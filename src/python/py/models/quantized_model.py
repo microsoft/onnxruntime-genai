@@ -70,6 +70,108 @@ class QuantizedAttention:
         self.rotary_emb = TensorModule()
         self.k_norm = TensorModule()
         self.q_norm = TensorModule()
+        self.sinks = TensorModule()
+
+
+class QuantizedExpert:
+    """Represents a single expert in MoE with quantized weights."""
+    def __init__(self, expert_id: int):
+        self.expert_id = expert_id
+        self.gate_proj = QuantizedTensorModule()
+        self.up_proj = QuantizedTensorModule()
+        self.gate_up_proj = QuantizedTensorModule()
+        self.down_proj = QuantizedTensorModule()
+
+
+class QuantizedExperts:
+    """Container for all experts in a MoE layer."""
+    def __init__(self):
+        """Pre-processed experts attributes"""
+        self._experts = {}
+        """QMoE packed attributes"""
+        self.fc1_weights = None
+        self.fc1_scales = None
+        self.fc1_zero_points = None
+        self.fc2_weights = None
+        self.fc2_scales = None
+        self.fc2_zero_points = None
+
+    def add_expert(self, expert_id: int) -> QuantizedExpert:
+        """Add a new expert and return it."""
+        if expert_id not in self._experts:
+            self._experts[expert_id] = QuantizedExpert(expert_id)
+        return self._experts[expert_id]
+
+    def get_expert(self, expert_id: int) -> QuantizedExpert:
+        """Get an expert by ID, creating if it doesn't exist."""
+        return self.add_expert(expert_id)
+
+    def items(self):
+        """Get (expert_id, expert) pairs."""
+        return self._experts.items()
+
+    def values(self):
+        """Get all experts."""
+        return self._experts.values()
+
+    def keys(self):
+        """Get all expert IDs."""
+        return self._experts.keys()
+
+    def __getitem__(self, expert_id: int) -> QuantizedExpert:
+        """Get expert by ID."""
+        return self.get_expert(expert_id)
+
+    @property
+    def num_experts(self) -> int:
+        """Number of experts."""
+        return len(self._experts)
+
+    def set_weight_data(self, expert_id: int, proj_type: str, param_type: str, tensor, bits: int, group_size: int):
+        """Set weight data for a specific expert projection.
+
+        Args:
+            expert_id: Expert ID (0, 1, 2, ...)
+            proj_type: Projection type ('gate_proj', 'up_proj', 'down_proj')
+            param_type: Parameter type ('weight', 'weight_zero_point', 'scales', etc.)
+            tensor: The tensor data
+            bits: Quantization bits
+            group_size: Quantization group size
+        """
+        expert = self.get_expert(expert_id)
+        proj_module = getattr(expert, proj_type)
+
+        proj_module.bits = bits
+        proj_module.group_size = group_size
+
+        # Map parameter names
+        param_mapping = {
+            'weight': 'qweight',
+            'weight_zero_point': 'qzeros',
+            'weight_scale': 'scales',
+            'scales': 'scales',
+            'qweight': 'qweight',
+            'qzeros': 'qzeros',
+            'bias': 'bias',
+            'g_idx': 'g_idx'
+        }
+
+        attr_name = param_mapping.get(param_type, param_type)
+        setattr(proj_module, attr_name, tensor)
+
+    def __str__(self):
+        """String representation of all experts in the MoE layer."""
+        if not self._experts:
+            return "QuantizedExperts(num_experts=0)"
+
+        lines = [f"QuantizedExperts(num_experts={self.num_experts})"]
+        for expert_id, expert in sorted(self._experts.items()):
+            lines.append(f"  QuantizedExperts {expert_id}:")
+            lines.append(f"  gate_proj: {expert.gate_proj}")
+            lines.append(f"  up_proj: {expert.up_proj}")
+            lines.append(f"  down_proj: {expert.down_proj}")
+
+        return "\n".join(lines)
 
 
 class QuantizedMLP:
@@ -79,6 +181,9 @@ class QuantizedMLP:
         self.down_proj = QuantizedTensorModule()
         self.fc1 = QuantizedTensorModule()
         self.fc2 = QuantizedTensorModule()
+        # MoE
+        self.experts = QuantizedExperts()
+        self.router = TensorModule()
 
 
 class QuantizedDecoderLayer:
@@ -522,6 +627,20 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.bias
                             tensor_map["mlp.gate_proj.bias"] = tensor[:intermediate_size]
                             tensor_map["mlp.up_proj.bias"] = tensor[intermediate_size:]
+                        elif bool(re.match(r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|gate_up_proj|down_proj)\.(weight|bias|qweight|scales|qzeros|weight_scale|weight_zero_point|g_idx)$", name)):
+                            # model.layers.layer_id.mlp.experts.expert_id.proj_type.param_type
+                            split_name = name.split(".")
+                            expert_id = int(split_name[5])
+                            proj_type = split_name[-2]
+                            param_type = split_name[-1]
+                            module.mlp.experts.set_weight_data(expert_id, proj_type, param_type, tensor, local_bits, local_group_size)
+                        elif bool(re.match(r"^model\.layers\.\d+\.mlp\.router\.(weight|bias)$", name)):
+                            # model.layers.layer_id.mlp.router.weight
+                            # model.layers.layer_id.mlp.router.bias
+                            tensor_map["mlp.router." + name.split(".")[-1]] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn\.sinks$", name)):
+                            # model.layers.layer_id.self_attn.sinks
+                            tensor_map["self_attn.sinks"] = tensor
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
 
@@ -576,6 +695,10 @@ class QuantizedModel:
             q_lm_head.group_size = group_size
             self.lm_head = q_lm_head
 
+    def set_g_idx(self, module):
+        if module is not None and module.g_idx is None:
+            module.g_idx = torch.tensor([i // module.group_size for i in range(module.in_features)], dtype=torch.int32)
+
     def set_properties(self):
         """
         Set in_features, out_features, and g_idx based on quantization type
@@ -585,13 +708,7 @@ class QuantizedModel:
                 self.lm_head.out_features = self.lm_head.scales.shape[1]
                 self.lm_head.in_features = self.lm_head.qweight.shape[0]
                 # Set g_idx if not already set
-                self.lm_head.g_idx = (
-                    self.lm_head.g_idx
-                    if self.lm_head.g_idx is not None
-                    else torch.tensor(
-                        [i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32
-                    )
-                )
+                self.set_g_idx(self.lm_head.g_idx)
             elif self.quant_type == "gptq":
                 self.lm_head.out_features = self.lm_head.qweight.shape[1]
                 self.lm_head.in_features = self.lm_head.g_idx.shape[0]
@@ -613,71 +730,47 @@ class QuantizedModel:
                 module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
                 module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
-                module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
-                module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
-                module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
-                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
-                module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
-                module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
 
                 # Set g_idx if not already set
-                module.self_attn.q_proj.g_idx = (
-                    module.self_attn.q_proj.g_idx
-                    if module.self_attn.q_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.self_attn.k_proj.g_idx = (
-                    module.self_attn.k_proj.g_idx
-                    if module.self_attn.k_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.self_attn.k_proj.group_size for i in range(module.self_attn.k_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.self_attn.v_proj.g_idx = (
-                    module.self_attn.v_proj.g_idx
-                    if module.self_attn.v_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.self_attn.v_proj.group_size for i in range(module.self_attn.v_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.self_attn.o_proj.g_idx = (
-                    module.self_attn.o_proj.g_idx
-                    if module.self_attn.o_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.self_attn.o_proj.group_size for i in range(module.self_attn.o_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.mlp.gate_proj.g_idx = (
-                    module.mlp.gate_proj.g_idx
-                    if module.mlp.gate_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.mlp.gate_proj.group_size for i in range(module.mlp.gate_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.mlp.up_proj.g_idx = (
-                    module.mlp.up_proj.g_idx
-                    if module.mlp.up_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.mlp.up_proj.group_size for i in range(module.mlp.up_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
-                module.mlp.down_proj.g_idx = (
-                    module.mlp.down_proj.g_idx
-                    if module.mlp.down_proj.g_idx is not None
-                    else torch.tensor(
-                        [i // module.mlp.down_proj.group_size for i in range(module.mlp.down_proj.in_features)],
-                        dtype=torch.int32,
-                    )
-                )
+                self.set_g_idx(module.self_attn.q_proj.g_idx)
+                self.set_g_idx(module.self_attn.k_proj.g_idx)
+                self.set_g_idx(module.self_attn.v_proj.g_idx)
+                self.set_g_idx(module.self_attn.o_proj.g_idx)
+                self.set_g_idx(module.mlp.gate_proj.g_idx)
+                self.set_g_idx(module.mlp.up_proj.g_idx)
+                self.set_g_idx(module.mlp.down_proj.g_idx)
 
+                if module.mlp.experts.num_experts > 0:
+                    for _, expert in module.mlp.experts.items():
+                        if expert.gate_up_proj.qweight is not None:
+                            expert.gate_up_proj.out_features = expert.gate_up_proj.scales.shape[1]
+                            expert.gate_up_proj.in_features = expert.gate_up_proj.qweight.shape[0]
+                            # Set g_idx if not already set
+                            self.set_g_idx(expert.gate_up_proj.g_idx)
+                            self.set_g_idx(expert.down_proj.g_idx)
+                        else:
+                            expert.gate_proj.out_features = expert.gate_proj.scales.shape[1]
+                            expert.gate_proj.in_features = expert.gate_proj.qweight.shape[0]
+                            expert.up_proj.out_features = expert.up_proj.scales.shape[1]
+                            expert.up_proj.in_features = expert.up_proj.qweight.shape[0]
+                            # Set g_idx if not already set
+                            self.set_g_idx(expert.gate_proj.g_idx)
+                            self.set_g_idx(expert.up_proj.g_idx)
+                            self.set_g_idx(expert.down_proj.g_idx)
+
+                        expert.down_proj.out_features = expert.down_proj.scales.shape[1]
+                        expert.down_proj.in_features = expert.down_proj.qweight.shape[0]
+                else:
+                    module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
+                    module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
+                    module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
+                    module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
+                    module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
+                    module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
+
+                    self.set_g_idx(module.mlp.gate_proj.g_idx)
+                    self.set_g_idx(module.mlp.up_proj.g_idx)
+                    self.set_g_idx(module.mlp.down_proj.g_idx)
             elif self.quant_type == "gptq":
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
@@ -876,7 +969,6 @@ class QuantizedModel:
         if module.bits not in [2, 4, 8]:
             raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
 
-        intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
         intweight_pt = intweight.byte()
         kpack = 8 // module.bits
         block_size = module.group_size
@@ -889,10 +981,6 @@ class QuantizedModel:
         if pad_len > 0:
             intweight_pt = torch.nn.functional.pad(intweight_pt, (0, 0, 0, pad_len), "constant", 0)
 
-        if module.qzeros.dtype != module.scales.dtype:
-            intzeros_pt = self.pack_on_row(intzeros_pt, module.bits, transpose=False, packed_dtype=torch.uint8)
-            intzeros_pt = intzeros_pt.reshape(-1)
-
         intweight_pt_T = intweight.T
         intweight_pt_T = self.pack_on_row(intweight_pt_T, module.bits, transpose=False, packed_dtype=torch.uint8)
         intweight_pt_T = intweight_pt_T.reshape(cols, k_blocks, blob_size)
@@ -901,6 +989,23 @@ class QuantizedModel:
 
         module.scales = scales_pt.contiguous()
         module.qweight = intweight_pt_T.contiguous().byte()
+
+        self.pack_zeros_ort_format(module, reshape=True)
+
+    def pack_zeros_ort_format(self, module, reshape=False):
+        """
+        Pack `qzeros` to ORT format
+        """
+        if module.bits not in [2, 4, 8]:
+            raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
+
+        intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
+
+        if module.qzeros.dtype != module.scales.dtype:
+            intzeros_pt = self.pack_on_row(intzeros_pt, module.bits, transpose=False, packed_dtype=torch.uint8)
+            if reshape:
+                intzeros_pt = intzeros_pt.reshape(-1)
+
         if module.qzeros.dtype != module.scales.dtype:
             module.qzeros = intzeros_pt.contiguous().byte()
         else:
@@ -1092,12 +1197,186 @@ class QuarkModel(QuantizedModel):
                     # Set `g_idx` to None since it's not used in `MatMulNBits`
                     q_tensors.g_idx = None
 
+                if isinstance(q_tensors, QuantizedExperts) and q_tensors.num_experts > 0:
+                    # Process each expert
+                    self.unpack_repack_experts(q_tensors)
+
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
             self.unpack(self.lm_head)
             self.repack(self.lm_head)
 
             # Set `g_idx` to None since it's not used in `MatMulNBits`
             self.lm_head.g_idx = None
+
+    def unpack_repack_experts(self, experts):
+        """
+        Unpacks weights from pre-quantized Quark experts
+        """
+        for expert in experts.values():
+            # Process gate_proj
+            if expert.gate_proj.qweight is not None:
+                self.unpack_qzeros(expert.gate_proj)
+                self.pack_zeros_ort_format(expert.gate_proj)
+                self.unpack_qweight_quark(expert.gate_proj)
+                expert.gate_proj.g_idx = None
+
+            # Process up_proj
+            if expert.up_proj.qweight is not None:
+                self.unpack_qzeros(expert.up_proj)
+                self.pack_zeros_ort_format(expert.up_proj)
+                self.unpack_qweight_quark(expert.up_proj)
+                expert.up_proj.g_idx = None
+
+            # Process fused gate_up_proj
+            if expert.gate_up_proj.qweight is not None:
+                self.unpack_qzeros(expert.gate_up_proj)
+                self.pack_zeros_ort_format(expert.gate_up_proj)
+                self.unpack_qweight_quark(expert.gate_up_proj)
+                expert.gate_up_proj.g_idx = None
+
+            # Process down_proj
+            if expert.down_proj.qweight is not None:
+                self.unpack_qzeros(expert.down_proj)
+                self.pack_zeros_ort_format(expert.down_proj)
+                self.unpack_qweight_quark(expert.down_proj)
+                expert.down_proj.g_idx = None
+
+        """
+        Repacks weights from pre-quantized Quark experts
+        into the format expected by the QMoE operator.
+        """
+        self.repack_qmoe_weights(experts)
+
+    def repack_qmoe_weights(self, experts):
+        """
+        Create quantized MoE weights from pre-quantized Quark experts.
+        For gate_up projection, it interleaves gate_proj and up_proj tensors
+        where even indices are for gate and odd indices are for up.
+        """
+        has_split_gate_up = all(
+            expert.gate_proj is not None and expert.gate_proj.qweight is not None and expert.up_proj is not None and expert.up_proj.qweight is not None for expert in experts.values()
+        )
+
+        if has_split_gate_up:
+            self.combine_and_repack_gate_up(experts)
+            self.repack_projections(experts, ['down_proj'])
+        else:
+            self.repack_projections(experts, ['gate_up_proj', 'down_proj'])
+
+    def repack_projections(self, experts, projection_types):
+        for proj_type in projection_types:
+            qweight_list = []
+            scales_list = []
+            zero_points_list = []
+
+            for expert_id in sorted(experts.keys()):
+                expert = experts[expert_id]
+                # Handle single projections like down_proj (or any other case)
+                combined_qweight_parts = []
+                combined_scales_parts = []
+                combined_zp_parts = []
+
+                proj_module = getattr(expert, proj_type)
+                weights = proj_module.qweight
+                weights = self.repack_qweight(weights, bits=proj_module.bits)
+                combined_qweight_parts.append(weights)
+                combined_scales_parts.append(proj_module.scales.T)
+                combined_zp_parts.append(proj_module.qzeros)
+
+                qweight_list.append(torch.cat(combined_qweight_parts, dim=0))
+                scales_list.append(torch.cat(combined_scales_parts, dim=0))
+                zero_points_list.append(torch.cat(combined_zp_parts, dim=0))
+
+            # Stack all experts' weights and scales
+            qweight = torch.stack(qweight_list, dim=0)
+            scales = torch.stack(scales_list, dim=0)
+            zero_points = torch.stack(zero_points_list, dim=0)
+
+            if proj_type == 'down_proj':
+                experts.fc2_weights, experts.fc2_scales, experts.fc2_zero_points = (
+                    qweight,
+                    scales.to(torch.float16),
+                    zero_points,
+                )
+            else:
+                experts.fc1_weights, experts.fc1_scales, experts.fc1_zero_points = (
+                    qweight,
+                    scales.to(torch.float16),
+                    zero_points,
+                )
+
+    def combine_and_repack_gate_up(self, experts):
+        gate_experts_weights = []
+        up_experts_weights = []
+        gate_expert_scales = []
+        up_expert_scales = []
+        gate_expert_zero_points = []
+        up_expert_zero_points = []
+
+        # Collect weights and scales for all experts
+        for expert_id in sorted(experts.keys()):
+            expert = experts[expert_id]
+            gate_proj = expert.gate_proj
+            up_proj = expert.up_proj
+
+            # qweight: [inter, hidden], scales: [inter, hidden // block_size]
+            gate_experts_weights.append(gate_proj.qweight)
+            up_experts_weights.append(up_proj.qweight)
+            gate_expert_scales.append(gate_proj.scales)
+            up_expert_scales.append(up_proj.scales)
+            gate_expert_zero_points.append(gate_proj.qzeros)
+            up_expert_zero_points.append(up_proj.qzeros)
+
+        # Stack experts: [experts, inter, hidden]
+        gate_weights = torch.stack(gate_experts_weights, axis=0)
+        up_weights = torch.stack(up_experts_weights, axis=0)
+
+        # Concatenate along last dim, then reshape to [experts, inter*2, hidden]
+        fc1 = torch.concat([gate_weights, up_weights], axis=-1).view(up_weights.shape[0], up_weights.shape[1]*2, up_weights.shape[2])
+
+        packed_weights = [self.repack_qweight(fc1[expert_id], bits=experts[expert_id].gate_proj.bits) for expert_id in sorted(experts.keys())]
+        # Stack into a 3D tensor: [num_experts, inter_size * 2, hidden_size // pack_size]
+        final_fc1 = torch.stack(packed_weights, dim=0)
+
+        # Stack scales: [experts, inter, hidden // block_size]
+        gate_scales = torch.stack(gate_expert_scales, axis=0).transpose(-1, -2)  # [experts, inter, hidden // 32]
+        up_scales = torch.stack(up_expert_scales, axis=0).transpose(-1, -2)  # [experts, inter, hidden // 32]
+        fc1_scales = torch.concat([gate_scales, up_scales], axis=-1).view(up_scales.shape[0], up_scales.shape[1]*2, up_scales.shape[2])
+
+        gate_zero_points = torch.stack(gate_expert_zero_points, axis=0)
+        up_zero_points = torch.stack(up_expert_zero_points, axis=0)
+        fc1_zero_points = torch.concat([gate_zero_points, up_zero_points], axis=1)
+
+        experts.fc1_weights, experts.fc1_scales, experts.fc1_zero_points = final_fc1, fc1_scales.to(torch.float16), fc1_zero_points
+
+    def repack_qweight(self, weights, bits) -> torch.Tensor:
+        """
+        Repacks unpacked uint8 weights (representing 4-bit values) into a packed uint8 tensor.
+        This mirrors the packing logic from builder.py's _symmetric_blockwise_quantize.
+        """
+        if bits != 4:
+            raise NotImplementedError("This repacking function is specifically for 4-bit weights.")
+
+        quantized_flat = weights.cpu()
+        original_shape = quantized_flat.shape
+        quantized_uint4 = quantized_flat.to(torch.uint8)
+
+        packed_shape = list(original_shape)
+        packed_shape[-1] = (original_shape[-1] + 1) // 2
+        packed_weight = torch.zeros(packed_shape, dtype=torch.uint8, device=quantized_flat.device)
+
+        # Pack two 4-bit values per byte
+        for i in range(0, quantized_uint4.shape[-1], 2):
+            val1 = quantized_uint4[..., i]
+            if i + 1 < quantized_uint4.shape[-1]:
+                val2 = quantized_uint4[..., i + 1]
+                packed_val = (val1 & 0xF) | ((val2 & 0xF) << 4)
+            else:
+                # Odd number of values - pack only lower 4 bits
+                packed_val = val1 & 0xF
+            packed_weight[..., i // 2] = packed_val
+
+        return packed_weight
 
     def _load_quant_config(self, quant_attrs):
         self.global_quant_config = quant_attrs["config"]["global_quant_config"]["weight"]
@@ -1177,6 +1456,48 @@ class QuarkModel(QuantizedModel):
         int_tensor = tensor[:, reverse_order_tensor]
         return int_tensor
 
+    def unpack_qweight_quark(self, module, reorder=True, dtype="uint4"):
+        """
+        Unpack `qweight` to standard format and reorder for OGA.
+        This is based on the packing logic from Quark's Pack_4_bits with reorder=True
+        and the unpacking logic from ORT GenAI's _symmetric_blockwise_quantize.
+        """
+        to_unpack = module.qweight
+
+        if to_unpack.ndim > 2:
+            raise ValueError("Unpack: Only supports tensors with dimensions not greater than 2.")
+
+        shifts = torch.tensor([0, 4, 8, 12, 16, 20, 24, 28], device=to_unpack.device)
+        org_ndim = to_unpack.ndim
+
+        if org_ndim == 1:
+            to_unpack = to_unpack.unsqueeze(0)
+
+        if to_unpack.ndim == 2:
+            unpacked = (to_unpack.unsqueeze(-1) >> shifts.view(1, 1, -1)).view(to_unpack.shape[0], -1).to(torch.int8)
+            if reorder:
+                ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+                order_tensor = torch.arange(
+                    unpacked.shape[-1],
+                    dtype=torch.int32,
+                    device=unpacked.device,
+                )
+                order_tensor = order_tensor.view(-1, 8)
+                order_tensor = order_tensor[:, ORDER].view(-1)
+                unpacked = unpacked[:, order_tensor]
+        elif to_unpack.ndim == 0:
+            unpacked = to_unpack
+
+        unpacked &= 0b1111
+
+        if dtype == "int4":
+            mask = (unpacked & 0x08).bool()
+            unpacked[mask] = unpacked[mask] | 0xF0
+
+        if org_ndim == 1:
+            unpacked = unpacked.squeeze(0)
+
+        module.qweight = unpacked.T.contiguous()
 
 class OliveModel(GPTQModel):
     """
