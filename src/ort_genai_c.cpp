@@ -402,6 +402,17 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorToggleGuidance(OgaGenerator* generator, bool enable) {
+  OGA_TRY
+  generator->ToggleGuidance(enable);
+  return nullptr;
+  OGA_CATCH
+}
+
+bool OGA_API_CALL OgaGeneratorIsGuidanceEnabled(OgaGenerator* generator) {
+  return generator->IsGuidanceEnabled();
+}
+
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
   *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));

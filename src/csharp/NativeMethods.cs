@@ -119,6 +119,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                    bool /* boolean */ enable_ff_tokens);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorToggleGuidance(IntPtr /* OgaGenerator* */ generator, bool /* boolean */ enable);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern bool OgaGeneratorIsGuidanceEnabled(IntPtr /* const OgaGenerator* */ generator);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
 
         // This function is used to check if the generator has finished generating all sequences.
