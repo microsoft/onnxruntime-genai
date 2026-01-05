@@ -119,7 +119,7 @@ struct DecoderPipelineState : State {
 
   void SetExtraInputs(const int64_t num_images, const int64_t num_image_tokens,  const std::vector<ExtraInput>& extra_inputs);
 
-DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                     DeviceSpan<int32_t> next_indices) override;
 
   OrtValue* GetOutput(const char* name) override;
@@ -129,7 +129,9 @@ DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
 
   std::unique_ptr<MultiModalFeatures> image_features_;  // model input
 
-  std::unique_ptr <Embeddings> full_inputs_embeds_;
+  std::unique_ptr<Embeddings> full_inputs_embeds_;
+
+  std::unique_ptr<Embeddings> inputs_embeds_;
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, Embeddings& embeddings,
                            int total_length);
@@ -153,8 +155,6 @@ DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
 
   std::unique_ptr<InputIDs> input_ids_;
 
-
-  std::unique_ptr <WindowedEmbeddings> inputs_embeds_;
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;

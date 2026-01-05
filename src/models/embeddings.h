@@ -21,6 +21,9 @@ struct Embeddings {
 
   void UpdateSequenceLength(size_t new_length);
 
+  virtual void Update(Embeddings& embeddings) {
+  }
+
   void ReuseEmbeddingsBuffer(const Embeddings& other);
 
   OrtValue* Get() { return embeddings_.get(); }
@@ -43,7 +46,7 @@ struct WindowedEmbeddings : public Embeddings {
   WindowedEmbeddings(const WindowedEmbeddings&) = delete;
   WindowedEmbeddings& operator=(const WindowedEmbeddings&) = delete;
 
-  void Update(Embeddings& embeddings);
+  void Update(Embeddings& embeddings) override;
 
  private:
   State& state_;
@@ -62,5 +65,7 @@ struct WindowedEmbeddings : public Embeddings {
   std::unique_ptr<OrtValue> past_sequence_length_;
   int32_t initial_num_tokens_{};
 };
+
+std::unique_ptr<Embeddings> CreateInputEmbeddings(State& state, Embeddings::Mode mode, const std::string& name);
 
 }  // namespace Generators;

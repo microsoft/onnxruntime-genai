@@ -91,6 +91,7 @@ WindowedEmbeddings::WindowedEmbeddings(State& state, Embeddings::Mode mode, cons
 
 
 
+
 void WindowedEmbeddings::Update(Embeddings& embeddings) {
   const auto& full_embeddings = embeddings.Get();
   const auto& full_shape = embeddings.GetShape();  // [batch_size, sequence_length, hidden_size]
@@ -147,6 +148,14 @@ void WindowedEmbeddings::Update(Embeddings& embeddings) {
     std::cerr << "Error: Input name '" << name_ << "' not found in input_names_." << std::endl;
   }
   window_index_++;
+}
+
+std::unique_ptr<Embeddings> CreateInputEmbeddings(State& state, Embeddings::Mode mode, const std::string& name) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
+    return std::make_unique<WindowedEmbeddings>(state, mode, name);
+  } else {
+    return std::make_unique<Embeddings>(state, mode, name);
+  }
 }
 
 }  // namespace Generators
