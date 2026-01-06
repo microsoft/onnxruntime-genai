@@ -280,7 +280,7 @@ static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
 void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
   // Use custom path if provided, otherwise use default
   std::string resolved_path = g_custom_model_path.empty() ? model_path : g_custom_model_path;
-  
+
   // Skip test if NvTensorRT model is not available
   if (!std::filesystem::exists(resolved_path)) {
     GTEST_SKIP() << "NvTensorRT model not available at: " << resolved_path;
@@ -330,7 +330,7 @@ TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
 void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
   // Use custom path if provided, otherwise use default
   std::string resolved_path = g_custom_model_path.empty() ? model_path : g_custom_model_path;
-  
+
   // Skip test if NvTensorRT model is not available
   if (!std::filesystem::exists(resolved_path)) {
     GTEST_SKIP() << "NvTensorRT model not available at: " << resolved_path;
