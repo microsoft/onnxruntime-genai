@@ -80,12 +80,17 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     tokens = tokenizer.encode(prompt)
     params = og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
-    params.set_search_options(max_length=max_length_to_use, min_length=prompt_length)
+    params.set_search_options(
+        min_length=prompt_length,
+        **({ "max_length": max_length_to_use } if not args.no_dynamic_max_length else {})
+    )
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokens)
-    while not generator.is_done():
+    i = 0
+    while not generator.is_done() and i < prompt_length:
         generator.generate_next_token()
+        i += 1
     return tokenizer.decode(generator.get_sequence(0))
 
 
@@ -307,7 +312,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        max_length=max_length,
+        **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
         min_length=max_length,
         batch_size=batch_size,
     )
@@ -317,8 +322,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         generator.append_tokens(tokens)
-        while not generator.is_done():
+        i = 0
+        while not generator.is_done() and i < generation_length:
             generator.generate_next_token()
+            i += 1
         if args.print_model_output:
             print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -350,7 +357,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             top_k=args.top_k,
             top_p=args.top_p,
             temperature=temperature,
-            max_length=max_length,
+            **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
             min_length=max_length,
             batch_size=batch_size,
         )
@@ -542,6 +549,9 @@ if __name__ == "__main__":
         default="follow_config",
         choices=["cpu", "cuda", "dml", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+    )
+    parser.add_argument(
+        "--no_dynamic_max_length", action="store_true", help="Disable dynamic max_length"
     )
     args = parser.parse_args()
 
