@@ -3255,10 +3255,14 @@ class Model:
             kwargs.get("weight3", ""),
             kwargs.get("scales3", ""),
             kwargs.get("bias3", ""),
-            kwargs.get("zero_points1", ""),
-            kwargs.get("zero_points2", ""),
-            kwargs.get("zero_points3", ""),
         ]
+
+        # Only add zero_points inputs if they are provided (for Quark asymmetric quantization)
+        zero_points1 = kwargs.get("zero_points1", "")
+        zero_points2 = kwargs.get("zero_points2", "")
+        zero_points3 = kwargs.get("zero_points3", "")
+        if zero_points1 or zero_points2 or zero_points3:
+            inputs.extend([zero_points1, zero_points2, zero_points3])
 
         output = f"{name}/output_0"
 
