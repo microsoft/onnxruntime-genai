@@ -705,8 +705,8 @@ class GPTOSSModel(Model):
                 hidden_size_padded = gate_up_proj_qweight_list[0].shape[-1] * pack_size
                 intermediate_size_padded = down_proj_qweight_list[0].shape[-1] * pack_size
 
-                if self.moe_attrs["swiglu_fusion"] == 0:
-                    # UNFUSED: split gate/up projections into separate tensors (for TRT-RTX)
+                if self.moe_attrs["swiglu_fusion"] == 0 and self.ep in {"NvTensorRtRtx", "trt-rtx"}:
+                    # UNFUSED: split gate/up projections into separate tensors (TRT-RTX only)
                     gate_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_proj.{moe_weight_type}"
                     gate_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_proj.scales"
                     gate_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_proj.bias"
@@ -761,7 +761,7 @@ class GPTOSSModel(Model):
                         bias3=up_proj_bias,
                     )
                 else:
-                    # FUSED: keep gate and up combined (default CUDA path)
+                    # FUSED: keep gate and up combined
                     self.make_initializer(
                         gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
                         gate_up_proj_weight,
