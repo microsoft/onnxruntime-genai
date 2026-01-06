@@ -49,6 +49,8 @@ namespace {
     << "      Number of warmup runs before benchmarking. Default: " << defaults.num_warmup_iterations << "\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
+    << "    --no_dynamic_max_length\n"
+    << "      Disable dynamic max_length.\n"
     << "    -h,--help\n"
     << "      Show this help message and exit.\n";
 
@@ -132,6 +134,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.num_warmup_iterations = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
+      } else if (arg == "--no_dynamic_max_length") {
+        opts.no_dynamic_max_length = true;
       } else if (arg == "-h" || arg == "--help") {
         PrintHelpAndExit(program_name, 0);
       } else {
