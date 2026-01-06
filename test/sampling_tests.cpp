@@ -19,6 +19,9 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+// External global variable from main.cpp for custom model path
+extern std::string g_custom_model_path;
+
 TEST(SamplingTests, BatchedSamplingTopPCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
@@ -555,8 +558,12 @@ struct NvTensorRtRtxTestSetup {
   static NvTensorRtRtxTestSetup Create(int vocab_size, int batch_size, int max_length = 10) {
     NvTensorRtRtxTestSetup setup;
 
+    // Use custom path if provided, otherwise use default
+    const char* nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+    std::string resolved_path = g_custom_model_path.empty() ? nvtrt_path : g_custom_model_path;
+
     // Check if model is available
-    if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    if (!std::filesystem::exists(resolved_path)) {
       setup.is_available = false;
       return setup;
     }
@@ -564,7 +571,7 @@ struct NvTensorRtRtxTestSetup {
     setup.is_available = true;
 
     // Create config with vocab_size overlay
-    auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+    auto config = OgaConfig::Create(resolved_path.c_str());
     std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
     config->Overlay(overlay.c_str());
     config->ClearProviders();
