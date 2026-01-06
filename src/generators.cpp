@@ -6,6 +6,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
+#include "models/one_op_model_executor.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -66,8 +67,8 @@ OrtGlobals::OrtGlobals()
 }
 
 OrtGlobals::~OrtGlobals() {
-  // Explicitly clear cast sessions before env_ is destroyed
-  cast_sessions_.clear();
+  // Clear 1-op model executor cache before env_ is destroyed
+  OneOpModelExecutor::ClearCache();
 }
 
 // Ensure Shutdown() has been called before process exit
