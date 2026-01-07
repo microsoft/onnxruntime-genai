@@ -105,8 +105,14 @@ pip install onnxruntime-genai
 
 Get the version of the package
 
+Linux/Mac:
 ```bash
 pip list | grep onnxruntime-genai
+```
+
+Windows:
+```bash
+pip list | findstr "onnxruntime-genai"
 ```
 
 Checkout the version of the examples that correspond to that release.
