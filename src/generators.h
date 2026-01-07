@@ -13,7 +13,6 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
