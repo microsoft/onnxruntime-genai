@@ -551,7 +551,7 @@ if __name__ == "__main__":
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(
-        "--no_dynamic_max_length", action="store_true", help="Disable dynamic max_length"
+        "--no_dynamic_max_length", default=False, action="store_true", help="Disable dynamic max_length"
     )
     args = parser.parse_args()
 
