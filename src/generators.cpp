@@ -321,18 +321,8 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   // Handle padding based on alignment setting for sliding window models
   if (padded_input_ids_size > input_ids.size()) {
-    const bool left_align = model_->config_->model.decoder.sliding_window.has_value() &&
-                            model_->config_->model.decoder.sliding_window->alignment == "left";
-
-    if (left_align) {
-      // Left alignment: padding first, then data
-      std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + (padded_input_ids_size - input_ids.size()));
-    } else {
-      // Right alignment (default): data first, then padding
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
-      std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
-    }
+    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+    std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
   } else {
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
   }
