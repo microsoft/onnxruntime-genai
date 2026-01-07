@@ -1,29 +1,5 @@
 # ONNX Runtime GenAI
 
-Note: between `v0.11.0` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
-
-Previously, the decoding loop could be written as follows.
-
-```
-while not IsDone():
-    GenerateToken()
-    GetLastToken()
-    PrintLastToken()
-```
-
-In 0.11.0, the decoding loop should now be written as follows.
-
-```
-while True:
-    GenerateToken()
-    if IsDone():
-        break
-    GetLastToken()
-    PrintLastToken()
-```
-
-Please read [this PR's description](https://github.com/microsoft/onnxruntime-genai/pull/1849) for more information.
-
 ## Status
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
@@ -32,20 +8,22 @@ Please read [this PR's description](https://github.com/microsoft/onnxruntime-gen
 
 ## Description
 
-Run generative AI models with ONNX Runtime. This API gives you an easy, flexible and performant way of running LLMs on device. It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
+Run generative AI models with ONNX Runtime. This API gives you an easy, flexible and performant way of running LLMs on device. It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, KV cache management, and grammar specification for tool calling.
+
+ONNX Runtime GenAI powers Foundry Local, Windows ML, and the Visual Studio Code AI Toolkit.
 
 See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/genai) for more details.
 
-|Support matrix|Supported now|Under development|On the roadmap|
+| Support matrix | Supported now | Under development | On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
+| Model architectures | ChatGLM</br>DeepSeek</br>Ernie</br>Fara</br>Gemma</br>GPTOSS</br>Granite</br>Llama</br>Mistral</br>Nemotron</br>OLMo</br>Phi</br>Phi3V</br>Phi4MM</br>Qwen</br>Qwen-2.5VL</br>SmolLM3</br>Whisper</br>| Stable diffusion ||
 | API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
-| Platform | Linux <br/> Windows <br/>Mac ^ <br/>Android ^  || iOS |||
-| Architecture | x86 <br/> x64 <br/> Arm64 ~ ||||
+| O/S | Linux <br/> Windows <br/>Mac  <br/>Android   || iOS |||
+| Architecture | x86 <br/> x64 <br/> arm64 ||||
 | Hardware Acceleration | CPU <br/> CUDA <br/> DirectML <br/> NvTensorRtRtx (TRT-RTX) <br/> OpenVINO <br/> QNN <br/> WebGPU | | AMD GPU |
 | Features | Multi-LoRA <br/> Continuous decoding <br/> Constrained decoding | | Speculative decoding |
 
-\~ Windows builds available, requires build from source for other platforms
+^ Requires build from source
 
 ## Installation
 
@@ -60,7 +38,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
    ```
 
 2. Install the API
-   
+
    ```shell
    pip install numpy
    pip install --pre onnxruntime-genai
@@ -113,28 +91,84 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
    del generator
    ```
 
-### Choosing the Right Examples: Release vs. Main Branch
+### Choose the correct version of the examples
 
-Due to the evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. The majority of the steps would remain same. Just the package installation and the model example file would change.
+Due to the evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version.
 
 ### Stable version
-Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed the 0.10.1 version of ONNX Runtime GenAI, so the instructions would look like this:
+
+Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). For example, install the Python package.
+
+```bash
+pip install onnxruntime-genai
+```
+
+Get the version of the package
+
+Linux/Mac:
+```bash
+pip list | grep onnxruntime-genai
+```
+
+Windows:
+```bash
+pip list | findstr "onnxruntime-genai"
+```
+
+Checkout the version of the examples that correspond to that release.
 
 ```bash
 # Clone the repo
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
 # Checkout the branch for the version you are using
-git checkout v0.10.1
+git checkout v0.11.4
 cd examples
 ```
 
-### Nightly version (Main Branch)
-Build the package from source using these [instructions](https://onnxruntime.ai/docs/genai/howto/build-from-source.html). Now just go to the folder location where all the examples are present.
+### Nightly version (main branch)
+
+Checkout the main branch of the repo
 
 ```bash
-# Clone the repo
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+```
+
+Build from source, using these [instructions](https://onnxruntime.ai/docs/genai/howto/build-from-source.html). For example, to build the Python wheel:
+
+```bash
+python build.py
+```
+
+Navigate to the examples folder in the main branch.
+
+```bash
 cd examples
+```
+
+## Breaking API changes
+
+### v0.11.0
+
+Between `v0.11.0` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
+
+Previously, the decoding loop could be written as follows.
+
+```
+while not IsDone():
+    GenerateToken()
+    GetLastToken()
+    PrintLastToken()
+```
+
+In 0.11.0, the decoding loop should now be written as follows.
+
+```
+while True:
+    GenerateToken()
+    if IsDone():
+        break
+    GetLastToken()
+    PrintLastToken()
 ```
 
 ## Roadmap
