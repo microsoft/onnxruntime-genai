@@ -101,21 +101,21 @@ struct Interface : RyzenAIInterface {
   }
 
   void SetupProvider(OrtSessionOptions& session_options, const ProviderOptions& provider_options) override {
-    std::vector<const OrtEpDevice*> supported;
+    std::vector<const OrtEpDevice*> supported_devices;
 
     {
-      const OrtEpDevice* const* devs = nullptr;
-      size_t ndevs = 0;
+      const OrtEpDevice* const* devices = nullptr;
+      size_t ndevices = 0;
 
-      Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devs, &ndevs));
+      Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devices, &ndevices));
 
-      for (const auto& dev : std::span{devs, devs + ndevs})
-        if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(dev) &&
-            OrtHardwareDeviceType_NPU == Ort::api->HardwareDevice_Type(Ort::api->EpDevice_Device(dev)))
-          supported.push_back(dev);
+      for (const auto& device : std::span{devices, devices + ndevices})
+        if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(device) &&
+            OrtHardwareDeviceType_NPU == Ort::api->HardwareDevice_Type(Ort::api->EpDevice_Device(device)))
+          supported_devices.push_back(device);
     }
 
-    if (supported.empty())
+    if (supported_devices.empty())
       throw std::runtime_error{"No RyzenAI devices detected"};
 
     {
@@ -128,7 +128,7 @@ struct Interface : RyzenAIInterface {
 
       // this call merges provider_options into session_options
       Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(&session_options,
-                                                                           &GetOrtEnv(), supported.data(), supported.size(),
+                                                                           &GetOrtEnv(), supported_devices.data(), supported_devices.size(),
                                                                            ep_keys.data(), ep_values.data(), ep_keys.size()));
     }
 
