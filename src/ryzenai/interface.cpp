@@ -135,7 +135,7 @@ struct Interface : RyzenAIInterface {
 
       Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devices, &ndevices));
 
-      for (const auto& device : std::span{devices, devices + ndevices})
+      for (const auto& device : std::span{devices, ndevices})
         if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(device) &&
             OrtHardwareDeviceType_NPU == Ort::api->HardwareDevice_Type(Ort::api->EpDevice_Device(device)))
           supported_devices.push_back(device);
