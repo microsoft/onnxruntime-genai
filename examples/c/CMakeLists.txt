@@ -3,9 +3,18 @@ cmake_minimum_required(VERSION 3.18.1)
 project(ortgenaiapp)
 set(CMAKE_CXX_STANDARD 20)
 
+# Download and make available nlohmann/json
+include(FetchContent)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.12.0     # Or update to latest release
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 option(USE_CXX "Invoke the C++ example" ON)
 option(MODEL_CHAT "Build the Model Chat example" OFF)
-option(MODEL_QA "Build the Model Q&A example without multi-turn prompting" OFF)
+option(MODEL_QA "Build the Model Q&A example" OFF)
 option(MODEL_VISION "Build the Model Vision example" OFF)
 option(PHI4-MM "Build the Phi-4 mm example" OFF)
 option(WHISPER "Build the Whisper example" OFF)
@@ -60,24 +69,29 @@ set(EXAMPLES_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src)
 if(MODEL_CHAT)
   add_executable(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(model_chat)
+  target_link_libraries(model_chat PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
 if(MODEL_QA)
   add_executable(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(model_qa)
+  target_link_libraries(model_qa PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
 if(MODEL_VISION)
   add_executable(model_vision ${EXAMPLES_SOURCE_DIR}/model_vision.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(model_vision)
+  target_link_libraries(model_vision PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
 if(PHI4-MM)
   add_executable(phi4-mm ${CMAKE_SOURCE_DIR}/src/phi4-mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(phi4-mm)
+  target_link_libraries(phi4-mm PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
 if(WHISPER)
   add_executable(whisper ${CMAKE_SOURCE_DIR}/src/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(whisper)
+  target_link_libraries(whisper PRIVATE nlohmann_json::nlohmann_json)
 endif()

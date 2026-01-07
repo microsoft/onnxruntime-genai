@@ -10,21 +10,27 @@
 
 // C++ API Example
 
-void CXX_API(const char* model_path, const char* execution_provider) {
-  std::cout << "Creating config..." << std::endl;
-  auto config = OgaConfig::Create(model_path);
+void CXX_API(
+  GeneratorParamsArgs& generator_params_args,
+  const std::string& model_path,
+  const std::string& ep,
+  const std::string& system_prompt,
+  bool verbose,
+  bool interactive
+) {
+  if (verbose) std::cout << "Creating config..." << std::endl;
+  std::unordered_map<std::string, std::string> ep_options;
+  auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
 
-  std::string provider(execution_provider);
-  append_provider(*config, provider);
-
-  std::cout << "Creating model..." << std::endl;
+  if (verbose) std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
 
-  std::cout << "Creating multimodal processor..." << std::endl;
+  if (verbose) std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
 
-  auto stream = OgaTokenizerStream::Create(*processor);
+  if (verbose) std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
+  auto stream = OgaTokenizerStream::Create(*processor);
 
   while (true) {
     // Get images
@@ -42,7 +48,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     } else {
       std::cout << "Loading images..." << std::endl;
       for (const auto& image_path : image_paths) {
-        if (!FileExists(image_path.c_str())) {
+        std::filesystem::path p(image_path);
+        if (!std::filesystem::exists(p)) {
           throw std::runtime_error(std::string("Image file not found: ") + image_path);
         }
       }
@@ -66,7 +73,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     } else {
       std::cout << "Loading audios..." << std::endl;
       for (const auto& audio_path : audio_paths) {
-        if (!FileExists(audio_path.c_str())) {
+        std::filesystem::path p(audio_path);
+        if (!std::filesystem::exists(p)) {
           throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
         }
       }
@@ -113,21 +121,41 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       std::cout << stream->Decode(new_token) << std::flush;
     }
 
-    for (int i = 0; i < 3; ++i)
-      std::cout << std::endl;
+    std::cout << "\n\n" << std::endl;
   }
 }
 
 int main(int argc, char** argv) {
-  std::string model_path, ep;
-  if (!parse_args(argc, argv, model_path, ep)) {
+  // Get command-line args
+  GeneratorParamsArgs generator_params_args;
+  GuidanceArgs guidance_args;
+  std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.";
+  bool verbose = false, interactive = false, rewind = true;
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind)) {
     return -1;
   }
+
+  // Responsible for cleaning up the library during shutdown
+  OgaHandle handle;
 
   std::cout << "--------------------" << std::endl;
   std::cout << "Hello, Phi-4-Multimodal!" << std::endl;
   std::cout << "--------------------" << std::endl;
-  CXX_API(model_path.c_str(), ep.c_str());
+  
+  std::cout << "Model path: " << model_path << std::endl;
+  std::cout << "Execution provider: " << ep << std::endl;
+  std::cout << "System prompt: " << system_prompt << std::endl;
+  std::cout << "Verbose: " << verbose << std::endl;
+  std::cout << "Interactive: " << interactive << std::endl;
+  std::cout << "--------------------------" << std::endl;
+  std::cout << std::endl;
+
+  try {
+    CXX_API(generator_params_args, model_path, ep, system_prompt, verbose, interactive);
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return -1;
+  }
 
   return 0;
 }
