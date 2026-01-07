@@ -98,23 +98,32 @@ void CXX_API(
   // Encode system prompt and append tokens to model
   auto sequences = OgaSequences::Create();
   tokenizer->Encode(prompt.c_str(), *sequences);
+  const int prompt_tokens_length = sequences->SequenceCount(0);
   generator->AppendTokenSequences(*sequences);
 
   // Keep asking for input prompts in a loop
   while (true) {
-    signal(SIGINT, TerminateGeneration);
+    // Get user prompt
     std::string text;
-    std::cout << "Prompt (Use quit() to exit):" << std::endl;
-    // Clear Any cin error flags because of SIGINT
-    std::cin.clear();
-    std::getline(std::cin, text);
 
-    if (text.empty()) {
-      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
-      continue;  // Skip to the next iteration if input is empty
-    } else if (text == "quit()") {
-      break;  // Exit the loop
+    if (interactive) {
+      std::cout << "Prompt (Use quit() to exit):" << std::endl;
+      // Clear any cin error flags because of SIGINT
+      std::cin.clear();
+      std::getline(std::cin, text);
+
+      if (text.empty()) {
+        std::cout << "Empty input. Please enter a valid prompt." << std::endl;
+        continue;  // Skip to the next iteration if input is empty
+      } else if (text == "quit()") {
+        break;  // Exit the loop
+      }
     }
+    else {
+      text = "What color is the sky?";
+    }
+
+    signal(SIGINT, TerminateGeneration);
 
     // Start timings
     bool is_first_token = true;
@@ -169,11 +178,14 @@ void CXX_API(
     }
     timing.RecordEndTimestamp();
 
-    const int prompt_tokens_length = sequences->SequenceCount(0);
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
     std::cout << "\n\n" << std::endl;
+    if (!interactive) break;
+
+    // Rewind the generator to the system prompt. This will erase all the chat history with the model.
+    if (rewind) generator->RewindTo(prompt_tokens_length);
   }
 }
 
@@ -182,7 +194,7 @@ int main(int argc, char** argv) {
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
   std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.";
-  bool verbose = false, interactive = false, rewind = false;
+  bool verbose = false, interactive = true, rewind = false;
   if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind)) {
     return -1;
   }

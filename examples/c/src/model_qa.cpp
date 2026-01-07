@@ -70,16 +70,22 @@ void CXX_API(
   while (true) {
     // Get user prompt
     std::string text;
-    std::cout << "Prompt (Use quit() to exit):" << std::endl;
-    // Clear Any cin error flags because of SIGINT
-    std::cin.clear();
-    std::getline(std::cin, text);
 
-    if (text.empty()) {
-      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
-      continue;  // Skip to the next iteration if input is empty
-    } else if (text == "quit()") {
-      break;  // Exit the loop
+    if (interactive) {
+      std::cout << "Prompt (Use quit() to exit):" << std::endl;
+      // Clear any cin error flags because of SIGINT
+      std::cin.clear();
+      std::getline(std::cin, text);
+
+      if (text.empty()) {
+        std::cout << "Empty input. Please enter a valid prompt." << std::endl;
+        continue;  // Skip to the next iteration if input is empty
+      } else if (text == "quit()") {
+        break;  // Exit the loop
+      }
+    }
+    else {
+      text = "What color is the sky?";
     }
 
     signal(SIGINT, TerminateGeneration);
@@ -168,6 +174,7 @@ void CXX_API(
     timing.Log(prompt_tokens_length, new_tokens_length);
 
     std::cout << "\n\n" << std::endl;
+    if (!interactive) break;
   }
 }
 
@@ -176,7 +183,7 @@ int main(int argc, char** argv) {
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
   std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.";
-  bool verbose = false, interactive = false, rewind = true;
+  bool verbose = false, interactive = true, rewind = true;
   if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind)) {
     return -1;
   }

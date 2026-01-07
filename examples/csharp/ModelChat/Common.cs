@@ -80,9 +80,11 @@ namespace ModelChat
         /// <summary>
         /// Set search options for a generator's params during decoding
         /// </summary>
+        /// <param name="generatorParams">Generator params object to set on</param>
         /// <param name="args">Arguments provided by user</param>
+        /// <param name="verbose">Use verbose logging</param>
         /// <returns>
-        /// Dictionary of key-value pairs to set
+        /// None
         /// </returns>
         public static void SetSearchOptions(GeneratorParams generatorParams, GeneratorParamsArgs args, bool verbose)
         {
@@ -125,27 +127,20 @@ namespace ModelChat
         public static string ApplyChatTemplate(string model_path, Tokenizer tokenizer, string messages, bool add_generation_prompt, string tools = "")
         {
             var prompt = messages;
+            var template_str = "";
+
             var jinja_path = Path.Combine(model_path, "chat_template.jinja");
             if (File.Exists(jinja_path))
             {
-                var template_str = File.ReadAllText(jinja_path, Encoding.UTF8);
-                prompt = tokenizer.ApplyChatTemplate(
-                    messages: messages,
-                    tools: tools,
-                    add_generation_prompt: add_generation_prompt,
-                    template_str: template_str
-                );
-            }
-            else
-            {
-                prompt = tokenizer.ApplyChatTemplate(
-                    messages: messages,
-                    tools: tools,
-                    add_generation_prompt: add_generation_prompt,
-                    template_str: ""
-                );
+                template_str = File.ReadAllText(jinja_path, Encoding.UTF8);
             }
 
+            prompt = tokenizer.ApplyChatTemplate(
+                messages: messages,
+                tools: tools,
+                add_generation_prompt: add_generation_prompt,
+                template_str: template_str
+            );
             return prompt;
         }
 
@@ -169,8 +164,8 @@ namespace ModelChat
                 {
                     { "name", name }
                 };
-                var tool_parameters_exist = tool.Function.Parameters.Count != 0;
 
+                var tool_parameters_exist = tool.Function.Parameters.Count != 0;
                 if (tool_parameters_exist)
                 {
                     var parameters = new Dictionary<string, object>
@@ -523,7 +518,7 @@ namespace ModelChat
 
             var num_beams = new Option<int>(
                 name: "num_beams",
-                aliases: ["-b", "--num_beams"]
+                aliases: ["-nb", "--num_beams"]
             )
             {
                 Arity = ArgumentArity.ExactlyOne,

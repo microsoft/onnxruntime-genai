@@ -222,7 +222,6 @@ void ModelQA(
 
         // Run generation loop
         if (verbose) Console.WriteLine("Running generation loop...\n");
-
         Console.Write("Output: ");
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (true)
@@ -284,13 +283,12 @@ void ModelChat(
     using GeneratorParams generatorParams = new GeneratorParams(model);
     Common.SetSearchOptions(generatorParams, generatorParamsArgs, verbose);
 
-    // Creating running list of messages
+    // Create system message
     var system_message = new Dictionary<string, string>
     {
         { "role", "system" },
         { "content", systemPrompt }
     };
-    var input_list = new List<Dictionary<string, string>>() { system_message };
 
     // Get and set guidance info if requested
     string tools = "";
@@ -307,7 +305,7 @@ void ModelChat(
             tool_call_start: guidanceArgs.tool_call_start,
             tool_call_end: guidanceArgs.tool_call_end
         );
-        input_list[0]["tools"] = tools;
+        system_message["tools"] = tools;
 
         generatorParams.SetGuidance(guidance_type, guidance_data);
         if (verbose)
@@ -327,7 +325,7 @@ void ModelChat(
     string prompt = "";
     try
     {
-        string messages = JsonSerializer.Serialize(input_list);
+        string messages = JsonSerializer.Serialize(new List<Dictionary<string, string>> { system_message });
         prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: false, tools);
     }
     catch
@@ -362,7 +360,6 @@ void ModelChat(
             { "role", "user" },
             { "content", userPrompt }
         };
-        input_list.Add(user_message);
 
         // Apply chat template
         prompt = "";
@@ -383,9 +380,7 @@ void ModelChat(
 
         // Run generation loop
         if (verbose) Console.WriteLine("Running generation loop...\n");
-
         Console.Write("Output: ");
-
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (true)
         {
@@ -466,7 +461,7 @@ RootCommand GetArgs()
 
     var verbose = new Option<bool>(
         name: "verbose",
-        aliases: ["--verbose"]
+        aliases: ["-v", "--verbose"]
     )
     {
         Arity = ArgumentArity.Zero,
@@ -481,7 +476,7 @@ RootCommand GetArgs()
     {
         Arity = ArgumentArity.Zero,
         DefaultValueFactory = (_) => false,
-        Description = "Interactive mode"
+        Description = "Run in interactive mode"
     };
     
     var system_prompt = new Option<string>(

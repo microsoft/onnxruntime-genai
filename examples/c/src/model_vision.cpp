@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
   std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.";
-  bool verbose = false, interactive = false, rewind = true;
+  bool verbose = false, interactive = true, rewind = false;
   if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind)) {
     return -1;
   }
