@@ -50,7 +50,7 @@ namespace {
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
     << "    --no_dynamic_max_length\n"
-    << "      Disable dynamic max_length.\n"
+    << "      Prevent overriding search/max_length with prompt length. Uses the static value from genai_config.json to ensure full KV-cache allocation.\n"
     << "    -h,--help\n"
     << "      Show this help message and exit.\n";
 
