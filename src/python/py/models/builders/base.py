@@ -358,11 +358,14 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
-        self.int4_qmoe_block_size = extra_options.get("int4_qmoe_block_size", 128)
 
-        # Validate that only supported EPs can use int4_qmoe_block_size for QMoE
-        # CPU, WebGPU, and TRT-RTX support block-wise quantization
+        # CPU, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
+        # TRT-RTX defaults to 128; CPU/WebGPU default to 0 (tensor-level) for backward compatibility.
         supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx", "NvTensorRtRtx"]
+        default_qmoe_block_size = 128 if self.ep in ["trt-rtx", "NvTensorRtRtx"] else 0
+        self.int4_qmoe_block_size = extra_options.get("int4_qmoe_block_size", default_qmoe_block_size)
+
+        # Validate that unsupported EPs don't explicitly request block-wise quantization
         if self.ep not in supported_blockwise_eps and "int4_qmoe_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
                 f"The 'int4_qmoe_block_size' option is not supported for {self.ep} execution provider with QMoE. "
@@ -384,10 +387,10 @@ class Model:
             "use_qdq": extra_options.get("use_qdq", False),
         }
 
-        # Propagate block_size to MoE/QMoE op when supported and requested.
-        # QMoE on CPU/WebGPU supports block-wise quantization via the 'block_size' attribute.
+        # Propagate block_size to MoE/QMoE op when supported.
+        # QMoE on supported EPs uses block-wise quantization via the 'block_size' attribute.
         # Ensure the attribute is set on the MoE op so runtime kernels can honor it.
-        if self.moe_attrs.get("op_type") == "QMoE" and self.ep in ["cpu", "webgpu"]:
+        if self.moe_attrs.get("op_type") == "QMoE" and self.ep in supported_blockwise_eps:
             self.moe_attrs["block_size"] = int(self.int4_qmoe_block_size)
         if self.quant_type is not None:
             # Create quantized attributes from quantization config

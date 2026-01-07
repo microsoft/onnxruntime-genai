@@ -592,8 +592,6 @@ class GPTOSSModel(Model):
                 gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
                 down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
-        moe_name = f"{basename}/{op_type}"
-
         if op_type == "MoE" and not has_quark_experts:
             # Save non-quantized MoE weights as initializers
             self.make_initializer(
@@ -605,22 +603,6 @@ class GPTOSSModel(Model):
                 down_proj_layout.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size),
                 down_proj_weight,
                 to=self.io_dtype,
-            )
-
-            # Save MoE biases as initializers
-            self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
-
-            self.make_moe_op(
-                moe_name,
-                root_input=root_input,
-                router_probs=f"{router_reshape_name}/output_0",
-                weight1=gate_up_proj_weight,
-                scales1=gate_up_proj_scales,
-                bias1=gate_up_proj_bias,
-                weight2=down_proj_weight,
-                scales2=down_proj_scales,
-                bias2=down_proj_bias,
             )
         else:
             if has_quark_experts:
@@ -657,85 +639,60 @@ class GPTOSSModel(Model):
                 down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
                 down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
+            # Determine shape based on Quark vs non-Quark
+            pack_size = 8 // self.moe_attrs["expert_weight_bits"]
             if has_quark_experts:
-                # Quark experts: use original sizes (no padding)
-                pack_size = 8 // self.moe_attrs["expert_weight_bits"]
                 hidden_size_padded = self.hidden_size
                 intermediate_size_padded = self.intermediate_size
-
-                # Save Quark qweight tensors
-                self.make_initializer(
-                    gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
-                    gate_up_proj_weight,
-                )
-                self.make_initializer(
-                    down_proj_qweight_tensor.view(
-                        self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
-                    ),
-                    down_proj_weight,
-                )
-
-                # Save Quark scales tensors
-                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
-
-                # Save Quark biases
-                gate_up_bias = self.combine_quark_gate_up_biases_from_experts(mlp.experts)
-                down_bias = self.combine_quark_down_biases_from_experts(mlp.experts)
-                self.make_initializer(gate_up_bias, gate_up_proj_bias, to=self.io_dtype)
-                self.make_initializer(down_bias, down_proj_bias, to=self.io_dtype)
-
-                # Quark always uses fused path with zero_points
-                self.make_moe_op(
-                    moe_name,
-                    root_input=root_input,
-                    router_probs=f"{router_reshape_name}/output_0",
-                    weight1=gate_up_proj_weight,
-                    scales1=gate_up_proj_scales,
-                    bias1=gate_up_proj_bias,
-                    weight2=down_proj_weight,
-                    scales2=down_proj_scales,
-                    bias2=down_proj_bias,
-                    zero_points1=gate_up_proj_zero_points,
-                    zero_points2=down_proj_zero_points,
-                )
             else:
-                # Non-Quark QMoE: use quantized weights with optional padding
-                pack_size = 8 // self.moe_attrs["expert_weight_bits"]
                 hidden_size_padded = gate_up_proj_qweight_list[0].shape[-1] * pack_size
                 intermediate_size_padded = down_proj_qweight_list[0].shape[-1] * pack_size
 
-                # FUSED: keep gate and up combined
-                self.make_initializer(
-                    gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
-                    gate_up_proj_weight,
-                )
-                self.make_initializer(
-                    down_proj_qweight_tensor.view(
-                        self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
-                    ),
-                    down_proj_weight,
-                )
+            # Save qweight tensors
+            self.make_initializer(
+                gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
+                gate_up_proj_weight,
+            )
+            self.make_initializer(
+                down_proj_qweight_tensor.view(
+                    self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
+                ),
+                down_proj_weight,
+            )
 
-                # Save scales tensors
-                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+            # Save scales tensors
+            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+            self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
-                # Save biases
-                self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
-                self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
+        # Save biases (shared for all paths)
+        if has_quark_experts:
+            gate_up_bias = self.combine_quark_gate_up_biases_from_experts(mlp.experts)
+            down_bias = self.combine_quark_down_biases_from_experts(mlp.experts)
+        else:
+            gate_up_bias = mlp.experts.gate_up_proj_bias
+            down_bias = mlp.experts.down_proj_bias
 
-                self.make_moe_op(
-                    moe_name,
-                    root_input=root_input,
-                    router_probs=f"{router_reshape_name}/output_0",
-                    weight1=gate_up_proj_weight,
-                    scales1=gate_up_proj_scales,
-                    bias1=gate_up_proj_bias,
-                    weight2=down_proj_weight,
-                    scales2=down_proj_scales,
-                    bias2=down_proj_bias,
-                )
+        self.make_initializer(gate_up_bias, gate_up_proj_bias, to=self.io_dtype)
+        self.make_initializer(down_bias, down_proj_bias, to=self.io_dtype)
+
+        # Single make_moe_op call with EP-based zero_points
+        # TRT-RTX doesn't support zero_points inputs
+        moe_name = f"{basename}/{op_type}"
+        use_zero_points = has_quark_experts and self.ep not in {"NvTensorRtRtx", "trt-rtx"}
+
+        self.make_moe_op(
+            moe_name,
+            root_input=root_input,
+            router_probs=f"{router_reshape_name}/output_0",
+            weight1=gate_up_proj_weight,
+            scales1=gate_up_proj_scales,
+            bias1=gate_up_proj_bias,
+            weight2=down_proj_weight,
+            scales2=down_proj_scales,
+            bias2=down_proj_bias,
+            zero_points1=gate_up_proj_zero_points if use_zero_points else "",
+            zero_points2=down_proj_zero_points if use_zero_points else "",
+        )
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"

@@ -406,7 +406,7 @@ def get_args():
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
                 int4_qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
-                    Default value is 128.
+                    Default is 128 for trt-rtx, 0 (tensor-level) for others. Supported EPs: cpu, webgpu, trt-rtx.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
