@@ -23,6 +23,7 @@
 #include "qwen2_5_vl_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
+#include "../ryzenai/interface.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -653,6 +654,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     } else if (provider_options.name == "OpenVINO") {
       p_device = GetDeviceInterface(DeviceType::OpenVINO);
       OpenVINO_AppendProviderOptions(session_options, config, provider_options);
+    } else if (provider_options.name == "RyzenAI") {
+      p_device = GetDeviceInterface(DeviceType::RyzenAI);
+
+      session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
+
+      GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
       if (provider_options.name == "QNN") {
@@ -810,7 +817,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -829,7 +836,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -921,6 +928,9 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  if (p_device_->GetType() == DeviceType::RyzenAI)
+    p_device_inputs_ = p_device_kvcache_ = p_device_;
 }
 
 Model::~Model() {

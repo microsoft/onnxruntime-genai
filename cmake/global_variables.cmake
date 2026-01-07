@@ -78,6 +78,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/webgpu/*.cpp"
   "${GENERATORS_ROOT}/openvino/*.h"
   "${GENERATORS_ROOT}/openvino/*.cpp"
+  "${GENERATORS_ROOT}/ryzenai/*.h"
+  "${GENERATORS_ROOT}/ryzenai/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
   "${ENGINE_ROOT}/*.h"

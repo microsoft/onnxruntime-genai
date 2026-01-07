@@ -1,0 +1,184 @@
+#include "../generators.h"
+#include "../search.h"
+#include "interface.h"
+#include <filesystem>
+#include <mutex>
+#include <span>
+
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+
+namespace Generators {
+namespace RyzenAI {
+
+static constexpr auto ep_path_env_key_ = "RYZENAI_EP_PATH";
+static constexpr auto ep_name_ = "RyzenAILightExecutionProvider";
+#if defined(_WIN32)
+static constexpr auto ep_filename_ = "onnxruntime_providers_ryzenai.dll";
+#else
+static constexpr auto ep_filename_ = "onnxruntime_providers_ryzenai.so";
+#endif
+static constexpr auto func_custom_ops_ = "RyzenAI_RegisterCustomOps";
+static constexpr auto func_shutdown_ = "RyzenAI_Shutdown";
+
+static Ort::Allocator* ort_allocator_{};
+
+struct Memory : DeviceBuffer {
+  Memory(size_t size) : owned_{true} {
+    size_in_bytes_ = size;
+    p_cpu_ = p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
+  }
+
+  Memory(void* p, size_t size) : owned_{false} {
+    size_in_bytes_ = size;
+    p_cpu_ = p_device_ = static_cast<uint8_t*>(p);
+  }
+
+  ~Memory() override {
+    if (owned_)
+      ort_allocator_->Free(p_device_);
+  }
+
+  const char* GetType() const override { return "RyzenAI"; }
+
+  void AllocateCpu() override {}
+  void CopyDeviceToCpu() override {}
+  void CopyCpuToDevice() override {}
+
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
+    CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+  }
+
+  void Zero() override {
+    memset(p_device_, 0, size_in_bytes_);
+  }
+
+  bool owned_;
+};
+
+struct Interface : RyzenAIInterface {
+  Interface() {
+    // If already loaded then nothing to do
+#if defined(_WIN32)
+    if (GetModuleHandleA(ep_filename_))
+      return;
+#else
+    if (dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW))
+      return;
+#endif
+
+    std::error_code ec;
+
+    ep_path_ = GetEnv(ep_path_env_key_);
+
+#if defined(_WIN32)
+    if (ep_path_.empty()) {
+      wchar_t buffer[MAX_PATH + 1] = {0};
+      const auto len = sizeof(buffer) / sizeof(buffer[0]);
+
+      if (MEMORY_BASIC_INFORMATION mbi; VirtualQuery(Ort::api->RegisterExecutionProviderLibrary, &mbi, sizeof(mbi)))
+        if (HMODULE mod = (HMODULE)mbi.AllocationBase; GetModuleFileNameW(mod, buffer, len))
+          if (const auto dir = std::filesystem::path{buffer}.remove_filename(); !dir.empty())
+            if (auto path = dir / ep_filename_; std::filesystem::exists(path, ec))
+              ep_path_ = std::move(path);
+    }
+#endif  // _WIN32
+
+    if (ep_path_.empty())
+      ep_path_ = std::filesystem::current_path(ec) / ep_filename_;
+
+    Ort::ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(GetOrtGlobals()->env_.get(), ep_name_, ep_path_.native().c_str()));
+  }
+
+  ~Interface() {
+    // TODO: make it linux compatible
+#if defined(_WIN32)
+    if (const auto mod = GetModuleHandleA(ep_filename_))
+      if (const auto func = reinterpret_cast<void (*)()>(GetProcAddress(mod, func_shutdown_)))
+        func();
+#endif  // _WIN32
+  }
+
+  void SetupProvider(OrtSessionOptions& session_options, const ProviderOptions& provider_options) override {
+    std::vector<const OrtEpDevice*> supported;
+
+    {
+      const OrtEpDevice* const* devs = nullptr;
+      size_t ndevs = 0;
+
+      Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devs, &ndevs));
+
+      for (const auto& dev : std::span{devs, devs + ndevs})
+        if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(dev) &&
+            OrtHardwareDeviceType_NPU == Ort::api->HardwareDevice_Type(Ort::api->EpDevice_Device(dev)))
+          supported.push_back(dev);
+    }
+
+    if (supported.empty())
+      throw std::runtime_error{"No RyzenAI devices detected"};
+
+    {
+      std::vector<const char*> ep_keys, ep_values;
+
+      for (auto& option : provider_options) {
+        ep_keys.emplace_back(option.first.c_str());
+        ep_values.emplace_back(option.second.c_str());
+      }
+
+      // this call merges provider_options into session_options
+      Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(&session_options,
+                                                                           &GetOrtEnv(), supported.data(), supported.size(),
+                                                                           ep_keys.data(), ep_values.data(), ep_keys.size()));
+    }
+
+    Ort::ThrowOnError(Ort::api->RegisterCustomOpsUsingFunction(&session_options, func_custom_ops_));
+  }
+
+  DeviceType GetType() const override { return DeviceType::RyzenAI; }
+
+  void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
+    assert(!ort_allocator_);
+    ort_allocator_ = &allocator;
+  }
+
+  Ort::Allocator& GetAllocator() override {
+    return *ort_allocator_;
+  }
+
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return std::make_shared<Memory>(size);
+  }
+
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
+    return std::make_shared<Memory>(p, size);
+  }
+
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
+
+  void Synchronize() override {}
+
+ private:
+  std::filesystem::path ep_path_;
+};
+
+static std::unique_ptr<Interface> interface_;
+
+}  // namespace RyzenAI
+
+void RyzenAIInterface::Shutdown() {
+  RyzenAI::interface_.reset();
+}
+
+RyzenAIInterface* GetRyzenAIInterface() {
+  static std::once_flag once;
+
+  std::call_once(once, []() {
+    RyzenAI::interface_ = std::make_unique<RyzenAI::Interface>();
+  });
+
+  return RyzenAI::interface_.get();
+}
+
+}  // namespace Generators
