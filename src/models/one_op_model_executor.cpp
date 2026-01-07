@@ -17,16 +17,18 @@ struct OneOpSessionCache {
   std::mutex mutex_;
 };
 
-// Get the global session cache (stored in OrtGlobals)
 static OneOpSessionCache& GetOneOpSessionCache() {
   static OneOpSessionCache cache;
   return cache;
 }
 
 // Generate a cache key from the model configuration and EP name
-uint64_t OneOpModelExecutor::GenerateCacheKey(const OneOpModelConfig& config, const std::string& ep_name) {
-  // Simple hash combining op_type, input/output types, and EP name
-  // For more complex operators with attributes, we'd need a more sophisticated hash
+uint64_t OneOpModelExecutor::GenerateCacheKey(
+    const OneOpModelConfig& config,
+    const std::string& ep_name,
+    const std::vector<const char*>& session_config_keys,
+    const std::vector<const char*>& session_config_values) {
+  // Simple hash combining op_type, input/output types, EP name, and session config
   std::hash<std::string> hasher;
   uint64_t key = hasher(config.op_type);
 
@@ -80,6 +82,12 @@ uint64_t OneOpModelExecutor::GenerateCacheKey(const OneOpModelConfig& config, co
     }
   }
 
+  // Hash session config keys and values
+  for (size_t i = 0; i < session_config_keys.size(); i++) {
+    key ^= hasher(session_config_keys[i]) + 0x9e3779b9 + (key << 6) + (key >> 2);
+    key ^= hasher(session_config_values[i]) + 0x9e3779b9 + (key << 6) + (key >> 2);
+  }
+
   return key;
 }
 
@@ -112,7 +120,7 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
   auto& cache = GetOneOpSessionCache();
-  uint64_t key = GenerateCacheKey(config, ep_name);
+  uint64_t key = GenerateCacheKey(config, ep_name, session_config_keys, session_config_values);
 
   std::lock_guard<std::mutex> lock(cache.mutex_);
 
@@ -132,59 +140,51 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
 }
 
 // Execute a 1-op model
-bool OneOpModelExecutor::Execute(
+void OneOpModelExecutor::Execute(
     const OneOpModelConfig& model_config,
     const OneOpExecutionParams& exec_params) {
-  try {
-    // Get or create session
-    OrtSession* session = GetOrCreateSession(
-        model_config,
-        exec_params.execution_provider_name,
-        exec_params.session_config_keys,
-        exec_params.session_config_values);
+  // Get or create session
+  OrtSession* session = GetOrCreateSession(
+      model_config,
+      exec_params.execution_provider_name,
+      exec_params.session_config_keys,
+      exec_params.session_config_values);
 
-    // Create IOBinding for efficient execution
-    auto io_binding = OrtIoBinding::Create(*session);
+  // Create IOBinding for efficient execution
+  auto io_binding = OrtIoBinding::Create(*session);
 
-    // Bind inputs
-    for (size_t i = 0; i < exec_params.inputs.size(); i++) {
-      const auto& input_spec = exec_params.inputs[i];
-      const auto& input_config = model_config.inputs[i];
+  // Bind inputs
+  for (size_t i = 0; i < exec_params.inputs.size(); i++) {
+    const auto& input_spec = exec_params.inputs[i];
+    const auto& input_config = model_config.inputs[i];
 
-      auto input_tensor = OrtValue::CreateTensor(
-          *exec_params.memory_info,
-          input_spec.data,
-          input_spec.size_in_bytes,
-          input_spec.shape,
-          input_spec.elem_type);
+    auto input_tensor = OrtValue::CreateTensor(
+        *exec_params.memory_info,
+        input_spec.data,
+        input_spec.size_in_bytes,
+        input_spec.shape,
+        input_spec.elem_type);
 
-      io_binding->BindInput(input_config.name.c_str(), *input_tensor);
-    }
-
-    // Bind outputs
-    for (size_t i = 0; i < exec_params.outputs.size(); i++) {
-      const auto& output_spec = exec_params.outputs[i];
-      const auto& output_config = model_config.outputs[i];
-
-      auto output_tensor = OrtValue::CreateTensor(
-          *exec_params.memory_info,
-          output_spec.data,
-          output_spec.size_in_bytes,
-          output_spec.shape,
-          output_spec.elem_type);
-
-      io_binding->BindOutput(output_config.name.c_str(), *output_tensor);
-    }
-
-    // Run inference
-    session->Run(nullptr, *io_binding);
-
-    return true;
-  } catch (const std::exception& e) {
-    // Log error or handle as needed
-    std::cerr << "OneOpModelExecutor::Execute failed: " << e.what() << std::endl;
-    return false;
+    io_binding->BindInput(input_config.name.c_str(), *input_tensor);
   }
+
+  // Bind outputs
+  for (size_t i = 0; i < exec_params.outputs.size(); i++) {
+    const auto& output_spec = exec_params.outputs[i];
+    const auto& output_config = model_config.outputs[i];
+
+    auto output_tensor = OrtValue::CreateTensor(
+        *exec_params.memory_info,
+        output_spec.data,
+        output_spec.size_in_bytes,
+        output_spec.shape,
+        output_spec.elem_type);
+
+    io_binding->BindOutput(output_config.name.c_str(), *output_tensor);
+  }
+
+  // Run inference
+  session->Run(nullptr, *io_binding);
 }
 
 // Clear all cached sessions
@@ -195,7 +195,7 @@ void OneOpModelExecutor::ClearCache() {
 }
 
 // Helper function for Cast operation
-bool ExecuteCastOp(
+void ExecuteCastOp(
     void* input_data,
     void* output_data,
     ONNXTensorElementDataType input_type,
@@ -228,7 +228,7 @@ bool ExecuteCastOp(
   params.session_config_keys = session_config_keys;
   params.session_config_values = session_config_values;
 
-  return OneOpModelExecutor::Execute(config, params);
+  OneOpModelExecutor::Execute(config, params);
 }
 
 }  // namespace Generators

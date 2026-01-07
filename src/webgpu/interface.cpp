@@ -194,7 +194,7 @@ struct InterfaceImpl : DeviceInterface {
     std::vector<const char*> session_config_values = {webgpu_config_value};
 
     // Use the generalized ExecuteCastOp helper with WebGPU session config
-    return ExecuteCastOp(
+    ExecuteCastOp(
         input,
         output,
         input_type,
@@ -204,6 +204,8 @@ struct InterfaceImpl : DeviceInterface {
         webgpu_mem_info,
         session_config_keys,
         session_config_values);
+
+    return true;
   }
 };
 

@@ -12,13 +12,15 @@
 namespace Generators {
 
 // Attribute types for ONNX operators
+// These values correspond to the AttributeProto.type field in the ONNX protobuf specification
+// Reference: https://github.com/onnx/onnx/blob/main/onnx/onnx.proto
 enum class AttributeType {
-  INT = 2,
-  FLOAT = 1,
-  STRING = 3,
-  INTS = 7,
-  FLOATS = 6,
-  STRINGS = 8
+  INT = 2,     // Single integer attribute
+  FLOAT = 1,   // Single float attribute
+  STRING = 3,  // String attribute
+  INTS = 7,    // Integer array attribute
+  FLOATS = 6,  // Float array attribute
+  STRINGS = 8  // String array attribute
 };
 
 // Attribute value for a single operator parameter
@@ -58,7 +60,12 @@ struct OneOpModelConfig {
   std::vector<TensorConfig> inputs;
   std::vector<TensorConfig> outputs;
   std::vector<AttributeValue> attributes;
-  int opset_version{17};  // Default to opset 17
+
+  // ONNX opset version for the generated model.
+  // Default is 17 which is widely supported and has been validated with this infrastructure.
+  // Can be overridden if a specific opset is required, but ensure the ONNX Runtime build
+  // supports it and the operator exists in that opset version.
+  int opset_version{17};
 
   OneOpModelConfig(const std::string& op) : op_type(op) {}
 };
@@ -69,7 +76,7 @@ class OneOpModelBuilder {
   // Build a complete ONNX model protobuf from the configuration
   static std::vector<uint8_t> Build(const OneOpModelConfig& config);
 
-  // Helper to create a Cast model (backward compatibility)
+  // Convenience helper to create a Cast model
   static std::vector<uint8_t> CreateCastModel(
       ONNXTensorElementDataType input_type,
       ONNXTensorElementDataType output_type);

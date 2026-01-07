@@ -46,8 +46,7 @@ class OneOpModelExecutor {
  public:
   // Execute a 1-op model with the given configuration and parameters
   // The session is automatically cached based on a hash of the model configuration
-  // Returns true on success, false on failure
-  static bool Execute(
+  static void Execute(
       const OneOpModelConfig& model_config,
       const OneOpExecutionParams& exec_params);
 
@@ -56,7 +55,11 @@ class OneOpModelExecutor {
 
  private:
   // Generate a cache key from the model configuration and EP name
-  static uint64_t GenerateCacheKey(const OneOpModelConfig& config, const std::string& ep_name);
+  static uint64_t GenerateCacheKey(
+      const OneOpModelConfig& config,
+      const std::string& ep_name,
+      const std::vector<const char*>& session_config_keys,
+      const std::vector<const char*>& session_config_values);
 
   // Create a new session for the given model and EP
   static std::unique_ptr<OrtSession> CreateSession(
@@ -77,7 +80,7 @@ class OneOpModelExecutor {
 
 // Execute a Cast operation using a 1-op model
 // This is a convenience wrapper around OneOpModelExecutor::Execute
-bool ExecuteCastOp(
+void ExecuteCastOp(
     void* input_data,
     void* output_data,
     ONNXTensorElementDataType input_type,

@@ -256,7 +256,7 @@ std::vector<uint8_t> OneOpModelBuilder::Build(const OneOpModelConfig& config) {
   return result;
 }
 
-// Helper to create a Cast model (backward compatibility with existing code)
+// Helper to create a Cast model
 std::vector<uint8_t> OneOpModelBuilder::CreateCastModel(
     ONNXTensorElementDataType input_type,
     ONNXTensorElementDataType output_type) {
