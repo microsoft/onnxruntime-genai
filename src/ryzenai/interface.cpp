@@ -73,19 +73,45 @@ struct Interface : RyzenAIInterface {
     ep_path_ = GetEnv(ep_path_env_key_);
 
 #if defined(_WIN32)
-    if (ep_path_.empty()) {
+    const auto get_hmod_for_method = [](LPCVOID func) -> HMODULE {
+      MEMORY_BASIC_INFORMATION mbi;
+
+      if (VirtualQuery(func, &mbi, sizeof(mbi)) && mbi.AllocationBase)
+        return (HMODULE)mbi.AllocationBase;
+
+      return nullptr;
+    };
+
+    const auto find_next_to_module = [&](HMODULE hmod) -> std::filesystem::path {
       wchar_t buffer[MAX_PATH + 1] = {0};
       const auto len = sizeof(buffer) / sizeof(buffer[0]);
 
-      if (MEMORY_BASIC_INFORMATION mbi; VirtualQuery(Ort::api->RegisterExecutionProviderLibrary, &mbi, sizeof(mbi)))
-        if (HMODULE mod = (HMODULE)mbi.AllocationBase; GetModuleFileNameW(mod, buffer, len))
-          if (const auto dir = std::filesystem::path{buffer}.remove_filename(); !dir.empty())
-            if (auto path = dir / ep_filename_; std::filesystem::exists(path, ec))
-              ep_path_ = std::move(path);
-    }
+      if (GetModuleFileNameW(hmod, buffer, len))
+        if (const auto dir = std::filesystem::path{buffer}.remove_filename(); !dir.empty())
+          if (auto path = dir / ep_filename_; std::filesystem::exists(path, ec))
+            return path;
+
+      return {};
+    };
+
+    if (ep_path_.empty())
+      // check next to onnxruntime-genai.dll
+      if (const auto hmod = get_hmod_for_method(GetRyzenAIInterface))
+        ep_path_ = find_next_to_module(hmod);
+
+    if (ep_path_.empty())
+      // check next to onnxruntime.dll
+      if (const auto hmod = get_hmod_for_method(Ort::api->RegisterExecutionProviderLibrary))
+        ep_path_ = find_next_to_module(hmod);
+
+    if (ep_path_.empty())
+      // check next to current executable
+      if (const auto hmod = GetModuleHandleA(NULL))
+        ep_path_ = find_next_to_module(hmod);
 #endif  // _WIN32
 
     if (ep_path_.empty())
+      // fallback to current working directory
       ep_path_ = std::filesystem::current_path(ec) / ep_filename_;
 
     Ort::ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(GetOrtGlobals()->env_.get(), ep_name_, ep_path_.native().c_str()));
