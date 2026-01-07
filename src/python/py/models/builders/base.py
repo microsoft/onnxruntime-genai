@@ -361,8 +361,8 @@ class Model:
         self.int4_qmoe_block_size = extra_options.get("int4_qmoe_block_size", 128)
 
         # Validate that only supported EPs can use int4_qmoe_block_size for QMoE
-        # CPU, WebGPU, CUDA, and TRT-RTX support block-wise quantization
-        supported_blockwise_eps = ["cpu", "webgpu", "cuda", "trt-rtx", "NvTensorRtRtx"]
+        # CPU, WebGPU, and TRT-RTX support block-wise quantization
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx", "NvTensorRtRtx"]
         if self.ep not in supported_blockwise_eps and "int4_qmoe_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
                 f"The 'int4_qmoe_block_size' option is not supported for {self.ep} execution provider with QMoE. "
