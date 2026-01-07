@@ -63,7 +63,6 @@ def check_extra_options(kv_pairs, execution_provider):
         "shared_embeddings",
         "hf_remote",
         "disable_qkv_fusion",
-        "gpt_oss_swiglu_fusion",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -404,10 +403,10 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization.
+                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
-                int4_qdq_block_size = 16/32/64/128/256: Specify the block size for quantize/dequantize nodes for int4 quantization.
-                    Default value is int4_block_size.
+                int4_qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
+                    Default value is 128.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -465,8 +464,6 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
                     Use this option to create quantized ONNX models that use BF16 precision.
-                gpt_oss_swiglu_fusion = Fuse gate and up tensors into a single tensor. Default is true.
-                    This is only applicable to GPT-OSS models.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
             """),

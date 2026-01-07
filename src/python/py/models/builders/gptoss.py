@@ -19,7 +19,7 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_beta"] = 1.0
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
-        self.moe_attrs["swiglu_fusion"] = 1 if self.gpt_oss_swiglu_fusion else 0
+        self.moe_attrs["swiglu_fusion"] = 1
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -705,93 +705,37 @@ class GPTOSSModel(Model):
                 hidden_size_padded = gate_up_proj_qweight_list[0].shape[-1] * pack_size
                 intermediate_size_padded = down_proj_qweight_list[0].shape[-1] * pack_size
 
-                if self.moe_attrs["swiglu_fusion"] == 0 and self.ep in {"NvTensorRtRtx", "trt-rtx"}:
-                    # UNFUSED: split gate/up projections into separate tensors (TRT-RTX only)
-                    gate_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_proj.{moe_weight_type}"
-                    gate_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_proj.scales"
-                    gate_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_proj.bias"
-                    up_proj_weight = f"model.layers.{layer_id}.moe.experts.up_proj.{moe_weight_type}"
-                    up_proj_scales = f"model.layers.{layer_id}.moe.experts.up_proj.scales"
-                    up_proj_bias = f"model.layers.{layer_id}.moe.experts.up_proj.bias"
+                # FUSED: keep gate and up combined
+                self.make_initializer(
+                    gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
+                    gate_up_proj_weight,
+                )
+                self.make_initializer(
+                    down_proj_qweight_tensor.view(
+                        self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
+                    ),
+                    down_proj_weight,
+                )
 
-                    # Split gate_up into gate (even indices) and up (odd indices)
-                    gate_proj_qweight_tensor = gate_up_proj_qweight_tensor[:, ::2, :]
-                    up_proj_qweight_tensor = gate_up_proj_qweight_tensor[:, 1::2, :]
-                    gate_proj_scales_tensor = gate_up_proj_scales_tensor[:, ::2]
-                    up_proj_scales_tensor = gate_up_proj_scales_tensor[:, 1::2]
+                # Save scales tensors
+                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
-                    # Save qweight tensors
-                    self.make_initializer(
-                        gate_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
-                        gate_proj_weight,
-                    )
-                    self.make_initializer(
-                        up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
-                        up_proj_weight,
-                    )
-                    self.make_initializer(
-                        down_proj_qweight_tensor.view(
-                            self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
-                        ),
-                        down_proj_weight,
-                    )
+                # Save biases
+                self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
+                self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
 
-                    # Save scales tensors
-                    self.make_initializer(gate_proj_scales_tensor, gate_proj_scales, to=self.io_dtype)
-                    self.make_initializer(up_proj_scales_tensor, up_proj_scales, to=self.io_dtype)
-                    self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
-
-                    # Save biases (split)
-                    self.make_initializer(mlp.experts.gate_up_proj_bias[:, ::2], gate_proj_bias, to=self.io_dtype)
-                    self.make_initializer(mlp.experts.gate_up_proj_bias[:, 1::2], up_proj_bias, to=self.io_dtype)
-                    self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
-
-                    self.make_moe_op(
-                        moe_name,
-                        root_input=root_input,
-                        router_probs=f"{router_reshape_name}/output_0",
-                        weight1=gate_proj_weight,
-                        scales1=gate_proj_scales,
-                        bias1=gate_proj_bias,
-                        weight2=down_proj_weight,
-                        scales2=down_proj_scales,
-                        bias2=down_proj_bias,
-                        weight3=up_proj_weight,
-                        scales3=up_proj_scales,
-                        bias3=up_proj_bias,
-                    )
-                else:
-                    # FUSED: keep gate and up combined
-                    self.make_initializer(
-                        gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
-                        gate_up_proj_weight,
-                    )
-                    self.make_initializer(
-                        down_proj_qweight_tensor.view(
-                            self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
-                        ),
-                        down_proj_weight,
-                    )
-
-                    # Save scales tensors
-                    self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                    self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
-
-                    # Save biases
-                    self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
-                    self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
-
-                    self.make_moe_op(
-                        moe_name,
-                        root_input=root_input,
-                        router_probs=f"{router_reshape_name}/output_0",
-                        weight1=gate_up_proj_weight,
-                        scales1=gate_up_proj_scales,
-                        bias1=gate_up_proj_bias,
-                        weight2=down_proj_weight,
-                        scales2=down_proj_scales,
-                        bias2=down_proj_bias,
-                    )
+                self.make_moe_op(
+                    moe_name,
+                    root_input=root_input,
+                    router_probs=f"{router_reshape_name}/output_0",
+                    weight1=gate_up_proj_weight,
+                    scales1=gate_up_proj_scales,
+                    bias1=gate_up_proj_bias,
+                    weight2=down_proj_weight,
+                    scales2=down_proj_scales,
+                    bias2=down_proj_bias,
+                )
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
