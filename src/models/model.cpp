@@ -921,6 +921,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   // Only CUDA, TRT-RTX and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+      p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
@@ -928,9 +929,6 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
-
-  if (p_device_->GetType() == DeviceType::RyzenAI)
-    p_device_inputs_ = p_device_kvcache_ = p_device_;
 }
 
 Model::~Model() {
