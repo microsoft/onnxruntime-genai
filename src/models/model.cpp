@@ -900,6 +900,20 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   return names;
 }
 
+std::vector<int64_t> SessionInfo::GetInputShape(const std::string& name) const {
+  auto type_info = inputs_.find(name);
+  if (type_info == inputs_.end())
+    throw std::runtime_error("Model input was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetShape();
+}
+
+std::vector<int64_t> SessionInfo::GetOutputShape(const std::string& name) const {
+  auto type_info = outputs_.find(name);
+  if (type_info == outputs_.end())
+    throw std::runtime_error("Model output was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetShape();
+}
+
 std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& name) const {
   auto type_info = inputs_.find(name);
   if (type_info == inputs_.end())

@@ -130,6 +130,9 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
+  std::vector<int64_t> GetInputShape(const std::string& name) const;
+  std::vector<int64_t> GetOutputShape(const std::string& name) const;
+
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 

@@ -1,5 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
+#include "../models/model.h"
 #include "interface.h"
 #include <filesystem>
 #include <mutex>
@@ -205,6 +206,20 @@ RyzenAIInterface* GetRyzenAIInterface() {
   });
 
   return RyzenAI::interface_.get();
+}
+
+bool IsRyzenAIPrunedModel(const Model& model) {
+  if (model.p_device_->GetType() != DeviceType::RyzenAI)
+    return false;
+
+  const auto& logits_name = model.config_->model.decoder.outputs.logits;
+
+  if (!model.session_info_.HasOutput(logits_name))
+    return false;
+
+  const auto logits_shape = model.session_info_.GetOutputShape(logits_name);
+
+  return logits_shape[1] == 1;
 }
 
 }  // namespace Generators
