@@ -260,6 +260,14 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
+  bool HitEOS() {
+    return generator_->HitEOS();
+  }
+
+  bool HitMaxLength() {
+    return generator_->HitMaxLength();
+  }
+
   void SetActiveAdapter(OgaAdapters& adapters, const std::string& adapter_name) {
     generator_->SetActiveAdapter(adapters, adapter_name.c_str());
   }
@@ -455,6 +463,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("hit_eos", &PyGenerator::HitEOS)
+      .def("hit_max_length", &PyGenerator::HitMaxLength)
       .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)

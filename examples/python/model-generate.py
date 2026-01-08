@@ -99,9 +99,9 @@ def main(args):
     if args.verbose:
         print("Generating tokens ...\n")
     start_time = time.time()
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
     run_time = time.time() - start_time
 

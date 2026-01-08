@@ -145,9 +145,9 @@ def run(args: argparse.Namespace):
         generator.set_inputs(inputs)
         start_time = time.time()
 
-        while True:
+        while not generator.is_done():
             generator.generate_next_token()
-            if generator.is_done():
+            if generator.hit_eos():
                 break
 
             new_token = generator.get_next_tokens()[0]

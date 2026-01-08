@@ -74,7 +74,7 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-__global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu) {
+__global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, bool* hit_eos_cpu) {
   for (int batch_id = 0; batch_id < next_tokens_count; ++batch_id) {
     // If EOS already met, pad
     if (eos_seen[batch_id]) {
@@ -103,13 +103,14 @@ __global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, b
     }
     if (batch_id == next_tokens_count) {
       *done_cpu = true;
+      *hit_eos_cpu = true;
       return;
     }
   }
 }
 
-void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
-  CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_seen, eos_token_ids, eos_token_count, pad_token_id, done_cpu);
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, bool* hit_eos_cpu, cudaStream_t stream) {
+  CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_seen, eos_token_ids, eos_token_count, pad_token_id, done_cpu, hit_eos_cpu);
 }
 
 __global__ void AddProbsKernel(float* log_probs,

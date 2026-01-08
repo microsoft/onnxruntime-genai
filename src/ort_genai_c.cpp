@@ -413,6 +413,14 @@ bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();
 }
 
+bool OGA_API_CALL OgaGenerator_HitEOS(OgaGenerator* generator) {
+  return generator->HitEOS();
+}
+
+bool OGA_API_CALL OgaGenerator_HitMaxLength(OgaGenerator* generator) {
+  return generator->HitMaxLength();
+}
+
 bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
   return generator->IsSessionTerminated();
 }

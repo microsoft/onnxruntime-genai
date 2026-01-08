@@ -72,6 +72,16 @@ Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong nati
   return OgaGenerator_IsDone(reinterpret_cast<OgaGenerator*>(native_handle));
 }
 
+JNIEXPORT jboolean JNICALL
+Java_ai_onnxruntime_genai_Generator_hitEOS(JNIEnv* env, jobject thiz, jlong native_handle) {
+  return OgaGenerator_HitEOS(reinterpret_cast<OgaGenerator*>(native_handle));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ai_onnxruntime_genai_Generator_hitMaxLength(JNIEnv* env, jobject thiz, jlong native_handle) {
+  return OgaGenerator_HitMaxLength(reinterpret_cast<OgaGenerator*>(native_handle));
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_rewindTo(JNIEnv* env, jobject thiz, jlong native_handle, jlong length) {
   ThrowIfError(env, OgaGenerator_RewindTo(reinterpret_cast<OgaGenerator*>(native_handle), length));

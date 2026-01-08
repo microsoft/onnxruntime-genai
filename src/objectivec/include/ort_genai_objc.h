@@ -235,6 +235,20 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (BOOL)isDoneWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
 
 /**
+ * Whether generation ended because an EOS token id was hit.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or false if an error occurs.
+ */
+- (BOOL)hitEOSWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
+
+/**
+ * Whether generation ended because the maximum length was hit.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or false if an error occurs.
+ */
+- (BOOL)hitMaxLengthWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
+
+/**
  * Set input with NamedTensors type.
  * @param namedTensors The named tensors.
  * @param error Optional error information set if an error occurs.
