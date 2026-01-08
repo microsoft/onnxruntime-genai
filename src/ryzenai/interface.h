@@ -2,6 +2,7 @@
 
 namespace Generators {
 
+// Note: memory allocated through RyzenAI interface is host/cpu accessible
 struct RyzenAIInterface : DeviceInterface {
   using ProviderOptions = std::vector<std::pair<std::string, std::string>>;
 
