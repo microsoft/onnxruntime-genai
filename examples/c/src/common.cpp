@@ -113,6 +113,33 @@ void from_json(const nlohmann::ordered_json& j, Tool& t) {
   j.at("function").get_to(t.function);
 }
 
+void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a) {
+  j = nlohmann::ordered_json{ {"batch_size", a.batch_size}, {"num_beams", a.num_beams}, {"num_return_sequences", a.num_return_sequences} };
+  // Add optional generator params if provided
+  if (a.chunk_size != 0) j["chunk_size"] = a.chunk_size;
+  if (a.do_sample) j["do_sample"] = a.do_sample.value();
+  if (a.min_length) j["min_length"] = a.min_length.value();
+  if (a.max_length) j["max_length"] = a.max_length.value();
+  if (a.repetition_penalty) j["repetition_penalty"] = a.repetition_penalty.value();
+  if (a.temperature) j["temperature"] = a.temperature.value();
+  if (a.top_k) j["top_k"] = a.top_k.value();
+  if (a.top_p) j["top_p"] = a.top_p.value();
+}
+
+void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
+  if (j.contains("batch_size")) j.at("batch_size").get_to(a.batch_size);
+  if (j.contains("chunk_size")) j.at("chunk_size").get_to(a.chunk_size);
+  if (j.contains("do_sample")) j.at("do_sample").get_to(a.do_sample);
+  if (j.contains("min_length")) j.at("min_length").get_to(a.min_length);
+  if (j.contains("max_length")) j.at("max_length").get_to(a.max_length);
+  if (j.contains("num_beams")) j.at("num_beams").get_to(a.num_beams);
+  if (j.contains("num_return_sequences")) j.at("num_return_sequences").get_to(a.num_return_sequences);
+  if (j.contains("repetition_penalty")) j.at("repetition_penalty").get_to(a.repetition_penalty);
+  if (j.contains("temperature")) j.at("temperature").get_to(a.temperature);
+  if (j.contains("top_k")) j.at("top_k").get_to(a.top_k);
+  if (j.contains("top_p")) j.at("top_p").get_to(a.top_p);
+}
+
 static void PrintUsage(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path> <execution_provider>" << std::endl;
   std::cerr << "  model_path: [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
@@ -364,10 +391,11 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
       }
     }
   }
-  // TODO: use the C binding to the Overlay API
+
   // Set any search-specific options that need to be known before constructing a Model object
   // Otherwise they can be set with params.SetSearchOptions(search_options)
-  // config.Overlay(...);
+  nlohmann::ordered_json j = search_options;
+  config.Overlay(j.dump());
   return config;
 }
 
@@ -420,9 +448,7 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
 }
 
 std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& tokenizer, const std::string& messages, bool add_generation_prompt, const std::string& tools) {
-  std::string prompt = messages;
   std::string template_str = "";
-  
   std::filesystem::path jinja_path = std::filesystem::path(model_path) / "chat_template.jinja";
   if (std::filesystem::exists(jinja_path)) {
     std::ifstream file(jinja_path, std::ios::binary);
@@ -436,7 +462,7 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
     }
   }
 
-  prompt = tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt);
+  std::string prompt = tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt);
   return prompt;
 }
 
@@ -543,34 +569,7 @@ std::vector<Tool> ToTool(std::vector<nlohmann::ordered_json>& tool_defs) {
   std::vector<Tool> tools;
   for (const auto& tool_def : tool_defs) {
     Tool tool = tool_def.get<Tool>();
-    // Tool tool;
-    // from_json(tool_def, tool);
     tools.push_back(tool);
-    // if (tool_def.contains("function")) {
-    //   std::string function_str = JsonSerializer.Serialize(tool_def["function"]);
-    //   std::unordered_map<std::string, std::any> function_map = JsonSerializer.Deserialize(function_str);
-    //   if (function_map.size() == 0) continue;
-
-    //   std::string name = function_map.contains("name") ? function_map["name"] : "";
-    //   std::string description = function_map.contains("description") ? function_map["description"] : "";
-
-    //   if (function_map.contains("parameters")) {
-    //     std::string param_str = JsonSerializer.Serialize(function_map["parameters"]);
-    //     std::unordered_map<std::string, std::any> param_map = JsonSerializer.Deserialize(param_str);
-    //     if (param_map.size() == 0) continue;
-
-    //     FunctionDefinition func;
-    //     func.name = name;
-    //     func.description = description;
-    //     func.parameters = param_map;
-
-    //     Tool tool;
-    //     tool.type = "function";
-    //     tool.function = func;
-
-    //     tools.push_back(tool);
-    //   }
-    // }
   }
   return tools;
 }

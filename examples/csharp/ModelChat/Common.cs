@@ -69,11 +69,19 @@ namespace ModelChat
                 }
             }
 
-            // TODO: add a C# binding to the Overlay API
+            // Create serializer context to skip null attributes
+            var options = new JsonSerializerOptions()
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            };
+            var ctx = new ArgsSerializerContext(options);
+            var json = JsonSerializer.Serialize(search_options, ctx.GeneratorParamsArgs);
+
             // Set any search-specific options that need to be known before constructing a Model object
             // Otherwise they can be set with params.SetSearchOptions(search_options)
-            // config.Overlay(...);
-
+            config.Overlay(json);
             return config;
         }
 
@@ -126,16 +134,14 @@ namespace ModelChat
         /// </returns>
         public static string ApplyChatTemplate(string model_path, Tokenizer tokenizer, string messages, bool add_generation_prompt, string tools = "")
         {
-            var prompt = messages;
             var template_str = "";
-
             var jinja_path = Path.Combine(model_path, "chat_template.jinja");
             if (File.Exists(jinja_path))
             {
                 template_str = File.ReadAllText(jinja_path, Encoding.UTF8);
             }
 
-            prompt = tokenizer.ApplyChatTemplate(
+            var prompt = tokenizer.ApplyChatTemplate(
                 messages: messages,
                 tools: tools,
                 add_generation_prompt: add_generation_prompt,
@@ -830,5 +836,12 @@ namespace ModelChat
         public bool tool_output { get; set; } = false;
         public string tool_call_start { get; set; } = "";
         public string tool_call_end { get; set; } = "";
+    }
+
+    [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+    [JsonSerializable(typeof(GeneratorParamsArgs))]
+    [JsonSerializable(typeof(GuidanceArgs))]
+    public sealed partial class ArgsSerializerContext : JsonSerializerContext
+    {
     }
 }

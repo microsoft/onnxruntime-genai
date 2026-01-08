@@ -61,7 +61,10 @@ def main(args):
         print("Generator created")
 
     # Apply chat template
-    system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
+    try:
+        system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
+    except:
+        system_prompt = text
     if args.verbose:
         print(f"System prompt: {system_prompt}")
 
@@ -91,7 +94,10 @@ def main(args):
         message = [{"role": "user", "content": text}]
         
         # Apply chat template
-        user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
+        try:
+            user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
+        except:
+            user_prompt = text
         if args.verbose:
             print(f"User prompt: {user_prompt}")
 

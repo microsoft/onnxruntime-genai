@@ -103,12 +103,12 @@ def apply_chat_template(model_path: str, tokenizer: og.Tokenizer, messages: str,
     Returns:
         str: prompt to encode
     """
-    prompt = messages
     template_str = ""
     jinja_path = os.path.join(model_path, "chat_template.jinja")
     if os.path.exists(jinja_path):
         with open(jinja_path, encoding="utf-8") as f:
             template_str = f.read()
+
     prompt = tokenizer.apply_chat_template(
         messages=messages, tools=tools, add_generation_prompt=add_generation_prompt, template_str=template_str
     )

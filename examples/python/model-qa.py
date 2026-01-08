@@ -34,6 +34,7 @@ def main(args):
     ]
 
     # Get guidance info if requested
+    guidance_type, guidance_data = "", ""
     if args.response_format != "":
         print("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json")
         guidance_type, guidance_data, tools = get_guidance(

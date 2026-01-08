@@ -102,6 +102,7 @@ def run_tool_calling():
                 "-e",
                 tool_call_end,
             ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
             # Run model-qa.py for inference
             command = [

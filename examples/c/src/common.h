@@ -184,6 +184,26 @@ struct GeneratorParamsArgs {
 };
 
 /**
+ * @brief Convert GeneratorParamsArgs to JSON
+ * 
+ * @param j JSON object
+ * @param a Args object
+ *
+ * @return None
+ */
+void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a);
+
+/**
+ * @brief Convert JSON to GeneratorParamsArgs
+ * 
+ * @param j JSON object
+ * @param a Args object
+ *
+ * @return None
+ */
+void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a);
+
+/**
  * @brief A class for holding parsed values for guidance
  */
 struct GuidanceArgs {

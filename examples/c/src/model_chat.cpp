@@ -153,7 +153,6 @@ void CXX_API(
     if (verbose) std::cout << "Running generation loop..." << std::endl;
     std::cout << std::endl;
     std::cout << "Output: ";
-    // generator->SetRuntimeOption("terminate_session", "0");
     const auto current_token_count = generator->GetSequenceCount(0);
     try {
       while (true) {
