@@ -158,6 +158,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
+  bool IsPruned() const;
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtArenaCfg> arena_cfg_;

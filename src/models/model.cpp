@@ -1164,6 +1164,14 @@ std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, session_info_);
 }
 
+bool Model::IsPruned() const {
+  const auto& logits_name = config_->model.decoder.outputs.logits;
+  if (!session_info_.HasOutput(logits_name))
+    return false;
+  const auto logits_shape = session_info_.GetOutputShape(logits_name);
+  return logits_shape[1] == 1;
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
   std::string config_overlay;
   if (settings) {
