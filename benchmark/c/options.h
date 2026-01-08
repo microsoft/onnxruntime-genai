@@ -20,6 +20,7 @@ struct Options {
   size_t num_iterations{5};
   size_t num_warmup_iterations{1};
   bool verbose{};
+  bool no_dynamic_max_length{};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);

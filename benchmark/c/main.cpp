@@ -112,7 +112,7 @@ void WriteE2EStats(std::string_view label,
             << "\n";
 }
 
-std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer, size_t batch_size) {
+std::string GeneratePrompt(const benchmark::Options& opts, size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer, size_t batch_size) {
   const char* const base_prompt = "A";
   auto base_prompt_sequences = OgaSequences::Create();
   for (size_t i = 0; i < batch_size; ++i) {
@@ -120,12 +120,14 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   }
 
   auto params = OgaGeneratorParams::Create(model);
-  params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
+  if (!opts.no_dynamic_max_length) {
+    params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
+  }
   params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
 
   auto generator = OgaGenerator::Create(model, *params);
   generator->AppendTokenSequences(*base_prompt_sequences);
-  while (!generator->IsDone()) {
+  while (!generator->IsDone() && num_prompt_tokens-- > 0) {
     generator->GenerateNextToken();
   }
 
@@ -159,7 +161,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   const auto prompt = [&]() -> std::string {
     if (const size_t* num_prompt_tokens = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
-      return GeneratePrompt(*num_prompt_tokens, *model, *tokenizer, opts.batch_size);
+      return GeneratePrompt(opts, *num_prompt_tokens, *model, *tokenizer, opts.batch_size);
     }
     return std::get<std::string>(opts.prompt_num_tokens_or_content);
   }();
@@ -179,7 +181,9 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   auto make_generator_params = [&] {
     auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", static_cast<double>(num_tokens));
+    if (!opts.no_dynamic_max_length) {
+      params->SetSearchOption("max_length", static_cast<double>(num_tokens));
+    }
     params->SetSearchOption("min_length", static_cast<double>(num_tokens));
     return params;
   };
@@ -190,8 +194,9 @@ void RunBenchmark(const benchmark::Options& opts) {
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
     auto generator = OgaGenerator::Create(*model, *generator_params);
+    auto num_tokens_to_generate = opts.num_tokens_to_generate;
     generator->AppendTokenSequences(*prompt_sequences);
-    while (!generator->IsDone()) {
+    while (!generator->IsDone() && num_tokens_to_generate-- > 0) {
       generator->GenerateNextToken();
     }
 
@@ -215,6 +220,7 @@ void RunBenchmark(const benchmark::Options& opts) {
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_iterations; ++i) {
     auto generator = OgaGenerator::Create(*model, *generator_params);
+    auto num_tokens_to_generate = opts.num_tokens_to_generate;
 
     {
       Timing e2e_gen_timing{e2e_gen_times};
@@ -232,7 +238,7 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator_done = generator->IsDone();
       }
 
-      while (!generator_done) {
+      while (!generator_done && num_tokens_to_generate-- > 0) {
         {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
