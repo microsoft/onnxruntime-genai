@@ -1,5 +1,8 @@
+// Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
 #include "../generators.h"
 #include "../search.h"
+#include "../models/model.h"
 #include "interface.h"
 #include <filesystem>
 #include <mutex>
@@ -205,6 +208,10 @@ RyzenAIInterface* GetRyzenAIInterface() {
   });
 
   return RyzenAI::interface_.get();
+}
+
+bool IsRyzenAIPrunedModel(const Model& model) {
+  return model.p_device_->GetType() == DeviceType::RyzenAI && model.IsPruned();
 }
 
 }  // namespace Generators
