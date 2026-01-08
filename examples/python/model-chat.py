@@ -64,7 +64,7 @@ def main(args):
     try:
         system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
     except:
-        system_prompt = text
+        system_prompt = args.system_prompt
     if args.verbose:
         print(f"System prompt: {system_prompt}")
 

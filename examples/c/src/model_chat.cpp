@@ -26,15 +26,14 @@ void TerminateGeneration(int signum) {
 }
 
 void CXX_API(
-  GeneratorParamsArgs& generator_params_args,
-  GuidanceArgs& guidance_args,
-  const std::string& model_path,
-  const std::string& ep,
-  const std::string& system_prompt,
-  bool verbose,
-  bool interactive,
-  bool rewind
-) {
+    GeneratorParamsArgs& generator_params_args,
+    GuidanceArgs& guidance_args,
+    const std::string& model_path,
+    const std::string& ep,
+    const std::string& system_prompt,
+    bool verbose,
+    bool interactive,
+    bool rewind) {
   if (verbose) std::cout << "Creating config..." << std::endl;
   std::unordered_map<std::string, std::string> ep_options;
   auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
@@ -52,29 +51,29 @@ void CXX_API(
 
   // Create system message
   nlohmann::ordered_json message = nlohmann::ordered_json::array();
-  message.push_back({ {"role", "system"}, {"content", system_prompt} });
+  message.push_back({{"role", "system"}, {"content", system_prompt}});
 
   // Get and set guidance info if requested
   std::string guidance_type, guidance_data, tools;
   if (!guidance_args.response_format.empty()) {
     std::cout << "Make sure your tool call start id and tool call end id are marked as special in tokenizer.json" << std::endl;
     std::tie(guidance_type, guidance_data, tools) = GetGuidance(
-      guidance_args.response_format,
-      guidance_args.tools_file,
-      "",  // tools_str
-      nullptr,  // tools
-      guidance_args.text_output, 
-      guidance_args.tool_output,
-      guidance_args.tool_call_start,
-      guidance_args.tool_call_end
-    );
+        guidance_args.response_format,
+        guidance_args.tools_file,
+        "",       // tools_str
+        nullptr,  // tools
+        guidance_args.text_output,
+        guidance_args.tool_output,
+        guidance_args.tool_call_start,
+        guidance_args.tool_call_end);
     message[0]["tools"] = tools;
 
     params->SetGuidance(guidance_type.c_str(), guidance_data.c_str());
     if (verbose) {
       std::cout << std::endl;
       std::cout << "Guidance type is: " << guidance_type << std::endl;
-      std::cout << "Guidance data is: \n" << guidance_data << std::endl;
+      std::cout << "Guidance data is: \n"
+                << guidance_data << std::endl;
       std::cout << std::endl;
     }
   }
@@ -83,17 +82,17 @@ void CXX_API(
   auto generator = OgaGenerator::Create(*model, *params);
   g_generator = generator.get();  // Store the current generator for termination
   if (verbose) std::cout << "Generator created" << std::endl;
-  
+
   // Apply chat template
   std::string prompt;
   try {
     bool add_generation_prompt = false;
     prompt = ApplyChatTemplate(model_path, *tokenizer, message.dump(), add_generation_prompt, tools);
-  }
-  catch (...) {
+  } catch (...) {
     prompt = system_prompt;
   }
-  if (verbose) std::cout << "System prompt: " << prompt << "\n" << std::endl;
+  if (verbose) std::cout << "System prompt: " << prompt << "\n"
+                         << std::endl;
 
   // Encode system prompt and append tokens to model
   auto sequences = OgaSequences::Create();
@@ -118,8 +117,7 @@ void CXX_API(
       } else if (text == "quit()") {
         break;  // Exit the loop
       }
-    }
-    else {
+    } else {
       text = "What color is the sky?";
     }
 
@@ -132,17 +130,17 @@ void CXX_API(
 
     // Create user message
     message = nlohmann::ordered_json::array();
-    message.push_back({ {"role", "user"}, {"content", text} });
+    message.push_back({{"role", "user"}, {"content", text}});
 
     // Apply chat template
     try {
       bool add_generation_prompt = true;
       prompt = ApplyChatTemplate(model_path, *tokenizer, message.dump(), add_generation_prompt);
-    }
-    catch (...) {
+    } catch (...) {
       prompt = text;
     }
-    if (verbose) std::cout << "User prompt: " << prompt << "\n" << std::endl;
+    if (verbose) std::cout << "User prompt: " << prompt << "\n"
+                           << std::endl;
 
     // Encode user prompt and append tokens to model
     sequences = OgaSequences::Create();
@@ -172,7 +170,8 @@ void CXX_API(
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "\n" << "Terminating generation: " << e.what() << std::endl;
+      std::cout << "\n"
+                << "Terminating generation: " << e.what() << std::endl;
       generator->RewindTo(current_token_count);  // Rewind to the last valid state
     }
     timing.RecordEndTimestamp();
@@ -180,7 +179,8 @@ void CXX_API(
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    std::cout << "\n\n" << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
     if (!interactive) break;
 
     // Rewind the generator to the system prompt. This will erase all the chat history with the model.

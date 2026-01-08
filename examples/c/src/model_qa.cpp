@@ -24,14 +24,13 @@ void TerminateGeneration(int signum) {
 }
 
 void CXX_API(
-  GeneratorParamsArgs& generator_params_args,
-  GuidanceArgs& guidance_args,
-  const std::string& model_path,
-  const std::string& ep,
-  const std::string& system_prompt,
-  bool verbose,
-  bool interactive
-) {
+    GeneratorParamsArgs& generator_params_args,
+    GuidanceArgs& guidance_args,
+    const std::string& model_path,
+    const std::string& ep,
+    const std::string& system_prompt,
+    bool verbose,
+    bool interactive) {
   if (verbose) std::cout << "Creating config..." << std::endl;
   std::unordered_map<std::string, std::string> ep_options;
   auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
@@ -45,7 +44,7 @@ void CXX_API(
 
   // Create running list of messages
   std::vector<nlohmann::ordered_json> input_list;
-  nlohmann::ordered_json system_message = nlohmann::ordered_json{ {"role", "system"}, {"content", system_prompt} };
+  nlohmann::ordered_json system_message = nlohmann::ordered_json{{"role", "system"}, {"content", system_prompt}};
   input_list.push_back(system_message);
 
   // Get and set guidance info if requested
@@ -53,16 +52,15 @@ void CXX_API(
   if (!guidance_args.response_format.empty()) {
     std::cout << "Make sure your tool call start id and tool call end id are marked as special in tokenizer.json" << std::endl;
     std::tie(guidance_type, guidance_data, tools) = GetGuidance(
-      guidance_args.response_format,
-      guidance_args.tools_file,
-      "",  // tools_str
-      nullptr,  // tools
-      guidance_args.text_output, 
-      guidance_args.tool_output,
-      guidance_args.tool_call_start,
-      guidance_args.tool_call_end
-    );
-    
+        guidance_args.response_format,
+        guidance_args.tools_file,
+        "",       // tools_str
+        nullptr,  // tools
+        guidance_args.text_output,
+        guidance_args.tool_output,
+        guidance_args.tool_call_start,
+        guidance_args.tool_call_end);
+
     input_list[0]["tools"] = tools;
   }
 
@@ -83,15 +81,14 @@ void CXX_API(
       } else if (text == "quit()") {
         break;  // Exit the loop
       }
-    }
-    else {
+    } else {
       text = "What color is the sky?";
     }
 
     signal(SIGINT, TerminateGeneration);
 
     // Add user message to list of messages
-    nlohmann::ordered_json user_message = nlohmann::ordered_json{ {"role", "user"}, {"content", text} };
+    nlohmann::ordered_json user_message = nlohmann::ordered_json{{"role", "user"}, {"content", text}};
     input_list.push_back(user_message);
     nlohmann::ordered_json j = input_list;
     std::string messages = j.dump();
@@ -111,7 +108,8 @@ void CXX_API(
       if (verbose) {
         std::cout << std::endl;
         std::cout << "Guidance type is: " << guidance_type << std::endl;
-        std::cout << "Guidance data is: \n" << guidance_data << std::endl;
+        std::cout << "Guidance data is: \n"
+                  << guidance_data << std::endl;
         std::cout << std::endl;
       }
     }
@@ -126,11 +124,11 @@ void CXX_API(
     try {
       bool add_generation_prompt = true;
       prompt = ApplyChatTemplate(model_path, *tokenizer, messages, add_generation_prompt, tools);
-    }
-    catch (...) {
+    } catch (...) {
       prompt = text;
     }
-    if (verbose) std::cout << "Prompt: " << prompt << "\n" << std::endl;
+    if (verbose) std::cout << "Prompt: " << prompt << "\n"
+                           << std::endl;
 
     // Encode combined system + user prompt and append tokens to model
     auto sequences = OgaSequences::Create();
@@ -159,7 +157,8 @@ void CXX_API(
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "\n" << "Terminating generation: " << e.what() << std::endl;
+      std::cout << "\n"
+                << "Terminating generation: " << e.what() << std::endl;
     }
     timing.RecordEndTimestamp();
 
@@ -173,7 +172,8 @@ void CXX_API(
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    std::cout << "\n\n" << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
     if (!interactive) break;
   }
 }

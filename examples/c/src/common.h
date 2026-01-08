@@ -41,7 +41,7 @@ class Timing {
 
 /**
  * @brief Trim user-provided filepath
- * 
+ *
  * @param str Filepath to trim
  *
  * @return Trimmed filepath
@@ -61,7 +61,7 @@ struct ToolSchema {
 
 /**
  * @brief Convert ToolSchema to JSON
- * 
+ *
  * @param j JSON object
  * @param tool ToolSchema object
  *
@@ -71,7 +71,7 @@ void to_json(nlohmann::ordered_json& j, const ToolSchema& tool);
 
 /**
  * @brief Convert ordered JSON to ToolSchema
- * 
+ *
  * @param j JSON object
  * @param tool ToolSchema object
  *
@@ -91,7 +91,7 @@ struct JsonSchema {
 
 /**
  * @brief Convert JsonSchema to JSON
- * 
+ *
  * @param j JSON object
  * @param schema JsonSchema object
  *
@@ -101,7 +101,7 @@ void to_json(nlohmann::ordered_json& j, const JsonSchema& schema);
 
 /**
  * @brief Convert JSON to JsonSchema
- * 
+ *
  * @param j JSON object
  * @param schema JsonSchema object
  *
@@ -120,7 +120,7 @@ struct FunctionDefinition {
 
 /**
  * @brief Convert FunctionDefinition to JSON
- * 
+ *
  * @param j JSON object
  * @param func FunctionDefinition object
  *
@@ -130,7 +130,7 @@ void to_json(nlohmann::ordered_json& j, const FunctionDefinition& func);
 
 /**
  * @brief Convert JSON to FunctionDefinition
- * 
+ *
  * @param j JSON object
  * @param func FunctionDefinition object
  *
@@ -148,7 +148,7 @@ struct Tool {
 
 /**
  * @brief Convert Tool to JSON
- * 
+ *
  * @param j JSON object
  * @param t Tool object
  *
@@ -158,7 +158,7 @@ void to_json(nlohmann::ordered_json& j, const Tool& t);
 
 /**
  * @brief Convert JSON to Tool
- * 
+ *
  * @param j JSON object
  * @param t Tool object
  *
@@ -185,7 +185,7 @@ struct GeneratorParamsArgs {
 
 /**
  * @brief Convert GeneratorParamsArgs to JSON
- * 
+ *
  * @param j JSON object
  * @param a Args object
  *
@@ -195,7 +195,7 @@ void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a);
 
 /**
  * @brief Convert JSON to GeneratorParamsArgs
- * 
+ *
  * @param j JSON object
  * @param a Args object
  *
@@ -217,7 +217,7 @@ struct GuidanceArgs {
 
 /**
  * @brief Parse command-line arguments from user
- * 
+ *
  * @param argc Number of command-line arguments provided
  * @param argv Contents of command-line arguments provided
  * @param generator_params_args Struct to hold args for generation params
@@ -235,7 +235,7 @@ bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args
 
 /**
  * @brief Set log options inside ORT GenAI
- * 
+ *
  * @param inputs Dump inputs to the model in the console
  * @param outputs Dump outputs to the model in the console
  *
@@ -245,7 +245,7 @@ void SetLogger(bool inputs = true, bool outputs = true);
 
 /**
  * @brief Get OgaConfig object and set EP-specific and search-specific options inside it
- * 
+ *
  * @param path Path to model folder containing GenAI config
  * @param ep Name of execution provider to set
  * @param ep_options Map of EP-specific option names and their values
@@ -257,7 +257,7 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
 
 /**
  * @brief Set search options for a generator's params during decoding
- * 
+ *
  * @param generatorParams Generator params object to set on
  * @param args Arguments provided by user
  * @param verbose Use verbose logging
@@ -268,7 +268,7 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
 
 /**
  * @brief Apply the chat template with various fallback options
- * 
+ *
  * @param model_path Path to folder containing model
  * @param tokenizer Tokenizer object to use
  * @param messages String-encoded list of messages
@@ -281,7 +281,7 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 
 /**
  * @brief Convert a list of tools to a list of tool schemas
- * 
+ *
  * @param tools List of OpenAI-compatible tools
  *
  * @return List of JSON schema compatible tools
@@ -290,7 +290,7 @@ std::vector<ToolSchema> ToolsToSchemas(std::vector<Tool>& tools);
 
 /**
  * @brief Create a JSON schema from a list of tools
- * 
+ *
  * @param tools List of OpenAI-compatible tools
  * @param tool_output Output can have a tool call
  *
@@ -300,7 +300,7 @@ std::string GetJsonSchema(std::vector<Tool>& tools, bool tool_output);
 
 /**
  * @brief Create a LARK grammar from a list of tools
- * 
+ *
  * @param tools List of OpenAI-compatible tools
  * @param text_output Output can have text
  * @param tool_output Output can have a tool call
@@ -313,7 +313,7 @@ std::string GetLarkGrammar(std::vector<Tool>& tools, bool text_output, bool tool
 
 /**
  * @brief Convert a JSON-deserialized object of tools to a list of Tool objects
- * 
+ *
  * @param tool_defs JSON-deserialized object containing OpenAI-compatible tool definitions
  *
  * @return List of Tool objects
@@ -322,7 +322,7 @@ std::vector<Tool> ToTool(std::vector<nlohmann::ordered_json>& tool_defs);
 
 /**
  * @brief Create a grammar to use with LLGuidance
- * 
+ *
  * @param response_format Type of format requested
  * @param filepath Path to file containing OpenAI-compatible tool definitions
  * @param tools_str JSON-serialized string containing OpenAI-compatible tool definitions

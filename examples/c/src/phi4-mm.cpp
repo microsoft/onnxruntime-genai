@@ -11,13 +11,12 @@
 // C++ API Example
 
 void CXX_API(
-  GeneratorParamsArgs& generator_params_args,
-  const std::string& model_path,
-  const std::string& ep,
-  const std::string& system_prompt,
-  bool verbose,
-  bool interactive
-) {
+    GeneratorParamsArgs& generator_params_args,
+    const std::string& model_path,
+    const std::string& ep,
+    const std::string& system_prompt,
+    bool verbose,
+    bool interactive) {
   if (verbose) std::cout << "Creating config..." << std::endl;
   std::unordered_map<std::string, std::string> ep_options;
   auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
@@ -121,7 +120,8 @@ void CXX_API(
       std::cout << stream->Decode(new_token) << std::flush;
     }
 
-    std::cout << "\n\n" << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
   }
 }
 
@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
   std::cout << "--------------------" << std::endl;
   std::cout << "Hello, Phi-4-Multimodal!" << std::endl;
   std::cout << "--------------------" << std::endl;
-  
+
   std::cout << "Model path: " << model_path << std::endl;
   std::cout << "Execution provider: " << ep << std::endl;
   std::cout << "System prompt: " << system_prompt << std::endl;

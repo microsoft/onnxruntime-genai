@@ -73,7 +73,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
       std::cout << processor->Decode(tokens, num_tokens) << std::endl;
     }
 
-    std::cout << "\n\n" << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
   }
 }
 
@@ -165,7 +166,8 @@ void C_API(const char* model_path, int32_t num_beams) {
       std::cout << str << std::endl;
     }
 
-    std::cout << "\n\n" << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
 
     OgaDestroyGenerator(generator);
     OgaDestroyGeneratorParams(params);

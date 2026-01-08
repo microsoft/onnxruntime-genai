@@ -51,7 +51,7 @@ std::string Trim(const std::string& str) {
 }
 
 void to_json(nlohmann::ordered_json& j, const ToolSchema& tool) {
-  j = nlohmann::ordered_json{ {"description", tool.description}, {"type", tool.type}, {"properties", tool.properties}, {"required", tool.required}, {"additionalProperties", tool.additionalProperties} };
+  j = nlohmann::ordered_json{{"description", tool.description}, {"type", tool.type}, {"properties", tool.properties}, {"required", tool.required}, {"additionalProperties", tool.additionalProperties}};
 }
 
 void from_json(const nlohmann::ordered_json& j, ToolSchema& tool) {
@@ -71,14 +71,13 @@ void from_json(const nlohmann::ordered_json& j, ToolSchema& tool) {
 
   if (j.contains("additionalProperties")) {
     j.at("additionalProperties").get_to(tool.additionalProperties);
-  }
-  else {
+  } else {
     tool.additionalProperties = false;
   }
 }
 
 void to_json(nlohmann::ordered_json& j, const JsonSchema& schema) {
-  j = nlohmann::ordered_json{ {"x-guidance", schema.xGuidance}, {"type", schema.type}, {"items", schema.items}, {"minItems", schema.minItems} };
+  j = nlohmann::ordered_json{{"x-guidance", schema.xGuidance}, {"type", schema.type}, {"items", schema.items}, {"minItems", schema.minItems}};
 }
 
 void from_json(const nlohmann::ordered_json& j, JsonSchema& schema) {
@@ -89,7 +88,7 @@ void from_json(const nlohmann::ordered_json& j, JsonSchema& schema) {
 }
 
 void to_json(nlohmann::ordered_json& j, const FunctionDefinition& func) {
-  j = nlohmann::ordered_json{ {"name", func.name}, {"description", func.description}, {"parameters", func.parameters} };
+  j = nlohmann::ordered_json{{"name", func.name}, {"description", func.description}, {"parameters", func.parameters}};
 }
 
 void from_json(const nlohmann::ordered_json& j, FunctionDefinition& func) {
@@ -105,7 +104,7 @@ void from_json(const nlohmann::ordered_json& j, FunctionDefinition& func) {
 }
 
 void to_json(nlohmann::ordered_json& j, const Tool& t) {
-  j = nlohmann::ordered_json{ {"type", t.type}, {"function", t.function} };
+  j = nlohmann::ordered_json{{"type", t.type}, {"function", t.function}};
 }
 
 void from_json(const nlohmann::ordered_json& j, Tool& t) {
@@ -114,7 +113,7 @@ void from_json(const nlohmann::ordered_json& j, Tool& t) {
 }
 
 void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a) {
-  j = nlohmann::ordered_json{ {"batch_size", a.batch_size}, {"num_beams", a.num_beams}, {"num_return_sequences", a.num_return_sequences} };
+  j = nlohmann::ordered_json{{"batch_size", a.batch_size}, {"num_beams", a.num_beams}, {"num_return_sequences", a.num_return_sequences}};
   // Add optional generator params if provided
   if (a.chunk_size != 0) j["chunk_size"] = a.chunk_size;
   if (a.do_sample) j["do_sample"] = a.do_sample.value();
@@ -140,6 +139,7 @@ void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
   if (j.contains("top_p")) j.at("top_p").get_to(a.top_p);
 }
 
+// TODO: update usage
 static void PrintUsage(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path> <execution_provider>" << std::endl;
   std::cerr << "  model_path: [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
@@ -175,25 +175,24 @@ std::optional<bool> ParseBool(const char* arg) {
   // Make lowercase string
   std::string s(arg);
   for (auto& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  
-  if (s == "true" || s == "1")  return true;
+
+  if (s == "true" || s == "1") return true;
   if (s == "false" || s == "0") return false;
   std::cout << "Invalid bool: \"" << arg << "\" (use true/false, 1/0)" << std::endl;
   return std::nullopt;
 }
 
 bool ParseArgs(
-  int argc,
-  char** argv,
-  GeneratorParamsArgs& generator_params_args,
-  GuidanceArgs& guidance_args,
-  std::string& model_path,
-  std::string& ep,
-  std::string& system_prompt,
-  bool& verbose,
-  bool& interactive,
-  bool& rewind
-) {
+    int argc,
+    char** argv,
+    GeneratorParamsArgs& generator_params_args,
+    GuidanceArgs& guidance_args,
+    std::string& model_path,
+    std::string& ep,
+    std::string& system_prompt,
+    bool& verbose,
+    bool& interactive,
+    bool& rewind) {
   // Integer tokens for long-only options (avoid collision with ASCII)
   enum {
     RESPONSE_FORMAT = 1000,
@@ -208,36 +207,35 @@ bool ParseArgs(
   };
 
   static struct option long_options[] = {
-    // Generator params options
-    {"batch_size",           optional_argument, nullptr, 'b'},
-    {"chunk_size",           optional_argument, nullptr, 'c'},
-    {"do_sample",            optional_argument, nullptr, 's'},
-    {"min_length",           optional_argument, nullptr, 'i'},
-    {"max_length",           optional_argument, nullptr, 'l'},
-    {"num_beams",            optional_argument, nullptr, 'n'},
-    {"num_return_sequences", optional_argument, nullptr, 'q'},
-    {"repetition_penalty",   optional_argument, nullptr, 'r'},
-    {"temperature",          optional_argument, nullptr, 't'},
-    {"top_k",                optional_argument, nullptr, 'k'},
-    {"top_p",                optional_argument, nullptr, 'p'},
+      // Generator params options
+      {"batch_size", optional_argument, nullptr, 'b'},
+      {"chunk_size", optional_argument, nullptr, 'c'},
+      {"do_sample", optional_argument, nullptr, 's'},
+      {"min_length", optional_argument, nullptr, 'i'},
+      {"max_length", optional_argument, nullptr, 'l'},
+      {"num_beams", optional_argument, nullptr, 'n'},
+      {"num_return_sequences", optional_argument, nullptr, 'q'},
+      {"repetition_penalty", optional_argument, nullptr, 'r'},
+      {"temperature", optional_argument, nullptr, 't'},
+      {"top_k", optional_argument, nullptr, 'k'},
+      {"top_p", optional_argument, nullptr, 'p'},
 
-    // Guidance options
-    {"response_format",      optional_argument, nullptr, RESPONSE_FORMAT},
-    {"tools_file",           optional_argument, nullptr, TOOLS_FILE},
-    {"text_output",          no_argument,       nullptr, TEXT_OUTPUT},
-    {"tool_output",          no_argument,       nullptr, TOOL_OUTPUT},
-    {"tool_call_start",      optional_argument, nullptr, TOOL_CALL_START},
-    {"tool_call_end",        optional_argument, nullptr, TOOL_CALL_END},
+      // Guidance options
+      {"response_format", optional_argument, nullptr, RESPONSE_FORMAT},
+      {"tools_file", optional_argument, nullptr, TOOLS_FILE},
+      {"text_output", no_argument, nullptr, TEXT_OUTPUT},
+      {"tool_output", no_argument, nullptr, TOOL_OUTPUT},
+      {"tool_call_start", optional_argument, nullptr, TOOL_CALL_START},
+      {"tool_call_end", optional_argument, nullptr, TOOL_CALL_END},
 
-    // Main options
-    {"model_path",           required_argument, nullptr, 'm'},
-    {"execution_provider",   optional_argument, nullptr, 'e'},
-    {"verbose",              no_argument,       nullptr, 'v'},
-    {"system_prompt",        optional_argument, nullptr, SYSTEM_PROMPT},
-    {"rewind",               no_argument,       nullptr, REWIND},
-    {"non_interactive",      no_argument,       nullptr, NON_INTERACTIVE},
-    {nullptr,                0,                 nullptr, 0}
-  };
+      // Main options
+      {"model_path", required_argument, nullptr, 'm'},
+      {"execution_provider", optional_argument, nullptr, 'e'},
+      {"verbose", no_argument, nullptr, 'v'},
+      {"system_prompt", optional_argument, nullptr, SYSTEM_PROMPT},
+      {"rewind", no_argument, nullptr, REWIND},
+      {"non_interactive", no_argument, nullptr, NON_INTERACTIVE},
+      {nullptr, 0, nullptr, 0}};
   const char* short_options = "b:c:s:i:l:n:q:r:t:k:p:m:e:v";
 
   int opt;
@@ -341,7 +339,7 @@ bool ParseArgs(
         break;
       }
       case NON_INTERACTIVE: {
-        interactive = false; 
+        interactive = false;
         break;
       }
       case SYSTEM_PROMPT: {
@@ -385,8 +383,7 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
     for (const auto& [key, val] : ep_options) {
       if (key.compare("enable_cuda_graph") == 0 && (ep.compare("cuda") == 0 || ep.compare("NvTensorRtRtx") == 0) && search_options.num_beams > 1) {
         config->SetProviderOption(ep.c_str(), "enable_cuda_graph", "0");
-      }
-      else {
+      } else {
         config->SetProviderOption(ep.c_str(), key.c_str(), val.c_str());
       }
     }
@@ -441,7 +438,7 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
     std::cout << "GeneratorParams created: {";
     for (int i = 0; i < opts.size(); i++) {
       std::cout << opts[i];
-      if (i != opts.size()-1) std::cout << ", ";
+      if (i != opts.size() - 1) std::cout << ", ";
     }
     std::cout << "}" << std::endl;
   }
@@ -529,14 +526,11 @@ std::string GetLarkGrammar(std::vector<Tool>& tools, bool text_output, bool tool
   std::string start_row;
   if (text_output && !tool_output) {
     start_row = "start: TEXT";
-  }
-  else if (!text_output && tool_output) {
+  } else if (!text_output && tool_output) {
     start_row = "start: " + call_type;
-  }
-  else if (text_output && tool_output) {
+  } else if (text_output && tool_output) {
     start_row = "start: TEXT | " + call_type;
-  }
-  else {
+  } else {
     throw new std::runtime_error("At least one of 'text_output' and 'tool_output' must be true");
   }
   rows.push_back(start_row);
@@ -560,7 +554,7 @@ std::string GetLarkGrammar(std::vector<Tool>& tools, bool text_output, bool tool
   std::string grammar = "";
   for (int i = 0; i < rows.size(); i++) {
     grammar += rows[i];
-    if (i != rows.size()-1) grammar += "\n";
+    if (i != rows.size() - 1) grammar += "\n";
   }
   return grammar;
 }
@@ -575,15 +569,14 @@ std::vector<Tool> ToTool(std::vector<nlohmann::ordered_json>& tool_defs) {
 }
 
 std::tuple<std::string, std::string, std::string> GetGuidance(
-  const std::string& response_format,
-  const std::string& filepath,
-  const std::string& tools_str,
-  std::vector<nlohmann::ordered_json>* tools,
-  bool text_output,
-  bool tool_output,
-  const std::string& tool_call_start,
-  const std::string& tool_call_end
-) {
+    const std::string& response_format,
+    const std::string& filepath,
+    const std::string& tools_str,
+    std::vector<nlohmann::ordered_json>* tools,
+    bool text_output,
+    bool tool_output,
+    const std::string& tool_call_start,
+    const std::string& tool_call_end) {
   std::string guidance_type = "";
   std::string guidance_data = "";
   std::vector<Tool> all_tools;
@@ -613,8 +606,7 @@ std::tuple<std::string, std::string, std::string> GetGuidance(
         defs.push_back(item);
       }
       all_tools = ToTool(defs);
-    }
-    else if (!tools_str.empty()) {
+    } else if (!tools_str.empty()) {
       nlohmann::ordered_json j = nlohmann::ordered_json::parse(tools_str);
       if (j.empty()) {
         throw new std::runtime_error("Error: Tools did not de-serialize correctly");
@@ -626,20 +618,17 @@ std::tuple<std::string, std::string, std::string> GetGuidance(
         defs.push_back(item);
       }
       all_tools = ToTool(defs);
-    }
-    else if (tools && !tools->empty()) {
+    } else if (tools && !tools->empty()) {
       try {
         all_tools = ToTool(*tools);
-      }
-      catch (...) {
+      } catch (...) {
         throw new std::runtime_error("Could not convert tools from vector<nlohmann::ordered_json> to vector<Tool>");
       }
-    }
-    else {
+    } else {
       throw new std::runtime_error("Error: Please provide the list of tools through a file, JSON-serialized string, or a list of tools");
     }
 
-    if (all_tools.empty()) { 
+    if (all_tools.empty()) {
       throw new std::runtime_error("Error: Could not obtain a list of tools in memory");
     }
   }
@@ -654,8 +643,7 @@ std::tuple<std::string, std::string, std::string> GetGuidance(
 
     guidance_type = "lark_grammar";
     guidance_data = GetLarkGrammar(all_tools, text_output, tool_output, tool_call_start, tool_call_end);
-  }
-  else if (response_format == "json_schema" || response_format == "json_object") {
+  } else if (response_format == "json_schema" || response_format == "json_object") {
     bool right_settings = tool_output && !text_output;
     if (!right_settings) {
       throw new std::runtime_error("Error: A response format of 'json_schema' or 'json_object' requires text_output = false and tool_output = true");
@@ -663,8 +651,7 @@ std::tuple<std::string, std::string, std::string> GetGuidance(
 
     guidance_type = "json_schema";
     guidance_data = GetJsonSchema(all_tools, tool_output);
-  }
-  else {
+  } else {
     throw new std::runtime_error("Error: Invalid response format provided");
   }
 
