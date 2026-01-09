@@ -62,10 +62,10 @@ struct OneOpModelConfig {
   std::vector<AttributeValue> attributes;
 
   // ONNX opset version for the generated model.
-  // Default is 17 which is widely supported and has been validated with this infrastructure.
+  // Default is 21 which is widely supported and matches the opset used elsewhere in the codebase.
   // Can be overridden if a specific opset is required, but ensure the ONNX Runtime build
   // supports it and the operator exists in that opset version.
-  int opset_version{17};
+  int opset_version{21};
 
   OneOpModelConfig(const std::string& op) : op_type(op) {}
 };
