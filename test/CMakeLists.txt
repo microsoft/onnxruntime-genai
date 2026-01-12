@@ -61,6 +61,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR
   # On these platforms, we need to link the ONNX Runtime library for standalone tests
   if(ONNXRUNTIME_LIB)
     target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+    # Set RPATH to find the correct ONNX Runtime library at runtime
+    if(ORT_LIB_DIR)
+      set_target_properties(unit_tests PROPERTIES
+        BUILD_RPATH "${ORT_LIB_DIR}"
+        INSTALL_RPATH "${ORT_LIB_DIR}"
+      )
+    endif()
   endif()
 else()
   # On Windows, always link
