@@ -44,7 +44,7 @@ set_target_properties(unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
   # Add one-op model infrastructure for standalone tests
   target_sources(unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/models/one_op_model_builder.cpp
