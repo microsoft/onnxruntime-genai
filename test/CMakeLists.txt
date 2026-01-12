@@ -54,8 +54,17 @@ set_target_properties(unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+# Link ONNX Runtime library
+# On Linux/Android/Darwin, it's usually not needed since symbols are in the shared library
+# However, for standalone one-op tests (GENAI_STANDALONE_ONE_OP), we need OrtGetApiBase
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  # On these platforms, we need to link the ONNX Runtime library for standalone tests
+  if(ONNXRUNTIME_LIB)
+    target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+  endif()
+else()
+  # On Windows, always link
+  target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)

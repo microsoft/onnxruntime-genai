@@ -3,7 +3,9 @@
 
 #include <gtest/gtest.h>
 #include <vector>
+#include <cstdint>
 
+#include "onnxruntime_c_api.h"
 #include "../src/models/one_op_model_executor.h"
 
 using namespace Generators;
@@ -29,7 +31,8 @@ TEST_F(OneOpModelTests, ExecuteCastOpFloatToInt32) {
 
   // Create CPU memory info using C API directly
   OrtMemoryInfo* cpu_mem_info_ptr = nullptr;
-  OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  OrtStatus* status = OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  ASSERT_EQ(status, nullptr) << "Failed to create CPU memory info";
 
   ExecuteCastOp(
       input.data(),
@@ -54,7 +57,8 @@ TEST_F(OneOpModelTests, ExecuteCastOpInt32ToFloat) {
   std::vector<float> output(input.size());
 
   OrtMemoryInfo* cpu_mem_info_ptr = nullptr;
-  OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  OrtStatus* status = OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  ASSERT_EQ(status, nullptr) << "Failed to create CPU memory info";
 
   ExecuteCastOp(
       input.data(),
@@ -76,7 +80,8 @@ TEST_F(OneOpModelTests, ExecuteCastOpInt32ToFloat) {
 // Test 3: ExecuteCastOp - Different sizes (cache reuse test)
 TEST_F(OneOpModelTests, ExecuteCastOpCacheReuse) {
   OrtMemoryInfo* cpu_mem_info_ptr = nullptr;
-  OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  OrtStatus* status = OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  ASSERT_EQ(status, nullptr) << "Failed to create CPU memory info";
 
   // First execution with size 3
   {
@@ -116,7 +121,8 @@ TEST_F(OneOpModelTests, ExecuteCastOpCacheReuse) {
 // Test 4: Cache clear functionality
 TEST_F(OneOpModelTests, CacheClear) {
   OrtMemoryInfo* cpu_mem_info_ptr = nullptr;
-  OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  OrtStatus* status = OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_mem_info_ptr);
+  ASSERT_EQ(status, nullptr) << "Failed to create CPU memory info";
 
   std::vector<float> input = {1.5f};
   std::vector<int32_t> output(1);
