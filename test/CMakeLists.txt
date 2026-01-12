@@ -28,16 +28,6 @@ else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()
 
-# Add one-op model infrastructure source files directly to tests
-# This allows tests to access internal symbols without DLL export
-target_sources(unit_tests PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/models/one_op_model_builder.cpp
-  ${CMAKE_SOURCE_DIR}/src/models/one_op_model_executor.cpp
-)
-
-# Define flag so one_op uses standalone env in test context
-target_compile_definitions(unit_tests PRIVATE GENAI_STANDALONE_ONE_OP)
-
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -54,23 +44,15 @@ set_target_properties(unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
 
-# Link ONNX Runtime library
-# On Linux/Android/Darwin, it's usually not needed since symbols are in the shared library
-# However, for standalone one-op tests (GENAI_STANDALONE_ONE_OP), we need OrtGetApiBase
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  # On these platforms, we need to link the ONNX Runtime library for standalone tests
-  if(ONNXRUNTIME_LIB)
-    target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
-    # Set RPATH to find the correct ONNX Runtime library at runtime
-    if(ORT_LIB_DIR)
-      set_target_properties(unit_tests PROPERTIES
-        BUILD_RPATH "${ORT_LIB_DIR}"
-        INSTALL_RPATH "${ORT_LIB_DIR}"
-      )
-    endif()
-  endif()
-else()
-  # On Windows, always link
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+  # Add one-op model infrastructure for standalone tests
+  target_sources(unit_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/models/one_op_model_builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/one_op_model_executor.cpp
+  )
+  # Define flag so one_op uses standalone env in test context
+  target_compile_definitions(unit_tests PRIVATE GENAI_STANDALONE_ONE_OP)
+  # Link ONNX Runtime library
   target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
