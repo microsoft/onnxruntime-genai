@@ -28,6 +28,15 @@ else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()
 
+# Add one-op model infrastructure source files directly to tests
+# This allows tests to access internal symbols without DLL export
+target_sources(unit_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/models/one_op_model_builder.cpp
+  ${CMAKE_SOURCE_DIR}/src/models/one_op_model_executor.cpp
+)
+
+# Define flag so one_op uses standalone env in test context
+target_compile_definitions(unit_tests PRIVATE GENAI_STANDALONE_ONE_OP)
 
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}

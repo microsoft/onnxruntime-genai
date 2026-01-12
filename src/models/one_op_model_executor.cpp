@@ -22,6 +22,29 @@ static OneOpSessionCache& GetOneOpSessionCache() {
   return cache;
 }
 
+// Get the appropriate OrtEnv for one-op models
+// When compiled as part of the library, uses the main library's env
+// When compiled in tests, creates a separate env
+static OrtEnv& GetOneOpEnv() {
+#ifdef GENAI_STANDALONE_ONE_OP
+  // Test/standalone mode - create our own env
+  static std::unique_ptr<OrtEnv> env;
+  static std::once_flag init_flag;
+
+  std::call_once(init_flag, []() {
+    if (Ort::api == nullptr) {
+      Ort::api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+    }
+    env = OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING);
+  });
+
+  return *env;
+#else
+  // Library mode - use the main library's env
+  return GetOrtEnv();
+#endif
+}
+
 // Generate a cache key from the model configuration and EP name
 uint64_t OneOpModelExecutor::GenerateCacheKey(
     const OneOpModelConfig& config,
@@ -97,6 +120,9 @@ std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
+  // Get env first - this ensures Ort::api is initialized
+  auto& env = GetOneOpEnv();
+
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -110,7 +136,7 @@ std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
     session_options->AppendExecutionProvider(ep_name.c_str(), nullptr, nullptr, 0);
   }
 
-  return OrtSession::Create(GetOrtEnv(), model_bytes.data(), model_bytes.size(), session_options.get());
+  return OrtSession::Create(env, model_bytes.data(), model_bytes.size(), session_options.get());
 }
 
 // Get or create a cached session
