@@ -47,10 +47,11 @@ namespace {
     << "      Number of times to repeat the benchmark. Default: " << defaults.num_iterations << "\n"
     << "    -w,--warmup <number>\n"
     << "      Number of warmup runs before benchmarking. Default: " << defaults.num_warmup_iterations << "\n"
+    << "    -ml,--max_length <number>\n"
+    << "      Max sequence length (prompt + output). Overrides genai_config.json.\n"
+    << "      Default: prompt_length + generation_length. Pass -1 to use config file value.\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
-    << "    --no_dynamic_max_length\n"
-    << "      Prevent overriding search/max_length with prompt length. Uses the static value from genai_config.json to ensure full KV-cache allocation.\n"
     << "    -h,--help\n"
     << "      Show this help message and exit.\n";
 
@@ -132,10 +133,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.num_iterations = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-w" || arg == "--warmup") {
         opts.num_warmup_iterations = ParseNumber<size_t>(next_arg(i));
+      } else if (arg == "-ml" || arg == "--max_length") {
+        opts.max_length = ParseNumber<int64_t>(next_arg(i));
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
-      } else if (arg == "--no_dynamic_max_length") {
-        opts.no_dynamic_max_length = true;
       } else if (arg == "-h" || arg == "--help") {
         PrintHelpAndExit(program_name, 0);
       } else {

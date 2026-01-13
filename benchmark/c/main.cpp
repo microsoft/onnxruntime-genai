@@ -112,6 +112,18 @@ void WriteE2EStats(std::string_view label,
             << "\n";
 }
 
+static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::Options& opts, const OgaModel& model, size_t num_tokens) {
+  auto params = OgaGeneratorParams::Create(model);
+  if (opts.max_length != -1) {
+    auto max_length = num_tokens;
+    if (opts.max_length > 0)
+      max_length = static_cast<size_t>(opts.max_length);
+    params->SetSearchOption("max_length", static_cast<double>(max_length));
+  }
+  params->SetSearchOption("min_length", static_cast<double>(num_tokens));
+  return params;
+}
+
 std::string GeneratePrompt(const benchmark::Options& opts, size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer, size_t batch_size) {
   const char* const base_prompt = "A";
   auto base_prompt_sequences = OgaSequences::Create();
@@ -119,12 +131,7 @@ std::string GeneratePrompt(const benchmark::Options& opts, size_t num_prompt_tok
     tokenizer.Encode(base_prompt, *base_prompt_sequences);
   }
 
-  auto params = OgaGeneratorParams::Create(model);
-  if (!opts.no_dynamic_max_length) {
-    params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
-  }
-  params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
-
+  auto params = MakeGeneratorParams(opts, model, num_prompt_tokens);
   auto generator = OgaGenerator::Create(model, *params);
   generator->AppendTokenSequences(*base_prompt_sequences);
   while (!generator->IsDone() && num_prompt_tokens-- > 0) {
@@ -178,17 +185,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   const size_t num_prompt_tokens = prompt_sequences->SequenceCount(0);
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
-
-  auto make_generator_params = [&] {
-    auto params = OgaGeneratorParams::Create(*model);
-    if (!opts.no_dynamic_max_length) {
-      params->SetSearchOption("max_length", static_cast<double>(num_tokens));
-    }
-    params->SetSearchOption("min_length", static_cast<double>(num_tokens));
-    return params;
-  };
-
-  const auto generator_params = make_generator_params();
+  const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
 
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
