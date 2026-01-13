@@ -120,20 +120,20 @@ steps:
     cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
-
-- powershell: |
-    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-  displayName: 'List all files in the repo for debugging'
   
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
-    displayName: 'Package C/C++ API - CHRISD'
+    displayName: 'Package C/C++ API - chrisd'
     workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+    displayName: 'List all files in the repo for debugging'
 
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
       DisplayName: 'ESRP - Sign C++ dlls'
       Pattern: '*genai*.dll'
 
