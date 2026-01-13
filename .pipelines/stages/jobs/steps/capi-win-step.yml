@@ -124,7 +124,7 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
-    displayName: 'Package C/C++ API - chrisd'
+    displayName: 'Package C/C++ API - chrisd - 2'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - powershell: |
