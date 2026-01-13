@@ -72,12 +72,6 @@ def monitor_cpu_memory():
             peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
-# Helper to optionally add max_length to search options based on CLI arguments.
-def get_max_length_kwargs(max_length):
-    if args.max_length == -1:
-        return {}
-    
-    return {"max_length": args.max_length if args.max_length > 0 else max_length}
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length) -> str:
@@ -88,7 +82,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     max_length_to_use = prompt_length + len(tokens)
     params.set_search_options(
         min_length=prompt_length,
-        **get_max_length_kwargs(max_length_to_use)
+        **({ "max_length": max_length_to_use } if not args.no_dynamic_max_length else {})
     )
 
     generator = og.Generator(model, params)
@@ -318,7 +312,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **get_max_length_kwargs(max_length),
+        **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
         min_length=max_length,
         batch_size=batch_size,
     )
@@ -363,7 +357,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             top_k=args.top_k,
             top_p=args.top_p,
             temperature=temperature,
-            **get_max_length_kwargs(max_length),
+            **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
             min_length=max_length,
             batch_size=batch_size,
         )
@@ -557,8 +551,8 @@ if __name__ == "__main__":
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(
-        "-ml", "--max_length", type=int, default=0,
-        help="Max sequence length (prompt + output). Overrides genai_config.json. Default: prompt_length + generation_length. Pass -1 to use config file value."
+        "--no_dynamic_max_length", default=False, action="store_true",
+        help="Prevent overriding search/max_length with prompt length. Uses the static value from genai_config.json to ensure full KV-cache allocation."
     )
     args = parser.parse_args()
 
