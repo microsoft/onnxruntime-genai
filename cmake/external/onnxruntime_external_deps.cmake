@@ -107,5 +107,17 @@ if(USE_GUIDANCE)
     GIT_TAG ${DEP_SHA1_llguidance}
   )
   onnxruntime_fetchcontent_makeavailable(llguidance)
+
+  # HACK: Patch llguidance's cargo.lock to avoid tripping component governance due to unused `ring`.
+  #       `ring` is deprecated in favour of `rust-openssl`.
+  #       `ring` is a transitive dep of several (unused by onnx-rt) modules in `llguidance`.
+  if(NOT EXISTS "${llguidance_SOURCE_DIR}/.onnx-rt-applied-remove-ring-ref-in-cargo-lock")
+    execute_process(
+      COMMAND git apply -- "${CMAKE_CURRENT_LIST_DIR}/llguidance/remove-ring-ref-in-cargo-lock.patch"
+      WORKING_DIRECTORY       "${llguidance_SOURCE_DIR}"
+      COMMAND_ERROR_IS_FATAL  ANY
+    )
+    file(TOUCH "${llguidance_SOURCE_DIR}/.onnx-rt-applied-remove-ring-ref-in-cargo-lock")
+  endif()
   corrosion_import_crate(MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml)
 endif()
