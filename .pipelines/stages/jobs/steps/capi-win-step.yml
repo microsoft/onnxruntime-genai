@@ -124,23 +124,13 @@ steps:
 - powershell: |
     Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
   displayName: 'List all files in the repo for debugging'
-
-- powershell: |
-    python -m pip install wheel
-  displayName: 'Install wheel'
-
-- powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
-  displayName: 'Package C/C++ API'
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- task: 1ES.PublishPipelineArtifact@1
-  displayName: 'Publish Artifact: ONNXRuntime Genai capi'
-  inputs:
-    artifactName: $(artifactName)-capi
-    targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
-
+  
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
+    displayName: 'Package C/C++ API - CHRISD'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
   - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
@@ -152,6 +142,12 @@ steps:
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      artifactName: $(artifactName)-capi
+      targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
   - task: PublishSymbols@2
     displayName: 'Publish Build Symbols'
