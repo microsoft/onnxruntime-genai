@@ -74,7 +74,7 @@ def monitor_cpu_memory():
 
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, override_max_length) -> str:
     text = "a"
     prompt = f"{args.chat_template.format(input=text)}"
     tokens = tokenizer.encode(prompt)
@@ -82,7 +82,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     max_length_to_use = prompt_length + len(tokens)
     params.set_search_options(
         min_length=prompt_length,
-        **({ "max_length": max_length_to_use } if not args.no_dynamic_max_length else {})
+        **({ "max_length": max_length_to_use } if override_max_length else {})
     )
 
     generator = og.Generator(model, params)
@@ -285,6 +285,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             raise ValueError(
                 f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
             )
+    
+    # When -1 is passed as max_length we should not override that search option
+    override_max_length = max_length != -1
 
     # Generate prompt
     if args.use_random_tokens:
@@ -299,7 +302,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        text = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+        text = [generate_prompt(model, tokenizer, prompt_length, override_max_length)] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
@@ -312,7 +315,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
+        **({ "max_length": max_length } if override_max_length else {}),
         min_length=max_length,
         batch_size=batch_size,
     )
@@ -357,7 +360,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             top_k=args.top_k,
             top_p=args.top_p,
             temperature=temperature,
-            **({ "max_length": max_length } if not args.no_dynamic_max_length else {}),
+            **({ "max_length": max_length } if override_max_length else {}),
             min_length=max_length,
             batch_size=batch_size,
         )
@@ -515,7 +518,7 @@ if __name__ == "__main__":
         "--max_lengths",
         type=str2intlist,
         default=[],
-        help="Max length is either a combination of prompt and generation length or one value broadcasting for all.",
+        help="Max length is either a combination of prompt and generation length or one value broadcasting for all. Pass -1 to disable override.",
     )
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
@@ -549,10 +552,6 @@ if __name__ == "__main__":
         default="follow_config",
         choices=["cpu", "cuda", "dml", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
-    )
-    parser.add_argument(
-        "--no_dynamic_max_length", default=False, action="store_true",
-        help="Prevent overriding search/max_length with prompt length. Uses the static value from genai_config.json to ensure full KV-cache allocation."
     )
     args = parser.parse_args()
 
