@@ -1,4 +1,8 @@
-# Run GPT OSS 20B with Web GPU
+# Run GPT OSS 20B with Web GPU (preview)
+
+These instructions allow you to experiment with GPT OSS 20B on any GPU.
+
+Note: once the model is officially supported by Foundry Local that will be the easiest way to run it.
 
 ## Model
 
@@ -16,8 +20,7 @@ Change the name of model_q4f16.onnx into model.onnx (as referenced in genai_conf
 
 ```bash
 pip install onnxruntime-webgpu
-pip install onnxruntime-genai
-pip uninstall onnxruntime (<-- we have some dependency clean up to do)
+pip install onnxruntime-genai --no-deps
 ```
 
 ## Example script
