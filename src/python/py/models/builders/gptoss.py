@@ -70,7 +70,7 @@ class GPTOSSModel(Model):
         self.window_size = original_window_size
 
     def make_moe(self, layer_id, mlp, root_input):
-        if self.ep in {"cpu", "cuda", "NvTensorRtRtx", "trt-rtx"}:
+        if self.ep in {"cpu", "cuda", "trt-rtx"}:
             self.make_moe_fused(layer_id, mlp, root_input)
         else:
             self.make_moe_decomposed(layer_id, mlp, root_input)
@@ -678,7 +678,7 @@ class GPTOSSModel(Model):
         # Single make_moe_op call with EP-based zero_points
         # TRT-RTX doesn't support zero_points inputs
         moe_name = f"{basename}/{op_type}"
-        use_zero_points = has_quark_experts and self.ep not in {"NvTensorRtRtx", "trt-rtx"}
+        use_zero_points = has_quark_experts and self.ep != "trt-rtx"
 
         self.make_moe_op(
             moe_name,

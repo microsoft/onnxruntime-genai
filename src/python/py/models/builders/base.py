@@ -361,9 +361,9 @@ class Model:
 
         # CPU, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
         # TRT-RTX defaults to 128; CPU/WebGPU default to 0 (tensor-level) for backward compatibility.
-        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx", "NvTensorRtRtx"]
-        default_qmoe_block_size = 128 if self.ep in ["trt-rtx", "NvTensorRtRtx"] else 0
-        self.int4_qmoe_block_size = extra_options.get("int4_qmoe_block_size", default_qmoe_block_size)
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
+        default_qmoe_block_size = 128 if self.ep == "trt-rtx" else 0
+        self.int4_qmoe_block_size = int(extra_options.get("int4_qmoe_block_size", default_qmoe_block_size))
 
         # Validate that unsupported EPs don't explicitly request block-wise quantization
         if self.ep not in supported_blockwise_eps and "int4_qmoe_block_size" in extra_options and moe_op_type == "QMoE":
@@ -721,19 +721,6 @@ class Model:
         )
         quant.process()
         model = ir.from_proto(quant.model.model)
-
-        # Convert float32 scales to bfloat16 if io_dtype is bfloat16.
-        # MatMulNBitsQuantizer doesn't natively support bfloat16, so we saved weights as float32
-        # for quantization and now convert the resulting scales to the target io_dtype.
-        if self.io_dtype == ir.DataType.BFLOAT16:
-            for initializer in model.graph.initializers.values():
-                # Scale tensors are named with "_scales" or "_DQ_scales" suffix
-                if initializer.name.endswith("_scales") or initializer.name.endswith("_DQ_scales"):
-                    if initializer.dtype == ir.DataType.FLOAT:
-                        # Convert float32 scales to bfloat16
-                        float32_data = initializer.const_value.numpy()
-                        bfloat16_data = torch.from_numpy(float32_data).to(torch.bfloat16)
-                        initializer.const_value = TorchTensor(bfloat16_data, name=initializer.name)
 
         return model
 
@@ -3259,12 +3246,14 @@ class Model:
             kwargs.get("bias3", ""),
         ]
 
-        # Only add zero_points inputs if they are provided (for Quark asymmetric quantization)
-        zero_points1 = kwargs.get("zero_points1", "")
-        zero_points2 = kwargs.get("zero_points2", "")
-        zero_points3 = kwargs.get("zero_points3", "")
-        if zero_points1 or zero_points2 or zero_points3:
-            inputs.extend([zero_points1, zero_points2, zero_points3])
+        # TRT-RTX doesn't support zero_points inputs at all
+        # For other EPs, always include as optional inputs (even empty strings)
+        if self.ep != "trt-rtx":
+            inputs.extend([
+                kwargs.get("zero_points1", ""),
+                kwargs.get("zero_points2", ""),
+                kwargs.get("zero_points3", ""),
+            ])
 
         output = f"{name}/output_0"
 
@@ -3298,11 +3287,13 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
-        # Get block size from quantization attributes
-        block_size = self.quant_attrs["int4"]["block_size"]
+        # Use block-wise quantization for supported EPs when int4_qmoe_block_size > 0.
+        # TRT-RTX defaults to 128; CPU/WebGPU default to 0 (tensor-level).
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
+        use_blockwise_quant = self.ep in supported_blockwise_eps and self.int4_qmoe_block_size > 0
 
-        # Use block-wise quantization if block_size > 0
-        if block_size > 0:
+        if use_blockwise_quant:
+            block_size = self.quant_attrs["int4"]["block_size"]
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3310,7 +3301,7 @@ class Model:
             except Exception as e:
                 raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
 
-        # block_size is 0, so we're using tensor-level quantization
+        # Use tensor-level quantization (default for QMoE on CPU/WebGPU when not explicitly requested)
         self.moe_attrs["block_size"] = 0
 
         # Existing tensor-level quantization implementation (fallback)
