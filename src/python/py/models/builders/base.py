@@ -551,7 +551,7 @@ class Model:
             }
             for key, default_val in defaults.items():
                 val = getattr(gen_config, key)
-                if val != default_val:
+                if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
         except:
             pass
