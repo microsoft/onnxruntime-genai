@@ -253,6 +253,16 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
+  void StartProfiling() {
+    OgaCheckResult(OgaModelStartProfiling(this));
+  }
+
+  OgaString EndProfiling() {
+    const char* p;
+    OgaCheckResult(OgaModelEndProfiling(this, &p));
+    return p;
+  }
+
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

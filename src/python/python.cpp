@@ -450,7 +450,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
-      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); });
+      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
+      .def("start_profiling", [](OgaModel& model) { model.StartProfiling(); })
+      .def("end_profiling", [](OgaModel& model) -> std::string { return model.EndProfiling().p_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())

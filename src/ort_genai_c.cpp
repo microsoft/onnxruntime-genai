@@ -359,6 +359,20 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaModelStartProfiling(OgaModel* model) {
+  OGA_TRY
+  model->StartProfiling();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaModelEndProfiling(OgaModel* model, const char** out) {
+  OGA_TRY
+  *out = AllocOgaString(model->EndProfiling());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
   auto params = std::make_shared<Generators::GeneratorParams>(*model);
