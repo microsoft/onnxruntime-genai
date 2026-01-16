@@ -107,10 +107,15 @@ set(ORT_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/native/${JAVA_OS_A
 file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
 
 # Add the native genai library to the native-lib dir
-add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                      $<TARGET_FILE:onnxruntime-genai>
-                      ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
+if(WIN32 OR ANDROID OR IOS)
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_FILE:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
+else()
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_LINKER_FILE:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
+endif()
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
@@ -229,15 +234,17 @@ if (ENABLE_TESTS)
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
 
+  set(_onnxruntime_bin_dir ${ORT_LIB_DIR})
   if(WIN32)
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dll")
+    set(_onnxruntime_bin_dir ${ORT_BIN_DIR})
   elseif(APPLE)
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dylib")
   else()
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
   endif()
 
-  file(GLOB ort_native_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+  file(GLOB ort_native_libs "${_onnxruntime_bin_dir}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
 
   # Copy ORT native libs for Java tests
   foreach(LIB_FILE ${ort_native_libs})
