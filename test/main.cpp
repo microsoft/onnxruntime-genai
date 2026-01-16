@@ -14,21 +14,22 @@ std::string g_custom_model_path;
 int main(int argc, char** argv) {
   std::cout << "Generators Utility Library" << std::endl;
 
-  // Parse custom model path argument
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "--model_path" && i + 1 < argc) {
-      g_custom_model_path = argv[++i];
-      std::cout << "Using custom model path: " << g_custom_model_path << std::endl;
-      break;
-    }
-  }
-
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();
   try {
     std::cout << "done" << std::endl;
     ::testing::InitGoogleTest(&argc, argv);
+
+    // Parse custom model path argument after InitGoogleTest
+    for (int i = 1; i < argc; ++i) {
+      const std::string arg = argv[i];
+      if (arg == "--model_path" && i + 1 < argc) {
+        g_custom_model_path = argv[++i];
+        std::cout << "Using custom model path: " << g_custom_model_path << std::endl;
+        break;
+      }
+    }
+
     int result = RUN_ALL_TESTS();
     std::cout << "Shutting down OnnxRuntime... ";
     OgaShutdown();

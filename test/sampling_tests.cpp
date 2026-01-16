@@ -559,7 +559,7 @@ struct NvTensorRtRtxTestSetup {
     NvTensorRtRtxTestSetup setup;
 
     // Use custom path if provided, otherwise use default
-    const char* nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+    std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
     std::string resolved_path = g_custom_model_path.empty() ? nvtrt_path : g_custom_model_path;
 
     // Check if model is available
