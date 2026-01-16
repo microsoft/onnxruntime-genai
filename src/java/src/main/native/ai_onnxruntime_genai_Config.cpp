@@ -50,3 +50,11 @@ Java_ai_onnxruntime_genai_Config_setProviderOption(JNIEnv* env, jobject thiz, jl
 
   ThrowIfError(env, OgaConfigSetProviderOption(config, c_provider_name, c_option_key, c_option_value));
 }
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Config_overlay(JNIEnv* env, jobject thiz, jlong native_handle, jstring json) {
+  CString c_json{env, json};
+  OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);
+
+  ThrowIfError(env, OgaConfigOverlay(config, c_json));
+}
