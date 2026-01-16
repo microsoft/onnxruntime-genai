@@ -551,7 +551,7 @@ class Model:
             }
             for key, default_val in defaults.items():
                 val = getattr(gen_config, key)
-                if val != default_val:
+                if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
         except:
             pass
@@ -623,8 +623,8 @@ class Model:
                 else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") else 50,
-                "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
+                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k is not None else 50,
+                "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
             },
         }
 
