@@ -112,6 +112,8 @@ def run_tool_calling():
                 model_path,
                 "-e",
                 execution_provider,
+                "--max_length",
+                1024,
                 "--response_format",
                 response_format,
                 "--tools_file",

@@ -13,15 +13,21 @@ args = parser.parse_args()
 assert os.path.exists(args.path), "Invalid path to tokenizer.json"
 assert os.path.basename(args.path) == "tokenizer.json", "Path is not to a tokenizer.json file"
 
+# Use raw bytes when making comparisons
+start_b = args.start_tool_call.encode("ascii", "strict")
+end_b = args.end_tool_call.encode("ascii", "strict")
+false_b = b'"special": false'
+true_b = b'"special": true'
+
 seen = False
 temp_path = args.path.replace("tokenizer.json", "temp.json")
-with open(args.path, "r") as in_file, open(temp_path, "w") as out_file:
+with open(args.path, "rb") as in_file, open(temp_path, "wb") as out_file:
     for line in in_file:
-        if args.start_tool_call in line or args.end_tool_call in line:
+        if start_b in line or end_b in line:
             seen = True
 
-        if seen and '"special": false' in line:
-            out_file.write(line.replace("false", "true"))
+        if seen and false_b in line:
+            out_file.write(line.replace(false_b, true_b))
             seen = False
         else:
             out_file.write(line)
