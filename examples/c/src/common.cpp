@@ -55,15 +55,21 @@ namespace nlohmann {
 template <class T>
 struct adl_serializer<std::optional<T>> {
   static void to_json(nlohmann::ordered_json& j, const std::optional<T>& opt) {
-    if (opt.has_value()) j = *opt;
-    else j = nullptr;
+    if (opt.has_value()) {
+      j = *opt;
+    } else {
+      j = nullptr;
+    }
   }
   static void from_json(const nlohmann::ordered_json& j, std::optional<T>& opt) {
-    if (j.is_null()) { opt = std::nullopt; return; }
+    if (j.is_null()) {
+      opt = std::nullopt;
+      return;
+    }
     opt = j.get<T>();
   }
 };
-}
+}  // namespace nlohmann
 
 void to_json(nlohmann::ordered_json& j, const ToolSchema& tool) {
   j = nlohmann::ordered_json{{"description", tool.description}, {"type", tool.type}, {"properties", tool.properties}, {"required", tool.required}, {"additionalProperties", tool.additionalProperties}};
@@ -165,7 +171,6 @@ bool ParseArgs(
     bool& verbose,
     bool& interactive,
     bool& rewind) {
-  
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -196,7 +201,8 @@ bool ParseArgs(
   app.add_flag("-v,--verbose", verbose, "Print verbose output and timing information. Defaults to false");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false");
-  app.add_flag_callback("--non_interactive", [&]{ interactive = false; }, "Disable interactive mode");
+  app.add_flag_callback(
+      "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
 
   try {
     app.parse(argc, argv);
