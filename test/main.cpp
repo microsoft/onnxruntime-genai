@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
 
   // Parse custom model path argument
   for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
+    const std::string arg = argv[i];
     if (arg == "--model_path" && i + 1 < argc) {
       g_custom_model_path = argv[++i];
       std::cout << "Using custom model path: " << g_custom_model_path << std::endl;
