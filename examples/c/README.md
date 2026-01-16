@@ -81,11 +81,11 @@ To ensure that the function/tool call works correctly with constrained decoding,
 To run the C examples with function/tool calling:
 ```
 # Using JSON Schema with only tool call output
-.\model_chat -m={path to model folder} -e={execution provider} --response_format=json_schema --tools_file={path to json file} --tool_output --tool_call_start="{starting tool call token}" --tool_call_end="{ending tool call token}"
+.\model_chat -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-.\model_chat -m={path to model folder} -e={execution provider} --response_format=lark_grammar --tools_file={path to json file} --tool_output --tool_call_start="{starting tool call token}" --tool_call_end="{ending tool call token}"
+.\model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
-.\model_chat -m={path to model folder} -e={execution provider} --response_format=lark_grammar --tools_file={path to json file} --text_output --tool_output --tool_call_start="{starting tool call token}" --tool_call_end="{ending tool call token}"
+.\model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 ```

@@ -4,7 +4,6 @@
 #include <cassert>
 
 #include "common.h"
-#include "getopt.h"
 
 void Timing::RecordStartTimestamp() {
   assert(start_timestamp_.time_since_epoch().count() == 0);
@@ -48,6 +47,22 @@ std::string Trim(const std::string& str) {
   }
   const size_t last = str.find_last_not_of(' ');
   return str.substr(first, (last - first + 1));
+}
+
+// Define to_json and from_json for std::optional<T>
+// Must be done within nlohmann::adl_serializer and not as standalone methods
+namespace nlohmann {
+template <class T>
+struct adl_serializer<std::optional<T>> {
+  static void to_json(nlohmann::ordered_json& j, const std::optional<T>& opt) {
+    if (opt.has_value()) j = *opt;
+    else j = nullptr;
+  }
+  static void from_json(const nlohmann::ordered_json& j, std::optional<T>& opt) {
+    if (j.is_null()) { opt = std::nullopt; return; }
+    opt = j.get<T>();
+  }
+};
 }
 
 void to_json(nlohmann::ordered_json& j, const ToolSchema& tool) {
@@ -139,49 +154,6 @@ void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
   if (j.contains("top_p")) j.at("top_p").get_to(a.top_p);
 }
 
-// TODO: update usage
-static void PrintUsage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << " <model_path> <execution_provider>" << std::endl;
-  std::cerr << "  model_path: [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
-  std::cerr << "  execution_provider: [optional] Force use of a particular execution provider (e.g. \"cpu\")" << std::endl;
-  std::cerr << "                      If not specified, EP / provider options specified in genai_config.json will be used." << std::endl;
-}
-
-std::optional<int> ParseInt(const char* arg) {
-  if (!arg) return std::nullopt;
-  char* end = nullptr;
-  long v = std::strtol(arg, &end, 10);
-  if (end == arg || *end != '\0') {
-    std::cout << "Invalid integer: \"" << arg << "\"" << std::endl;
-    return std::nullopt;
-  }
-  return static_cast<int>(v);
-}
-
-std::optional<double> ParseDouble(const char* arg) {
-  if (!arg) return std::nullopt;
-  char* end = nullptr;
-  double v = std::strtod(arg, &end);
-  if (end == arg || *end != '\0') {
-    std::cout << "Invalid double: \"" << arg << "\"" << std::endl;
-    return std::nullopt;
-  }
-  return v;
-}
-
-std::optional<bool> ParseBool(const char* arg) {
-  if (!arg) return std::nullopt;
-
-  // Make lowercase string
-  std::string s(arg);
-  for (auto& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-
-  if (s == "true" || s == "1") return true;
-  if (s == "false" || s == "0") return false;
-  std::cout << "Invalid bool: \"" << arg << "\" (use true/false, 1/0)" << std::endl;
-  return std::nullopt;
-}
-
 bool ParseArgs(
     int argc,
     char** argv,
@@ -193,172 +165,43 @@ bool ParseArgs(
     bool& verbose,
     bool& interactive,
     bool& rewind) {
-  // Integer tokens for long-only options (avoid collision with ASCII)
-  enum {
-    RESPONSE_FORMAT = 1000,
-    TOOLS_FILE,
-    TEXT_OUTPUT,
-    TOOL_OUTPUT,
-    TOOL_CALL_START,
-    TOOL_CALL_END,
-    SYSTEM_PROMPT,
-    REWIND,
-    NON_INTERACTIVE
-  };
+  
+  CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
+  argv = app.ensure_utf8(argv);
 
-  static struct option long_options[] = {
-      // Generator params options
-      {"batch_size", optional_argument, nullptr, 'b'},
-      {"chunk_size", optional_argument, nullptr, 'c'},
-      {"do_sample", optional_argument, nullptr, 's'},
-      {"min_length", optional_argument, nullptr, 'i'},
-      {"max_length", optional_argument, nullptr, 'l'},
-      {"num_beams", optional_argument, nullptr, 'n'},
-      {"num_return_sequences", optional_argument, nullptr, 'q'},
-      {"repetition_penalty", optional_argument, nullptr, 'r'},
-      {"temperature", optional_argument, nullptr, 't'},
-      {"top_k", optional_argument, nullptr, 'k'},
-      {"top_p", optional_argument, nullptr, 'p'},
+  std::string generator_params("Generator Params");
+  std::string guidance("Guidance Arguments");
 
-      // Guidance options
-      {"response_format", optional_argument, nullptr, RESPONSE_FORMAT},
-      {"tools_file", optional_argument, nullptr, TOOLS_FILE},
-      {"text_output", no_argument, nullptr, TEXT_OUTPUT},
-      {"tool_output", no_argument, nullptr, TOOL_OUTPUT},
-      {"tool_call_start", optional_argument, nullptr, TOOL_CALL_START},
-      {"tool_call_end", optional_argument, nullptr, TOOL_CALL_END},
+  app.add_option("-b,--batch_size", generator_params_args.batch_size, "Batch size used during inference.")->group(generator_params);
+  app.add_option("-c,--chunk_size", generator_params_args.chunk_size, "Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)")->group(generator_params);
+  app.add_option("-s,--do_sample", generator_params_args.do_sample, "Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false")->group(generator_params);
+  app.add_option("-i,--min_length", generator_params_args.min_length, "Min number of tokens to generate including the prompt")->group(generator_params);
+  app.add_option("-l,--max_length", generator_params_args.max_length, "Max number of tokens to generate including the prompt")->group(generator_params);
+  app.add_option("-n,--num_beams", generator_params_args.num_beams, "Number of beams to create")->group(generator_params);
+  app.add_option("-q,--num_return_sequences", generator_params_args.num_return_sequences, "Number of return sequences to produce")->group(generator_params);
+  app.add_option("-r,--repetition_penalty", generator_params_args.repetition_penalty, "Repetition penalty to sample with")->group(generator_params);
+  app.add_option("-t,--temperature", generator_params_args.temperature, "Temperature to sample with")->group(generator_params);
+  app.add_option("-k,--top_k", generator_params_args.top_k, "Top k tokens to sample from")->group(generator_params);
+  app.add_option("-p,--top_p", generator_params_args.top_p, "Top p probability to sample with")->group(generator_params);
 
-      // Main options
-      {"model_path", required_argument, nullptr, 'm'},
-      {"execution_provider", optional_argument, nullptr, 'e'},
-      {"verbose", no_argument, nullptr, 'v'},
-      {"system_prompt", optional_argument, nullptr, SYSTEM_PROMPT},
-      {"rewind", no_argument, nullptr, REWIND},
-      {"non_interactive", no_argument, nullptr, NON_INTERACTIVE},
-      {nullptr, 0, nullptr, 0}};
-  const char* short_options = "b:c:s:i:l:n:q:r:t:k:p:m:e:v";
+  app.add_option("--response_format", guidance_args.response_format, "Provide response format for the model")->group(guidance);
+  app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json")->group(guidance);
+  app.add_flag("--text_output", guidance_args.text_output, "Produce a text response in the output")->group(guidance);
+  app.add_flag("--tool_output", guidance_args.tool_output, "Produce a tool call in the output")->group(guidance);
+  app.add_option("--tool_call_start", guidance_args.tool_call_start, "String representation of tool call start (ex: <|tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.")->group(guidance);
+  app.add_option("--tool_call_end", guidance_args.tool_call_end, "String representation of tool call end (ex: <|/tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.")->group(guidance);
 
-  int opt;
-  int option_index = 0;
-  while ((opt = getopt_long(argc, argv, short_options, long_options, &option_index)) != -1) {
-    switch (opt) {
-      // Generator params options
-      case 'b': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.batch_size = *v;
-        break;
-      }
-      case 'c': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.chunk_size = *v;
-        break;
-      }
-      case 's': {
-        auto v = ParseBool(optarg);
-        if (v) generator_params_args.do_sample = *v;
-        break;
-      }
-      case 'i': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.min_length = *v;
-        break;
-      }
-      case 'l': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.max_length = *v;
-        break;
-      }
-      case 'n': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.num_beams = *v;
-        break;
-      }
-      case 'q': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.num_return_sequences = *v;
-        break;
-      }
-      case 'r': {
-        auto v = ParseDouble(optarg);
-        if (v) generator_params_args.repetition_penalty = *v;
-        break;
-      }
-      case 't': {
-        auto v = ParseDouble(optarg);
-        if (v) generator_params_args.temperature = *v;
-        break;
-      }
-      case 'k': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.top_k = *v;
-        break;
-      }
-      case 'p': {
-        auto v = ParseInt(optarg);
-        if (v) generator_params_args.top_p = *v;
-        break;
-      }
+  app.add_option("-m,--model_path", model_path, "ONNX model folder path (must contain genai_config.json and model.onnx)")->required();
+  app.add_option("-e,--execution_provider", ep, "Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.");
+  app.add_flag("-v,--verbose", verbose, "Print verbose output and timing information. Defaults to false");
+  app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
+  app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false");
+  app.add_flag_callback("--non_interactive", [&]{ interactive = false; }, "Disable interactive mode");
 
-      // Guidance options
-      case RESPONSE_FORMAT: {
-        if (optarg) guidance_args.response_format = optarg;
-        break;
-      }
-      case TOOLS_FILE: {
-        if (optarg) guidance_args.tools_file = optarg;
-        break;
-      }
-      case TEXT_OUTPUT: {
-        guidance_args.text_output = true;
-        break;
-      }
-      case TOOL_OUTPUT: {
-        guidance_args.tool_output = true;
-        break;
-      }
-      case TOOL_CALL_START: {
-        if (optarg) guidance_args.tool_call_start = optarg;
-        break;
-      }
-      case TOOL_CALL_END: {
-        if (optarg) guidance_args.tool_call_end = optarg;
-        break;
-      }
-
-      // Main options
-      case 'm': {
-        if (optarg) model_path = optarg;
-        break;
-      }
-      case 'e': {
-        if (optarg) ep = optarg;
-        break;
-      }
-      case 'v': {
-        verbose = true;
-        break;
-      }
-      case NON_INTERACTIVE: {
-        interactive = false;
-        break;
-      }
-      case SYSTEM_PROMPT: {
-        if (optarg) system_prompt = optarg;
-        break;
-      }
-      case REWIND: {
-        rewind = true;
-        break;
-      }
-      default: {
-        std::cerr << "Error: Unknown option" << std::endl;
-        return false;
-      }
-    }
-  }
-
-  if (model_path.empty()) {
-    std::cerr << "Error: Model path was not provided" << std::endl;
+  try {
+    app.parse(argc, argv);
+  } catch (...) {
+    std::cout << app.help() << std::endl;
     return false;
   }
   return true;
@@ -392,7 +235,8 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
   // Set any search-specific options that need to be known before constructing a Model object
   // Otherwise they can be set with params.SetSearchOptions(search_options)
   nlohmann::ordered_json j = search_options;
-  config.Overlay(j.dump());
+  std::string s = j.dump();
+  config->Overlay(s.c_str());
   return config;
 }
 
@@ -459,7 +303,7 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
     }
   }
 
-  std::string prompt = tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt);
+  std::string prompt = std::string(tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt));
   return prompt;
 }
 
@@ -515,7 +359,8 @@ std::string GetJsonSchema(std::vector<Tool>& tools, bool tool_output) {
 
   // Serialize JSON schema to string
   nlohmann::ordered_json j = json_schema;
-  return j.dump();
+  std::string s = j.dump();
+  return s;
 }
 
 std::string GetLarkGrammar(std::vector<Tool>& tools, bool text_output, bool tool_output, const std::string& tool_call_start, const std::string& tool_call_end) {
@@ -656,5 +501,6 @@ std::tuple<std::string, std::string, std::string> GetGuidance(
   }
 
   nlohmann::ordered_json j = all_tools;
-  return std::make_tuple(guidance_type, guidance_data, j.dump());
+  std::string s = j.dump();
+  return std::make_tuple(guidance_type, guidance_data, s);
 }

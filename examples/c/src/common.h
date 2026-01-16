@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 #include "ort_genai.h"
 
@@ -70,7 +71,7 @@ struct ToolSchema {
 void to_json(nlohmann::ordered_json& j, const ToolSchema& tool);
 
 /**
- * @brief Convert ordered JSON to ToolSchema
+ * @brief Convert JSON to ToolSchema
  *
  * @param j JSON object
  * @param tool ToolSchema object
