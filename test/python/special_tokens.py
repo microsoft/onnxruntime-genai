@@ -32,4 +32,4 @@ with open(args.path, "rb") as in_file, open(temp_path, "wb") as out_file:
         else:
             out_file.write(line)
 
-os.rename(temp_path, args.path)
+os.replace(temp_path, args.path)
