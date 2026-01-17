@@ -245,8 +245,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
 
 /**
- * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
- * if it already exists, does nothing.
+ * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist.
+ * If it already exists, do nothing.
  * \param[in] config The config to set the provider on.
  * \param[in] provider The provider to set on the config.
  * \return OgaResult containing the error message if the setting of the provider failed.
