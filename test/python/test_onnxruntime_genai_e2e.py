@@ -83,7 +83,7 @@ def run_tool_calling():
     log.debug("Running tool calling Python E2E Tests")
 
     cwd = os.path.dirname(os.path.abspath(__file__))
-    tool_call_models = [("phi-4-mini", "<|tool_call|>", "<|/tool_call|>"), ("qwen-2.5", "<tool_call>", "</tool_call>")]
+    tool_call_models = [("qwen-2.5-0.5b", "<tool_call>", "</tool_call>")]
     prompt = "What is the weather in Redmond, WA?"
     response_format = "lark_grammar"
 
@@ -108,6 +108,54 @@ def run_tool_calling():
             command = [
                 sys.executable,
                 os.path.join(cwd, "..", "..", "examples", "python", "model-qa.py"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(1024),
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--input_prompt",
+                prompt,
+                "--tool_output",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+            # Run model-qa inside ModelChat.cs for inference
+            command = [
+                os.path.join(cwd, "..", "..", "examples", "csharp", "ModelChat", "bin", "Debug", "net8.0", f"ModelChat{'.exe' if sys.platform.startswith("win") else ''}"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(1024),
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--input_prompt",
+                prompt,
+                "--tool_output",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+            # Run model_qa.cpp for inference
+            command = [
+                os.path.join(cwd, "..", "..", "examples", "c", "build", f"model_qa{'.exe' if sys.platform.startswith("win") else ''}"),
                 "-m",
                 model_path,
                 "-e",

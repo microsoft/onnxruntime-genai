@@ -66,7 +66,7 @@ def get_model_paths():
         # "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
         # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
-        "phi-4-mini": ("microsoft/Phi-4-mini-instruct", False)
+        "phi-4-mini": ("microsoft/Phi-4-mini-instruct", True)
     }
 
     ci_data_path = os.path.join(get_ci_data_path(), "pytorch")
@@ -86,7 +86,7 @@ def get_model_paths():
         # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
         # "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
         # "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
-        "qwen-2.5": (os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"), False),
+        "qwen-2.5-0.5b": (os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"), False),
         # "nemotron-mini": os.path.join(ci_data_path, "nemotron-mini-4b"),
     }
 
