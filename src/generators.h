@@ -128,6 +128,7 @@ struct Generator : LeakChecked<Generator> {
 
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
 

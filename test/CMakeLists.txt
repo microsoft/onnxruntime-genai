@@ -28,7 +28,6 @@ else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()
 
-
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -46,7 +45,15 @@ set_target_properties(unit_tests PROPERTIES
 )
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+  # Add one-op model infrastructure for standalone tests
+  target_sources(unit_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/models/one_op_model_builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/one_op_model_executor.cpp
+  )
+  # Define flag so one_op uses standalone env in test context
+  target_compile_definitions(unit_tests PRIVATE GENAI_STANDALONE_ONE_OP)
+  # Link ONNX Runtime library
+  target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
