@@ -55,8 +55,8 @@ def main(args):
     # Keep asking for input prompts in a loop
     while True:
         # Get user prompt
-        if args.input_prompt:
-            text = args.input_prompt
+        if args.user_prompt:
+            text = args.user_prompt
         else:
             text = input("Prompt (Use quit() to exit): ")
         if not text:
@@ -148,8 +148,8 @@ def main(args):
                 f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens) / prompt_time:.2f} tps, New tokens per second: {len(new_tokens) / run_time:.2f} tps"
             )
 
-        # If input prompt is provided, it will just run the model for the input prompt and exit
-        if args.input_prompt:
+        # If non-interactive is requested, it will just run the model for the user prompt and exit
+        if args.non_interactive:
             break
 
 
@@ -160,7 +160,8 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
-    parser.add_argument('-ip', '--input_prompt', type=str, default='', help='Input prompt. If provided, it will just run the prompt and exit.')
+    parser.add_argument('-up', '--user_prompt', type=str, default='What color is the sky?', help='User prompt to use for the model.')
+    parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
 
     get_generator_params_args(parser)
     get_guidance_args(parser)

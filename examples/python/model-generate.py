@@ -91,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", default=False, help="Print verbose output and timing information. Defaults to false")
     parser.add_argument("-pr", "--prompts", nargs="*", required=False, help="Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts")
     parser.add_argument("-ct", "--chat_template", type=str, default="", help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.")
-    parser.add_argument("--non-interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
+    parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
 
     get_generator_params_args(parser)
 
