@@ -31,6 +31,7 @@ void CXX_API(
     const std::string& model_path,
     const std::string& ep,
     const std::string& system_prompt,
+    const std::string& user_prompt,
     bool verbose,
     bool interactive,
     bool rewind) {
@@ -118,7 +119,7 @@ void CXX_API(
         break;  // Exit the loop
       }
     } else {
-      text = "What color is the sky?";
+      text = user_prompt;
     }
 
     signal(SIGINT, TerminateGeneration);
@@ -192,9 +193,9 @@ int main(int argc, char** argv) {
   // Get command-line args
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
-  std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.";
+  std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.", user_prompt = "What color is the sky?";
   bool verbose = false, interactive = true, rewind = false;
-  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind)) {
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, interactive, rewind)) {
     return -1;
   }
 
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
   std::cout << "Model path: " << model_path << std::endl;
   std::cout << "Execution provider: " << ep << std::endl;
   std::cout << "System prompt: " << system_prompt << std::endl;
+  if (!interactive) std::cout << "User prompt: " << user_prompt << std::endl;
   std::cout << "Verbose: " << verbose << std::endl;
   std::cout << "Interactive: " << interactive << std::endl;
   std::cout << "Rewind: " << rewind << std::endl;
@@ -215,7 +217,7 @@ int main(int argc, char** argv) {
   std::cout << std::endl;
 
   try {
-    CXX_API(generator_params_args, guidance_args, model_path, ep, system_prompt, verbose, interactive, rewind);
+    CXX_API(generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, interactive, rewind);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return -1;

@@ -168,6 +168,7 @@ bool ParseArgs(
     std::string& model_path,
     std::string& ep,
     std::string& system_prompt,
+    std::string& user_prompt,
     bool& verbose,
     bool& interactive,
     bool& rewind) {
@@ -200,6 +201,7 @@ bool ParseArgs(
   app.add_option("-e,--execution_provider", ep, "Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.");
   app.add_flag("-v,--verbose", verbose, "Print verbose output and timing information. Defaults to false");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
+  app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
