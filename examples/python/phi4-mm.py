@@ -189,10 +189,10 @@ if __name__ == "__main__":
         "-pr", "--prompt", required=False, help="Input prompts to generate tokens from, mainly for CI usage"
     )
     parser.add_argument(
-        "--non-interactive",
+        "--non_interactive",
         action=argparse.BooleanOptionalAction,
         required=False,
-        help="Non-interactive mode, mainly for CI usage",
+        help="non_interactive mode, mainly for CI usage",
     )
     args = parser.parse_args()
     run(args)

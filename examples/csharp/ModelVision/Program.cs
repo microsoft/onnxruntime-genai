@@ -37,7 +37,7 @@ void PrintUsage()
     Console.WriteLine("\t\t\t\tExecution provider for the model");
     Console.WriteLine("  --image_paths");
     Console.WriteLine("\t\t\t\tPath to the images");
-    Console.WriteLine("  --non-interactive (optional), mainly for CI usage");
+    Console.WriteLine("  --non_interactive (optional), mainly for CI usage");
     Console.WriteLine("\t\t\t\tInteractive mode");
 }
 
@@ -58,7 +58,7 @@ uint i_arg = 0;
 while (i_arg < args.Length)
 {
     var arg = args[i_arg];
-    if (arg == "--non-interactive")
+    if (arg == "--non_interactive")
     {
         interactive = false;
     }
@@ -95,9 +95,9 @@ if (string.IsNullOrEmpty(executionProvider))
     throw new Exception("Execution provider must be specified");
 }
 
-Console.WriteLine("--------------------");
-Console.WriteLine("Hello, Phi-3-Vision!");
-Console.WriteLine("--------------------");
+Console.WriteLine("-------------------");
+Console.WriteLine("Hello, ModelVision!");
+Console.WriteLine("-------------------");
 
 Console.WriteLine("Model path: " + modelPath);
 Console.WriteLine("Execution provider: " + executionProvider);

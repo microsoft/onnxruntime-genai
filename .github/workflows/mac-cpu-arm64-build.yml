@@ -144,6 +144,21 @@ jobs:
           cd test/csharp
           dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal
 
+      - name: Build the C# Examples
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd examples/csharp/ModelChat
+          dotnet build -c Release
+          cd ../ModelVision
+          dotnet build -c Release
+          cd ../HelloPhi4MM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x

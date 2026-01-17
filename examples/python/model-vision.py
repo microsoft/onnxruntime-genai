@@ -198,7 +198,7 @@ if __name__ == "__main__":
         help="Maximum generation length. Defaults to model's context_length from config.",
     )
     parser.add_argument(
-        "--non-interactive",
+        "--non_interactive",
         action=argparse.BooleanOptionalAction,
         required=False,
         help="Non-interactive mode, mainly for CI usage",
