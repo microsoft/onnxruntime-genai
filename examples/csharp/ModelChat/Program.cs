@@ -9,19 +9,17 @@ using System.Text.Json;
 /// <summary>
 /// Get prompt from user
 /// </summary>
-/// <param name="interactive">Ask user or use pre-defined value</param>
 /// <returns>
 /// User prompt to use
 /// </returns>
-static string GetPrompt(bool interactive)
+static string GetPrompt()
 {
-    string prompt = "def is_prime(num):"; // Example prompt
-    if (interactive)
-        do
-        {
-            Console.Write("Prompt (Use quit() to exit): ");
-            prompt = Console.ReadLine();
-        } while (string.IsNullOrEmpty(prompt));
+    string? prompt;
+    do
+    {
+        Console.Write("Prompt (Use quit() to exit): ");
+        prompt = Console.ReadLine();
+    } while (string.IsNullOrEmpty(prompt));
     return prompt;
 }
 
@@ -33,6 +31,7 @@ static string GetPrompt(bool interactive)
 /// <param name="generatorParamsArgs">Generator params arguments to use</param>
 /// <param name="modelPath">Path to folder containing model</param>
 /// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="userPrompt">User prompt to use with model</param>
 /// <param name="interactive">Ask user or use pre-defined value</param>
 /// <param name="verbose">Use verbose logging</param>
 /// <returns>
@@ -44,6 +43,7 @@ void ModelGenerate(
     GeneratorParamsArgs generatorParamsArgs,
     string modelPath,
     string systemPrompt,
+    string userPrompt,
     bool interactive,
     bool verbose
 )
@@ -52,18 +52,18 @@ void ModelGenerate(
     do
     {
         // Get prompt
-        string userPrompt = GetPrompt(interactive);
-        if (string.IsNullOrEmpty(userPrompt))
+        string user_prompt = interactive ? GetPrompt() : userPrompt;
+        if (string.IsNullOrEmpty(user_prompt))
         {
             continue;
         }
-        if (string.Compare(userPrompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        if (string.Compare(user_prompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
         {
             break;
         }
 
         // Get input tokens
-        string messages = $@"[{{""role"":""system"",""content"":""{systemPrompt}""}},{{""role"":""user"",""content"":""{userPrompt}""}}]";
+        string messages = $@"[{{""role"":""system"",""content"":""{systemPrompt}""}},{{""role"":""user"",""content"":""{user_prompt}""}}]";
         string prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: true);
         var sequences = tokenizer.Encode(prompt);
         if (verbose) Console.WriteLine($"Prompt encoded: {prompt}");
@@ -117,6 +117,7 @@ void ModelGenerate(
 /// <param name="guidanceArgs">Guidance arguments to use</param>
 /// <param name="modelPath">Path to folder containing model</param>
 /// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="userPrompt">User prompt to use with model</param>
 /// <param name="interactive">Ask user or use pre-defined value</param>
 /// <param name="verbose">Use verbose logging</param>
 /// <returns>
@@ -130,6 +131,7 @@ void ModelQA(
     GuidanceArgs guidanceArgs,
     string modelPath,
     string systemPrompt,
+    string userPrompt,
     bool interactive,
     bool verbose
 )
@@ -164,12 +166,12 @@ void ModelQA(
     do
     {
         // Get prompt
-        string userPrompt = GetPrompt(interactive);
-        if (string.IsNullOrEmpty(userPrompt))
+        string user_prompt = interactive ? GetPrompt() : userPrompt;
+        if (string.IsNullOrEmpty(user_prompt))
         {
             continue;
         }
-        if (string.Compare(userPrompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        if (string.Compare(user_prompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
         {
             break;
         }
@@ -178,7 +180,7 @@ void ModelQA(
         var user_message = new Dictionary<string, string>
         {
             { "role", "user" },
-            { "content", userPrompt }
+            { "content", user_prompt }
         };
         input_list.Add(user_message);
 
@@ -212,7 +214,7 @@ void ModelQA(
         }
         catch
         {
-            prompt = userPrompt;
+            prompt = user_prompt;
         }
         if (verbose) Console.WriteLine($"Prompt: {prompt}");
 
@@ -260,6 +262,7 @@ void ModelQA(
 /// <param name="guidanceArgs">Guidance arguments to use</param>
 /// <param name="modelPath">Path to folder containing model</param>
 /// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="userPrompt">User prompt to use with model</param>
 /// <param name="interactive">Ask user or use pre-defined value</param>
 /// <param name="rewind">Rewind to system prompt after each user prompt</param>
 /// <param name="verbose">Use verbose logging</param>
@@ -274,6 +277,7 @@ void ModelChat(
     GuidanceArgs guidanceArgs,
     string modelPath,
     string systemPrompt,
+    string userPrompt,
     bool interactive,
     bool rewind,
     bool verbose
@@ -344,12 +348,12 @@ void ModelChat(
     do
     {
         // Get prompt
-        string userPrompt = GetPrompt(interactive);
-        if (string.IsNullOrEmpty(userPrompt))
+        string user_prompt = interactive ? GetPrompt() : userPrompt;
+        if (string.IsNullOrEmpty(user_prompt))
         {
             continue;
         }
-        if (string.Compare(userPrompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        if (string.Compare(user_prompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
         {
             break;
         }
@@ -358,7 +362,7 @@ void ModelChat(
         var user_message = new Dictionary<string, string>
         {
             { "role", "user" },
-            { "content", userPrompt }
+            { "content", user_prompt }
         };
 
         // Apply chat template
@@ -489,6 +493,16 @@ RootCommand GetArgs()
         Description = "System prompt to use for the model."
     };
 
+    var user_prompt = new Option<string>(
+        name: "user_prompt",
+        aliases: ["-up", "--user_prompt"]
+    )
+    {
+        Arity = ArgumentArity.ExactlyOne,
+        DefaultValueFactory = (_) => "What color is the sky?",
+        Description = "User prompt to use for the model."
+    };
+
     var rewind = new Option<bool>(
         name: "rewind",
         aliases: ["-rw", "--rewind"]
@@ -502,6 +516,7 @@ RootCommand GetArgs()
     parser.Add(model_path);
     parser.Add(execution_provider);
     parser.Add(system_prompt);
+    parser.Add(user_prompt);
     parser.Add(verbose);
     parser.Add(non_interactive);
     parser.Add(rewind);
@@ -541,6 +556,7 @@ void main(string[] args) {
     string modelPath = parseResult.GetValue<string>("model_path")!;
     string executionProvider = parseResult.GetValue<string>("execution_provider")!;
     string systemPrompt = parseResult.GetValue<string>("system_prompt")!;
+    string userPrompt = parseResult.GetValue<string>("user_prompt")!;
     bool verbose = parseResult.GetValue<bool>("verbose");
     bool interactive = !parseResult.GetValue<bool>("non_interactive");
     bool rewind = parseResult.GetValue<bool>("rewind");
@@ -555,6 +571,10 @@ void main(string[] args) {
     Console.WriteLine("Model path: " + modelPath);
     Console.WriteLine("Execution provider: " + executionProvider);
     Console.WriteLine("System prompt: " + systemPrompt);
+    if (!interactive)
+    {
+        Console.WriteLine("User prompt: " + userPrompt);
+    }
     Console.WriteLine("Verbose: " + verbose);
     Console.WriteLine("Interactive: " + interactive);
     Console.WriteLine("Rewind: " + rewind);
@@ -596,17 +616,17 @@ void main(string[] args) {
     if (option == 1)
     {
         if (verbose) Console.WriteLine("Entering option 1\n");
-        ModelGenerate(model, tokenizer, generatorParamsArgs, modelPath, systemPrompt, interactive, verbose);
+        ModelGenerate(model, tokenizer, generatorParamsArgs, modelPath, systemPrompt, userPrompt, interactive, verbose);
     }
     else if (option == 2)
     {
         if (verbose) Console.WriteLine("Entering option 2\n");
-        ModelQA(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, interactive, verbose);
+        ModelQA(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, userPrompt, interactive, verbose);
     }
     else
     {
         if (verbose) Console.WriteLine("Entering option 3\n");
-        ModelChat(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, interactive, rewind, verbose);
+        ModelChat(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, userPrompt, interactive, rewind, verbose);
     }
 }
 
