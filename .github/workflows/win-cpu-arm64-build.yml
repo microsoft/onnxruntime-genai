@@ -100,7 +100,7 @@ jobs:
       - name: Run the Python Tests
         run: |
           python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
-     
+
       - name: Build the C# API and Run the C# Tests
         run: |
           cd test\csharp
