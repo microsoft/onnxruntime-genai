@@ -115,6 +115,19 @@ jobs:
           cd test\csharp
           dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
+      - name: Build the C# Examples
+        run: |
+          cd examples\csharp\ModelChat
+          dotnet build -c Release
+          cd ..\ModelVision
+          dotnet build -c Release
+          cd ..\HelloPhi4MM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+          python3 test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cuda\tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\test_models\qwen-2.5-0.5b\int4\cuda\ -e cuda --response_format lark_grammar --tools_file test\test_models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+
       - name: Prepend CUDA to PATH and Run tests
         run: |-
           $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 

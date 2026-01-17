@@ -91,8 +91,9 @@ def run_tool_calling():
     response_format = "lark_grammar"
 
     for (model_name, tool_call_start, tool_call_end) in tool_call_models:
-        for (precision, execution_provider) in [("int4", "cpu"), ("int4", "cuda")]:
+        for (precision, execution_provider) in [("int4", "cpu"), ("int4", "cuda"), ("int4", "dml")]:
             model_path = os.path.join(cwd, "..", "test_models", model_name, precision, execution_provider)
+            if not os.path.exists(model_path): continue
 
             # Run special_tokens.py to mark tool call token ids as special
             command = [
@@ -133,55 +134,30 @@ def run_tool_calling():
             ]
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
-            # # Run model-qa inside ModelChat.cs for inference
-            # command = [
-            #     os.path.join(cwd, "..", "..", "examples", "csharp", "ModelChat", "bin", "Debug", "net8.0", f"ModelChat{'.exe' if sys.platform.startswith('win') else ''}"),
-            #     "-m",
-            #     model_path,
-            #     "-e",
-            #     execution_provider,
-            #     "--max_length",
-            #     str(max_length),
-            #     "--response_format",
-            #     response_format,
-            #     "--tools_file",
-            #     os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
-            #     "--tool_call_start",
-            #     tool_call_start,
-            #     "--tool_call_end",
-            #     tool_call_end,
-            #     "--user_prompt",
-            #     user_prompt,
-            #     "--tool_output",
-            #     "--non_interactive",
-            #     "--verbose",
-            # ]
-            # run_subprocess(command, cwd=cwd, log=log).check_returncode()
-
-            # # Run model_qa.cpp for inference
-            # command = [
-            #     os.path.join(cwd, "..", "..", "examples", "c", "build", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
-            #     "-m",
-            #     model_path,
-            #     "-e",
-            #     execution_provider,
-            #     "--max_length",
-            #     str(max_length),
-            #     "--response_format",
-            #     response_format,
-            #     "--tools_file",
-            #     os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
-            #     "--tool_call_start",
-            #     tool_call_start,
-            #     "--tool_call_end",
-            #     tool_call_end,
-            #     "--user_prompt",
-            #     user_prompt,
-            #     "--tool_output",
-            #     "--non_interactive",
-            #     "--verbose",
-            # ]
-            # run_subprocess(command, cwd=cwd, log=log).check_returncode()
+            # Run model_qa.cpp for inference
+            command = [
+                os.path.join(cwd, "..", "..", "examples", "c", "build", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(max_length),
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--user_prompt",
+                user_prompt,
+                "--tool_output",
+                "--non_interactive",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def get_args():
