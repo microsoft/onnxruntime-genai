@@ -49,7 +49,7 @@ steps:
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
       dotnet build ./${{ parameters.CsprojName }}.csproj -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --no-restore --self-contained --verbosity normal
-      ls -l ./bin/${{ parameters.CsprojConfiguration }}/net6.0/$(os)-$(arch)/
+      ls -l ./bin/${{ parameters.CsprojConfiguration }}/net8.0/$(os)-$(arch)/
     displayName: 'Perform dotnet restore & build'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx'))
@@ -70,8 +70,8 @@ steps:
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
-            chmod +x ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} && \
-            ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive"
+            chmod +x ./bin/Release_Cuda/net8.0/linux-x64/${{ parameters.CsprojName }} && \
+            ./bin/Release_Cuda/net8.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive"
 
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
