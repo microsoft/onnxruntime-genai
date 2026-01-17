@@ -226,13 +226,14 @@ struct GuidanceArgs {
  * @param model_path Path to model folder containing GenAI config
  * @param ep Name of execution provider to set
  * @param system_prompt System prompt to use for the model
+ * @param user_prompt User prompt to use for the model
  * @param verbose Use verbose logging
  * @param interactive Run in interactive mode
  * @param rewind Rewind to the system prompt after each generation
  *
  * @return true if command-line arguments can be parsed, else false
  */
-bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& system_prompt, bool& verbose, bool& interactive, bool& rewind);
+bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& system_prompt, std::string& user_prompt, bool& verbose, bool& interactive, bool& rewind);
 
 /**
  * @brief Set log options inside ORT GenAI
