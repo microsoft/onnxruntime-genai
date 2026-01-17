@@ -113,7 +113,7 @@ def run_tool_calling():
                 "-e",
                 execution_provider,
                 "--max_length",
-                str(1024),
+                str(256),
                 "--response_format",
                 response_format,
                 "--tools_file",
