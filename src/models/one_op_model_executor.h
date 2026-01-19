@@ -63,7 +63,7 @@ class OneOpModelExecutor {
 
   // Create a new session for the given model and EP
   static std::unique_ptr<OrtSession> CreateSession(
-      const std::vector<uint8_t>& model_bytes,
+      OrtModel* model,
       const std::string& ep_name,
       const std::vector<const char*>& session_config_keys,
       const std::vector<const char*>& session_config_values);

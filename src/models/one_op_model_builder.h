@@ -70,33 +70,18 @@ struct OneOpModelConfig {
   OneOpModelConfig(const std::string& op) : op_type(op) {}
 };
 
-// Builder class for creating 1-op ONNX models as protobuf bytes
+// Builder class for creating 1-op ONNX models using the Model Editor API
 class OneOpModelBuilder {
  public:
-  // Build a complete ONNX model protobuf from the configuration
-  static std::vector<uint8_t> Build(const OneOpModelConfig& config);
+  // Build a complete ONNX model using the Model Editor API
+  // Returns an OrtModel that can be used to create sessions
+  // Caller is responsible for calling ReleaseOrtModel when done
+  static OrtModel* Build(const OneOpModelConfig& config);
 
   // Convenience helper to create a Cast model
-  static std::vector<uint8_t> CreateCastModel(
+  static OrtModel* CreateCastModel(
       ONNXTensorElementDataType input_type,
       ONNXTensorElementDataType output_type);
-
- private:
-  // Protobuf encoding helpers
-  static void EncodeVarint(std::vector<uint8_t>& buffer, uint64_t value);
-  static void EncodeKey(std::vector<uint8_t>& buffer, uint32_t field_number, uint32_t wire_type);
-  static void EncodeString(std::vector<uint8_t>& buffer, uint32_t field_number, const std::string& value);
-  static void EncodeInt64(std::vector<uint8_t>& buffer, uint32_t field_number, int64_t value);
-  static void EncodeFloat(std::vector<uint8_t>& buffer, uint32_t field_number, float value);
-  static void EncodeMessage(std::vector<uint8_t>& buffer, uint32_t field_number, const std::vector<uint8_t>& message);
-
-  // Component builders
-  static std::vector<uint8_t> BuildAttributeProto(const AttributeValue& attr);
-  static std::vector<uint8_t> BuildNodeProto(const OneOpModelConfig& config);
-  static std::vector<uint8_t> BuildTensorShapeProto(const std::vector<int64_t>& shape);
-  static std::vector<uint8_t> BuildValueInfoProto(const TensorConfig& tensor);
-  static std::vector<uint8_t> BuildOpsetImport(int version);
-  static std::vector<uint8_t> BuildGraphProto(const OneOpModelConfig& config);
 };
 
 }  // namespace Generators

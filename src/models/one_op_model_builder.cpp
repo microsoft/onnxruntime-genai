@@ -55,209 +55,166 @@ AttributeValue AttributeValue::Strings(const std::string& name, const std::vecto
   return attr;
 }
 
-// Protobuf varint encoding
-void OneOpModelBuilder::EncodeVarint(std::vector<uint8_t>& buffer, uint64_t value) {
-  while (value >= 0x80) {
-    buffer.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
-    value >>= 7;
-  }
-  buffer.push_back(static_cast<uint8_t>(value & 0x7F));
-}
+// Helper to create OrtOpAttr from AttributeValue using Model Editor API
+static OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
+  OrtOpAttr* op_attr = nullptr;
 
-// Encode field key (field_number << 3 | wire_type)
-void OneOpModelBuilder::EncodeKey(std::vector<uint8_t>& buffer, uint32_t field_number, uint32_t wire_type) {
-  EncodeVarint(buffer, (field_number << 3) | wire_type);
-}
-
-// Encode length-delimited field (wire_type = 2)
-void OneOpModelBuilder::EncodeString(std::vector<uint8_t>& buffer, uint32_t field_number, const std::string& value) {
-  EncodeKey(buffer, field_number, 2);
-  EncodeVarint(buffer, value.size());
-  buffer.insert(buffer.end(), value.begin(), value.end());
-}
-
-// Encode varint field (wire_type = 0)
-void OneOpModelBuilder::EncodeInt64(std::vector<uint8_t>& buffer, uint32_t field_number, int64_t value) {
-  EncodeKey(buffer, field_number, 0);
-  EncodeVarint(buffer, static_cast<uint64_t>(value));
-}
-
-// Encode float field (wire_type = 5, 32-bit fixed)
-void OneOpModelBuilder::EncodeFloat(std::vector<uint8_t>& buffer, uint32_t field_number, float value) {
-  EncodeKey(buffer, field_number, 5);
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(float));
-  buffer.push_back(static_cast<uint8_t>(bits & 0xFF));
-  buffer.push_back(static_cast<uint8_t>((bits >> 8) & 0xFF));
-  buffer.push_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
-  buffer.push_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
-}
-
-// Encode embedded message (wire_type = 2)
-void OneOpModelBuilder::EncodeMessage(std::vector<uint8_t>& buffer, uint32_t field_number, const std::vector<uint8_t>& message) {
-  EncodeKey(buffer, field_number, 2);
-  EncodeVarint(buffer, message.size());
-  buffer.insert(buffer.end(), message.begin(), message.end());
-}
-
-// Build AttributeProto
-std::vector<uint8_t> OneOpModelBuilder::BuildAttributeProto(const AttributeValue& attr) {
-  std::vector<uint8_t> result;
-
-  // Field 1: name (string)
-  EncodeString(result, 1, attr.name);
-
-  // Field 20: type (AttributeType enum)
-  EncodeInt64(result, 20, static_cast<int64_t>(attr.type));
-
-  // Value fields based on type
   switch (attr.type) {
     case AttributeType::INT:
-      EncodeInt64(result, 3, attr.int_value);
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), &attr.int_value, 1,
+                                               OrtOpAttrType::ORT_OP_ATTR_INT, &op_attr));
       break;
     case AttributeType::FLOAT:
-      EncodeFloat(result, 2, attr.float_value);
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), &attr.float_value, 1,
+                                               OrtOpAttrType::ORT_OP_ATTR_FLOAT, &op_attr));
       break;
     case AttributeType::STRING:
-      EncodeString(result, 4, attr.string_value);
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.string_value.c_str(),
+                                               static_cast<int>(attr.string_value.size()),
+                                               OrtOpAttrType::ORT_OP_ATTR_STRING, &op_attr));
       break;
     case AttributeType::INTS:
-      for (auto val : attr.ints_value) {
-        EncodeInt64(result, 7, val);
-      }
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.ints_value.data(),
+                                               static_cast<int>(attr.ints_value.size()),
+                                               OrtOpAttrType::ORT_OP_ATTR_INTS, &op_attr));
       break;
     case AttributeType::FLOATS:
-      for (auto val : attr.floats_value) {
-        EncodeFloat(result, 6, val);
-      }
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.floats_value.data(),
+                                               static_cast<int>(attr.floats_value.size()),
+                                               OrtOpAttrType::ORT_OP_ATTR_FLOATS, &op_attr));
       break;
-    case AttributeType::STRINGS:
-      for (const auto& val : attr.strings_value) {
-        EncodeString(result, 8, val);
+    case AttributeType::STRINGS: {
+      std::vector<const char*> string_ptrs;
+      string_ptrs.reserve(attr.strings_value.size());
+      for (const auto& str : attr.strings_value) {
+        string_ptrs.push_back(str.c_str());
       }
+      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), string_ptrs.data(),
+                                               static_cast<int>(string_ptrs.size()),
+                                               OrtOpAttrType::ORT_OP_ATTR_STRINGS, &op_attr));
       break;
+    }
   }
 
-  return result;
+  return op_attr;
 }
 
-// Build NodeProto
-std::vector<uint8_t> OneOpModelBuilder::BuildNodeProto(const OneOpModelConfig& config) {
-  std::vector<uint8_t> result;
-
-  // Field 1: input (repeated string)
-  for (const auto& input : config.inputs) {
-    EncodeString(result, 1, input.name);
+// Build complete ONNX model using the Model Editor API
+OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
+  // Ensure Ort::api is initialized (needed for testing)
+  if (Ort::api == nullptr) {
+    Ort::api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   }
 
-  // Field 2: output (repeated string)
-  for (const auto& output : config.outputs) {
-    EncodeString(result, 2, output.name);
+  const auto& model_editor_api = Ort::GetModelEditorApi();
+
+  OrtGraph* graph = nullptr;
+  OrtModel* model = nullptr;
+
+  try {
+    // Create graph
+    Ort::ThrowOnError(model_editor_api.CreateGraph(&graph));
+
+    // Create input ValueInfos
+    std::vector<OrtValueInfo*> graph_inputs;
+    for (const auto& input : config.inputs) {
+      OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+      Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
+      Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, input.elem_type));
+      Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, input.shape.data(), input.shape.size()));
+
+      OrtTypeInfo* type_info = nullptr;
+      Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
+      Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+
+      OrtValueInfo* value_info = nullptr;
+      Ort::ThrowOnError(model_editor_api.CreateValueInfo(input.name.c_str(), type_info, &value_info));
+      Ort::api->ReleaseTypeInfo(type_info);
+
+      graph_inputs.push_back(value_info);
+    }
+
+    // Create output ValueInfos
+    std::vector<OrtValueInfo*> graph_outputs;
+    for (const auto& output : config.outputs) {
+      OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+      Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
+      Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, output.elem_type));
+      Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, output.shape.data(), output.shape.size()));
+
+      OrtTypeInfo* type_info = nullptr;
+      Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
+      Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+
+      OrtValueInfo* value_info = nullptr;
+      Ort::ThrowOnError(model_editor_api.CreateValueInfo(output.name.c_str(), type_info, &value_info));
+      Ort::api->ReleaseTypeInfo(type_info);
+
+      graph_outputs.push_back(value_info);
+    }
+
+    // Set graph inputs and outputs (graph takes ownership of ValueInfos)
+    Ort::ThrowOnError(model_editor_api.SetGraphInputs(graph, graph_inputs.data(), graph_inputs.size()));
+    Ort::ThrowOnError(model_editor_api.SetGraphOutputs(graph, graph_outputs.data(), graph_outputs.size()));
+
+    // Create node attributes
+    std::vector<OrtOpAttr*> node_attributes;
+    for (const auto& attr : config.attributes) {
+      node_attributes.push_back(CreateOpAttr(attr));
+    }
+
+    // Create input/output name vectors
+    std::vector<const char*> input_names;
+    for (const auto& input : config.inputs) {
+      input_names.push_back(input.name.c_str());
+    }
+
+    std::vector<const char*> output_names;
+    for (const auto& output : config.outputs) {
+      output_names.push_back(output.name.c_str());
+    }
+
+    // Create node
+    OrtNode* node = nullptr;
+    Ort::ThrowOnError(model_editor_api.CreateNode(
+        config.op_type.c_str(),
+        "",  // empty domain = ONNX domain
+        (config.op_type + "_node").c_str(),
+        input_names.data(),
+        input_names.size(),
+        output_names.data(),
+        output_names.size(),
+        node_attributes.empty() ? nullptr : node_attributes.data(),
+        node_attributes.size(),
+        &node));
+
+    // Add node to graph (graph takes ownership of node)
+    Ort::ThrowOnError(model_editor_api.AddNodeToGraph(graph, node));
+
+    // Create model with opset
+    const char* domain_name = "";
+    Ort::ThrowOnError(model_editor_api.CreateModel(&domain_name, &config.opset_version, 1, &model));
+
+    // Add graph to model (model takes ownership of graph)
+    Ort::ThrowOnError(model_editor_api.AddGraphToModel(model, graph));
+    graph = nullptr;  // model now owns graph
+
+    return model;
+
+  } catch (...) {
+    // Clean up on error
+    if (graph != nullptr) {
+      Ort::api->ReleaseGraph(graph);
+    }
+    if (model != nullptr) {
+      Ort::api->ReleaseModel(model);
+    }
+    throw;
   }
-
-  // Field 4: op_type (string)
-  EncodeString(result, 4, config.op_type);
-
-  // Field 5: attribute (repeated AttributeProto)
-  for (const auto& attr : config.attributes) {
-    auto attr_proto = BuildAttributeProto(attr);
-    EncodeMessage(result, 5, attr_proto);
-  }
-
-  return result;
-}
-
-// Build TensorShapeProto
-std::vector<uint8_t> OneOpModelBuilder::BuildTensorShapeProto(const std::vector<int64_t>& shape) {
-  std::vector<uint8_t> result;
-
-  for (int64_t dim : shape) {
-    // TensorShapeProto::Dimension
-    std::vector<uint8_t> dim_proto;
-    EncodeInt64(dim_proto, 1, dim);  // dim_value
-
-    // Add dimension to shape
-    EncodeMessage(result, 1, dim_proto);  // Field 1: dim (repeated)
-  }
-
-  return result;
-}
-
-// Build ValueInfoProto
-std::vector<uint8_t> OneOpModelBuilder::BuildValueInfoProto(const TensorConfig& tensor) {
-  std::vector<uint8_t> result;
-
-  // Build TensorShapeProto
-  auto shape_proto = BuildTensorShapeProto(tensor.shape);
-
-  // Build TypeProto::Tensor
-  std::vector<uint8_t> tensor_type_proto;
-  EncodeInt64(tensor_type_proto, 1, static_cast<int64_t>(tensor.elem_type));  // elem_type
-  EncodeMessage(tensor_type_proto, 2, shape_proto);                           // shape
-
-  // Build TypeProto
-  std::vector<uint8_t> type_proto;
-  EncodeMessage(type_proto, 1, tensor_type_proto);  // tensor_type
-
-  // Build ValueInfoProto
-  EncodeString(result, 1, tensor.name);  // name
-  EncodeMessage(result, 2, type_proto);  // type
-
-  return result;
-}
-
-// Build OperatorSetIdProto
-std::vector<uint8_t> OneOpModelBuilder::BuildOpsetImport(int version) {
-  std::vector<uint8_t> result;
-  EncodeString(result, 1, "");      // domain (empty = default domain)
-  EncodeInt64(result, 2, version);  // version
-  return result;
-}
-
-// Build GraphProto
-std::vector<uint8_t> OneOpModelBuilder::BuildGraphProto(const OneOpModelConfig& config) {
-  std::vector<uint8_t> result;
-
-  // Field 1: node (repeated NodeProto)
-  auto node_proto = BuildNodeProto(config);
-  EncodeMessage(result, 1, node_proto);
-
-  // Field 2: name (string)
-  EncodeString(result, 2, config.op_type + "_model");
-
-  // Field 11: input (repeated ValueInfoProto)
-  for (const auto& input : config.inputs) {
-    auto value_info = BuildValueInfoProto(input);
-    EncodeMessage(result, 11, value_info);
-  }
-
-  // Field 12: output (repeated ValueInfoProto)
-  for (const auto& output : config.outputs) {
-    auto value_info = BuildValueInfoProto(output);
-    EncodeMessage(result, 12, value_info);
-  }
-
-  return result;
-}
-
-// Build complete ModelProto
-std::vector<uint8_t> OneOpModelBuilder::Build(const OneOpModelConfig& config) {
-  std::vector<uint8_t> result;
-
-  // Build components
-  auto opset_import = BuildOpsetImport(config.opset_version);
-  auto graph_proto = BuildGraphProto(config);
-
-  // ModelProto
-  EncodeInt64(result, 1, 8);               // ir_version = 8
-  EncodeMessage(result, 7, graph_proto);   // graph
-  EncodeMessage(result, 8, opset_import);  // opset_import
-
-  return result;
 }
 
 // Helper to create a Cast model
-std::vector<uint8_t> OneOpModelBuilder::CreateCastModel(
+OrtModel* OneOpModelBuilder::CreateCastModel(
     ONNXTensorElementDataType input_type,
     ONNXTensorElementDataType output_type) {
   OneOpModelConfig config("Cast");

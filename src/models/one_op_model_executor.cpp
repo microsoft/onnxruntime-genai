@@ -5,13 +5,16 @@
 #include "one_op_model_builder.h"
 #include "../generators.h"
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <cstring>
 
 namespace Generators {
 
-// Global cache for 1-op model sessions
-// Stored in OrtGlobals to ensure proper cleanup before OrtEnv destruction
+// Cache for 1-op model sessions
+// Uses a static cache to share sessions across all callers for efficiency since
+// session creation is expensive. Thread-safe via mutex.
 struct OneOpSessionCache {
   std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
   std::mutex mutex_;
@@ -116,7 +119,7 @@ uint64_t OneOpModelExecutor::GenerateCacheKey(
 
 // Create a new session for the given model and EP
 std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
-    const std::vector<uint8_t>& model_bytes,
+    OrtModel* model,
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
@@ -136,7 +139,12 @@ std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
     session_options->AppendExecutionProvider(ep_name.c_str(), nullptr, nullptr, 0);
   }
 
-  return OrtSession::Create(env, model_bytes.data(), model_bytes.size(), session_options.get());
+  // Create session from OrtModel using Model Editor API
+  const auto& model_editor_api = Ort::GetModelEditorApi();
+  OrtSession* session_ptr = nullptr;
+  Ort::ThrowOnError(model_editor_api.CreateSessionFromModel(&env, model, session_options.get(), &session_ptr));
+
+  return std::unique_ptr<OrtSession>(session_ptr);
 }
 
 // Get or create a cached session
@@ -155,9 +163,14 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
     return it->second.get();
   }
 
-  // Create new session
-  auto model_bytes = OneOpModelBuilder::Build(config);
-  auto session = CreateSession(model_bytes, ep_name, session_config_keys, session_config_values);
+  // Build model using Model Editor API
+  OrtModel* model = OneOpModelBuilder::Build(config);
+
+  // Create session from model
+  auto session = CreateSession(model, ep_name, session_config_keys, session_config_values);
+
+  // Release the model - session has its own copy
+  Ort::api->ReleaseModel(model);
 
   OrtSession* session_ptr = session.get();
   cache.sessions_[key] = std::move(session);

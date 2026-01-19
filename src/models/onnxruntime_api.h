@@ -124,6 +124,19 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
+/// <summary>
+/// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
+/// </summary>
+/// <returns>ORT C Model Editor API reference</returns>
+inline const OrtModelEditorApi& GetModelEditorApi() {
+  auto* model_editor_api = api->GetModelEditorApi();
+  if (model_editor_api == nullptr) {
+    // minimal build
+    throw std::runtime_error("Model Editor API is not available in this build");
+  }
+  return *model_editor_api;
+}
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
