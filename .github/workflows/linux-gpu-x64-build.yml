@@ -136,16 +136,16 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
 
-      - name: Build C/C++ examples with CMake in Docker
+      - name: Build the Java API and Run the Java Tests in Docker
         run: |
+          set -e -x
           docker run \
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake -S examples/c -B examples/c/build -G "Unix Makefiles" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build/Linux/Release && \
-              /usr/bin/cmake --build examples/c/build --config Release
+              ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja"
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |

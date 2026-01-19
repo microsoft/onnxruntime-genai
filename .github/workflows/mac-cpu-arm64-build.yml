@@ -108,10 +108,11 @@ jobs:
           cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
         continue-on-error: false
 
-      - name: Build C/C++ examples with CMake
+      - name: Build the Java API and Run the Java Tests
         run: |
-          cmake -S examples/c -B examples/c/build -G "Unix Makefiles" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build/cpu/osx-arm64/Release
-          cmake --build examples/c/build --config Release
+          set -e -x
+          source genai-macos-venv/bin/activate
+          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles" --macos MacOSX --osx_arch arm64 --apple_deploy_target 12.0 --apple_sysroot macosx
 
       - name: Install the Python wheel and test dependencies
         run: |
@@ -164,12 +165,6 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
           ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
-
-      - name: Build the Java API and Run the Java Tests
-        run: |
-          set -e -x
-          source genai-macos-venv/bin/activate
-          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles" --macos MacOSX --osx_arch arm64 --apple_deploy_target 12.0 --apple_sysroot macosx
 
       - name: Run tests
         run: |

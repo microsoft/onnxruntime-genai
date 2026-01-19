@@ -96,10 +96,10 @@ jobs:
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
-      - name: Build C/C++ examples with CMake
+      - name: Build the Java API and Run the Java Tests
         run: |
-          cmake -S examples/c -B examples/c/build -G "Unix Makefiles" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build/Linux/Release
-          cmake --build examples/c/build --config Release
+          set -e -x
+          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
 
       - name: Install the Python wheel and test dependencies
         run: |
@@ -143,11 +143,6 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
           ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
-
-      - name: Build the Java API and Run the Java Tests
-        run: |
-          set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
 
       - name: Run tests
         run: |

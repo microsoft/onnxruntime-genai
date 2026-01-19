@@ -87,10 +87,9 @@ jobs:
           cmake --build --preset windows_x64_cuda_release --parallel
           cmake --build --preset windows_x64_cuda_release --target PyPackageBuild
 
-      - name: Build C/C++ examples with CMake
+      - name: Build the Java API and Run the Java Tests
         run: |
-          cmake -S examples\c -B examples\c\build -G "Visual Studio 17 2022" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build\cuda\win-x64\Release\Relase
-          cmake --build examples\c\build --config Release
+          python3 build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
 
       - name: Add CUDA to PATH
         run: |
