@@ -104,7 +104,7 @@ jobs:
 
       - name: Build C/C++ examples with CMake
         run: |
-          cmake -S examples\c -B examples\c\build -G "Visual Studio 17 2022" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build\Release
+          cmake -S examples\c -B examples\c\build -G "Visual Studio 17 2022" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build\cpu\win-x64\Release\Release
           cmake --build examples\c\build --config Release
 
       - name: Install the Python wheel and test dependencies
