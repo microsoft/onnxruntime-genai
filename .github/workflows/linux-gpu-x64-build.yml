@@ -112,7 +112,7 @@ jobs:
             --multiple_repos \
             --repository onnxruntimecudabuildx64
 
-      - name: Config with Cmake in Docker
+      - name: Config with CMake in Docker
         run: |
           set -e -x
           docker run \
@@ -125,7 +125,7 @@ jobs:
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
 
-      - name: Build with Cmake in Docker
+      - name: Build with CMake in Docker
         run: |
           set -e -x
           docker run \
@@ -135,6 +135,17 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
+
+      - name: Build C/C++ examples with CMake in Docker
+        run: |
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake -S examples/c -B examples/c/build -G "Unix Makefiles" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build && \
+              /usr/bin/cmake --build examples/c/build --config Release
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |

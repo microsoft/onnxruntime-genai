@@ -108,7 +108,12 @@ jobs:
           cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
         continue-on-error: false
 
-      - name: Install the python wheel and test dependencies
+      - name: Build C/C++ examples with CMake
+        run: |
+          cmake -S examples/c -B examples/c/build -G "Unix Makefiles" -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_VISION=ON -DPHI4-MM=ON -DWHISPER=ON -DORT_GENAI_INCLUDE_DIR=src -DORT_GENAI_LIB_DIR=build
+          cmake --build examples/c/build --config Release
+
+      - name: Install the Python wheel and test dependencies
         run: |
           python3 -m venv genai-macos-venv
           source genai-macos-venv/bin/activate
@@ -130,7 +135,7 @@ jobs:
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
-      - name: Run the python tests
+      - name: Run the Python tests
         run: |
           source genai-macos-venv/bin/activate
           export HF_TOKEN="12345"
@@ -155,6 +160,7 @@ jobs:
           dotnet build -c Release
 
       - name: Test the C# LLM Example with Tool Calling
+        run: |
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
           ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
