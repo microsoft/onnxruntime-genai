@@ -102,16 +102,16 @@ jobs:
           cmake --build --preset windows_x64_cpu_release --parallel
           cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
 
-      - name: Build the Java API and Run the Java Tests
-        run: |
-          python3 build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
-
       - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test\python\requirements.txt --user
           python3 -m pip install -r test\python\cpu\torch\requirements.txt --user
           python3 -m pip install -r test\python\cpu\ort\requirements.txt --user
           python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python3 build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
 
       - name: Run the Python Tests
         run: |

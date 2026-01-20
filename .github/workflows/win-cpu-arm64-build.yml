@@ -89,10 +89,6 @@ jobs:
           cmake --build --preset windows_arm64_cpu_release --parallel
           cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
 
-      - name: Build the Java API and Run the Java Tests
-        run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
-
       - name: Install the Python Wheel and Test Dependencies
         run: |
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
@@ -100,6 +96,10 @@ jobs:
           python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
           python -m pip install onnxruntime-qnn
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
 
       - name: Run the Python Tests
         run: |

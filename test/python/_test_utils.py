@@ -141,11 +141,15 @@ def download_models(download_path, precision, device, log):
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer) in ci_paths.items():
-        output_path = os.path.join(download_path, model_name, precision, device)
-        log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
-        if not os.path.exists(output_path):
-            download_model(None, input_path, output_path, precision, device, one_layer)
-            output_paths.append(output_path)
+        try:
+            output_path = os.path.join(download_path, model_name, precision, device)
+            log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
+            if not os.path.exists(output_path):
+                download_model(None, input_path, output_path, precision, device, one_layer)
+                output_paths.append(output_path)
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping CI model.")
+            continue
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, (hf_name, one_layer) in hf_paths.items():

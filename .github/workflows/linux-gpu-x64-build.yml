@@ -143,11 +143,13 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 \
-            bash -c " \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja"
 
-      - name: Install the onnxruntime-genai Python wheel and run python test
+      - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
           docker run \

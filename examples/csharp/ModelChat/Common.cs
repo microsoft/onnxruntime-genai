@@ -359,7 +359,7 @@ namespace ModelChat
             string response_format = "",
             string filepath = "",
             string tools_str = "",
-            List<object> tools = null,
+            List<object>? tools = null,
             bool text_output = true,
             bool tool_output = false,
             string tool_call_start = "",

@@ -96,11 +96,6 @@ jobs:
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
-      - name: Build the Java API and Run the Java Tests
-        run: |
-          set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
-
       - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
@@ -114,6 +109,11 @@ jobs:
         run: |
           ls -l ${{ github.workspace }}/build/cpu
           ls -l ${{ github.workspace }}/build/cpu/wheel
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          set -e -x
+          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
