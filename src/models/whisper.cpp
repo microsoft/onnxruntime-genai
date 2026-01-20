@@ -7,14 +7,10 @@ namespace Generators {
 
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  // If provider options were explicitly added for the encoder, create session options from this config.
-  if (!config_->model.encoder.session_options.provider_options.empty()) {
-    encoder_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options, *encoder_session_options_, true, false);
-  }
+  encoder_session_options_ = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true, false);
 
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename,
-                                   encoder_session_options_ ? encoder_session_options_.get() : session_options_.get());
+  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*session_decoder_);
@@ -48,6 +44,9 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 }
 
 DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_encoder_);
   return {};
 }
@@ -55,10 +54,11 @@ DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
     : State{params, model},
       model_{model},
+      kv_cache_(CreateKeyValueCache(*this)),
       num_frames_{num_frames} {
   input_ids_.Add();
   logits_.Add();
-  kv_cache_.Add();
+  kv_cache_->Add();
 
   // Add past sequence length
   if (HasPastSequenceLengthInput()) {
@@ -95,7 +95,10 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
     output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, current_length, num_frames_ / 2};
     output_cross_qk_index_ = outputs_.size();
 
-    for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
+    int num_hidden_layers = model_.config_->model.decoder.num_hidden_layers;
+    output_cross_qk_names_.reserve(num_hidden_layers);
+    output_cross_qk_.reserve(num_hidden_layers);
+    for (int i = 0; i < num_hidden_layers; i++) {
       output_cross_qk_.emplace_back(OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), output_cross_qk_shape_, output_cross_qk_type_));
       output_cross_qk_names_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, i));
 
@@ -104,6 +107,9 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
     }
   }
 
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
@@ -112,7 +118,7 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
   input_ids_.Update(next_tokens);
-  kv_cache_.Update(beam_indices, current_length);
+  kv_cache_->Update(beam_indices, current_length);
   logits_.Update(next_tokens, first_run_ ? current_length : new_length);
 
   // Return early if this method is just initializing the above OrtValue objects and not updating them
@@ -166,16 +172,23 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
     : State{params, model},
       model_{model} {
   encoder_state_ = std::make_unique<AudioEncoderState>(model, params);
-  cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
-  encoder_state_->AddCrossCache(cross_cache_);
   decoder_state_ = std::make_unique<WhisperDecoderState>(model, params, encoder_state_->GetNumFrames());
-  decoder_state_->AddCrossCache(cross_cache_);
 
-  transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
+  if (encoder_state_->HasCrossKVCacheOutputs()) {
+    cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
+    encoder_state_->AddCrossCache(cross_cache_);
+    decoder_state_->AddCrossCache(cross_cache_);
+    transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
+  }
 }
 
 void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   encoder_state_->SetExtraInputs(extra_inputs);
+
+  if (!encoder_state_->HasCrossKVCacheOutputs()) {
+    decoder_state_->inputs_.push_back(encoder_state_->hidden_states_.get());
+    decoder_state_->input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
+  }
 
   // Check if alignment heads input exists
   void* alignment_heads_input = nullptr;
@@ -332,7 +345,12 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     // Transpose the K caches only when the else branch is run for the first time.
     // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
     TransposeKCaches(cross_cache_->GetValues());
-    TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
+
+    auto default_kv_cache_ptr = dynamic_cast<DefaultKeyValueCache*>(decoder_state_->kv_cache_.get());
+    if (!default_kv_cache_ptr) {
+      throw std::runtime_error("Unable to convert KeyValueCache to DefaultKeyValueCache");
+    }
+    TransposeKCaches(default_kv_cache_ptr->GetPresents());
   }
 
   // Update inputs and outputs for decoder

@@ -97,6 +97,9 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;
 
+  // Support for per-layer KV cache shapes (for models with alternating attention patterns)
+  std::vector<std::array<int64_t, 4>> layer_shapes_;
+
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;

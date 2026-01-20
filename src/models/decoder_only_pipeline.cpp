@@ -72,6 +72,10 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
         OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
                            model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
+
+  if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.pipeline[id_].run_options.value());
+  }
   State::Run(*model_.sessions_[id_]);
   return {};
 }
@@ -108,8 +112,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : State{params, model},
-      model_{model},
       input_ids_{CreateInputIDs(*this)},
+      model_{model},
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
@@ -345,6 +349,9 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
+  // first_run_ should be thought of as prompt_processing_run_.
+  // It is true only for the prompt processing part when the provided tokens are more than 1.
+  first_run_ = next_tokens.size() > 1;
   size_t num_chunks{1};
   if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
     int window_size = model_.config_->model.decoder.sliding_window->window_size;

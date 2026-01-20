@@ -4,6 +4,7 @@
 #include <cstring>  // for memcmp
 #include <iostream>
 #include <random>
+#include <filesystem>
 #include <gtest/gtest.h>
 
 #include "span.h"
@@ -79,8 +80,11 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -120,8 +124,11 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -154,8 +161,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -176,8 +186,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -188,8 +201,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator->RewindTo(3);
   std::vector<int32_t> next_ids{731, 731};
   generator->AppendTokens(next_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -231,8 +247,11 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -248,6 +267,110 @@ TEST(ModelTests, BeamSearchGptCuda) {
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
 #endif
+
+// NvTensorRT test cases using Phi3 models
+static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
+    {MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt", "fp16"},
+};
+
+void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "NvTensorRT model not available at: " << model_path;
+  }
+  const std::vector<int64_t> input_ids_shape{1, 19};
+  const std::vector<int32_t> input_ids{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+
+  // Complete expected sequence (input + generated) from model_qa.cpp using the working phi3-fp16-nvtrt model
+  const std::vector<int32_t> expected_output{
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+      15043, 29991, 306, 29915, 29885, 2599};
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+  auto model = OgaModel::Create(*config);
+
+  constexpr int max_length = 25;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  while (true) {
+    generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[i * max_length];
+
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+  }
+}
+
+TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
+  for (auto model_path : c_phi3_nvtrt_model_paths)
+    Test_GreedySearch_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
+}
+
+void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "NvTensorRT model not available at: " << model_path;
+  }
+
+  const std::vector<int64_t> input_ids_shape{1, 19};
+  const std::vector<int32_t> input_ids{
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889,
+      32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+
+  // Expected output sequence (input + generated tokens) for validation with greedy search
+  const std::vector<int32_t> expected_output{
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+      15043, 1554, 13, 16271, 29892, 8733};
+
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+  auto model = OgaModel::Create(*config);
+
+  constexpr int max_length = 25;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+  params->SetSearchOptionBool("past_present_share_buffer", false);
+  params->SetSearchOptionBool("do_sample", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  while (true) {
+    generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
+  }
+
+  auto sequence = generator->GetSequence(0);
+
+  // Verify output matches expected output
+  EXPECT_EQ(sequence.size(), expected_output.size());
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence.data(),
+                               expected_output.size() * sizeof(int32_t)));
+}
+
+TEST(ModelTests, OutOfPlaceKvCachePhi3NvTensorRtRtx) {
+  for (auto model_path : c_phi3_nvtrt_model_paths)
+    Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
+}
 
 #if TEST_PHI2 && (USE_CUDA || USE_DML)
 TEST(ModelTests, TestApiDevice) {
@@ -271,8 +394,11 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   auto result = generator->GetSequence(0);
@@ -302,8 +428,11 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   auto result = generator->GetSequence(0);

@@ -80,6 +80,10 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
 
+    # Suppress warning C4819: file contains character that cannot be represented in current code page
+    "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
+
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
     "$<$<COMPILE_LANGUAGE:C>:/W4>"
@@ -265,6 +269,11 @@ if(ANDROID)
   # strip the binary if it's not a build with debug info
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
+
+  # Build shared libraries with support for 16 KB page size on Android
+  # https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 endif()
 
 if(ENABLE_TESTS)

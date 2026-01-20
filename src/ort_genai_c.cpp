@@ -395,9 +395,9 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGen
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
   OGA_TRY
-  params->SetGuidance(type, data);
+  params->SetGuidance(type, data, enable_ff_tokens);
   return nullptr;
   OGA_CATCH
 }
@@ -409,7 +409,7 @@ OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* p
   OGA_CATCH
 }
 
-bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
+bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();
 }
 
@@ -577,6 +577,46 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_TRY
   auto tokenizer = model->CreateTokenizer();
   *out = ReturnShared<OgaTokenizer>(tokenizer);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
+    size_t num_options) {
+  OGA_TRY
+
+  if (!tokenizer)
+    throw std::runtime_error("Tokenizer pointer is null");
+
+  tokenizer->UpdateOptions(keys, values, num_options);
+
+  return nullptr;
+
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBosTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count) {
+  OGA_TRY
+  auto& eos_ids = tokenizer->GetEosTokenIds();
+  *eos_token_ids = eos_ids.data();
+  *token_count = eos_ids.size();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetPadTokenId();
   return nullptr;
   OGA_CATCH
 }

@@ -38,6 +38,7 @@ struct Config {
     // Vision encoder names
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
@@ -81,25 +82,22 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
-    std::optional<bool> disable_cpu_ep_fallback;
-    std::optional<bool> disable_quant_qdq;
-    std::optional<bool> enable_quant_qdq_cleanup;
-    std::optional<bool> ep_context_enable;
-    std::optional<std::string> ep_context_embed_mode;
-    std::optional<std::string> ep_context_file_path;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
+    std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
+
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
-    bool use_env_allocators{};
-    std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
+    std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
     std::vector<ProviderOptions> provider_options;
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
-    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
+
+  using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
 
   struct Model {
     std::string type;
@@ -109,12 +107,19 @@ struct Config {
     int bos_token_id{};             // The id of the beginning-of-stream token.
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+
+    // Qwen2.5-VL specific token IDs
+    int image_token_id{};
+    int video_token_id{};
+    int vision_start_token_id{};
+
     int vocab_size{};
     int context_length{};
 
     struct Encoder {
       std::string filename;
-      SessionOptions session_options;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
 
       int hidden_size{};
       int num_attention_heads{};
@@ -139,6 +144,8 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -153,12 +160,32 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      // Qwen2.5-VL specific vision config values
+      int spatial_merge_size{2};
+      float tokens_per_second{2.0f};
+
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
+
+      // Vision pipeline support (patch embed -> vision attn -> patch merger)
+      struct PipelineModel {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
+        std::string model_id;              // Identifier used to link outputs to subsequent stages
+        std::vector<std::string> inputs;   // Graph input names
+        std::vector<std::string> outputs;  // Graph output names
+        bool run_on_cpu{false};            // If true force CPU EP when multiple EPs are configured
+      };
+      std::vector<PipelineModel> pipeline;  // Ordered pipeline models
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
@@ -169,6 +196,9 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
@@ -187,6 +217,7 @@ struct Config {
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
+      std::optional<RunOptions> run_options;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -200,6 +231,7 @@ struct Config {
         std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
         bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
+        std::vector<int> layers;           // Layer indices that use sliding window attention (for models with alternating patterns)
       };
       std::optional<SlidingWindow> sliding_window;
 
@@ -235,10 +267,11 @@ struct Config {
       } outputs;
 
       struct PipelineModel {
-        std::string model_id;
         std::string filename;
         std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
 
+        std::string model_id;
         std::vector<std::string> inputs;
         std::vector<std::string> outputs;
         std::unordered_map<std::string, std::string> output_names_forwarder;
@@ -274,6 +307,7 @@ struct Config {
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
+    std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
   } search;
 
   struct Engine {

@@ -420,9 +420,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
  * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
  * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -444,7 +445,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \param[in] generator The generator to check if it is done with generating all sequences.
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
-OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
@@ -571,6 +572,58 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaMultiModalProcessor** out);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
+
+/**
+ * Updates tokenizer options for the given OgaTokenizer instance.
+ * The provided keys and values must be null-terminated UTF-8 strings.
+ *
+ * This function allows updating tokenizer behavior at runtime by passing
+ * key/value string pairs. Each key corresponds to a configurable tokenizer
+ * option. Both keys and values must remain valid for the duration of this call.
+ *
+ * @param tokenizer Pointer to the OgaTokenizer whose options will be updated.
+ * @param keys Array of option key strings.
+ * @param values Array of corresponding option value strings (same length as keys).
+ * @param num_options Number of key/value pairs provided.
+ *
+ * @return nullptr on success, or an OgaResult* describing the error.
+ *         The returned OgaResult* (if not null) must be freed with OgaDestroyResult.
+ *
+ * Supported options:
+ *
+ * - `add_special_tokens`
+ *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * - `skip_special_tokens`
+ *   - Purpose: Controls whether to remove special tokens during detokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"true"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * Future tokenizer options may be added without changing this API signature.
+ * Passing unknown keys will result in an error.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
+    size_t num_options);
+
+/**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * Return an array containing the int representations of the EOS tokens. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
+
+/**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences

@@ -23,6 +23,10 @@ public class TestUtils {
     return getFilePathFromDisk(getTestResourcePath("hf-internal-testing/tiny-random-gpt2-fp32"));
   }
 
+  public static final String phi2ModelPath() {
+    return getFilePathFromDisk(getTestResourcePath("phi-2/int4/cpu"));
+  }
+
   public static final String testVisionModelPath() {
     return getFilePathFromDisk(getTestResourcePath("vision-preprocessing"));
   }

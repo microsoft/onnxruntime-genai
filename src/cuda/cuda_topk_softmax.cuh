@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cub/cub.cuh>
 #include <limits>
+#include <cuda_runtime.h>
 
 #include "cuda_topk.h"
 
@@ -43,7 +44,12 @@ __global__ void CopyAndSoftmaxKernel(int* final_indices, float* final_scores, co
   float thread_exp = (threadIdx.x < k) ? expf(thread_score - block_max_val) : 0.0f;
 
   // CUB reduces the contributions, placing the result in thread 0.
+#if CUDART_VERSION >= 12090
+  float sum_exp_reduced = BlockReduce(temp_storage).Reduce(thread_exp, ::cuda::std::plus());
+#else
   float sum_exp_reduced = BlockReduce(temp_storage).Reduce(thread_exp, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) {
     block_sum_exp = sum_exp_reduced;
   }
@@ -87,7 +93,12 @@ __global__ void ProcessSortedTopK(float* final_scores, int* final_indices, const
     thread_sum_exp += expf((batch_scores[i] / temperature) - max_val);
   }
 
+#if CUDART_VERSION >= 12090
+  float sum_exp_reduced = BlockReduce(temp_storage).Reduce(thread_sum_exp, ::cuda::std::plus());
+#else
   float sum_exp_reduced = BlockReduce(temp_storage).Reduce(thread_sum_exp, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) {
     sum_exp = sum_exp_reduced;
   }

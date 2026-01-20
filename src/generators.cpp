@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
 #include "sequences.h"
@@ -15,6 +17,7 @@
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
+#include "ryzenai/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -55,7 +58,9 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
-  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  const char* keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk"};
+  const size_t values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
+  auto arena_config = OrtArenaCfg::Create(keys, values, 4);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 
@@ -92,6 +97,8 @@ void Shutdown() {
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
+
+  RyzenAIInterface::Shutdown();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -136,6 +143,8 @@ struct GenaiInterfaceImpl : GenaiInterface {
 struct LibraryHandle {
   LibraryHandle(const char* filename) {
     auto path = CurrentModulePath() + filename;
+    if (!fs::path(path).exists())
+      path = filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
       throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));
@@ -220,6 +229,8 @@ std::string to_string(DeviceType device_type) {
       return "OpenVINO";
     case DeviceType::NvTensorRtRtx:
       return "NvTensorRtRtx";
+    case DeviceType::RyzenAI:
+      return "RyzenAI";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -243,6 +254,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetQNNInterface();
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
+    case DeviceType::RyzenAI:
+      return GetRyzenAIInterface();
   }
 }
 
@@ -261,9 +274,18 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens = false) {
   guidance_type = type;
   guidance_data = data;
+  guidance_ff_tokens_enabled = enable_ff_tokens;
+}
+
+bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
+  // past_present_share_buffer is only actually enabled when:
+  // 1. The config option is set to true, AND
+  // 2. Either num_beams == 1 OR the model is Whisper
+  return search.past_present_share_buffer &&
+         (search.num_beams == 1 || model_type == "whisper");
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -328,7 +350,16 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  constexpr std::array<DeviceType, 5> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU, DeviceType::OpenVINO, DeviceType::NvTensorRtRtx};
+  // Some models fallback to CPU for the attention operator (for example, some decoder-pipeline NPU models).
+  // Continuous decoding is supported for this case as the kv cache for such models is always on CPU.
+  constexpr std::array<DeviceType, 6> devices_supporting_continuous_decoding{
+      DeviceType::CPU,
+      DeviceType::CUDA,
+      DeviceType::WEBGPU,
+      DeviceType::OpenVINO,
+      DeviceType::NvTensorRtRtx,
+      DeviceType::RyzenAI};
+
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
                    [this](DeviceType device_type) { return device_type == state_->model_.p_device_kvcache_->GetType(); }))
@@ -340,10 +371,6 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
     set_extra_inputs_ = false;
-  }
-
-  if (last_action_ == Action::generated) {
-    ComputeLogits(search_->GetNextTokens());
   }
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
@@ -385,10 +412,12 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
+
   if (last_action_ == Action::generated && guidance_logits_processor_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
+
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -396,28 +425,36 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
+
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    if (!ff_tokens.empty()) {
+      // process fast-forward tokens
+      std::span<int32_t> forced_tokens_span{ff_tokens};
+      auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
+      search_->AppendTokens(forced_tokens);
+
+      std::span<int32_t> new_next_token_span{ff_tokens};
+      auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
+      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      if (g_log.enabled && g_log.model_logits) {
+        auto& stream_ = Log("model_logits");
+        DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
+        stream_ << std::endl;
+      }
+      SetLogits(logits);
+    }
+  }
+
   last_action_ = Action::standard;
   computed_logits_ = true;
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
-  // TODO: Need a better way to handle different keys
-  // We can create a config manager to host all configurations and do comparison at that point
-  if (strcmp(key, "terminate_session") == 0) {
-    if (strcmp(value, "0") == 0) {
-      state_->UnsetTerminate();
-    } else if (strcmp(value, "1") == 0) {
-      state_->SetTerminate();
-    } else {
-      // Value not expected
-      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
-    }
-  } else {
-    throw std::runtime_error(std::string("SetRuntimeOption key is not expected: ") + key);
-  }
+  state_->SetRunOption(key, value);
 }
 
-bool Generator::IsDone() const {
+bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -426,6 +463,10 @@ bool Generator::IsDone() const {
   bool is_done = search_->IsDone();
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
   }
 
   return is_done;
@@ -445,7 +486,7 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
-    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
   // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
   // TODO: change this when these EPs support multi rope factors

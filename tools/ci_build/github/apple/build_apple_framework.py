@@ -175,7 +175,7 @@ def _build_package(args):
         )
 
         if args.ort_home:
-            base_build_command += ['--ort_home', args.ort_home]
+            base_build_command += ["--ort_home", args.ort_home]
 
         if args.include_ops_by_config is not None:
             base_build_command += ["--include_ops_by_config=" + str(args.include_ops_by_config.resolve())]

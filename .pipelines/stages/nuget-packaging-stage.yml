@@ -113,6 +113,7 @@ stages:
           build_config: ${{ parameters.build_config }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}
     - ${{ if eq(parameters.enable_win_qnn, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:

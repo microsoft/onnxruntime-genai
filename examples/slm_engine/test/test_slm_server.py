@@ -2,6 +2,7 @@
 
 import argparse
 import json
+
 import requests
 
 BLUE = "\033[34m"
@@ -33,11 +34,9 @@ def launch_server(server_binary: str, model_path: str):
             response = requests.get(url)
             json_response = json.loads(response.text)
             if json_response["response"]["status"] == "success":
-                print(
-                    f"{MAGENTA}Engine State: {json_response['response']['engine_state']}{CLEAR}"
-                )
+                print(f"{MAGENTA}Engine State: {json_response['response']['engine_state']}{CLEAR}")
                 started = True
-        except Exception as ex:
+        except Exception:
             # Initially the server may not be ready to accept requests
             # We want to ignore and retry
             pass  # Ignore all exceptions
@@ -55,7 +54,6 @@ def launch_server(server_binary: str, model_path: str):
 
 # This function tests the OpenAI API Interface
 def run_test(url: str):
-
     # Test the API
     print("Testing the API with a test message")
     test_message = """

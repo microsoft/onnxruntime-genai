@@ -166,8 +166,11 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+  cudaStreamSynchronize(GetStream());
+  if (!*done_cpu_) {
+    cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+  }
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)

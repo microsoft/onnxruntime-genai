@@ -168,10 +168,14 @@ do
     using var generator = new Generator(model, generatorParams);
     generator.SetInputs(inputTensors);
     var watch = System.Diagnostics.Stopwatch.StartNew();
-    while (!generator.IsDone())
+    while (true)
     {
         generator.GenerateNextToken();
-        Console.Write(stream.Decode(generator.GetSequence(0)[^1]));
+        if (generator.IsDone())
+        {
+            break;
+        }
+        Console.Write(stream.Decode(generator.GetNextTokens()[0]));
     }
     watch.Stop();
     var runTimeInSeconds = watch.Elapsed.TotalSeconds;

@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include <numeric>
 
 namespace Generators {
 
@@ -63,21 +64,21 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     : Model(std::move(config)) {
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
-    auto vision_session_options = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options.get());
+    vision_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, true);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
   }
 
   if (speech) {
-    auto speech_session_options = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *speech_session_options, true, true);
-    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options.get());
+    speech_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, true);
+    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
   }
 
-  auto embedding_session_options = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *embedding_session_options, true, true);
+  embedding_session_options_ = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, true);
 
-  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options.get());
+  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*decoder_session_);
@@ -110,6 +111,9 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.vision.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.vision.run_options.value());
+  }
   State::Run(*model_.vision_session_);
   return {};
 }
@@ -129,6 +133,9 @@ void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
 }
 
 DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.speech.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.speech.run_options.value());
+  }
   State::Run(*model_.speech_session_);
   return {};
 }
@@ -165,6 +172,9 @@ void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool 
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.embedding.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.embedding.run_options.value());
+  }
   State::Run(*model_.embedding_session_);
   return {};
 }
@@ -172,14 +182,18 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{model, *this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   inputs_embeds_.Add();
-  position_inputs_.Add();
+  position_inputs_->Add();
   logits_.Add();
   kv_cache_.Add();
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+
   bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
   State::Run(*model_.decoder_session_, graph_capture_this_run);
   return logits_.Get();
@@ -188,7 +202,14 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
-  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
+  position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
+  kv_cache_.Update(beam_indices, total_length);
+  logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
+}
+
+// Overload for pipeline to call
+void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
@@ -230,6 +251,24 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
+  // Set the grid tensors for Qwen2-VL if present
+  if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
+    std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
+
+    for (const auto& input : extra_inputs) {
+      if (input.name == Config::Defaults::ImageGridThwName) {
+        img_grid = input.tensor;
+      } else if (input.name == "video_grid_thw") {
+        vid_grid = input.tensor;
+      } else if (input.name == "second_per_grid_ts") {
+        sec_grid = input.tensor;
+      }
+    }
+
+    if (img_grid || vid_grid) {
+      qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
+    }
+  }
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -253,7 +292,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (num_audio_tokens_ > 0 && speech_state_) {
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
-    if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
+    if (vision_state_) {
+      embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
+    }
     if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);

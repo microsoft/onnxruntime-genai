@@ -116,7 +116,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val += expf(temp_scaled_logits[i] - block_max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  float reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::std::plus());
+#else
   float reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) block_sum_exp = reduced_sum;
   __syncthreads();
 
@@ -157,7 +163,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val = max(thread_val, filtered_logits[i]);
   }
+
+#if CUDART_VERSION >= 12090
+  float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::maximum());
+#else
   float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Max());
+#endif
+
   if (threadIdx.x == 0) block_max_val = reduced_max;
   __syncthreads();
 
@@ -165,7 +177,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val += expf(filtered_logits[i] - block_max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::std::plus());
+#else
   reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) block_sum_exp = reduced_sum;
   __syncthreads();
 
@@ -375,7 +393,13 @@ __global__ void BlockwiseSoftmaxKernel(float* output, const float* input, int so
   for (int i = threadIdx.x; i < softmax_elements; i += kBlockSize) {
     thread_max = max(thread_max, batch_input[i]);
   }
+
+#if CUDART_VERSION >= 12090
+  float block_max = BlockReduce(temp_storage).Reduce(thread_max, ::cuda::maximum());
+#else
   float block_max = BlockReduce(temp_storage).Reduce(thread_max, cub::Max());
+#endif
+
   if (threadIdx.x == 0) {
     max_val = block_max;
   }
@@ -386,7 +410,13 @@ __global__ void BlockwiseSoftmaxKernel(float* output, const float* input, int so
   for (int i = threadIdx.x; i < softmax_elements; i += kBlockSize) {
     thread_sum_exp += expf(batch_input[i] - max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  float block_sum = BlockReduce(temp_storage).Reduce(thread_sum_exp, ::cuda::std::plus());
+#else
   float block_sum = BlockReduce(temp_storage).Reduce(thread_sum_exp, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) {
     sum_exp = block_sum;
   }

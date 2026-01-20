@@ -74,6 +74,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   for (int i = 0; i < params_->search.batch_size; i++) {
     LlgConstraintInit constraint_init;
     llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
+    constraint_init.ff_tokens_ok = params_->guidance_ff_tokens_enabled && params_->search.batch_size == 1 && params_->search.num_beams == 1;
     LlgConstraint* constraint_ptr = nullptr;
     if (params_->guidance_type == "json_schema") {
       constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
@@ -88,6 +89,8 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       throw std::runtime_error("Error creating grammar: " + error_message);
     }
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
+    // create ff_tokens buffer for each batch item
+    ff_tokens_batch_.push_back(std::vector<int32_t>());
   }
 
   // Compute the mask asynchronously to avoid blocking the model inference on device
@@ -129,6 +132,17 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
   return masks;
 }
 
+std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
+  if (index >= ff_tokens_batch_.size()) {
+    // in case guidance is not being used, return empty vector
+    return std::vector<int32_t>();
+  }
+
+  auto v = std::vector<int32_t>(ff_tokens_batch_[index]);
+  ff_tokens_batch_[index].clear();
+  return v;
+}
+
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
   for (int i = 0; i < params_->search.batch_size; i++) {
     LlgCommitResult commit_result;
@@ -136,6 +150,13 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
     if (error != 0) {
       std::string error_message = llg_get_error(llg_constraints_[i].get());
       throw std::runtime_error("Error committing tokens: " + error_message);
+    }
+
+    auto& ff_tokens = ff_tokens_batch_[i];
+    ff_tokens.clear();
+    // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
+    for (size_t j = 1; j < commit_result.n_tokens; j++) {
+      ff_tokens.push_back((int32_t)commit_result.tokens[j]);
     }
   }
   mask_future_ = std::async(std::launch::async, [&]() {
@@ -207,6 +228,9 @@ void GuidanceLogitsProcessor::ResetWithoutCompute() {
       throw std::runtime_error("Error creating grammar: " + error_message);
     }
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
+  }
+  for (int i = 0; i < ff_tokens_batch_.size(); i++) {
+    ff_tokens_batch_[i].clear();
   }
 }
 

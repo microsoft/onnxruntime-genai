@@ -305,6 +305,40 @@ struct OgaTokenizer : OgaAbstract {
     return std::unique_ptr<OgaTokenizer>(p);
   }
 
+  void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
+    OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
+  }
+
+  int32_t GetBosTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBosTokenId(this, &token_id));
+    return token_id;
+  }
+
+#if OGA_USE_SPAN
+  std::span<const int32_t> GetEosTokenIds() const {
+    const int32_t* eos_ids;
+    size_t count;
+    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids, &count));
+    return {eos_ids, count};
+  }
+#else
+  std::vector<int32_t> GetEosTokenIds() const {
+    std::vector<int32_t> eos_ids;
+    const int32_t* eos_ids_ptr;
+    size_t count;
+    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids_ptr, &count));
+    eos_ids.assign(eos_ids_ptr, eos_ids_ptr + count);
+    return eos_ids;
+  }
+#endif
+
+  int32_t GetPadTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetPadTokenId(this, &token_id));
+    return token_id;
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
@@ -396,8 +430,8 @@ struct OgaGeneratorParams : OgaAbstract {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
 
-  void SetGuidance(const char* type, const char* data) {
-    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
+  void SetGuidance(const char* type, const char* data, bool enable_ff_tokens = false) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
@@ -410,7 +444,7 @@ struct OgaGenerator : OgaAbstract {
     return std::unique_ptr<OgaGenerator>(p);
   }
 
-  bool IsDone() const {
+  bool IsDone() {
     return OgaGenerator_IsDone(this);
   }
 

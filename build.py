@@ -11,13 +11,11 @@ import shlex
 import shutil
 import sys
 import textwrap
-
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
 import util  # ./tools/python/util noqa: E402
-
 
 log = util.get_logger("build.py")
 
@@ -62,7 +60,7 @@ def _parse_args():
         type=Path,
         # We set the default programmatically as it needs to take into account whether we're cross-compiling
         help="Path to the build directory. Defaults to 'build/<target platform>'. "
-             "The build configuration will be a subdirectory of the build directory. e.g. build/Linux/Debug",
+        "The build configuration will be a subdirectory of the build directory. e.g. build/Linux/Debug",
     )
 
     parser.add_argument(
@@ -70,13 +68,14 @@ def _parse_args():
         default="RelWithDebInfo",
         type=str,
         choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
-        help="Configuration to build.")
+        help="Configuration to build.",
+    )
 
     # Build phases.
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
-    parser.add_argument("--package", action="store_true", help="Package the build.") # Does not override other phases.
+    parser.add_argument("--package", action="store_true", help="Package the build.")  # Does not override other phases.
     parser.add_argument(
         "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
@@ -87,7 +86,11 @@ def _parse_args():
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
-    parser.add_argument("--publish_java_maven_local", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
+    parser.add_argument(
+        "--publish_java_maven_local",
+        action="store_true",
+        help="Publish Java bindings to local Maven repository after tests.",
+    )
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
@@ -123,17 +126,21 @@ def _parse_args():
         "--cuda_home",
         type=Path,
         help="Path to CUDA home. Read from CUDA_HOME or CUDA_PATH environment variable if not specified."
-             "Used when --use_cuda is specified.",
+        "Used when --use_cuda is specified.",
     )
 
-    parser.add_argument("--use_trt_rtx", action="store_true", help="Whether to use TensorRT-RTX. Default is to not use TensorRT-RTX.")
+    parser.add_argument(
+        "--use_trt_rtx", action="store_true", help="Whether to use TensorRT-RTX. Default is to not use TensorRT-RTX."
+    )
 
     parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
-    parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
-    
+    parser.add_argument(
+        "--use_guidance", action="store_true", help="Whether to add guidance support. Default is False."
+    )
+
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -151,8 +158,9 @@ def _parse_args():
         choices=["armeabi-v7a", "arm64-v8a", "x86", "x86_64"],
         help="Specify the target Android Application Binary Interface (ABI)",
     )
-    parser.add_argument("--android_api", type=int, default=27,
-                        help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
+    parser.add_argument(
+        "--android_api", type=int, default=27, help="Android API Level. Default is 27 (Android 8.1, released in 2017)."
+    )
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
@@ -162,9 +170,12 @@ def _parse_args():
         default=_path_from_env_var("ANDROID_NDK_HOME"),
         help="Path to the Android NDK. Typically `<Android SDK>/ndk/<ndk_version>`.",
     )
-    parser.add_argument("--android_run_emulator", action="store_true",
-                        help="Create/start an Android emulator to run the test application. "
-                             "Requires --android, --build_java and --android_abi=x86_64.")
+    parser.add_argument(
+        "--android_run_emulator",
+        action="store_true",
+        help="Create/start an Android emulator to run the test application. "
+        "Requires --android, --build_java and --android_abi=x86_64.",
+    )
 
     # iOS build options
     parser.add_argument(
@@ -175,14 +186,12 @@ def _parse_args():
     parser.add_argument(
         "--osx_arch",
         type=str,
-        help="Specify the Target specific architectures for iOS "
-        "This is only supported on MacOS host",
+        help="Specify the Target specific architectures for iOS This is only supported on MacOS host",
     )
     parser.add_argument(
         "--apple_deploy_target",
         type=str,
-        help="Specify the minimum version of the target platform "
-        "This is only supported on MacOS host",
+        help="Specify the minimum version of the target platform This is only supported on MacOS host",
     )
 
     parser.add_argument(
@@ -336,9 +345,7 @@ def _validate_ios_args(args: argparse.Namespace):
         if not have_required_args:
             raise ValueError(
                 "iOS build on MacOS canceled due to missing arguments: "
-                + ", ".join(
-                val for val, cond in zip(arg_names, needed_args) if not cond
-                )
+                + ", ".join(val for val, cond in zip(arg_names, needed_args, strict=False) if not cond)
             )
 
 
@@ -392,7 +399,9 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     configuration = f"/p:Configuration={args.config}"
     platform = "/p:Platform=Any CPU"
     # need an extra config on windows as the actual build output is in the original build dir / config / config
-    native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
+    native_lib_path = (
+        f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
+    )
     ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
     props = [configuration, platform, native_lib_path, ort_lib_path]
@@ -437,15 +446,15 @@ def _run_android_tests(args: argparse.Namespace):
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
         import subprocess
+
         exception = None
         try:
-            util.run([gradle_executable, "--no-daemon",
-                      f"-DminSdkVer={android_api}",
-                      "clean",
-                      "connectedDebugAndroidTest"],
-                     cwd=android_test_path,
-                     capture_stdout=True,
-                     capture_stderr=True,)
+            util.run(
+                [gradle_executable, "--no-daemon", f"-DminSdkVer={android_api}", "clean", "connectedDebugAndroidTest"],
+                cwd=android_test_path,
+                capture_stdout=True,
+                capture_stderr=True,
+            )
         except subprocess.CalledProcessError as e:
             exception = e
             print(e)
@@ -480,7 +489,7 @@ def _get_windows_build_args(args: argparse.Namespace):
     ]
     if args.use_cuda:
         win_args += [
-            "-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler",
+            '-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf /Qspectre " -allow-unsupported-compiler',
         ]
     return win_args
 
@@ -577,16 +586,31 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         ]
 
     if args.ios:
+
         def _get_opencv_toolchain_file():
             if args.apple_sysroot == "iphoneos":
                 return (
-                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
-                        "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
+                    REPO_ROOT
+                    / "cmake"
+                    / "external"
+                    / "opencv"
+                    / "platforms"
+                    / "iOS"
+                    / "cmake"
+                    / "Toolchains"
+                    / "Toolchain-iPhoneOS_Xcode.cmake"
                 )
             else:
                 return (
-                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
-                        "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
+                    REPO_ROOT
+                    / "cmake"
+                    / "external"
+                    / "opencv"
+                    / "platforms"
+                    / "iOS"
+                    / "cmake"
+                    / "Toolchains"
+                    / "Toolchain-iPhoneSimulator_Xcode.cmake"
                 )
 
         command += [
@@ -626,8 +650,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.arm64 or args.arm64ec:
         if args.test:
             log.warning(
-                "Cannot test on host build machine for cross-compiled "
-                "ARM64 builds. Will skip test running after build."
+                "Cannot test on host build machine for cross-compiled ARM64 builds. Will skip test running after build."
             )
             args.test = False
 
@@ -667,7 +690,11 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
-        csharp_build_command = [dotnet, "build", ".",]
+        csharp_build_command = [
+            dotnet,
+            "build",
+            ".",
+        ]
         csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
@@ -677,7 +704,15 @@ def package(args: argparse.Namespace, env: dict[str, str]):
     """
     Package the build output with CMake targets.
     """
-    make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "package"]
+    make_command = [
+        str(args.cmake_path),
+        "--build",
+        str(args.build_dir),
+        "--config",
+        args.config,
+        "--target",
+        "package",
+    ]
     if args.parallel:
         make_command.append("--parallel")
     util.run(make_command, env=env)
@@ -751,15 +786,22 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
         lib_dir = lib_dir / args.config
 
-    cmake_command = [
-        str(args.cmake_path),
-        "-S", str(examples_dir),
-        "-B", str(build_dir),
-        "-G", args.cmake_generator,
-    ] + samples_to_build + [
-        "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
-        "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
-    ]
+    cmake_command = (
+        [
+            str(args.cmake_path),
+            "-S",
+            str(examples_dir),
+            "-B",
+            str(build_dir),
+            "-G",
+            args.cmake_generator,
+        ]
+        + samples_to_build
+        + [
+            "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
+            "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+        ]
+    )
 
     if args.cmake_generator.startswith("Visual Studio"):
         if args.arm64:
@@ -791,7 +833,7 @@ if __name__ == "__main__":
 
     if arguments.build:
         build(arguments, environment)
-    
+
     if arguments.package:
         package(arguments, environment)
 

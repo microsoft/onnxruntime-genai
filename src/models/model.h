@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 #include "model_type.h"
 #include "ortx_tokenizer.h"
@@ -26,10 +28,6 @@ struct State {
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual void Finalize(int current_length) {}
 
-  void SetTerminate();
-  void UnsetTerminate();
-  bool session_terminated_{};
-
   virtual void RewindTo(size_t index) { (void)index; };
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
@@ -37,14 +35,15 @@ struct State {
   void ClearIO();  // Clear all inputs/outputs
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
-
+  void SetRunOption(const char* key, const char* value);
+  void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
   void DumpInputs();
   void DumpOutputs();
 
   const Model& model_;
-
+  bool session_terminated_{};
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
@@ -85,6 +84,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
 
+  void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
@@ -94,10 +94,15 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
   int32_t TokenToTokenId(const char* token) const;
+  int32_t GetBosTokenId() const { return bos_token_id_; }
+  const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
+  int32_t GetPadTokenId() const { return pad_token_id_; }
 
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  int32_t bos_token_id_;
+  std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
 };
 
@@ -127,6 +132,9 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
+  std::vector<int64_t> GetInputShape(const std::string& name) const;
+  std::vector<int64_t> GetOutputShape(const std::string& name) const;
+
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 
@@ -150,8 +158,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
+  bool IsPruned() const;
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtArenaCfg> arena_cfg_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)

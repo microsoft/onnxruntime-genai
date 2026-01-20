@@ -1,0 +1,100 @@
+merge_base_with = 'origin/main'
+
+[[linter]]
+code = 'RUFF'
+include_patterns = [
+    '**/*.py',
+    '**/*.pyi',
+]
+exclude_patterns = [
+    'cmake/**',
+    'build/**',
+    'nuget/**',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'ruff_linter',
+    '--config=pyproject.toml',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    '--requirement=requirements-lintrunner.txt',
+]
+is_formatter = true
+
+
+[[linter]]
+code = 'RUFF-FORMAT'
+include_patterns = [
+    '**/*.py',
+]
+exclude_patterns = [
+    'cmake/**',
+    'build/**',
+    'nuget/**',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'ruff_format_linter',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    '--requirement=requirements-lintrunner.txt',
+]
+is_formatter = true
+
+[[linter]]
+code = 'CLANGFORMAT'
+include_patterns = [
+    '**/*.h',
+    '**/*.cc',
+    '**/*.hpp',
+    '**/*.cpp',
+    '**/*.cuh',
+    '**/*.cu',
+    '**/*.m',
+    '**/*.mm',
+]
+exclude_patterns = [
+    'cmake/**',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'clangformat_linter',
+    '--binary=clang-format',
+    '--fallback',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    '--requirement=requirements-lintrunner.txt',
+]
+is_formatter = true
