@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+// Exclude tests on Linux, Android, and macOS because ONNXRUNTIME_LIB is not directly linked
+// on these platforms (see test/CMakeLists.txt). The Model Editor API and one-op infrastructure
+// require the full ORT library to be available at link time.
 #if !defined(__linux__) && !defined(__ANDROID__) && !defined(__APPLE__)
 
 #include <gtest/gtest.h>

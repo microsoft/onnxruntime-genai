@@ -54,19 +54,24 @@ uint64_t OneOpModelExecutor::GenerateCacheKey(
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  // Simple hash combining op_type, input/output types, EP name, and session config
+  // Validate session config vectors have matching sizes
+  if (session_config_keys.size() != session_config_values.size()) {
+    throw std::invalid_argument("session_config_keys and session_config_values must have the same size");
+  }
+
+  // Hash combining op_type, input/output types, EP name, and session config
   std::hash<std::string> hasher;
   uint64_t key = hasher(config.op_type);
 
   // Hash EP name
   key ^= hasher(ep_name) + 0x9e3779b9 + (key << 6) + (key >> 2);
 
-  // Hash input types
+  // Hash input types (shapes are not included since models use dynamic shapes)
   for (const auto& input : config.inputs) {
     key ^= static_cast<uint64_t>(input.elem_type) + 0x9e3779b9 + (key << 6) + (key >> 2);
   }
 
-  // Hash output types
+  // Hash output types (shapes are not included since models use dynamic shapes)
   for (const auto& output : config.outputs) {
     key ^= static_cast<uint64_t>(output.elem_type) + 0x9e3779b9 + (key << 6) + (key >> 2);
   }
@@ -182,6 +187,14 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
 void OneOpModelExecutor::Execute(
     const OneOpModelConfig& model_config,
     const OneOpExecutionParams& exec_params) {
+  // Validate input/output counts match
+  if (exec_params.inputs.size() != model_config.inputs.size()) {
+    throw std::invalid_argument("Number of inputs in exec_params doesn't match model_config");
+  }
+  if (exec_params.outputs.size() != model_config.outputs.size()) {
+    throw std::invalid_argument("Number of outputs in exec_params doesn't match model_config");
+  }
+
   // Get or create session
   OrtSession* session = GetOrCreateSession(
       model_config,

@@ -75,7 +75,7 @@ class OneOpModelBuilder {
  public:
   // Build a complete ONNX model using the Model Editor API
   // Returns an OrtModel that can be used to create sessions
-  // Caller is responsible for calling ReleaseOrtModel when done
+  // Caller is responsible for calling Ort::api->ReleaseModel() when done
   static OrtModel* Build(const OneOpModelConfig& config);
 
   // Convenience helper to create a Cast model

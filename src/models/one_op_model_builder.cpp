@@ -113,6 +113,7 @@ OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
 
   OrtGraph* graph = nullptr;
   OrtModel* model = nullptr;
+  std::vector<OrtOpAttr*> node_attributes;
 
   try {
     // Create graph
@@ -161,7 +162,6 @@ OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
     Ort::ThrowOnError(model_editor_api.SetGraphOutputs(graph, graph_outputs.data(), graph_outputs.size()));
 
     // Create node attributes
-    std::vector<OrtOpAttr*> node_attributes;
     for (const auto& attr : config.attributes) {
       node_attributes.push_back(CreateOpAttr(attr));
     }
@@ -193,7 +193,11 @@ OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
 
     // Add node to graph (graph takes ownership of node)
     Ort::ThrowOnError(model_editor_api.AddNodeToGraph(graph, node));
-
+    // Release node attributes - CreateNode made its own copy
+    for (auto* attr : node_attributes) {
+      Ort::api->ReleaseOpAttr(attr);
+    }
+    node_attributes.clear();
     // Create model with opset
     const char* domain_name = "";
     Ort::ThrowOnError(model_editor_api.CreateModel(&domain_name, &config.opset_version, 1, &model));
@@ -206,6 +210,9 @@ OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
 
   } catch (...) {
     // Clean up on error
+    for (auto* attr : node_attributes) {
+      Ort::api->ReleaseOpAttr(attr);
+    }
     if (graph != nullptr) {
       Ort::api->ReleaseGraph(graph);
     }
