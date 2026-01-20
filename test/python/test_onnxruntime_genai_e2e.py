@@ -136,7 +136,7 @@ def run_tool_calling():
 
             # Run model_qa.cpp for inference
             command = [
-                os.path.join(cwd, "..", "..", "examples", "c", "build", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                os.path.join(cwd, "..", "..", "examples", "c", "build", "Release", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
                 "-m",
                 model_path,
                 "-e",

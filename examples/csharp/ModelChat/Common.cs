@@ -69,19 +69,24 @@ namespace ModelChat
                 }
             }
 
-            // Create serializer context to skip null attributes
-            var options = new JsonSerializerOptions()
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            };
-            var ctx = new ArgsSerializerContext(options);
-            var json = JsonSerializer.Serialize(search_options, ctx.GeneratorParamsArgs);
+            /**
+             * TODO: Uncomment the below snippet to use config.Overlay once the C# binding to Config.Overlay
+             * is in a stable package release.
+             */
 
-            // Set any search-specific options that need to be known before constructing a Model object
-            // Otherwise they can be set with params.SetSearchOptions(search_options)
-            config.Overlay(json);
+            // // Create serializer context to skip null attributes
+            // var options = new JsonSerializerOptions()
+            // {
+            //     WriteIndented = true,
+            //     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            //     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            // };
+            // var ctx = new ArgsSerializerContext(options);
+            // var json = JsonSerializer.Serialize(search_options, ctx.GeneratorParamsArgs);
+
+            // // Set any search-specific options that need to be known before constructing a Model object
+            // // Otherwise they can be set with params.SetSearchOptions(search_options)
+            // config.Overlay(json);
             return config;
         }
 
