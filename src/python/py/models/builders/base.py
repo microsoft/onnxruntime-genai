@@ -359,16 +359,16 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
 
-        # CPU, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
-        # TRT-RTX defaults to 128; CPU/WebGPU default to 0 (tensor-level) for backward compatibility.
-        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
-        default_qmoe_block_size = 128 if self.ep == "trt-rtx" else 0
-        self.int4_qmoe_block_size = int(extra_options.get("int4_qmoe_block_size", default_qmoe_block_size))
+        # CPU, CUDA, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
+        # TRT-RTX defaults to 128; others default to 32 for consistency with MatMulNBits.
+        supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
+        default_qmoe_block_size = 128 if self.ep == "trt-rtx" else 32
+        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", default_qmoe_block_size))
 
         # Validate that unsupported EPs don't explicitly request block-wise quantization
-        if self.ep not in supported_blockwise_eps and "int4_qmoe_block_size" in extra_options and moe_op_type == "QMoE":
+        if self.ep not in supported_blockwise_eps and "qmoe_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
-                f"The 'int4_qmoe_block_size' option is not supported for {self.ep} execution provider with QMoE. "
+                f"The 'qmoe_block_size' option is not supported for {self.ep} execution provider with QMoE. "
                 f"Block-wise quantization is only supported for: {', '.join(supported_blockwise_eps)}."
             )
 
@@ -377,7 +377,7 @@ class Model:
                 "accuracy_level": int(
                     extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)
                 ),
-                "block_size": int(self.int4_qmoe_block_size),
+                "qmoe_block_size": int(self.qmoe_block_size),
                 "qdq_block_size": int(self.int4_block_size),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
@@ -391,7 +391,7 @@ class Model:
         # QMoE on supported EPs uses block-wise quantization via the 'block_size' attribute.
         # Ensure the attribute is set on the MoE op so runtime kernels can honor it.
         if self.moe_attrs.get("op_type") == "QMoE" and self.ep in supported_blockwise_eps:
-            self.moe_attrs["block_size"] = int(self.int4_qmoe_block_size)
+            self.moe_attrs["block_size"] = int(self.qmoe_block_size)
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
@@ -720,9 +720,7 @@ class Model:
             algo_config=self.quant_attrs["int4"]["algo_config"],
         )
         quant.process()
-        model = ir.from_proto(quant.model.model)
-
-        return model
+        return ir.from_proto(quant.model.model)
 
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
@@ -1066,14 +1064,7 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        # When onnx_dtype is INT4/UINT4, weights will be quantized by MatMulNBitsQuantizer later.
-        # MatMulNBitsQuantizer doesn't properly support BFLOAT16 inputs, so we need to save
-        # weights as FLOAT32 to ensure correct quantization with proper scales.
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and self.io_dtype == ir.DataType.BFLOAT16:
-            weight_dtype = ir.DataType.FLOAT
-        else:
-            weight_dtype = self.io_dtype
-        self.make_initializer(matmul.weight.T, weight, to=weight_dtype)
+        self.make_initializer(matmul.weight.T, weight, to=self.io_dtype)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -3287,13 +3278,13 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
-        # Use block-wise quantization for supported EPs when int4_qmoe_block_size > 0.
-        # TRT-RTX defaults to 128; CPU/WebGPU default to 0 (tensor-level).
-        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
-        use_blockwise_quant = self.ep in supported_blockwise_eps and self.int4_qmoe_block_size > 0
+        # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
+        # TRT-RTX defaults to 128; others default to 32.
+        supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
+        use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:
-            block_size = self.quant_attrs["int4"]["block_size"]
+            block_size = self.quant_attrs["int4"]["qmoe_block_size"]
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
