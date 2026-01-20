@@ -101,10 +101,13 @@ static OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
 
 // Build complete ONNX model using the Model Editor API
 OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
-  // Ensure Ort::api is initialized (needed for testing)
+  // Ensure Ort::api is initialized
+  // In library mode, Ort::api is initialized by the main library
+#ifdef GENAI_STANDALONE_ONE_OP
   if (Ort::api == nullptr) {
     Ort::api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   }
+#endif
 
   const auto& model_editor_api = Ort::GetModelEditorApi();
 
