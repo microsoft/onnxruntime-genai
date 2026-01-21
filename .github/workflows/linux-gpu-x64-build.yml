@@ -142,9 +142,10 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --user 0 \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              sudo dnf update && sudo dnf install -y python3-dev && \
+              dnf update && dnf install -y python3-dev && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
