@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 #include "model_type.h"
 #include "ortx_tokenizer.h"
@@ -130,6 +132,9 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
+  std::vector<int64_t> GetInputShape(const std::string& name) const;
+  std::vector<int64_t> GetOutputShape(const std::string& name) const;
+
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 
@@ -152,6 +157,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+
+  bool IsPruned() const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;

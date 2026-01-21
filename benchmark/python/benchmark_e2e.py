@@ -74,18 +74,23 @@ def monitor_cpu_memory():
 
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, override_max_length) -> str:
     text = "a"
     prompt = f"{args.chat_template.format(input=text)}"
     tokens = tokenizer.encode(prompt)
     params = og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
-    params.set_search_options(max_length=max_length_to_use, min_length=prompt_length)
+    params.set_search_options(
+        min_length=prompt_length,
+        **({ "max_length": max_length_to_use } if override_max_length else {})
+    )
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokens)
-    while not generator.is_done():
+    i = 0
+    while not generator.is_done() and i < prompt_length:
         generator.generate_next_token()
+        i += 1
     return tokenizer.decode(generator.get_sequence(0))
 
 
@@ -280,6 +285,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             raise ValueError(
                 f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
             )
+    
+    # When -1 is passed as max_length we should not override that search option
+    override_max_length = max_length != -1
 
     # Generate prompt
     if args.use_random_tokens:
@@ -294,7 +302,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        text = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+        text = [generate_prompt(model, tokenizer, prompt_length, override_max_length)] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
@@ -307,7 +315,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        max_length=max_length,
+        **({ "max_length": max_length } if override_max_length else {}),
         min_length=max_length,
         batch_size=batch_size,
     )
@@ -317,8 +325,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         generator.append_tokens(tokens)
-        while not generator.is_done():
+        i = 0
+        while not generator.is_done() and i < generation_length:
             generator.generate_next_token()
+            i += 1
         if args.print_model_output:
             print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -350,7 +360,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             top_k=args.top_k,
             top_p=args.top_p,
             temperature=temperature,
-            max_length=max_length,
+            **({ "max_length": max_length } if override_max_length else {}),
             min_length=max_length,
             batch_size=batch_size,
         )
@@ -508,7 +518,7 @@ if __name__ == "__main__":
         "--max_lengths",
         type=str2intlist,
         default=[],
-        help="Max length is either a combination of prompt and generation length or one value broadcasting for all.",
+        help="Max length is either a combination of prompt and generation length or one value broadcasting for all. Pass -1 to disable override.",
     )
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
