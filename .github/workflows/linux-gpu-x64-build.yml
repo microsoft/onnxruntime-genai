@@ -145,7 +145,7 @@ jobs:
             --user 0 \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              dnf -y update && dnf install -y python3.11-devel && \
+              dnf -y update && dnf install -y python3.11-devel && dnf install -y python3-pip python3-setuptools python3-wheel && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
