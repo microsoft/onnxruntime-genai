@@ -108,9 +108,12 @@ if(USE_GUIDANCE)
   )
   onnxruntime_fetchcontent_makeavailable(llguidance)
 
-  # HACK: Patch llguidance's cargo.lock to avoid tripping component governance due to unused `ring`.
+  # HACK: Patch llguidance's `/Cargo.toml` to avoid tripping component governance due to unused `ring` dep.
   #       `ring` is deprecated in favour of `rust-openssl`.
-  #       `ring` is a transitive dep of several (unused by onnx-rt) modules in `llguidance`.
+  #       `ring` is a transitive dep of several (unused by onnx-rt) libs in `llguidance`.
+  #       We only use the `parser` lib.
+  #       Governance trips on `/Cargo.lock` but that is expected to be regenerated as part of the build,
+  #       dropping the reference to `ring`.
   if(NOT EXISTS "${llguidance_SOURCE_DIR}/.onnx-rt-applied-remove-ring-ref-in-cargo-lock")
     execute_process(
       COMMAND git apply -- "${CMAKE_CURRENT_LIST_DIR}/llguidance/remove-ring-ref-in-cargo-lock.patch"
