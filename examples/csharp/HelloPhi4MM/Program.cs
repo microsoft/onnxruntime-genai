@@ -218,10 +218,6 @@ do
     while (!generator.IsDone())
     {
         generator.GenerateNextToken();
-        if (generator.HitEOS())
-        {
-            break;
-        }
         Console.Write(stream.Decode(generator.GetNextTokens()[0]));
     }
     watch.Stop();

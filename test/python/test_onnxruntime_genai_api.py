@@ -155,8 +155,6 @@ def test_greedy_search(test_data_path, relative_model_path):
         generator.set_logits(logits)  # twice just to be sure buffer is still valid
 
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     expected_sequence = np.array(
         [
@@ -195,8 +193,6 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     assert generator.get_sequence(0) is not None
 
@@ -205,8 +201,6 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     assert generator.get_sequence(0) is not None
 
@@ -219,8 +213,6 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
@@ -235,8 +227,6 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     )
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
@@ -264,8 +254,6 @@ def test_rewind(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
@@ -274,8 +262,6 @@ def test_rewind(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
@@ -405,8 +391,6 @@ def test_batching(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
@@ -436,8 +420,6 @@ def test_e2e(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
@@ -471,8 +453,6 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
@@ -650,8 +630,6 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     expected_output = [
         "This is a test.\n        # TOD import * doct proofingrad",
@@ -850,8 +828,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
 
 @pytest.mark.parametrize("device", devices)
@@ -937,8 +913,6 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
         while not generator.is_done():
             generator.generate_next_token()
-            if generator.hit_eos():
-                break
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])

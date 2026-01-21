@@ -340,9 +340,6 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -521,9 +518,6 @@ TEST(CAPITests, EndToEndPhi) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -563,9 +557,6 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -660,9 +651,6 @@ TEST(CAPITests, LoadModelFromMemory) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -740,9 +728,6 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -905,9 +890,6 @@ TEST(CAPITests, SetTerminate) {
     EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->HitEOS()) {
-          break;
-        }
       } }, std::runtime_error);
   };
 
@@ -970,9 +952,6 @@ struct Phi2Test {
 
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->HitEOS()) {
-          break;
-        }
       }
 
       // Decode One at a time
@@ -1132,9 +1111,6 @@ TEST(CAPITests, AdaptersTest) {
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->HitEOS()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1158,9 +1134,6 @@ TEST(CAPITests, AdaptersTest) {
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->HitEOS()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1212,9 +1185,6 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->HitEOS()) {
-        break;
-      }
     }
   }
 
@@ -1258,9 +1228,6 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1280,9 +1247,6 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1318,9 +1282,6 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1336,9 +1297,6 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1355,9 +1313,6 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   generator->AppendTokens(next_ids.data(), next_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1388,9 +1343,6 @@ TEST(CAPITests, SetGuidance) {
   generator->AppendTokenSequences(*input_sequences);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
   auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());

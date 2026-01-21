@@ -101,8 +101,6 @@ def main(args):
     start_time = time.time()
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
     run_time = time.time() - start_time
 
     for i in range(len(prompts)):

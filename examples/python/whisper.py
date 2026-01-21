@@ -70,8 +70,6 @@ def run(args: argparse.Namespace):
 
         while not generator.is_done():
             generator.generate_next_token()
-            if generator.hit_eos():
-                break
 
         print()
         transcriptions = []

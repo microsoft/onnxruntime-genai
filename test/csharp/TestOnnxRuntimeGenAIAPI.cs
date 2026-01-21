@@ -164,10 +164,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             while (!generator.IsDone())
                             {
                                 generator.GenerateNextToken();
-                                if (generator.HitEOS())
-                                {
-                                    break;
-                                }
                             }
 
                             for (ulong i = 0; i < batchSize; i++)
@@ -219,10 +215,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             while (!generator.IsDone())
                             {
                                 generator.GenerateNextToken();
-                                if (generator.HitEOS())
-                                {
-                                    break;
-                                }
                             }
 
                             for (ulong i = 0; i < batchSize; i++)
@@ -299,10 +291,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.GenerateNextToken();
-                            if (generator.HitEOS())
-                            {
-                                break;
-                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -362,10 +350,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.GenerateNextToken();
-                            if (generator.HitEOS())
-                            {
-                                break;
-                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -427,10 +411,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.GenerateNextToken();
-                            if (generator.HitEOS())
-                            {
-                                break;
-                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -638,10 +618,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.GenerateNextToken();
-                            if (generator.HitEOS())
-                            {
-                                break;
-                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -748,10 +724,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 while (!generator.IsDone())
                 {
                     generator.GenerateNextToken();
-                    if (generator.HitEOS())
-                    {
-                        break;
-                    }
                 }
 
                 using var logits = generator.GetOutput("logits");
@@ -780,10 +752,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 while (!generator.IsDone())
                 {
                     generator.GenerateNextToken();
-                    if (generator.HitEOS())
-                    {
-                        break;
-                    }
                 }
                 using var logits = generator.GetOutput("logits");
                 if (_useCudaModel)

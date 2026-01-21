@@ -56,9 +56,6 @@
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   const auto output_sequence_length = generator->GetSequenceCount(0);

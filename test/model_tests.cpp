@@ -82,9 +82,6 @@ TEST(ModelTests, GreedySearchGptFp32) {
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -126,9 +123,6 @@ TEST(ModelTests, BeamSearchGptFp32) {
   generator->AppendTokens(input_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -163,9 +157,6 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -188,9 +179,6 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -203,9 +191,6 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator->AppendTokens(next_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -249,9 +234,6 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   generator->AppendTokens(input_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -301,9 +283,6 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -354,9 +333,6 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   auto sequence = generator->GetSequence(0);
@@ -396,9 +372,6 @@ Print all primes between 1 and n
   generator->AppendTokens(tokens->Get(0));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   auto result = generator->GetSequence(0);
@@ -430,9 +403,6 @@ Print all primes between 1 and n
   generator->AppendTokens(tokens->Get(0));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->HitEOS()) {
-      break;
-    }
   }
 
   auto result = generator->GetSequence(0);

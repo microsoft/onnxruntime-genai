@@ -54,8 +54,6 @@ def main(args):
     full_seq_str = ""
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
         # NOTE: since get_next_tokens returns only the last token, we'll need to use get_sequence instead
         # new_tokens = generator.get_next_tokens()[0]

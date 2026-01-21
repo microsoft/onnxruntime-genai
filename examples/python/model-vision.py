@@ -152,9 +152,6 @@ def run(args: argparse.Namespace):
 
         while not generator.is_done():
             generator.generate_next_token()
-            if generator.hit_eos():
-                break
-
             new_token = generator.get_next_tokens()[0]
             print(stream.decode(new_token), end="", flush=True)
 

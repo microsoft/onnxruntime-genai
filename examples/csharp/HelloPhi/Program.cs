@@ -130,10 +130,6 @@ if (option == 1 || option == 2)
             while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
-                if (generator.HitEOS())
-                {
-                    break;
-                }
             }
 
             var outputSequence = generator.GetSequence(0);
@@ -158,10 +154,6 @@ if (option == 1 || option == 2)
             while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
-                if (generator.HitEOS())
-                {
-                    break;
-                }
                 Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
             }
             Console.WriteLine();
@@ -199,10 +191,6 @@ if (option == 3) // Streaming Chat
         while (!generator.IsDone())
         {
             generator.GenerateNextToken();
-            if (generator.HitEOS())
-            {
-                break;
-            }
             Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
         }
         Console.WriteLine();

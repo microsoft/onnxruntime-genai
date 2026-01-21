@@ -214,9 +214,6 @@ def main(args):
                         first_token_timestamp = time.time()
                         first = False
 
-                if generator.hit_eos():
-                    break
-
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end="", flush=True)
                 if args.timings:

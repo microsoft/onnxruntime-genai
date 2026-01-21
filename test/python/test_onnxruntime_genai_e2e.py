@@ -33,8 +33,6 @@ def run_model(model_path: str | bytes | os.PathLike):
     generator.append_tokens(sequences)
     while not generator.is_done():
         generator.generate_next_token()
-        if generator.hit_eos():
-            break
 
     for i in range(3):
         assert generator.get_sequence(i) is not None
