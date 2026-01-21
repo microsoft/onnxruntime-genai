@@ -99,8 +99,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
           is_first_token = false;
         }
 
-        const auto num_tokens = generator->GetSequenceCount(0);
-        const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+        const auto new_token = generator->GetNextTokens()[0];
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {

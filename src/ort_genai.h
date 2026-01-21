@@ -493,6 +493,15 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
     return {out, out_count};
   }
+#else
+  std::vector<int32_t> GetNextTokens() {
+    std::vector<int32_t> next_tokens;
+    const int32_t* out;
+    size_t out_count;
+    OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
+    next_tokens.assign(out, out + out_count);
+    return next_tokens;
+  }
 #endif
 
   void RewindTo(size_t new_length) {
