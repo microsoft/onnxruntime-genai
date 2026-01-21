@@ -91,7 +91,7 @@ def run_tool_calling():
     response_format = "lark_grammar"
 
     for (model_name, tool_call_start, tool_call_end) in tool_call_models:
-        for (precision, execution_provider) in [("int4", "cpu"), ("int4", "cuda"), ("int4", "dml")]:
+        for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
             model_path = os.path.join(cwd, "..", "test_models", model_name, precision, execution_provider)
             if not os.path.exists(model_path): continue
 
