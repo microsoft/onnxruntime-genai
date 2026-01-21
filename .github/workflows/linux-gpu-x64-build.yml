@@ -150,7 +150,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja"
+              ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja --cmake_extra_defines PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }}"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
