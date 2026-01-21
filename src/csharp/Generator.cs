@@ -20,16 +20,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
-        public bool HitEOS()
-        {
-            return NativeMethods.OgaGenerator_HitEOS(_generatorHandle) != 0;
-        }
-
-        public bool HitMaxLength()
-        {
-            return NativeMethods.OgaGenerator_HitMaxLength(_generatorHandle) != 0;
-        }
-
         public void SetModelInput(string name, Tensor value)
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_SetModelInput(_generatorHandle, StringUtils.ToUtf8(name), value.Handle));
@@ -54,6 +44,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public void AppendTokenSequences(Sequences sequences)
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
+        }
+
+        public int TokenCount()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_TokenCount(_generatorHandle, out int count));
+            return count;
         }
 
         public void GenerateNextToken()

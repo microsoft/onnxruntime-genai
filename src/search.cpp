@@ -52,8 +52,6 @@ BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 void Search_Cpu::ResetDone() {
   // Reset done count/state
   done_ = false;
-  hit_eos_ = false;
-  hit_max_length_ = false;
 }
 
 void GreedySearch_Cpu::ResetDone() {
@@ -311,7 +309,6 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
     if (--not_done_count_ == 0) {
       done_ = true;
-      hit_eos_ = true;
     }
   }
 }
@@ -333,7 +330,6 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "greedy cpu hit");
     done_ = true;
-    hit_max_length_ = true;
   }
 }
 
@@ -419,7 +415,6 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "beam cpu hit");
     done_ = true;
-    hit_max_length_ = true;
   }
 }
 

@@ -448,19 +448,10 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
 
 /**
- * \brief Returns true if the generator is done because it hit the EOS token id after generating all the sequences.
- * \param[in] generator The generator to check if it is done with generating all sequences.
- * \return True if the generator has hit the EOS token id, false otherwise.
+ * \brief Returns true if the session has been terminated.
+ * \param[in] generator The generator to add the inputs to.
+ * \return True if the session has been terminated, false otherwise.
  */
-OGA_EXPORT bool OGA_API_CALL OgaGenerator_HitEOS(OgaGenerator* generator);
-
-/**
- * \brief Returns true if the generator is done because it hit the maximum length after generating all the sequences.
- * \param[in] generator The generator to check if it is done with generating all sequences.
- * \return True if the generator has hit the maximum length, false otherwise.
- */
-OGA_EXPORT bool OGA_API_CALL OgaGenerator_HitMaxLength(OgaGenerator* generator);
-
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
@@ -497,6 +488,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
+ * \brief Returns the number of tokens in the generator
+ * \param[in] generator The generator containing the appended tokens.
+ * \param[out] count The number of tokens that have been added.
+ * \return OgaResult containing the error message if the getting of the number of tokens failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_TokenCount(OgaGenerator* generator, int32_t* count);
+
+/**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
  * \param[in] generator The generator to compute the logits for.
  * \return OgaResult containing the error message if the computation of the logits failed.
@@ -512,6 +511,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
+/**
+ * \brief Set a runtime option's name and value.
+ * \param[in] generator The generator to rewind to the given length.
+ * \param[in] key The runtime option's name
+ * \param[in] value The runtime option's value
+ * \return OgaResult containing the error message if setting the runtime option failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /**
@@ -636,7 +642,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
 
 /**
- * Return the int representation of the BOS token
+ * Return the int representation of the PAD token
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 

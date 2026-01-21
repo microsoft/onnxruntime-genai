@@ -125,14 +125,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern byte OgaGenerator_IsDone(IntPtr /* const OgaGenerator* */ generator);
 
-        // This function is used to check if the generator has hit the EOS token id after generating all sequences.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern byte OgaGenerator_HitEOS(IntPtr /* const OgaGenerator* */ generator);
-
-        // This function is used to check if the generator has hit the max length after generating all sequences.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern byte OgaGenerator_HitMaxLength(IntPtr /* const OgaGenerator* */ generator);
-
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GetNextTokens(IntPtr /* const OgaGenerator* */ generator,
                                                                                 out IntPtr /* const int32_t** */ outTokenIds,
@@ -162,6 +154,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaGenerator_AppendTokenSequences(IntPtr /* OgaGenerator* */ generator,
                                                                                        IntPtr /* const OgaSequences* */ sequences);
                                                                                        
+        // This function is used to get the number of tokens in the generator.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_TokenCount(IntPtr /* OgaGenerator* */ generator,
+                                                                             int* /* int32_t* */ count);
 
         // This function is used to rewind the generator to the given newLength.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

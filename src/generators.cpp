@@ -454,6 +454,10 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
+int32_t Generator::TokenCount() {
+  return static_cast<int32_t>(search_->GetSequenceLength());
+}
+
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
@@ -470,14 +474,6 @@ bool Generator::IsDone() {
   }
 
   return is_done;
-}
-
-bool Generator::HitEOS() const {
-  return search_->HitEOS();
-}
-
-bool Generator::HitMaxLength() const {
-  return search_->HitMaxLength();
 }
 
 bool Generator::IsSessionTerminated() const {

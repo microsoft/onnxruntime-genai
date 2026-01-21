@@ -26,8 +26,6 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 
   eos_seen_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_seen_);
   done_cpu_ = CudaMallocHostArray<bool>(1);
-  hit_eos_cpu_ = CudaMallocHostArray<bool>(1);
-  hit_max_length_cpu_ = CudaMallocHostArray<bool>(1);
 
   eos_token_ids_ = params.p_device->Allocate<int32_t>(params.config.model.eos_token_id.size());
   copy(std::span<const int32_t>{params.config.model.eos_token_id}, eos_token_ids_.CpuSpan());
@@ -78,8 +76,6 @@ BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::ResetDone() {
   *done_cpu_ = false;
-  *hit_eos_cpu_ = false;
-  *hit_max_length_cpu_ = false;
   cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream());
 }
 
@@ -171,7 +167,7 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
 
   // Check for EOS
   assert(next_tokens_.size() == eos_seen_.size());
-  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), hit_eos_cpu_.get(), GetStream());
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
   cudaStreamSynchronize(GetStream());
@@ -184,7 +180,6 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
-    *hit_max_length_cpu_ = true;
   }
 }
 
@@ -195,7 +190,6 @@ bool BeamSearch_Cuda::IsDone() const {
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "beam cuda hit");
-    *hit_max_length_cpu_ = true;
     return true;
   }
   return false;
@@ -241,7 +235,6 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
-    *hit_max_length_cpu_ = true;
     return;
   }
 

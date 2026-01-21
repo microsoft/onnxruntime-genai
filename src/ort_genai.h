@@ -448,12 +448,8 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
-  bool HitEOS() {
-    return OgaGenerator_HitEOS(this);
-  }
-
-  bool HitMaxLength() {
-    return OgaGenerator_HitMaxLength(this);
+  bool IsSessionTerminated() const {
+    return OgaGenerator_IsSessionTerminated(this);
   }
 
   void SetModelInput(const char* name, OgaTensor& tensor) {
@@ -478,8 +474,10 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
-  bool IsSessionTerminated() const {
-    return OgaGenerator_IsSessionTerminated(this);
+  int32_t TokenCount() const {
+    int32_t count;
+    OgaCheckResult(OgaGenerator_TokenCount(this, &count));
+    return count;
   }
 
   void GenerateNextToken() {

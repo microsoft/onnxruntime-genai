@@ -413,14 +413,6 @@ bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();
 }
 
-bool OGA_API_CALL OgaGenerator_HitEOS(OgaGenerator* generator) {
-  return generator->HitEOS();
-}
-
-bool OGA_API_CALL OgaGenerator_HitMaxLength(OgaGenerator* generator) {
-  return generator->HitMaxLength();
-}
-
 bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
   return generator->IsSessionTerminated();
 }
@@ -461,6 +453,13 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generato
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
   generator->AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_TokenCount(OgaGenerator* generator, int32_t* count) {
+  OGA_TRY
+  *count = generator->TokenCount();
   return nullptr;
   OGA_CATCH
 }

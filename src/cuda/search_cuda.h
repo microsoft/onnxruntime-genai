@@ -19,14 +19,6 @@ struct Search_Cuda : Search {
     cudaStreamSynchronize(GetStream());
     return *done_cpu_;
   }  // TODO: Use an event
-  bool HitEOS() const {
-    cudaStreamSynchronize(GetStream());
-    return *hit_eos_cpu_;
-  }
-  bool HitMaxLength() const {
-    cudaStreamSynchronize(GetStream());
-    return *hit_max_length_cpu_;
-  }
   void ResetDone() override;
 
   DeviceSpan<float> GetLogits() const override;
@@ -48,8 +40,6 @@ struct Search_Cuda : Search {
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   cuda_host_unique_ptr<bool> done_cpu_;
-  cuda_host_unique_ptr<bool> hit_eos_cpu_;
-  cuda_host_unique_ptr<bool> hit_max_length_cpu_;
 };
 
 struct GreedySearch_Cuda : Search_Cuda {

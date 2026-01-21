@@ -62,32 +62,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Checks if the generation process ended because an EOS token id was hit.
-   *
-   * @return true if the EOS token was hit, false otherwise.
-   */
-  public boolean hitEOS() {
-    if (nativeHandle == 0) {
-      throw new IllegalStateException("Instance has been freed and is invalid");
-    }
-
-    return hitEOS(nativeHandle);
-  }
-
-  /**
-   * Checks if the generation process ended because the maximum length was hit.
-   *
-   * @return true if the maximum length was hit, false otherwise.
-   */
-  public boolean hitMaxLength() {
-    if (nativeHandle == 0) {
-      throw new IllegalStateException("Instance has been freed and is invalid");
-    }
-
-    return hitMaxLength(nativeHandle);
-  }
-
-  /**
    * Add a Tensor as a model input.
    *
    * @param name Name of the model input the tensor will provide.
@@ -154,6 +128,19 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     }
 
     appendTokenSequences(nativeHandle, sequences.nativeHandle());
+  }
+
+  /**
+   * Returns the token count in the generator.
+   *
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public int tokenCount() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    tokenCount(nativeHandle);
   }
 
   /**
@@ -296,10 +283,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native boolean isDone(long nativeHandle);
 
-  private native boolean hitEOS(long nativeHandle);
-
-  private native boolean hitMaxLength(long nativeHandle);
-
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
 
@@ -309,6 +292,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
       throws GenAIException;
+
+  private native int tokenCount(long nativeHandle) throws GenAIException;
 
   private native void rewindTo(long nativeHandle, long newLength) throws GenAIException;
 
