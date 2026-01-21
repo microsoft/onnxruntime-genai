@@ -359,9 +359,9 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
 
-        # CPU, CUDA, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
+        # CPU, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
         # TRT-RTX defaults to 128; others default to 32 for consistency with MatMulNBits.
-        supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
         default_qmoe_block_size = 128 if self.ep == "trt-rtx" else 32
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", default_qmoe_block_size))
 
@@ -3280,7 +3280,7 @@ class Model:
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
         # TRT-RTX defaults to 128; others default to 32.
-        supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:
