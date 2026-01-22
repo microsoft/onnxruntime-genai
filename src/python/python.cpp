@@ -192,10 +192,6 @@ struct PyGeneratorParams {
     }
   }
 
-  void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
-  }
-
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
@@ -316,11 +312,31 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
            pybind11::arg("enable_ff_tokens") = false);
+      .def("get_search_options", [](const GeneratorParams& p) {
+        py::dict d;
+        d["batch_size"] = p.batch_size;
+        d["chunk_size"] = p.chunk_size;
+        d["diversity_penalty"] = p.diversity_penalty;
+        d["do_sample"] = p.do_sample;
+        d["early_stopping"] = p.early_stopping;
+        d["length_penalty"] = p.length_penalty;
+        d["max_length"] = p.max_length;
+        d["min_length"] = p.min_length;
+        d["no_repeat_ngram_size"] = p.no_repeat_ngram_size;
+        d["num_beams"] = p.num_beams;
+        d["num_return_sequences"] = p.num_return_sequences;
+        d["past_present_share_buffer"] = p.past_present_share_buffer;
+        d["random_seed"] = p.random_seed;
+        d["repetition_penalty"] = p.repetition_penalty;
+        d["temperature"] = p.temperature;
+        d["top_k"] = p.top_k;
+        d["top_p"] = p.top_p;
+        return d;
+      })
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });

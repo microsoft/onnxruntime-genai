@@ -29,7 +29,7 @@ public final class GeneratorParams implements AutoCloseable {
   }
 
   /**
-   * Set seach option with double value.
+   * Set search option with double value.
    *
    * @param optionName The option name.
    * @param value The option value.
@@ -56,6 +56,36 @@ public final class GeneratorParams implements AutoCloseable {
     }
 
     setSearchOptionBool(nativeHandle, optionName, value);
+  }
+
+  /**
+   * Get search option with numerical value.
+   *
+   * @param optionName The option name.
+   * @return The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void getSearchNumber(String optionName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    getSearchNumber(nativeHandle, optionName);
+  }
+
+  /**
+   * Get search option with boolean value.
+   *
+   * @param optionName The option name.
+   * @return The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void getSearchBool(String optionName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    getSearchBool(nativeHandle, optionName);
   }
 
   @Override
@@ -87,4 +117,8 @@ public final class GeneratorParams implements AutoCloseable {
 
   private native void setSearchOptionBool(long nativeHandle, String optionName, boolean value)
       throws GenAIException;
+
+  private native void getSearchNumber(long nativeHandle, String optionName) throws GenAIException;
+
+  private native void getSearchBool(long nativeHandle, String optionName) throws GenAIException;
 }

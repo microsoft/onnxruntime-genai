@@ -74,6 +74,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
+  // Query the params to get the value set for a param
+  double GetSearchNumber(std::string_view name) const;
+  bool GetSearchBool(std::string_view name) const;
+
   int max_batch_size{0};
   bool use_graph_capture{};
   bool use_multi_profile{};

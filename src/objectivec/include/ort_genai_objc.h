@@ -82,6 +82,27 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
+ * Return the int representation of the BOS token.
+ *
+ * @return The BOS token id
+ */
+- (int32_t)getBosTokenId:(NSError**)error;
+
+/**
+ * Return the int representations of the array of EOS tokens.
+ *
+ * @return The array of EOS token ids
+ */
+- (nullable NSArray<NSNumber*>*)getEosTokenIds:(NSError**)error;
+
+/**
+ * Return the int representation of the PAD token.
+ *
+ * @return The PAD token id
+ */
+- (int32_t)getPadTokenId:(NSError**)error;
+
+/**
  * Encode text to sequences
  *
  * @param str The text to be encoded.
@@ -208,6 +229,23 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (BOOL)setSearchOption:(NSString*)key
               boolValue:(BOOL)value
                   error:(NSError**)error;
+
+/**
+ * Get numerical value of option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (double)getSearchNumber:(NSString*)key
+                    error:(NSError**)error;
+/**
+ * Get boolean value of option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (BOOL)getSearchBool:(NSString*)key
+                error:(NSError**)error;
 @end
 
 /**

@@ -426,12 +426,20 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void TryGraphCaptureWithMaxBatchSize(int /*max_batch_size*/) {
-    printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
-  }
-
   void SetGuidance(const char* type, const char* data, bool enable_ff_tokens = false) {
     OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
+  }
+
+  double GetSearchNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaGeneratorParamsGetSearchNumber(this, name, &value));
+    return value;
+  }
+
+  bool GetSearchBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSearchBool(this, name, &value));
+    return value;
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
