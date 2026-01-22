@@ -140,7 +140,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    tokenCount(nativeHandle);
+    return tokenCount(nativeHandle);
   }
 
   /**
