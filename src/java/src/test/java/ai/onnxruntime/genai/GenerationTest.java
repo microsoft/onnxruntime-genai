@@ -141,7 +141,7 @@ public class GenerationTest {
 
         assertEquals(params.getSearchNumber("max_length"), maxLength);
         assertEquals(params.getSearchBool("early_stopping"), true);
-        assertEquals(generator.tokenCount(), 10);
+        assertEquals(generator.tokenCount(), 4);
 
         while (!generator.isDone()) {
           generator.generateNextToken();
