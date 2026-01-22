@@ -397,14 +397,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(OgaGeneratorParams* params, const char* name, double* value) {
   OGA_TRY
-  *value = params->GetIntValue(name);
+  *value = params->GetSearchNumber(name);
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(OgaGeneratorParams* params, const char* name, bool* value) {
   OGA_TRY
-  *value = params->GetBoolValue(name);
+  *value = params->GetSearchBool(name);
   return nullptr;
   OGA_CATCH
 }
