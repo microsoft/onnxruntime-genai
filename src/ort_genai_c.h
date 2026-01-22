@@ -446,7 +446,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorPar
  * \param[out] value The value of the search parameter.
  * \return OgaResult containing the error message if setting the generator params failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(OgaGeneratorParams* params, const char* name, double* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value);
 
 /**
  * \brief Get a boolean value for a search parameter
@@ -455,7 +455,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(OgaGenerato
  * \param[out] value The value of the search parameter.
  * \return OgaResult containing the error message if setting the generator params failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(OgaGeneratorParams* params, const char* name, bool* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -525,7 +525,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* gener
  * \param[out] count The number of tokens that have been added.
  * \return OgaResult containing the error message if the getting of the number of tokens failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_TokenCount(OgaGenerator* generator, int32_t* count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator, int32_t* count);
 
 /**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
