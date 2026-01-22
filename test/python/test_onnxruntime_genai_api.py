@@ -149,7 +149,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
 
-    assert int(search_params.get_search_options()["max_length"]) == 40
+    assert int(search_params.get_search_options()["max_length"]) == 10
     assert search_params.get_search_options()["early_stopping"] == True
     assert int(generator.token_count()) == 4
 
