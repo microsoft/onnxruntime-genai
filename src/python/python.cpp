@@ -196,6 +196,28 @@ struct PyGeneratorParams {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
 
+  py::dict GetSearchOptions() {
+    py::dict d;
+    d["batch_size"] = params_->GetSearchNumber("batch_size");
+    d["chunk_size"] = params_->GetSearchNumber("chunk_size");
+    d["diversity_penalty"] = params_->GetSearchNumber("diversity_penalty");
+    d["do_sample"] = params_->GetSearchBool("do_sample");
+    d["early_stopping"] = params_->GetSearchBool("early_stopping");
+    d["length_penalty"] = params_->GetSearchNumber("length_penalty");
+    d["max_length"] = params_->GetSearchNumber("max_length");
+    d["min_length"] = params_->GetSearchNumber("min_length");
+    d["no_repeat_ngram_size"] = params_->GetSearchNumber("no_repeat_ngram_size");
+    d["num_beams"] = params_->GetSearchNumber("num_beams");
+    d["num_return_sequences"] = params_->GetSearchNumber("num_return_sequences");
+    d["past_present_share_buffer"] = params_->GetSearchBool("past_present_share_buffer");
+    d["random_seed"] = params_->GetSearchNumber("random_seed");
+    d["repetition_penalty"] = params_->GetSearchNumber("repetition_penalty");
+    d["temperature"] = params_->GetSearchNumber("temperature");
+    d["top_k"] = params_->GetSearchNumber("top_k");
+    d["top_p"] = params_->GetSearchNumber("top_p");
+    return d;
+  }
+
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
@@ -316,27 +338,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
            pybind11::arg("enable_ff_tokens") = false)
-      .def("get_search_options", [](const GeneratorParams& p) {
-        py::dict d;
-        d["batch_size"] = p.batch_size;
-        d["chunk_size"] = p.chunk_size;
-        d["diversity_penalty"] = p.diversity_penalty;
-        d["do_sample"] = p.do_sample;
-        d["early_stopping"] = p.early_stopping;
-        d["length_penalty"] = p.length_penalty;
-        d["max_length"] = p.max_length;
-        d["min_length"] = p.min_length;
-        d["no_repeat_ngram_size"] = p.no_repeat_ngram_size;
-        d["num_beams"] = p.num_beams;
-        d["num_return_sequences"] = p.num_return_sequences;
-        d["past_present_share_buffer"] = p.past_present_share_buffer;
-        d["random_seed"] = p.random_seed;
-        d["repetition_penalty"] = p.repetition_penalty;
-        d["temperature"] = p.temperature;
-        d["top_k"] = p.top_k;
-        d["top_p"] = p.top_p;
-        return d;
-      });
+      .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -410,7 +412,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
       .def(
-          "apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
+          "apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string {
+            return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_;
+          },
+          pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
