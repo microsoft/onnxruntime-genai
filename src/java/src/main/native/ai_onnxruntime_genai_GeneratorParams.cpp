@@ -35,8 +35,9 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionNumber(JNIEnv* env, job
   ThrowIfError(env, OgaGeneratorParamsSetSearchNumber(generator_params, name, value));
 }
 
-JNIEXPORT jdouble JNICALL
-Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobject thiz, jlong native_handle, jstring option_name) {
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                              jstring option_name, jboolean value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   CString name{env, option_name};
 
