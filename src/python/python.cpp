@@ -196,8 +196,8 @@ struct PyGeneratorParams {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
 
-  py::dict GetSearchOptions() {
-    py::dict d;
+  pybind11::dict GetSearchOptions() {
+    pybind11::dict d;
     d["batch_size"] = params_->GetSearchNumber("batch_size");
     d["chunk_size"] = params_->GetSearchNumber("chunk_size");
     d["diversity_penalty"] = params_->GetSearchNumber("diversity_penalty");
