@@ -4715,7 +4715,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MobileLLMForCausalLM":
         onnx_model = MobileLLM(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "BaichuanForCausalLM":
+    elif config.architectures[0] == "BaiChuanForCausalLM":
         onnx_model = BaiChuanModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "baichuan"
     elif config.architectures[0] == "Idefics3ForConditionalGeneration":
