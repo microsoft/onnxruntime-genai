@@ -291,8 +291,8 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
 double GeneratorParams::GetSearchNumber(std::string_view name) const {
   if (name == "batch_size") {
     return static_cast<double>(search.batch_size);
-  } else if (name == "chunk_size" && search.chunk_size.has_value()) {
-    return static_cast<double>(search.chunk_size.value());
+  } else if (name == "chunk_size") {
+    return search.chunk_size.has_value() ? static_cast<double>(search.chunk_size.value()) : 0.0;
   } else if (name == "diversity_penalty") {
     return search.diversity_penalty;
   } else if (name == "length_penalty") {
@@ -318,7 +318,7 @@ double GeneratorParams::GetSearchNumber(std::string_view name) const {
   } else if (name == "top_p") {
     return search.top_p;
   } else {
-    throw std::runtime_error("Invalid name for GetSearchNumber.");
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
   }
 }
 
@@ -330,7 +330,7 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
   } else if (name == "past_present_share_buffer") {
     return search.past_present_share_buffer;
   } else {
-    throw std::runtime_error("Invalid name for GetSearchBool.");
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
   }
 }
 
