@@ -60,6 +60,6 @@ Java_ai_onnxruntime_genai_GeneratorParams_getSearchBool(JNIEnv* env, jobject thi
   CString name{env, option_name};
   bool value;
 
-  ThrowIfError(env, OgaGeneratorParamsSetSearchBool(generator_params, name, &value));
+  ThrowIfError(env, OgaGeneratorParamsGetSearchBool(generator_params, name, &value));
   return static_cast<jboolean>(value);
 }
