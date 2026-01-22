@@ -207,6 +207,67 @@ struct InterfaceImpl : DeviceInterface {
 
     return true;
   }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Only support continuous decoding mode (batch_beam_size == 1)
+    // For batch mode, fall back to CPU implementation
+    if (batch_beam_size != 1) {
+      return false;
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create CPU memory info
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+    // Compute position_ids on CPU: position_ids[i] = start + i
+    int start = total_length - new_kv_length;
+    std::array<int64_t, 1> shape{static_cast<int64_t>(new_kv_length)};
+
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      // Generate int32 position_ids on CPU
+      std::vector<int32_t> cpu_data(new_kv_length);
+      for (int i = 0; i < new_kv_length; i++) {
+        cpu_data[i] = static_cast<int32_t>(start + i);
+      }
+
+      // Create source tensor (CPU memory)
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data.data(), new_kv_length * sizeof(int32_t), shape, type);
+
+      // Create destination tensor (WebGPU device memory)
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, position_ids, new_kv_length * sizeof(int32_t), shape, type);
+
+      // Copy from CPU to GPU using CopyTensors
+      OrtValue* src_ptrs[] = {src_tensor.get()};
+      OrtValue* dst_ptrs[] = {dst_tensor.get()};
+      Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    } else {
+      // Generate int64 position_ids on CPU
+      std::vector<int64_t> cpu_data(new_kv_length);
+      for (int i = 0; i < new_kv_length; i++) {
+        cpu_data[i] = static_cast<int64_t>(start + i);
+      }
+
+      // Create source tensor (CPU memory)
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data.data(), new_kv_length * sizeof(int64_t), shape, type);
+
+      // Create destination tensor (WebGPU device memory)
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, position_ids, new_kv_length * sizeof(int64_t), shape, type);
+
+      // Copy from CPU to GPU using CopyTensors
+      OrtValue* src_ptrs[] = {src_tensor.get()};
+      OrtValue* dst_ptrs[] = {dst_tensor.get()};
+      Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    }
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU
