@@ -500,7 +500,7 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
-int32_t Generator::TokenCount() {
+int32_t Generator::TokenCount() const {
   return static_cast<int32_t>(search_->GetSequenceLength());
 }
 

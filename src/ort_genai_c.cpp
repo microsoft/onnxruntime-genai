@@ -395,14 +395,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(OgaGeneratorParams* params, const char* name, double* value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value) {
   OGA_TRY
   *value = params->GetSearchNumber(name);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(OgaGeneratorParams* params, const char* name, bool* value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value) {
   OGA_TRY
   *value = params->GetSearchBool(name);
   return nullptr;
@@ -464,7 +464,7 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_TokenCount(OgaGenerator* generator, int32_t* count) {
+OgaResult* OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator, int32_t* count) {
   OGA_TRY
   *count = generator->TokenCount();
   return nullptr;

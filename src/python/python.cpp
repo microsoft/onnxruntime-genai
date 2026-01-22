@@ -315,7 +315,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
-           pybind11::arg("enable_ff_tokens") = false);
+           pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", [](const GeneratorParams& p) {
         py::dict d;
         d["batch_size"] = p.batch_size;
@@ -336,7 +336,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         d["top_k"] = p.top_k;
         d["top_p"] = p.top_p;
         return d;
-      })
+      });
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
