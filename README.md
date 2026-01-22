@@ -150,30 +150,6 @@ To install the nightly Python build:
 pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime-genai
 ```
 
-## Breaking API changes
-
-Note: between `v0.11.5` and `v0.10.1`, there was a breaking API usage change to improve model quality during multi-turn conversations. In the process, the generation loop was changed to the following.
-
-```
-while True:
-    GenerateToken()
-    if IsDone():
-        break
-    GetLastToken()
-    PrintLastToken()
-```
-
-With the addition of the GetLastToken() API across language bindings, the prior behavior for the decoding loop is restore. The decoding loop can now be written once again as follows.
-
-```
-while not IsDone():
-    GenerateToken()
-    GetLastToken()
-    PrintLastToken()
-```
-
-Please read [this PR's description](https://github.com/microsoft/onnxruntime-genai/pull/1925) for more information.
-
 ## Roadmap
 
 See the [Discussions](https://github.com/microsoft/onnxruntime-genai/discussions) to request new features and up-vote existing requests.
