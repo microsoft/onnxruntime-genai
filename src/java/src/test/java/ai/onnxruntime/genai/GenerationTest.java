@@ -138,6 +138,11 @@ public class GenerationTest {
 
       try (Generator generator = new Generator(model, params); ) {
         generator.appendTokens(inputIDs);
+
+        assertEquals(params.GetSearchNumber("max_length"), maxLength);
+        assertEquals(params.GetSearchBool("early_stopping"), true);
+        assertEquals(generator.TokenCount(), 10);
+
         while (!generator.isDone()) {
           generator.generateNextToken();
         }
@@ -148,6 +153,7 @@ public class GenerationTest {
             assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
           }
         }
+        assertEquals(generator.TokenCount(), generator.GetSequenceCount(0).length);
       }
     }
   }

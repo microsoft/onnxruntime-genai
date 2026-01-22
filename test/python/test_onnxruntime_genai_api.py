@@ -148,6 +148,11 @@ def test_greedy_search(test_data_path, relative_model_path):
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
+
+    assert int(search_params.get_search_options["max_length"]) == 40
+    assert search_params.get_search_options["early_stopping"] == True
+    assert int(generator.token_count()) == 4
+
     while not generator.is_done():
         # Test getting/setting logits
         logits = generator.get_logits()
@@ -165,7 +170,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     )
     for i in range(batch_size):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
-
+    assert int(generator.token_count()) == len(generator.get_sequence(0))
 
 @pytest.mark.parametrize(
     "relative_model_path",

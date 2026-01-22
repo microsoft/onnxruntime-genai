@@ -158,9 +158,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         using (var generator = new Generator(model, generatorParams))
                         {
                             Assert.NotNull(generator);
-
                             generator.AppendTokens(inputIDs);
+
                             Assert.False(generator.IsDone());
+                            Assert.Equal(generatorParams.GetSearchNumber("max_length"), maxLength);
+                            Assert.Equal(generatorParams.GetSearchBool("early_stopping"), true);
+                            Assert.Equal(generator.TokenCount(), generator.GetSequence(0).Length);
+
                             while (!generator.IsDone())
                             {
                                 generator.GenerateNextToken();
@@ -171,6 +175,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                                 var sequence = generator.GetSequence(i).ToArray();
                                 var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                                 Assert.Equal(expectedSequence, sequence);
+                                Assert.Equal(generator.TokenCount(), generator.GetSequence(i).Length);
                             }
                         }
                     }

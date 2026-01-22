@@ -555,6 +555,10 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
+  ASSERT_EQ(static_cast<int>(params->GetSearchNumber("max_length")), 40);
+  ASSERT_EQ(params->GetSearchBool("early_stopping"), true);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
+
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -573,6 +577,7 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   const auto* sequence_data = generator->GetSequenceData(0);
 
   ASSERT_LE(sequence_length, 40);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
 
   const auto* expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
