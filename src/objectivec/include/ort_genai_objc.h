@@ -307,9 +307,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * Get the number of tokens in the generator.
  * @param error Optional error information set if an error occurs.
- * @return The number of tokens in the generator or int32_t(-1) if an error occurs.
+ * @return The number of tokens in the generator
  */
-- (int32_t)tokenCount:(NSError**)error;
+- (int)tokenCount:(NSError**)error;
 
 /**
  * Rewinds the generator to the given length.

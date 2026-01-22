@@ -67,11 +67,11 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (int32_t)tokenCount:(NSError**)error {
+- (int)tokenCount:(NSError**)error {
   try {
     return _generator->TokenCount();
   }
-  OGA_OBJC_API_IMPL_CATCH(error, int32_t(-1))
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT(error)
 }
 
 - (BOOL)rewindTo:(size_t)newLength error:(NSError**)error {
