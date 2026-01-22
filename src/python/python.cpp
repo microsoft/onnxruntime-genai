@@ -258,6 +258,10 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
+  int32_t TokenCount() const {
+    return generator_->TokenCount();
+  }
+
   pybind11::array_t<float> GetLogits() {
     return ToNumpy(*generator_->GetLogits());
   }
@@ -483,7 +487,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
-      .def("token_count", &OgaGenerator::TokenCount)
+      .def("token_count", &PyGenerator::TokenCount)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
