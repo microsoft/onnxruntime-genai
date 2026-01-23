@@ -117,7 +117,7 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -143,7 +143,8 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
+      cd $(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)
+      cpack -C $(build_config)
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 

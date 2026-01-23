@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
 #include "sequences.h"
@@ -15,6 +17,7 @@
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
+#include "ryzenai/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -94,6 +97,8 @@ void Shutdown() {
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
+
+  RyzenAIInterface::Shutdown();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -224,6 +229,8 @@ std::string to_string(DeviceType device_type) {
       return "OpenVINO";
     case DeviceType::NvTensorRtRtx:
       return "NvTensorRtRtx";
+    case DeviceType::RyzenAI:
+      return "RyzenAI";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -247,6 +254,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetQNNInterface();
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
+    case DeviceType::RyzenAI:
+      return GetRyzenAIInterface();
   }
 }
 
@@ -318,24 +327,14 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-
-  // Handle padding based on alignment setting for sliding window models
-  if (padded_input_ids_size > input_ids.size()) {
-    const bool left_align = model_->config_->model.decoder.sliding_window.has_value() &&
-                            model_->config_->model.decoder.sliding_window->alignment == "left";
-
-    if (left_align) {
-      // Left alignment: padding first, then data
-      std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + (padded_input_ids_size - input_ids.size()));
-    } else {
-      // Right alignment (default): data first, then padding
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
-      std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
-    }
-  } else {
-    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  auto padding_begin = cpu_span.begin();
+  auto data_end = cpu_span.end();
+  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
+    padding_begin = cpu_span.begin() + input_ids.size();
+    data_end = padding_begin;
   }
+  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
@@ -358,7 +357,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       DeviceType::CUDA,
       DeviceType::WEBGPU,
       DeviceType::OpenVINO,
-      DeviceType::NvTensorRtRtx};
+      DeviceType::NvTensorRtRtx,
+      DeviceType::RyzenAI};
 
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),

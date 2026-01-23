@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -23,6 +23,7 @@
 #include "qwen2_5_vl_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
+#include "../ryzenai/interface.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -653,6 +654,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     } else if (provider_options.name == "OpenVINO") {
       p_device = GetDeviceInterface(DeviceType::OpenVINO);
       OpenVINO_AppendProviderOptions(session_options, config, provider_options);
+    } else if (provider_options.name == "RyzenAI") {
+      p_device = GetDeviceInterface(DeviceType::RyzenAI);
+
+      session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
+
+      GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
       if (provider_options.name == "QNN") {
@@ -670,6 +677,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
       } else if (provider_options.name == "NvTensorRtRtx") {
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
         ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
@@ -771,7 +779,24 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+#if defined(_WIN32)
+      if (provider_options.name == "VitisAI") {
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "external_ep_libray"; });
+            opt_it != provider_options.options.end()) {
+          auto lib_name = opt_it->second;
+          auto lib = LoadLibrary(lib_name.c_str());
+          if (const auto func = (void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*))GetProcAddress(lib, "CreateEpFactories")) {
+            OrtEpFactory* factory = nullptr;
+            size_t num = 1;
 
+            func(nullptr, OrtGetApiBase(), nullptr, &factory, num, &num);
+          }
+          fs::path custom_ops_lib_path(lib_name);
+          session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
+        }
+      }
+#endif  // WIN32
 #endif
     }
   }
@@ -810,7 +835,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -829,7 +854,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -893,6 +918,20 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   return names;
 }
 
+std::vector<int64_t> SessionInfo::GetInputShape(const std::string& name) const {
+  auto type_info = inputs_.find(name);
+  if (type_info == inputs_.end())
+    throw std::runtime_error("Model input was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetShape();
+}
+
+std::vector<int64_t> SessionInfo::GetOutputShape(const std::string& name) const {
+  auto type_info = outputs_.find(name);
+  if (type_info == outputs_.end())
+    throw std::runtime_error("Model output was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetShape();
+}
+
 std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& name) const {
   auto type_info = inputs_.find(name);
   if (type_info == inputs_.end())
@@ -911,9 +950,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_, arena_cfg_);
 
-  // Only CUDA, TRT-RTX and DML does every input on the device
+  // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+      p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
@@ -1140,6 +1180,14 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, session_info_);
+}
+
+bool Model::IsPruned() const {
+  const auto& logits_name = config_->model.decoder.outputs.logits;
+  if (!session_info_.HasOutput(logits_name))
+    return false;
+  const auto logits_shape = session_info_.GetOutputShape(logits_name);
+  return logits_shape[1] == 1;
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
