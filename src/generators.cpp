@@ -6,7 +6,6 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
-#include "models/graph_executor.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -65,8 +64,6 @@ OrtGlobals::OrtGlobals()
   // Init the CPU device (special case because it always exists, and its allocator is special
   GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
 }
-
-OrtGlobals::~OrtGlobals() = default;
 
 // Ensure Shutdown() has been called before process exit
 struct EnsureShutdown {

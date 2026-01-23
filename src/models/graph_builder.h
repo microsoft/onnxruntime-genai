@@ -54,7 +54,7 @@ struct TensorConfig {
       : name(n), elem_type(t), shape(s) {}
 };
 
-// Configuration for building a 1-op ONNX model
+// Configuration for building an ONNX model
 struct ModelConfig {
   std::string op_type;  // e.g., "Cast", "TopK", "Argmax"
   std::vector<TensorConfig> inputs;
@@ -74,11 +74,6 @@ namespace GraphBuilder {
 // Returns an OrtModel that can be used to create sessions
 // Caller is responsible for calling Ort::api->ReleaseModel() when done
 OrtModel* Build(const ModelConfig& config);
-
-// Convenience helper to create a Cast model
-OrtModel* CreateCastModel(
-    ONNXTensorElementDataType input_type,
-    ONNXTensorElementDataType output_type);
 
 }  // namespace GraphBuilder
 

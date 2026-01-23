@@ -221,24 +221,6 @@ OrtModel* Build(const ModelConfig& config) {
   }
 }
 
-// Helper to create a Cast model
-OrtModel* CreateCastModel(
-    ONNXTensorElementDataType input_type,
-    ONNXTensorElementDataType output_type) {
-  ModelConfig config("Cast");
-
-  // Add input tensor with dynamic shape
-  config.inputs.push_back(TensorConfig("input", input_type, {-1}));
-
-  // Add output tensor with dynamic shape
-  config.outputs.push_back(TensorConfig("output", output_type, {-1}));
-
-  // Add "to" attribute
-  config.attributes.push_back(AttributeValue::Int("to", static_cast<int64_t>(output_type)));
-
-  return Build(config);
-}
-
 }  // namespace GraphBuilder
 
 }  // namespace Generators
