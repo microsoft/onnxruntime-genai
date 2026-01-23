@@ -188,7 +188,7 @@ struct InterfaceImpl : DeviceInterface {
     Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
 
     // WebGPU-specific session configuration
-    static const char* webgpu_config_key = "ep.webgpuexecutionprovider.registerInt64Ops";
+    static const char* webgpu_config_key = "ep.webgpuexecutionprovider.enableInt64";
     static const char* webgpu_config_value = "1";
     std::vector<const char*> session_config_keys = {webgpu_config_key};
     std::vector<const char*> session_config_values = {webgpu_config_value};
