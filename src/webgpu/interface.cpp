@@ -4,7 +4,7 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
-#include "../models/one_op_model_executor.h"
+#include "../models/graph_executor.h"
 
 namespace Generators {
 namespace WebGPU {

@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "one_op_model_executor.h"
-#include "one_op_model_builder.h"
+#include "graph_executor.h"
+#include "graph_builder.h"
 #include "../generators.h"
 #include <functional>
 #include <memory>
@@ -12,125 +12,39 @@
 
 namespace Generators {
 
-// Cache for 1-op model sessions
-// Uses a static cache to share sessions across all callers for efficiency since
-// session creation is expensive. Thread-safe via mutex.
-struct OneOpSessionCache {
-  std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
-  std::mutex mutex_;
-};
-
-static OneOpSessionCache& GetOneOpSessionCache() {
-  static OneOpSessionCache cache;
-  return cache;
-}
-
-// Get the appropriate OrtEnv for one-op models
-// When compiled as part of the library, uses the main library's env
-// When compiled in tests, creates a separate env
-static OrtEnv& GetOneOpEnv() {
-#ifdef GENAI_STANDALONE_ONE_OP
-  // Test/standalone mode - create our own env
-  static std::unique_ptr<OrtEnv> env;
-  static std::once_flag init_flag;
-
-  std::call_once(init_flag, []() {
-    if (Ort::api == nullptr) {
-      Ort::api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
-    }
-    env = OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING);
-  });
-
-  return *env;
-#else
-  // Library mode - use the main library's env
-  return GetOrtEnv();
-#endif
-}
+namespace {
 
 // Generate a cache key from the model configuration and EP name
-uint64_t OneOpModelExecutor::GenerateCacheKey(
-    const OneOpModelConfig& config,
-    const std::string& ep_name,
-    const std::vector<const char*>& session_config_keys,
-    const std::vector<const char*>& session_config_values) {
-  // Validate session config vectors have matching sizes
-  if (session_config_keys.size() != session_config_values.size()) {
-    throw std::invalid_argument("session_config_keys and session_config_values must have the same size");
-  }
-
-  // Hash combining op_type, input/output types, EP name, and session config
+uint64_t GenerateCacheKey(
+    const ModelConfig& config,
+    const std::string& ep_name) {
+  // Hash combining op_type, input/output types, and EP name
+  // Attributes and shapes are excluded since they're passed as uniforms and can be changed dynamically
   std::hash<std::string> hasher;
   uint64_t key = hasher(config.op_type);
 
   // Hash EP name
   key ^= hasher(ep_name) + 0x9e3779b9 + (key << 6) + (key >> 2);
 
-  // Hash input types (shapes are not included since models use dynamic shapes)
+  // Hash input types
   for (const auto& input : config.inputs) {
     key ^= static_cast<uint64_t>(input.elem_type) + 0x9e3779b9 + (key << 6) + (key >> 2);
   }
 
-  // Hash output types (shapes are not included since models use dynamic shapes)
+  // Hash output types
   for (const auto& output : config.outputs) {
     key ^= static_cast<uint64_t>(output.elem_type) + 0x9e3779b9 + (key << 6) + (key >> 2);
-  }
-
-  // Hash attributes
-  for (const auto& attr : config.attributes) {
-    key ^= hasher(attr.name) + 0x9e3779b9 + (key << 6) + (key >> 2);
-
-    switch (attr.type) {
-      case AttributeType::INT:
-        key ^= static_cast<uint64_t>(attr.int_value) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        break;
-      case AttributeType::FLOAT: {
-        uint32_t float_bits;
-        std::memcpy(&float_bits, &attr.float_value, sizeof(float));
-        key ^= static_cast<uint64_t>(float_bits) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        break;
-      }
-      case AttributeType::STRING:
-        key ^= hasher(attr.string_value) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        break;
-      case AttributeType::INTS:
-        for (auto val : attr.ints_value) {
-          key ^= static_cast<uint64_t>(val) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        }
-        break;
-      case AttributeType::FLOATS:
-        for (auto val : attr.floats_value) {
-          uint32_t float_bits;
-          std::memcpy(&float_bits, &val, sizeof(float));
-          key ^= static_cast<uint64_t>(float_bits) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        }
-        break;
-      case AttributeType::STRINGS:
-        for (const auto& val : attr.strings_value) {
-          key ^= hasher(val) + 0x9e3779b9 + (key << 6) + (key >> 2);
-        }
-        break;
-    }
-  }
-
-  // Hash session config keys and values
-  for (size_t i = 0; i < session_config_keys.size(); i++) {
-    key ^= hasher(session_config_keys[i]) + 0x9e3779b9 + (key << 6) + (key >> 2);
-    key ^= hasher(session_config_values[i]) + 0x9e3779b9 + (key << 6) + (key >> 2);
   }
 
   return key;
 }
 
 // Create a new session for the given model and EP
-std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
+std::unique_ptr<OrtSession> CreateSession(
     OrtModel* model,
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  // Get env first - this ensures Ort::api is initialized
-  auto& env = GetOneOpEnv();
-
   auto session_options = OrtSessionOptions::Create();
   session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -147,19 +61,19 @@ std::unique_ptr<OrtSession> OneOpModelExecutor::CreateSession(
   // Create session from OrtModel using Model Editor API
   const auto& model_editor_api = Ort::GetModelEditorApi();
   OrtSession* session_ptr = nullptr;
-  Ort::ThrowOnError(model_editor_api.CreateSessionFromModel(&env, model, session_options.get(), &session_ptr));
+  Ort::ThrowOnError(model_editor_api.CreateSessionFromModel(&GetOrtEnv(), model, session_options.get(), &session_ptr));
 
   return std::unique_ptr<OrtSession>(session_ptr);
 }
 
 // Get or create a cached session
-OrtSession* OneOpModelExecutor::GetOrCreateSession(
-    const OneOpModelConfig& config,
+OrtSession* GetOrCreateSession(
+    const ModelConfig& config,
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
-  auto& cache = GetOneOpSessionCache();
-  uint64_t key = GenerateCacheKey(config, ep_name, session_config_keys, session_config_values);
+  auto& cache = GetOrtGlobals()->graph_session_cache_;
+  uint64_t key = GenerateCacheKey(config, ep_name);
 
   std::lock_guard<std::mutex> lock(cache.mutex_);
 
@@ -169,7 +83,7 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
   }
 
   // Build model using Model Editor API
-  OrtModel* model = OneOpModelBuilder::Build(config);
+  OrtModel* model = GraphBuilder::Build(config);
 
   // Create session from model
   auto session = CreateSession(model, ep_name, session_config_keys, session_config_values);
@@ -183,10 +97,11 @@ OrtSession* OneOpModelExecutor::GetOrCreateSession(
   return session_ptr;
 }
 
-// Execute a 1-op model
-void OneOpModelExecutor::Execute(
-    const OneOpModelConfig& model_config,
-    const OneOpExecutionParams& exec_params) {
+}  // anonymous namespace
+
+void GraphExecutor::Execute(
+    const ModelConfig& model_config,
+    const ExecutionParams& exec_params) {
   // Validate input/output counts match
   if (exec_params.inputs.size() != model_config.inputs.size()) {
     throw std::invalid_argument("Number of inputs in exec_params doesn't match model_config");
@@ -239,13 +154,6 @@ void OneOpModelExecutor::Execute(
   session->Run(nullptr, *io_binding);
 }
 
-// Clear all cached sessions
-void OneOpModelExecutor::ClearCache() {
-  auto& cache = GetOneOpSessionCache();
-  std::lock_guard<std::mutex> lock(cache.mutex_);
-  cache.sessions_.clear();
-}
-
 // Helper function for Cast operation
 void ExecuteCastOp(
     void* input_data,
@@ -258,19 +166,19 @@ void ExecuteCastOp(
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
   // Build Cast model configuration with dynamic shape (-1) to support any element count
-  OneOpModelConfig config("Cast");
+  ModelConfig config("Cast");
   config.inputs.push_back(TensorConfig("input", input_type, {-1}));
   config.outputs.push_back(TensorConfig("output", output_type, {-1}));
   config.attributes.push_back(AttributeValue::Int("to", static_cast<int64_t>(output_type)));
 
   // Build execution parameters
-  OneOpExecutionParams params(execution_provider_name, memory_info);
-  params.inputs.push_back(OneOpTensorSpec(
+  ExecutionParams params(execution_provider_name, memory_info);
+  params.inputs.push_back(TensorSpec(
       input_data,
       input_type,
       {static_cast<int64_t>(element_count)},
       element_count * Ort::SizeOf(input_type)));
-  params.outputs.push_back(OneOpTensorSpec(
+  params.outputs.push_back(TensorSpec(
       output_data,
       output_type,
       {static_cast<int64_t>(element_count)},
@@ -280,7 +188,7 @@ void ExecuteCastOp(
   params.session_config_keys = session_config_keys;
   params.session_config_values = session_config_values;
 
-  OneOpModelExecutor::Execute(config, params);
+  GraphExecutor::Execute(config, params);
 }
 
 }  // namespace Generators

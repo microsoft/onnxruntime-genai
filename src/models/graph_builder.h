@@ -55,33 +55,31 @@ struct TensorConfig {
 };
 
 // Configuration for building a 1-op ONNX model
-struct OneOpModelConfig {
+struct ModelConfig {
   std::string op_type;  // e.g., "Cast", "TopK", "Argmax"
   std::vector<TensorConfig> inputs;
   std::vector<TensorConfig> outputs;
   std::vector<AttributeValue> attributes;
 
-  // ONNX opset version for the generated model.
-  // Default is 21 which is widely supported and matches the opset used elsewhere in the codebase.
-  // Can be overridden if a specific opset is required, but ensure the ONNX Runtime build
-  // supports it and the operator exists in that opset version.
-  int opset_version{21};
+  // ONNX opset version for the generated model. Default to 21.
+  const int opset_version{21};
 
-  OneOpModelConfig(const std::string& op) : op_type(op) {}
+  ModelConfig(const std::string& op) : op_type(op) {}
 };
 
-// Builder class for creating 1-op ONNX models using the Model Editor API
-class OneOpModelBuilder {
- public:
-  // Build a complete ONNX model using the Model Editor API
-  // Returns an OrtModel that can be used to create sessions
-  // Caller is responsible for calling Ort::api->ReleaseModel() when done
-  static OrtModel* Build(const OneOpModelConfig& config);
+// Namespace for graph building utilities using the Model Editor API
+namespace GraphBuilder {
 
-  // Convenience helper to create a Cast model
-  static OrtModel* CreateCastModel(
-      ONNXTensorElementDataType input_type,
-      ONNXTensorElementDataType output_type);
-};
+// Build a complete ONNX model using the Model Editor API
+// Returns an OrtModel that can be used to create sessions
+// Caller is responsible for calling Ort::api->ReleaseModel() when done
+OrtModel* Build(const ModelConfig& config);
+
+// Convenience helper to create a Cast model
+OrtModel* CreateCastModel(
+    ONNXTensorElementDataType input_type,
+    ONNXTensorElementDataType output_type);
+
+}  // namespace GraphBuilder
 
 }  // namespace Generators

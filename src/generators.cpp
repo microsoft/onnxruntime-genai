@@ -6,7 +6,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
-#include "models/one_op_model_executor.h"
+#include "models/graph_executor.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -66,10 +66,7 @@ OrtGlobals::OrtGlobals()
   GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
 }
 
-OrtGlobals::~OrtGlobals() {
-  // Clear 1-op model executor cache before env_ is destroyed
-  OneOpModelExecutor::ClearCache();
-}
+OrtGlobals::~OrtGlobals() = default;
 
 // Ensure Shutdown() has been called before process exit
 struct EnsureShutdown {

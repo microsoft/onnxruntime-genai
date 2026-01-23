@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "one_op_model_builder.h"
+#include "graph_builder.h"
 #include <cstring>
 
 namespace Generators {
@@ -55,8 +55,10 @@ AttributeValue AttributeValue::Strings(const std::string& name, const std::vecto
   return attr;
 }
 
+namespace {
+
 // Helper to create OrtOpAttr from AttributeValue using Model Editor API
-static OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
+OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
   OrtOpAttr* op_attr = nullptr;
 
   switch (attr.type) {
@@ -99,16 +101,12 @@ static OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
   return op_attr;
 }
 
-// Build complete ONNX model using the Model Editor API
-OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
-  // Ensure Ort::api is initialized
-  // In library mode, Ort::api is initialized by the main library
-#ifdef GENAI_STANDALONE_ONE_OP
-  if (Ort::api == nullptr) {
-    Ort::api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
-  }
-#endif
+}  // anonymous namespace
 
+namespace GraphBuilder {
+
+// Build complete ONNX model using the Model Editor API
+OrtModel* Build(const ModelConfig& config) {
   const auto& model_editor_api = Ort::GetModelEditorApi();
 
   OrtGraph* graph = nullptr;
@@ -224,10 +222,10 @@ OrtModel* OneOpModelBuilder::Build(const OneOpModelConfig& config) {
 }
 
 // Helper to create a Cast model
-OrtModel* OneOpModelBuilder::CreateCastModel(
+OrtModel* CreateCastModel(
     ONNXTensorElementDataType input_type,
     ONNXTensorElementDataType output_type) {
-  OneOpModelConfig config("Cast");
+  ModelConfig config("Cast");
 
   // Add input tensor with dynamic shape
   config.inputs.push_back(TensorConfig("input", input_type, {-1}));
@@ -240,5 +238,7 @@ OrtModel* OneOpModelBuilder::CreateCastModel(
 
   return Build(config);
 }
+
+}  // namespace GraphBuilder
 
 }  // namespace Generators

@@ -117,9 +117,9 @@ struct DeviceInterface {
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
   // Generic 1-op model execution support
-  // EPs can override this to use the common OneOpModelExecutor infrastructure
+  // EPs can override this to use the common graph executor infrastructure
   // for operations like Cast, TopK, Argmax, etc. that may not have native kernels
-  // See models/one_op_model_executor.h for helper functions
+  // See models/graph_executor.h for helper functions
   virtual bool Cast(void* /*input*/, void* /*output*/, ONNXTensorElementDataType /*input_type*/, ONNXTensorElementDataType /*output_type*/, size_t /*element_count*/) { return false; }
 
   virtual bool UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { return false; }
