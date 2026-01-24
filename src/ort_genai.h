@@ -324,12 +324,10 @@ struct OgaTokenizer : OgaAbstract {
   }
 #else
   std::vector<int32_t> GetEosTokenIds() const {
-    std::vector<int32_t> eos_ids;
     const int32_t* eos_ids_ptr;
     size_t count;
     OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids_ptr, &count));
-    eos_ids.assign(eos_ids_ptr, eos_ids_ptr + count);
-    return eos_ids;
+    return std::vector<int32_t>(eos_ids_ptr, eos_ids_ptr + count);
   }
 #endif
 
@@ -501,12 +499,10 @@ struct OgaGenerator : OgaAbstract {
   }
 #else
   std::vector<int32_t> GetNextTokens() {
-    std::vector<int32_t> next_tokens;
     const int32_t* out;
     size_t out_count;
     OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
-    next_tokens.assign(out, out + out_count);
-    return next_tokens;
+    return std::vector<int32_t>(out, out + out_count);
   }
 #endif
 
