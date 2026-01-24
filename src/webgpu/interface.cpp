@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
+#include "../models/graph_executor.h"
 
 namespace Generators {
 namespace WebGPU {
@@ -176,6 +177,36 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do?
+
+  bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // WebGPU-specific session configuration
+    static const char* webgpu_config_key = "ep.webgpuexecutionprovider.enableInt64";
+    static const char* webgpu_config_value = "1";
+    std::vector<const char*> session_config_keys = {webgpu_config_key};
+    std::vector<const char*> session_config_values = {webgpu_config_value};
+
+    // Use the generalized ExecuteCastOp helper with WebGPU session config
+    ExecuteCastOp(
+        input,
+        output,
+        input_type,
+        output_type,
+        element_count,
+        "WebGPU",
+        webgpu_mem_info,
+        session_config_keys,
+        session_config_values);
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU
