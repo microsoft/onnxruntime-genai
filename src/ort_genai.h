@@ -443,6 +443,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);
   }
+  
+  void ToggleGuidance(bool enable) {
+    OgaCheckResult(OgaGeneratorToggleGuidance(this, enable));
+  }
+
+  bool IsGuidanceEnabled() {
+    return OgaGeneratorIsGuidanceEnabled(this);
+  }
 
   bool IsDone() {
     return OgaGenerator_IsDone(this);
