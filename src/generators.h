@@ -13,7 +13,6 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -140,11 +139,8 @@ struct OrtGlobals {
 
   // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
   // Destroyed before env_ to ensure proper cleanup order
-  struct SessionCache {
-    std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
-    std::mutex mutex_;
-  };
-  SessionCache graph_session_cache_;
+  // Note: No mutex needed since ort-genai execution is single-threaded
+  std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> graph_session_cache_;
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;

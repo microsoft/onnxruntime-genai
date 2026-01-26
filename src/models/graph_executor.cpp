@@ -6,7 +6,6 @@
 #include "../generators.h"
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <cstring>
 
@@ -75,10 +74,8 @@ OrtSession* GetOrCreateSession(
   auto& cache = GetOrtGlobals()->graph_session_cache_;
   uint64_t key = GenerateCacheKey(config, ep_name);
 
-  std::lock_guard<std::mutex> lock(cache.mutex_);
-
-  auto it = cache.sessions_.find(key);
-  if (it != cache.sessions_.end()) {
+  auto it = cache.find(key);
+  if (it != cache.end()) {
     return it->second.get();
   }
 
@@ -92,7 +89,7 @@ OrtSession* GetOrCreateSession(
   Ort::api->ReleaseModel(model);
 
   OrtSession* session_ptr = session.get();
-  cache.sessions_[key] = std::move(session);
+  cache[key] = std::move(session);
 
   return session_ptr;
 }
