@@ -25,7 +25,7 @@
   try {
     return _tokenizer->GetBosTokenId();
   }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT(error)
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
 }
 
 - (nullable NSArray<NSNumber*>*)getEosTokenIds:(NSError**)error {
@@ -47,7 +47,7 @@
   try {
     return _tokenizer->GetPadTokenId();
   }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT(error)
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
 }
 
 - (nullable OGASequences*)encode:(NSString*)str error:(NSError**)error {

@@ -374,7 +374,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The number of tokens in the generator
  */
-- (int)tokenCount:(NSError**)error;
+- (size_t)tokenCount:(NSError**)error;
 
 /**
  * Rewinds the generator to the given length.

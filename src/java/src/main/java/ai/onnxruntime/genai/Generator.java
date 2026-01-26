@@ -135,7 +135,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
    *
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public int tokenCount() throws GenAIException {
+  public long tokenCount() throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -293,7 +293,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
       throws GenAIException;
 
-  private native int tokenCount(long nativeHandle) throws GenAIException;
+  private native long tokenCount(long nativeHandle) throws GenAIException;
 
   private native void rewindTo(long nativeHandle, long newLength) throws GenAIException;
 

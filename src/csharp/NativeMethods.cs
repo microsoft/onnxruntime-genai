@@ -168,8 +168,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                        
         // This function is used to get the number of tokens in the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerator_TokenCount(IntPtr /* OgaGenerator* */ generator,
-                                                                             out int /* int32_t* */ count);
+        public static extern UIntPtr OgaGenerator_TokenCount(IntPtr /* const OgaGenerator* */ generator);
+
 
         // This function is used to rewind the generator to the given newLength.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

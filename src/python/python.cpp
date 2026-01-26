@@ -258,7 +258,7 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
-  int32_t TokenCount() const {
+  size_t TokenCount() const {
     return generator_->TokenCount();
   }
 

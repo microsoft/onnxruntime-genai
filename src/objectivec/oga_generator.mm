@@ -67,11 +67,11 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (int)tokenCount:(NSError**)error {
+- (size_t)tokenCount:(NSError**)error {
   try {
     return _generator->TokenCount();
   }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT(error)
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
 - (BOOL)rewindTo:(size_t)newLength error:(NSError**)error {
@@ -117,7 +117,7 @@
   try {
     return _generator->GetSequenceCount(index);
   }
-  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
 + (void)shutdown {

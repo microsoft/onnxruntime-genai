@@ -522,10 +522,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* gener
 /**
  * \brief Returns the number of tokens in the generator
  * \param[in] generator The generator containing the appended tokens.
- * \param[out] count The number of tokens that have been added.
- * \return OgaResult containing the error message if the getting of the number of tokens failed.
+ * \return The number of tokens that have been added.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator, int32_t* count);
+OGA_EXPORT size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator);
 
 /**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.

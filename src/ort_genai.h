@@ -480,10 +480,8 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
-  int32_t TokenCount() const {
-    int32_t count;
-    OgaCheckResult(OgaGenerator_TokenCount(this, &count));
-    return count;
+  size_t TokenCount() const {
+    return OgaGenerator_TokenCount(this);
   }
 
   void GenerateNextToken() {

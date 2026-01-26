@@ -464,11 +464,8 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator, int32_t* count) {
-  OGA_TRY
-  *count = generator->TokenCount();
-  return nullptr;
-  OGA_CATCH
+size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator) {
+  return generator->TokenCount();
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
