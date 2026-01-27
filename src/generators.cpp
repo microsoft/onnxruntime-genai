@@ -292,7 +292,7 @@ double GeneratorParams::GetSearchNumber(std::string_view name) const {
   if (name == "batch_size") {
     return static_cast<double>(search.batch_size);
   } else if (name == "chunk_size") {
-    return search.chunk_size.has_value() ? static_cast<double>(search.chunk_size.value()) : 0.0;
+    return static_cast<double>(search.chunk_size.value_or(0));
   } else if (name == "diversity_penalty") {
     return search.diversity_penalty;
   } else if (name == "length_penalty") {
