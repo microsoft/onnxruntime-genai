@@ -139,7 +139,6 @@ struct OrtGlobals {
 
   // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
   // Destroyed before env_ to ensure proper cleanup order
-  // Note: No mutex needed since ort-genai execution is single-threaded
   std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> graph_session_cache_;
 
  private:

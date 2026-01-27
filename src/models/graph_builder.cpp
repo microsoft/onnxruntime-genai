@@ -112,7 +112,7 @@ OrtModel* Build(const ModelConfig& config) {
   // Use RAII wrappers for automatic cleanup
   std::unique_ptr<OrtGraph> graph;
   std::unique_ptr<OrtModel> model;
-  std::vector<OrtOpAttr*> node_attributes;  // Manual management - CreateNode doesn't copy these
+  std::vector<OrtOpAttr*> node_attributes;  // Manual management - CreateNode stores references, doesn't copy
 
   // Create graph
   OrtGraph* graph_ptr = nullptr;
@@ -123,18 +123,18 @@ OrtModel* Build(const ModelConfig& config) {
   std::vector<std::unique_ptr<OrtValueInfo>> graph_inputs_owned;
   std::vector<OrtValueInfo*> graph_inputs;
   for (const auto& input : config.inputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, input.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, input.shape.data(), input.shape.size()));
+    OrtTensorTypeAndShapeInfo* tensor_info_raw = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info_raw));
+    std::unique_ptr<OrtTensorTypeAndShapeInfo> tensor_info(tensor_info_raw);
+    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info.get(), input.elem_type));
+    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info.get(), input.shape.data(), input.shape.size()));
 
-    OrtTypeInfo* type_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
-    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+    OrtTypeInfo* type_info_raw = nullptr;
+    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info.get(), &type_info_raw));
+    std::unique_ptr<OrtTypeInfo> type_info(type_info_raw);
 
     OrtValueInfo* value_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateValueInfo(input.name.c_str(), type_info, &value_info));
-    Ort::api->ReleaseTypeInfo(type_info);
+    Ort::ThrowOnError(model_editor_api.CreateValueInfo(input.name.c_str(), type_info.get(), &value_info));
 
     graph_inputs.push_back(value_info);
     graph_inputs_owned.emplace_back(value_info);
@@ -144,18 +144,18 @@ OrtModel* Build(const ModelConfig& config) {
   std::vector<std::unique_ptr<OrtValueInfo>> graph_outputs_owned;
   std::vector<OrtValueInfo*> graph_outputs;
   for (const auto& output : config.outputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, output.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, output.shape.data(), output.shape.size()));
+    OrtTensorTypeAndShapeInfo* tensor_info_raw = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info_raw));
+    std::unique_ptr<OrtTensorTypeAndShapeInfo> tensor_info(tensor_info_raw);
+    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info.get(), output.elem_type));
+    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info.get(), output.shape.data(), output.shape.size()));
 
-    OrtTypeInfo* type_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
-    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
+    OrtTypeInfo* type_info_raw = nullptr;
+    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info.get(), &type_info_raw));
+    std::unique_ptr<OrtTypeInfo> type_info(type_info_raw);
 
     OrtValueInfo* value_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateValueInfo(output.name.c_str(), type_info, &value_info));
-    Ort::api->ReleaseTypeInfo(type_info);
+    Ort::ThrowOnError(model_editor_api.CreateValueInfo(output.name.c_str(), type_info.get(), &value_info));
 
     graph_outputs.push_back(value_info);
     graph_outputs_owned.emplace_back(value_info);
@@ -214,7 +214,7 @@ OrtModel* Build(const ModelConfig& config) {
   Ort::ThrowOnError(model_editor_api.AddGraphToModel(model.get(), graph.get()));
   graph.release();  // model now owns graph
 
-  // Release node attributes now that model is built and attributes are no longer needed
+  // Release node attributes - must be done AFTER model is built since CreateNode stores references
   for (auto* attr : node_attributes) {
     Ort::api->ReleaseOpAttr(attr);
   }
