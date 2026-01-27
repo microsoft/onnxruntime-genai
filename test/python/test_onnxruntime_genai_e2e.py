@@ -30,10 +30,8 @@ def run_model(model_path: str | bytes | os.PathLike):
 
     generator = og.Generator(model, params)
     generator.append_tokens(sequences)
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
-            break
 
     for i in range(3):
         assert generator.get_sequence(i) is not None

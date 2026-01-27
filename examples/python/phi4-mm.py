@@ -145,11 +145,8 @@ def run(args: argparse.Namespace):
         generator.set_inputs(inputs)
         start_time = time.time()
 
-        while True:
+        while not generator.is_done():
             generator.generate_next_token()
-            if generator.is_done():
-                break
-
             new_token = generator.get_next_tokens()[0]
             print(tokenizer_stream.decode(new_token), end="", flush=True)
 

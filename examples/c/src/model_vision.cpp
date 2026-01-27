@@ -113,15 +113,9 @@ void CXX_API(
     std::cout << "Generating response..." << std::endl;
     std::cout << std::endl;
     std::cout << "Output: ";
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-
-      if (generator->IsDone()) {
-        break;
-      }
-
-      const auto num_tokens = generator->GetSequenceCount(0);
-      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+      const auto new_token = generator->GetNextTokens()[0];
       std::cout << stream->Decode(new_token) << std::flush;
     }
 

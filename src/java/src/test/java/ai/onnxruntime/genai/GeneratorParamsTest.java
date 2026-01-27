@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 public class GeneratorParamsTest {
   @Test
   public void testValidSearchOption() throws GenAIException {
-    // test setting an invalid search option throws a GenAIException
+    // test setting a valid search option
     try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
         GeneratorParams params = generator.createGeneratorParams(); ) {
       params.setSearchOption("early_stopping", true); // boolean
