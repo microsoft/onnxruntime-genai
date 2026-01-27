@@ -131,6 +131,19 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Returns the token count in the generator.
+   *
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public long tokenCount() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenCount(nativeHandle);
+  }
+
+  /**
    * Rewinds the generator to the given length. This is useful when the user wants to rewind the
    * generator to a specific length and continue generating from that point.
    *
@@ -279,6 +292,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
       throws GenAIException;
+
+  private native long tokenCount(long nativeHandle) throws GenAIException;
 
   private native void rewindTo(long nativeHandle, long newLength) throws GenAIException;
 

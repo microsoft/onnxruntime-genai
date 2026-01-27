@@ -288,6 +288,52 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
          (search.num_beams == 1 || model_type == "whisper");
 }
 
+double GeneratorParams::GetSearchNumber(std::string_view name) const {
+  if (name == "batch_size") {
+    return static_cast<double>(search.batch_size);
+  } else if (name == "chunk_size") {
+    return static_cast<double>(search.chunk_size.value_or(0));
+  } else if (name == "diversity_penalty") {
+    return search.diversity_penalty;
+  } else if (name == "length_penalty") {
+    return search.length_penalty;
+  } else if (name == "max_length") {
+    return static_cast<double>(search.max_length);
+  } else if (name == "min_length") {
+    return static_cast<double>(search.min_length);
+  } else if (name == "no_repeat_ngram_size") {
+    return static_cast<double>(search.no_repeat_ngram_size);
+  } else if (name == "num_beams") {
+    return static_cast<double>(search.num_beams);
+  } else if (name == "num_return_sequences") {
+    return static_cast<double>(search.num_return_sequences);
+  } else if (name == "random_seed") {
+    return static_cast<double>(search.random_seed);
+  } else if (name == "repetition_penalty") {
+    return search.repetition_penalty;
+  } else if (name == "temperature") {
+    return search.temperature;
+  } else if (name == "top_k") {
+    return static_cast<double>(search.top_k);
+  } else if (name == "top_p") {
+    return search.top_p;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
+  }
+}
+
+bool GeneratorParams::GetSearchBool(std::string_view name) const {
+  if (name == "do_sample") {
+    return search.do_sample;
+  } else if (name == "early_stopping") {
+    return search.early_stopping;
+  } else if (name == "past_present_share_buffer") {
+    return search.past_present_share_buffer;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
+  }
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -452,6 +498,10 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
+}
+
+size_t Generator::TokenCount() const {
+  return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
