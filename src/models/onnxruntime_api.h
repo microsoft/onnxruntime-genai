@@ -1317,6 +1317,38 @@ struct OrtOpAttr {
 };
 
 /// <summary>
+/// This struct provides life time management for OrtGraph used in Model Editor API
+/// </summary>
+struct OrtGraph {
+  static void operator delete(void* p) { Ort::api->ReleaseGraph(reinterpret_cast<OrtGraph*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtModel used in Model Editor API
+/// </summary>
+struct OrtModel {
+  static void operator delete(void* p) { Ort::api->ReleaseModel(reinterpret_cast<OrtModel*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtValueInfo used in Model Editor API
+/// </summary>
+struct OrtValueInfo {
+  static void operator delete(void* p) { Ort::api->ReleaseValueInfo(reinterpret_cast<OrtValueInfo*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtNode used in Model Editor API
+/// </summary>
+struct OrtNode {
+  static void operator delete(void* p) { Ort::api->ReleaseNode(reinterpret_cast<OrtNode*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
 /// This class wraps a raw pointer OrtKernelContext* that is being passed
 /// to the custom kernel Compute() method. Use it to safely access context
 /// attributes, input and output parameters with exception safety guarantees.
