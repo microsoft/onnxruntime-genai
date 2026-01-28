@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import json
 import logging
 import os
 import subprocess
@@ -122,6 +123,16 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     extra_options = ["--extra_options", "include_hidden_states=true"]
     if device == "cpu" and precision == "int4":
         extra_options += ["int4_accuracy_level=4"]
+
+    # WebGPU-specific options for model building (int4 optimization, etc.)
+    if device == "webgpu":
+        extra_options += [
+            "shared_embeddings=true",
+            "int4_algo_config=rtn_last",
+            "int4_is_symmetric=true",
+            "enable_webgpu_graph=true",
+        ]
+
     if one_layer:
         extra_options += ["num_hidden_layers=1"]
     if len(extra_options) > 1:
@@ -129,12 +140,56 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
 
     run_subprocess(command).check_returncode()
 
+    # For WebGPU, modify genai_config.json to add session EP options
+    if device == "webgpu":
+        config_path = os.path.join(output_path, "genai_config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+
+            # Add session_options if not present
+            if "session_options" not in config:
+                config["session_options"] = {}
+
+            # Add log_id if not present
+            if "log_id" not in config["session_options"]:
+                config["session_options"]["log_id"] = "onnxruntime-genai"
+
+            # Add provider_options for WebGPU
+            if "provider_options" not in config["session_options"]:
+                config["session_options"]["provider_options"] = []
+
+            # Find or create WebGPU provider options
+            webgpu_options_entry = None
+            for i, provider in enumerate(config["session_options"]["provider_options"]):
+                if "webgpu" in provider:
+                    webgpu_options_entry = provider
+                    break
+
+            if webgpu_options_entry is None:
+                webgpu_options_entry = {"webgpu": {"validationMode": "disabled", "enableGraphCapture": "1"}}
+                config["session_options"]["provider_options"].append(webgpu_options_entry)
+            else:
+                # Update existing entry
+                webgpu_options_entry["webgpu"]["validationMode"] = "disabled"
+                webgpu_options_entry["webgpu"]["enableGraphCapture"] = "1"
+
+            # Write back the updated config
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+
 
 def download_models(download_path, precision, device, log):
     log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
 
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
+
+    # For WebGPU, only test phi-2 model
+    if device == "webgpu":
+        ci_paths = {k: v for k, v in ci_paths.items() if k == "phi-2"}
+        hf_paths = {k: v for k, v in hf_paths.items() if k == "phi-2"}
+        log.info("WebGPU device: Testing only phi-2 model")
 
     log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
 
