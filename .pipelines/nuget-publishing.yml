@@ -113,6 +113,11 @@ parameters:
     type: string
     default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250617-0934-76952334d2.nupkg'
 
+  - name: version_revision
+    displayName: 'Optional version revision to append to the generated GenAI nuget package version.'
+    type: string
+    default: ''
+
 resources:
   repositories:
     - repository: 1esPipelines
@@ -201,3 +206,4 @@ extends:
             parameters:
               custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
               nuget_version_type: ${{ parameters.nuget_version_type }}
+              version_revision: ${{ parameters.version_revision }}

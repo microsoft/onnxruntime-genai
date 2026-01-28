@@ -8,6 +8,10 @@ parameters:
   type: string
   default: 'stable'
 
+- name: version_revision
+  type: string
+  default: ''
+
 jobs:
 - job: custom_nuget_packaging
   displayName: 'Custom NuGet Packaging'
@@ -119,10 +123,15 @@ jobs:
       Write-Host "OSX x64 artifact path " $osx_x64_artifact_path
       Write-Host "OSX arm64 artifact path " $osx_arm64_artifact_path
 
+      $genai_package_version = "$(genai_version)"
+      if ("${{ parameters.version_revision }}" -ne "") {
+        $genai_package_version = "$genai_package_version.${{ parameters.version_revision }}"
+      }
+      Write-Host "Generated GenAI package version: " $genai_package_version
       $ort_package_version = $versioned_name.Substring($ort_nuget_package_name.Length + 1, $versioned_name.Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
         --package_name $genai_nuget_package_name `
-        --package_version $(genai_version) `
+        --package_version $genai_package_version `
         --ort_package_name $ort_nuget_package_name  `
         --ort_package_version $ort_package_version `
         --root_dir $(Build.Repository.LocalPath) `

@@ -8,6 +8,10 @@ parameters:
   type: string
   default: 'stable'
 
+- name: version_revision
+  type: string
+  default: ''
+
 stages:
 - stage: custom_nuget_packaging
   dependsOn: [capi_packaging]
@@ -16,3 +20,4 @@ stages:
       parameters:
         custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
         nuget_version_type: ${{ parameters.nuget_version_type }}
+        version_revision: ${{ parameters.version_revision }}
