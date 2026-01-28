@@ -20,7 +20,7 @@ env:
 jobs:
   linux-cuda-x64-build:
     env:
-      PYTHON_EXECUTABLE: "/opt/python/cp310-cp310/bin/python3.10"
+      PYTHON_EXECUTABLE: "/opt/python/cp311-cp311/bin/python3.11"
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo

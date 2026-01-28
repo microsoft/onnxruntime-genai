@@ -173,6 +173,19 @@ void State::SetRunOption(const char* key, const char* value) {
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
     }
     return;
+  } else if (strcmp(key, "enable_profiling") == 0) {
+    if (strcmp(value, "0") == 0) {
+      run_options_->DisableProfiling();
+    } else if (strcmp(value, "1") == 0) {
+      run_options_->EnableProfiling(ORT_TSTR("onnxruntime_run_profile"));
+    } else {
+      auto ToProfileString = [](const char* s) -> std::basic_string<ORTCHAR_T> {
+        std::string str(s);
+        return std::basic_string<ORTCHAR_T>(str.begin(), str.end());
+      };
+      run_options_->EnableProfiling(ToProfileString(value).c_str());
+    }
+    return;
   }
   run_options_->AddConfigEntry(key, value);
 }
