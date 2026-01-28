@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-from __future__ import annotations
 
 import argparse
 import json
@@ -78,6 +77,87 @@ def run_whisper():
         run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_tool_calling():
+    log.debug("Running tool calling Python E2E Tests")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    tool_call_models = [("qwen-2.5-0.5b", "<tool_call>", "</tool_call>")]
+
+    # Runtime settings
+    max_length = 256
+    user_prompt = "What is the weather in Redmond, WA?"
+    response_format = "lark_grammar"
+
+    for (model_name, tool_call_start, tool_call_end) in tool_call_models:
+        for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
+            model_path = os.path.join(cwd, "..", "test_models", model_name, precision, execution_provider)
+            if not os.path.exists(model_path): continue
+
+            # Run special_tokens.py to mark tool call token ids as special
+            command = [
+                sys.executable,
+                os.path.join(cwd, "special_tokens.py"),
+                "-p",
+                os.path.join(model_path, "tokenizer.json"),
+                "-s",
+                tool_call_start,
+                "-e",
+                tool_call_end,
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+            # Run model-qa.py for inference
+            command = [
+                sys.executable,
+                os.path.join(cwd, "..", "..", "examples", "python", "model-qa.py"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(max_length),
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--user_prompt",
+                user_prompt,
+                "--tool_output",
+                "--non_interactive",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+            # Run model_qa.cpp for inference
+            command = [
+                os.path.join(cwd, "..", "..", "examples", "c", "build", f"{'Release' if sys.platform.startswith('win') else ''}", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(max_length),
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--user_prompt",
+                user_prompt,
+                "--tool_output",
+                "--non_interactive",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -106,3 +186,6 @@ if __name__ == "__main__":
 
     # Run Whisper E2E tests
     run_whisper()
+
+    # Run tool calling E2E tests
+    run_tool_calling()

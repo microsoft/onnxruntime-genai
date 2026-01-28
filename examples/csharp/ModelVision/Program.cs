@@ -37,8 +37,6 @@ void PrintUsage()
     Console.WriteLine("\t\t\t\tExecution provider for the model");
     Console.WriteLine("  --image_paths");
     Console.WriteLine("\t\t\t\tPath to the images");
-    Console.WriteLine("  --audio_paths");
-    Console.WriteLine("\t\t\t\tPath to the audios");
     Console.WriteLine("  --non_interactive (optional), mainly for CI usage");
     Console.WriteLine("\t\t\t\tInteractive mode");
 }
@@ -55,7 +53,6 @@ bool interactive = true;
 string modelPath = string.Empty;
 string executionProvider = string.Empty;
 List<string> imagePaths = new List<string>();
-List<string> audioPaths = new List<string>();
 
 uint i_arg = 0;
 while (i_arg < args.Length)
@@ -86,13 +83,6 @@ while (i_arg < args.Length)
             imagePaths = args[i_arg + 1].Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
         }
     }
-    else if (arg == "--audio_paths")
-    {
-        if (i_arg + 1 < args.Length)
-        {
-            audioPaths = args[i_arg + 1].Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
-        }
-    }
     i_arg++;
 }
 
@@ -105,9 +95,9 @@ if (string.IsNullOrEmpty(executionProvider))
     throw new Exception("Execution provider must be specified");
 }
 
-Console.WriteLine("--------------------");
-Console.WriteLine("Hello, Phi-4-Multimodal!");
-Console.WriteLine("--------------------");
+Console.WriteLine("-------------------");
+Console.WriteLine("Hello, ModelVision!");
+Console.WriteLine("-------------------");
 
 Console.WriteLine("Model path: " + modelPath);
 Console.WriteLine("Execution provider: " + executionProvider);
@@ -122,18 +112,18 @@ if (executionProvider != "cpu") {
     }
 }
 using Model model = new Model(config);
-using Tokenizer tokenizer = new Tokenizer(model);
 using MultiModalProcessor processor = new MultiModalProcessor(model);
+using Tokenizer tokenizer = new Tokenizer(model);
 using var stream = processor.CreateStream();
 
 do
 {
-    // Get images
     if (interactive)
     {
         Console.WriteLine("Image Path (comma separated; leave empty if no image):");
         imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
     }
+
     if (imagePaths.Count == 0)
     {
         Console.WriteLine("No image provided. Using default image.");
@@ -149,64 +139,27 @@ do
         }
         Console.WriteLine("Using image: " + imagePath);
     }
+
     Images images = imagePaths.Count > 0 ? Images.Load(imagePaths.ToArray()) : null;
 
-    // Get audios
-    if (interactive)
-    {
-        Console.WriteLine("Audio Path (comma separated; leave empty if no audio):");
-        audioPaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
-    }
-    if (audioPaths.Count == 0)
-    {
-        Console.WriteLine("No audio provided. Using default audio.");
-        audioPaths.Add(Path.Combine(
-            GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"), "test_models", "audios", "1272-141231-0002.mp3"));
-    }
-    for (int i = 0; i < audioPaths.Count; i++)
-    {
-        string audioPath = Path.GetFullPath(audioPaths[i].Trim());
-        if (!File.Exists(audioPath))
-        {
-            throw new Exception("Audio file not found: " + audioPath);
-        }
-        Console.WriteLine("Using audio: " + audioPath);
-    }
-    Audios audios = audioPaths.Count > 0 ? Audios.Load(audioPaths.ToArray()) : null;
-
-    // Get prompt
-    string text = "Does the audio summarize what is in the picture? If not, what is different?";
+    string text = "What is shown in this image?";
     if (interactive) {
         Console.WriteLine("Prompt:");
         text = Console.ReadLine();
     }
 
-    // Combine prompt, images, and audios and construct multimodal content
     string content = "";
     if (images != null)
     {
-        for (int i = 0; i < imagePaths.Count; i++)
-        {
-            content += $"<|image_{i + 1}|>\n";
-        }
-    }
-    if (audios != null)
-    {
-        for (int i = 0; i < audioPaths.Count; i++)
-        {
-            content += $"<|audio_{i + 1}|>\n";
-        }
+        content = string.Join("\\n", imagePaths.Select((_, idx) => $"<|image_{idx + 1}|>")) + "\\n";
     }
     content += text;
 
-    // Format message string
     string messages = $"[{{\"role\":\"user\",\"content\":\"{content}\"}}]";
-
-    // Apply chat template to get prompt
     string prompt = tokenizer.ApplyChatTemplate("", messages, "", true);
 
-    Console.WriteLine("Processing inputs...");
-    using var inputTensors = processor.ProcessImagesAndAudios(prompt, images, audios);
+    Console.WriteLine("Processing image and prompt...");
+    using var inputTensors = processor.ProcessImages(prompt, images);
 
     Console.WriteLine("Generating response...");
     using GeneratorParams generatorParams = new GeneratorParams(model);
@@ -228,9 +181,5 @@ do
     if (images != null)
     {
         images.Dispose();
-    }
-    if (audios != null)
-    {
-        audios.Dispose();
     }
 } while (interactive);
