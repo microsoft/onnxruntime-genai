@@ -1,0 +1,163 @@
+name: "Windows WebGPU x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  binaryDir: 'build/cpu/win-x64'
+
+jobs:
+  windows-webgpu-x64-build:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10"]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11.x'
+          architecture: 'x64'
+
+      - name: Setup VCPKG
+        uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+        with:
+          vcpkg-version: '2025.03.19'
+          vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
+          cmake-version: '3.31.6'
+          cmake-hash: '0f1584e8666cf4a65ec514bd02afe281caabf1d45d2c963f3151c41484f457386aa03273ab25776a670be02725354ce0b46f3a5121857416da37366342a833a0'
+          add-cmake-to-path: 'true'
+          disable-terrapin: 'false'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download OnnxRuntime Nightly (CPU package for headers and lib)
+        shell: pwsh
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "OnnxRuntime version: $ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+
+      - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+        continue-on-error: true
+
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          mkdir ort/lib
+          move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+          move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
+
+      - name: Download WebGPU-enabled DLLs from onnxruntime-node
+        shell: pwsh
+        run: |
+          Write-Host "Downloading onnxruntime-node@dev for WebGPU DLLs..."
+
+          # Install onnxruntime-node@dev to get WebGPU-enabled binaries
+          npm install onnxruntime-node@dev --no-save
+
+          # Create temp directory for extracted DLLs
+          mkdir ort/dlls -Force
+
+          # Find the onnxruntime-node directory
+          $nodeModulePath = "node_modules/onnxruntime-node"
+
+          # Extract DLLs from the npm package
+          # The npm package contains platform-specific binaries
+          $binPath = "$nodeModulePath/bin/napi-v3/win32/x64"
+
+          if (Test-Path $binPath) {
+            Write-Host "Extracting WebGPU DLLs from: $binPath"
+
+            # Copy the WebGPU-enabled DLLs (onnxruntime, dxil, dxcompiler)
+            Copy-Item "$binPath/*.dll" ort/dlls/ -Force
+
+            Write-Host "Extracted DLLs:"
+            Get-ChildItem ort/dlls/*.dll | ForEach-Object { Write-Host "  - $($_.Name)" }
+          } else {
+            Write-Error "Could not find binaries at: $binPath"
+            Write-Host "Available paths:"
+            Get-ChildItem $nodeModulePath -Recurse -Directory | Where-Object { $_.Name -eq "x64" } | ForEach-Object { Write-Host "  - $($_.FullName)" }
+            exit 1
+          }
+
+      - name: Replace CPU DLLs with WebGPU DLLs
+        shell: pwsh
+        run: |
+          Write-Host "Replacing CPU DLLs with WebGPU-enabled DLLs..."
+
+          # Backup original DLLs (optional, for debugging)
+          # mkdir ort/lib/backup -Force
+          # Copy-Item ort/lib/*.dll ort/lib/backup/ -Force
+
+          # Overwrite CPU DLLs with WebGPU DLLs
+          Copy-Item ort/dlls/*.dll ort/lib/ -Force
+
+          Write-Host "Updated DLLs in ort/lib:"
+          Get-ChildItem ort/lib/*.dll | ForEach-Object {
+            Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+          }
+
+      - name: Install Rust Toolchain
+        run: |
+          $exePath = "$env:TEMP\rustup-init.exe"
+          (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+          & $exePath -y --default-toolchain=1.86.0
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
+      - name: Configure CMake
+        run: |
+          cmake --preset windows_x64_cpu_release
+
+      - name: Build with CMake
+        run: |
+          cmake --build --preset windows_x64_cpu_release --parallel
+          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+
+      - name: Install the Python Wheel and Test Dependencies
+        run: |
+          python -m pip install -r test\python\requirements.txt
+          python -m pip install -r test\python\webgpu\torch\requirements.txt
+          python -m pip install -r test\python\webgpu\ort\requirements.txt
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Run the Python Tests
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          cd test\csharp
+          dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+
+      - name: Run C++ Unit Tests
+        run: |-
+          copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+          & .\$env:binaryDir\Release\unit_tests.exe
