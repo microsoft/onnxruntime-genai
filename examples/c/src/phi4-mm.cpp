@@ -101,15 +101,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetInputs(*input_tensors);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-
-      if (generator->IsDone()) {
-        break;
-      }
-
-      const auto num_tokens = generator->GetSequenceCount(0);
-      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+      const auto new_token = generator->GetNextTokens()[0];
       std::cout << stream->Decode(new_token) << std::flush;
     }
 

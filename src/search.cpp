@@ -49,6 +49,17 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
+void Search_Cpu::ResetDone() {
+  // Reset done count/state
+  done_ = false;
+}
+
+void GreedySearch_Cpu::ResetDone() {
+  Search_Cpu::ResetDone();
+  not_done_count_ = params_->search.batch_size;
+  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+}
+
 DeviceSpan<float> Search_Cpu::GetLogits() const {
   return next_token_scores_;
 }
@@ -333,16 +344,13 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     }
     AppendNextTokensToSequences();
   }
-  // Reset done count/state
-  done_ = false;
-  not_done_count_ = params_->search.batch_size;
-  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+
+  ResetDone();
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {
-  done_ = false;
-  not_done_count_ = params_->search.batch_size;
-  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+  ResetDone();
+
   // Set next tokens to the last tokens in the sequence
   if (index > 0) {
     for (int i = 0; i < params_->BatchBeamSize(); i++) {

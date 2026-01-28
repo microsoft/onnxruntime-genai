@@ -30,7 +30,7 @@
   try {
     return _sequences->Count();
   }
-  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
 - (nullable const int32_t*)sequenceDataAtIndex:(size_t)index error:(NSError**)error {
@@ -44,7 +44,7 @@
   try {
     return _sequences->SequenceCount(index);
   }
-  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
 - (OgaSequences&)CXXAPIOgaSequences {

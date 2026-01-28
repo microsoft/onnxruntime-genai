@@ -388,16 +388,23 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* para
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
   OGA_TRY
-  printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
+  params->SetGuidance(type, data, enable_ff_tokens);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value) {
   OGA_TRY
-  params->SetGuidance(type, data, enable_ff_tokens);
+  *value = params->GetSearchNumber(name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value) {
+  OGA_TRY
+  *value = params->GetSearchBool(name);
   return nullptr;
   OGA_CATCH
 }
@@ -455,6 +462,10 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const
   generator->AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
   return nullptr;
   OGA_CATCH
+}
+
+size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator) {
+  return generator->TokenCount();
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {

@@ -216,15 +216,12 @@ def main(args):
         print("Output: ", end="", flush=True)
 
         try:
-            while True:
+            while not generator.is_done():
                 generator.generate_next_token()
                 if args.timings:
                     if first:
                         first_token_timestamp = time.time()
                         first = False
-
-                if generator.is_done():
-                    break
 
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end="", flush=True)

@@ -44,6 +44,7 @@ struct Search_Cpu : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const override { return done_; }
+  void ResetDone();
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
@@ -75,6 +76,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
   // Used by continuous decoding search.
+  void ResetDone();
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;
   void RewindTo(size_t index) override;
 
