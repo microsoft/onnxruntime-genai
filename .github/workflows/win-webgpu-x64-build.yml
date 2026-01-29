@@ -78,27 +78,34 @@ jobs:
           npm install onnxruntime-node@dev --no-save
 
           # Create temp directory for extracted DLLs
-          mkdir ort/dlls -Force
+          New-Item -ItemType Directory -Force -Path ort/dlls | Out-Null
 
-          # Find the onnxruntime-node directory
-          $nodeModulePath = "node_modules/onnxruntime-node"
+          # Path to WebGPU DLLs (napi-v6 for latest version, x64 for 64-bit Windows)
+          $dllPath = "node_modules/onnxruntime-node/bin/napi-v6/win32/x64"
 
-          # Extract DLLs from the npm package
-          # The npm package contains platform-specific binaries
-          $binPath = "$nodeModulePath/bin/napi-v3/win32/x64"
+          if (Test-Path $dllPath) {
+            Write-Host "Found DLLs at: $dllPath"
 
-          if (Test-Path $binPath) {
-            Write-Host "Extracting WebGPU DLLs from: $binPath"
+            # Copy WebGPU DLLs (excluding DirectML.dll which is not needed)
+            $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
+            foreach ($dllName in $dllsToCopy) {
+              $sourcePath = Join-Path $dllPath $dllName
+              if (Test-Path $sourcePath) {
+                Copy-Item $sourcePath ort/dlls/ -Force
+                $fileInfo = Get-Item $sourcePath
+                Write-Host "  Copied: $dllName ($([math]::Round($fileInfo.Length / 1MB, 2)) MB)"
+              } else {
+                Write-Warning "  Not found: $dllName"
+              }
+            }
 
-            # Copy the WebGPU-enabled DLLs (onnxruntime, dxil, dxcompiler)
-            Copy-Item "$binPath/*.dll" ort/dlls/ -Force
-
-            Write-Host "Extracted DLLs:"
-            Get-ChildItem ort/dlls/*.dll | ForEach-Object { Write-Host "  - $($_.Name)" }
+            $copiedCount = (Get-ChildItem ort/dlls/*.dll).Count
+            Write-Host "Total DLLs extracted: $copiedCount"
           } else {
-            Write-Error "Could not find binaries at: $binPath"
-            Write-Host "Available paths:"
-            Get-ChildItem $nodeModulePath -Recurse -Directory | Where-Object { $_.Name -eq "x64" } | ForEach-Object { Write-Host "  - $($_.FullName)" }
+            Write-Error "Could not find DLLs at: $dllPath"
+            Write-Host "Searching for onnxruntime.dll..."
+            $found = Get-ChildItem node_modules/onnxruntime-node -Recurse -Filter "onnxruntime.dll" | Select-Object -First 3
+            $found | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
             exit 1
           }
 
@@ -106,10 +113,6 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Replacing CPU DLLs with WebGPU-enabled DLLs..."
-
-          # Backup original DLLs (optional, for debugging)
-          # mkdir ort/lib/backup -Force
-          # Copy-Item ort/lib/*.dll ort/lib/backup/ -Force
 
           # Overwrite CPU DLLs with WebGPU DLLs
           Copy-Item ort/dlls/*.dll ort/lib/ -Force
