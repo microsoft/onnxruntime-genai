@@ -94,7 +94,7 @@ jobs:
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
           choco uninstall llvm --yes
           python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
-          python -m pip install onnxruntime-qnn==1.25.0.dev20260126001 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+          python -m pip install onnxruntime-qnn -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the Python Tests

@@ -176,14 +176,16 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
     if (strcmp(value, "0") == 0) {
       run_options_->DisableProfiling();
-    } else if (strcmp(value, "1") == 0) {
-      run_options_->EnableProfiling(ORT_TSTR("onnxruntime_run_profile"));
     } else {
+      // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
+      // Value "1" uses the default prefix; any other value is treated as a custom prefix.
+      // Convert to basic_string<ORTCHAR_T> for cross-platform compatibility (wchar_t on Windows, char elsewhere).
       auto ToProfileString = [](const char* s) -> std::basic_string<ORTCHAR_T> {
         std::string str(s);
         return std::basic_string<ORTCHAR_T>(str.begin(), str.end());
       };
-      run_options_->EnableProfiling(ToProfileString(value).c_str());
+      const char* prefix = (strcmp(value, "1") == 0) ? "onnxruntime_run_profile" : value;
+      run_options_->EnableProfiling(ToProfileString(prefix).c_str());
     }
     return;
   }
