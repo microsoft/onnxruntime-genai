@@ -15,6 +15,7 @@ src/csharp/AssemblyInfo.cs
 /onnxruntime-linux-x64-*
 *.csv
 .idea
+.venv
 cache_dir
 example-models
 *.onnx
