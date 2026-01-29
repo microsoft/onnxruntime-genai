@@ -100,6 +100,9 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
     target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK", "net9.0-android31.0", "net9.0-ios15.4", "net9.0-maccatalyst14.0"]
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
+        if len(package_version.split(".")) == 4:
+            # Trim the revision part for dependency version
+            package_version = ".".join(package_version.split(".")[:3])
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
         xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
         xml_text.append("</group>")
