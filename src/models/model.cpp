@@ -584,8 +584,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     if (provider_options.name == "cuda") {
       // Try pre-registered plugin path first
       if (IsProviderRegistered(session_options, provider_options,
-                                            DeviceType::CUDA, "CUDAExecutionProvider",
-                                            is_primary_session_options, p_device)) {
+                               DeviceType::CUDA, "CUDAExecutionProvider",
+                               is_primary_session_options, p_device)) {
         continue;  // Handled via V2 API, skip built-in path
       }
 
@@ -694,8 +694,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       // Try pre-registered plugin path first
       if (IsProviderRegistered(session_options, provider_options,
-                                            DeviceType::NvTensorRtRtx, "NvTensorRTRTXExecutionProvider",
-                                            is_primary_session_options, p_device)) {
+                               DeviceType::NvTensorRtRtx, "NvTensorRTRTXExecutionProvider",
+                               is_primary_session_options, p_device)) {
         continue;  // Handled via V2 API
       }
 
@@ -724,109 +724,109 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       // For providers that go through the extensible AppendExecutionProvider API:
-        if (provider_options.name == "QNN") {
-          session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-          // TODO set device_type_ in a less hacky way.
-          // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
-          // on the other hand, not sure if is_primary_session_options is the right thing to check here.
-          if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                               [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
-              opt_it != provider_options.options.end() && opt_it->second == "1") {
-            p_device = GetDeviceInterface(DeviceType::QNN);
-          }
-        } else if (provider_options.name == "WebGPU")
-          p_device = GetDeviceInterface(DeviceType::WEBGPU);
-        else if (provider_options.name == "VitisAI") {
-          session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
-          session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-          session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
+      if (provider_options.name == "QNN") {
+        session_options.AddConfigEntry("ep.share_ep_contexts", "1");
+        // TODO set device_type_ in a less hacky way.
+        // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+        // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
+            opt_it != provider_options.options.end() && opt_it->second == "1") {
+          p_device = GetDeviceInterface(DeviceType::QNN);
         }
+      } else if (provider_options.name == "WebGPU")
+        p_device = GetDeviceInterface(DeviceType::WEBGPU);
+      else if (provider_options.name == "VitisAI") {
+        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
+      }
 
 #if USE_WINML
-        // Get device filtering config
-        Config::DeviceFilteringOptions resolved_device_filtering;
-        if (provider_options.device_filtering_options.has_value()) {
-          resolved_device_filtering = provider_options.device_filtering_options.value();
-        }
+      // Get device filtering config
+      Config::DeviceFilteringOptions resolved_device_filtering;
+      if (provider_options.device_filtering_options.has_value()) {
+        resolved_device_filtering = provider_options.device_filtering_options.value();
+      }
 
-        std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
-        std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
-        std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
+      std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
+      std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
+      std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
 
-        // Match EP device with EP name in provider options and model device config
-        // include\onnxruntime\core\graph\constants.h
-        const static std::unordered_map<std::string, std::string> s_providerNameToExecutionProvider{
-            {"QNN", "QNNExecutionProvider"},
-            {"WebGPU", "WebGpuExecutionProvider"},
-            {"VitisAI", "VitisAIExecutionProvider"},
-            {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
-        };
-        std::string ep_name{};
-        if (auto search = s_providerNameToExecutionProvider.find(provider_options.name); search != s_providerNameToExecutionProvider.end()) {
-          ep_name = search->second;
-        }
+      // Match EP device with EP name in provider options and model device config
+      // include\onnxruntime\core\graph\constants.h
+      const static std::unordered_map<std::string, std::string> s_providerNameToExecutionProvider{
+          {"QNN", "QNNExecutionProvider"},
+          {"WebGPU", "WebGpuExecutionProvider"},
+          {"VitisAI", "VitisAIExecutionProvider"},
+          {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
+      };
+      std::string ep_name{};
+      if (auto search = s_providerNameToExecutionProvider.find(provider_options.name); search != s_providerNameToExecutionProvider.end()) {
+        ep_name = search->second;
+      }
 
-        size_t num_devices = 0;
-        const OrtEpDevice* const* device_ptrs = nullptr;
-        Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
 
-        std::vector<const OrtEpDevice*> ep_devices_ptrs;
-        ep_devices_ptrs.reserve(num_devices);
+      std::vector<const OrtEpDevice*> ep_devices_ptrs;
+      ep_devices_ptrs.reserve(num_devices);
 
-        for (size_t i = 0; i < num_devices; ++i) {
-          const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
-          const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
-          const uint32_t hardware_vendor_id = Ort::api->HardwareDevice_VendorId(hardware_device);
-          const OrtHardwareDeviceType hardware_device_type = Ort::api->HardwareDevice_Type(hardware_device);
+      for (size_t i = 0; i < num_devices; ++i) {
+        const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
+        const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
+        const uint32_t hardware_vendor_id = Ort::api->HardwareDevice_VendorId(hardware_device);
+        const OrtHardwareDeviceType hardware_device_type = Ort::api->HardwareDevice_Type(hardware_device);
 
-          bool hardware_device_id_matched = (!config_device_id.has_value()) || config_device_id.value() == hardware_device_id;
-          bool hardware_vendor_id_matched = (!config_vendor_id.has_value()) || config_vendor_id.value() == hardware_vendor_id;
-          bool hardware_device_type_matched = (!config_device_type_enum.has_value()) ||
-                                              config_device_type_enum.value() == hardware_device_type;
+        bool hardware_device_id_matched = (!config_device_id.has_value()) || config_device_id.value() == hardware_device_id;
+        bool hardware_vendor_id_matched = (!config_vendor_id.has_value()) || config_vendor_id.value() == hardware_vendor_id;
+        bool hardware_device_type_matched = (!config_device_type_enum.has_value()) ||
+                                            config_device_type_enum.value() == hardware_device_type;
 
-          // Append matched EP device
-          if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
-              hardware_device_id_matched &&
-              hardware_vendor_id_matched &&
-              hardware_device_type_matched) {
-            ep_devices_ptrs.push_back(device_ptrs[i]);
-            // WinML Hotfix: DML and WebGPU EP factories currently only support one device at a time
-            if (provider_options.name == "DML" || provider_options.name == "WebGPU") {
-              break;
-            }
+        // Append matched EP device
+        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
+            hardware_device_id_matched &&
+            hardware_vendor_id_matched &&
+            hardware_device_type_matched) {
+          ep_devices_ptrs.push_back(device_ptrs[i]);
+          // WinML Hotfix: DML and WebGPU EP factories currently only support one device at a time
+          if (provider_options.name == "DML" || provider_options.name == "WebGPU") {
+            break;
           }
         }
+      }
 
-        // No need to append if we can't find a device.
-        if (!ep_devices_ptrs.empty()) {
-          std::vector<const char*> keys, values;
-          for (auto& option : provider_options.options) {
-            // WinML Hotfix: remove backend_type and backend_path from QNN provider options
-            static const std::set<std::string> qnn_options_to_remove{"backend_type", "backend_path"};
-            if (provider_options.name == "QNN" &&
-                qnn_options_to_remove.find(option.first) != qnn_options_to_remove.end()) {
-              continue;
-            }
-
-            keys.emplace_back(option.first.c_str());
-            values.emplace_back(option.second.c_str());
+      // No need to append if we can't find a device.
+      if (!ep_devices_ptrs.empty()) {
+        std::vector<const char*> keys, values;
+        for (auto& option : provider_options.options) {
+          // WinML Hotfix: remove backend_type and backend_path from QNN provider options
+          static const std::set<std::string> qnn_options_to_remove{"backend_type", "backend_path"};
+          if (provider_options.name == "QNN" &&
+              qnn_options_to_remove.find(option.first) != qnn_options_to_remove.end()) {
+            continue;
           }
 
-          Ort::api->SessionOptionsAppendExecutionProvider_V2(
-              &session_options,
-              &GetOrtEnv(),
-              ep_devices_ptrs.data(), ep_devices_ptrs.size(),
-              keys.data(), values.data(), keys.size());
-        } else if (provider_options.name == "NvTensorRtRtx") {
-          // Fallback to legacy API for built-in NvTensorRtRtx when no pre-registered device found
-          // This handles the case when using the built-in provider (not loaded as a plugin)
-          std::vector<const char*> keys, values;
-          for (auto& option : provider_options.options) {
-            keys.emplace_back(option.first.c_str());
-            values.emplace_back(option.second.c_str());
-          }
-          session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+          keys.emplace_back(option.first.c_str());
+          values.emplace_back(option.second.c_str());
         }
+
+        Ort::api->SessionOptionsAppendExecutionProvider_V2(
+            &session_options,
+            &GetOrtEnv(),
+            ep_devices_ptrs.data(), ep_devices_ptrs.size(),
+            keys.data(), values.data(), keys.size());
+      } else if (provider_options.name == "NvTensorRtRtx") {
+        // Fallback to legacy API for built-in NvTensorRtRtx when no pre-registered device found
+        // This handles the case when using the built-in provider (not loaded as a plugin)
+        std::vector<const char*> keys, values;
+        for (auto& option : provider_options.options) {
+          keys.emplace_back(option.first.c_str());
+          values.emplace_back(option.second.c_str());
+        }
+        session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+      }
 #else
       std::vector<const char*> keys, values;
 
