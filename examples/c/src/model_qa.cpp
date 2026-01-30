@@ -138,7 +138,6 @@ void CXX_API(
     auto sequences = OgaSequences::Create();
     tokenizer->Encode(prompt.c_str(), *sequences);
     generator->AppendTokenSequences(*sequences);
-    const int prompt_tokens_length = generator->TokenCount();
 
     // Run generation loop
     if (verbose) std::cout << "Running generation loop..." << std::endl;
@@ -168,7 +167,8 @@ void CXX_API(
     // Remove user message from list of messages
     input_list.pop_back();
 
-    const int new_tokens_length = generator->TokenCount() - prompt_tokens_length;
+    const int prompt_tokens_length = sequences->SequenceCount(0);
+    const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
     std::cout << "\n\n"
