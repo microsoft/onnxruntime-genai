@@ -109,67 +109,59 @@ namespace GraphBuilder {
 OrtModel* Build(const ModelConfig& config) {
   const auto& model_editor_api = Ort::GetModelEditorApi();
 
-  // Use RAII wrappers for automatic cleanup
-  std::unique_ptr<OrtGraph> graph;
-  std::unique_ptr<OrtModel> model;
-  std::vector<OrtOpAttr*> node_attributes;  // Manual management - CreateNode stores references, doesn't copy
-
-  // Create graph
-  OrtGraph* graph_ptr = nullptr;
-  Ort::ThrowOnError(model_editor_api.CreateGraph(&graph_ptr));
-  graph.reset(graph_ptr);
+  // Create graph using RAII wrapper
+  auto graph = OrtGraph::Create();
 
   // Create input ValueInfos
-  std::vector<std::unique_ptr<OrtValueInfo>> graph_inputs_owned;
-  std::vector<OrtValueInfo*> graph_inputs;
+  std::vector<std::unique_ptr<OrtValueInfo>> graph_inputs;
   for (const auto& input : config.inputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info_raw = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info_raw));
-    std::unique_ptr<OrtTensorTypeAndShapeInfo> tensor_info(tensor_info_raw);
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info.get(), input.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info.get(), input.shape.data(), input.shape.size()));
+    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
+    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, input.elem_type));
+    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, input.shape.data(), input.shape.size()));
 
-    OrtTypeInfo* type_info_raw = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info.get(), &type_info_raw));
-    std::unique_ptr<OrtTypeInfo> type_info(type_info_raw);
+    auto value_info = OrtValueInfo::Create(input.name.c_str(), tensor_info);
+    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
 
-    OrtValueInfo* value_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateValueInfo(input.name.c_str(), type_info.get(), &value_info));
-
-    graph_inputs.push_back(value_info);
-    graph_inputs_owned.emplace_back(value_info);
+    graph_inputs.push_back(std::move(value_info));
   }
 
   // Create output ValueInfos
-  std::vector<std::unique_ptr<OrtValueInfo>> graph_outputs_owned;
-  std::vector<OrtValueInfo*> graph_outputs;
+  std::vector<std::unique_ptr<OrtValueInfo>> graph_outputs;
   for (const auto& output : config.outputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info_raw = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info_raw));
-    std::unique_ptr<OrtTensorTypeAndShapeInfo> tensor_info(tensor_info_raw);
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info.get(), output.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info.get(), output.shape.data(), output.shape.size()));
+    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
+    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, output.elem_type));
+    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, output.shape.data(), output.shape.size()));
 
-    OrtTypeInfo* type_info_raw = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info.get(), &type_info_raw));
-    std::unique_ptr<OrtTypeInfo> type_info(type_info_raw);
+    auto value_info = OrtValueInfo::Create(output.name.c_str(), tensor_info);
+    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
 
-    OrtValueInfo* value_info = nullptr;
-    Ort::ThrowOnError(model_editor_api.CreateValueInfo(output.name.c_str(), type_info.get(), &value_info));
-
-    graph_outputs.push_back(value_info);
-    graph_outputs_owned.emplace_back(value_info);
+    graph_outputs.push_back(std::move(value_info));
   }
 
   // Set graph inputs and outputs (graph takes ownership of ValueInfos)
-  Ort::ThrowOnError(model_editor_api.SetGraphInputs(graph.get(), graph_inputs.data(), graph_inputs.size()));
-  Ort::ThrowOnError(model_editor_api.SetGraphOutputs(graph.get(), graph_outputs.data(), graph_outputs.size()));
+  std::vector<OrtValueInfo*> input_ptrs;
+  input_ptrs.reserve(graph_inputs.size());
+  for (auto& vi : graph_inputs) {
+    input_ptrs.push_back(vi.get());
+  }
+
+  std::vector<OrtValueInfo*> output_ptrs;
+  output_ptrs.reserve(graph_outputs.size());
+  for (auto& vi : graph_outputs) {
+    output_ptrs.push_back(vi.get());
+  }
+
+  Ort::ThrowOnError(model_editor_api.SetGraphInputs(graph.get(), input_ptrs.data(), input_ptrs.size()));
+  Ort::ThrowOnError(model_editor_api.SetGraphOutputs(graph.get(), output_ptrs.data(), output_ptrs.size()));
 
   // Release ownership since graph took it
-  for (auto& vi : graph_inputs_owned) vi.release();
-  for (auto& vi : graph_outputs_owned) vi.release();
+  for (auto& vi : graph_inputs) vi.release();
+  for (auto& vi : graph_outputs) vi.release();
 
   // Create node attributes
+  std::vector<OrtOpAttr*> node_attributes;
   for (const auto& attr : config.attributes) {
     node_attributes.push_back(CreateOpAttr(attr));
   }
@@ -185,9 +177,8 @@ OrtModel* Build(const ModelConfig& config) {
     output_names.push_back(output.name.c_str());
   }
 
-  // Create node
-  OrtNode* node_ptr = nullptr;
-  Ort::ThrowOnError(model_editor_api.CreateNode(
+  // Create node using RAII wrapper
+  auto node = OrtNode::Create(
       config.op_type.c_str(),
       "",  // empty domain = ONNX domain
       (config.op_type + "_node").c_str(),
@@ -196,19 +187,16 @@ OrtModel* Build(const ModelConfig& config) {
       output_names.data(),
       output_names.size(),
       node_attributes.empty() ? nullptr : node_attributes.data(),
-      node_attributes.size(),
-      &node_ptr));
-  std::unique_ptr<OrtNode> node(node_ptr);
+      node_attributes.size());
 
   // Add node to graph (graph takes ownership of node)
   Ort::ThrowOnError(model_editor_api.AddNodeToGraph(graph.get(), node.get()));
   node.release();  // graph now owns node
 
-  // Create model with opset
+  // Create model with opset using RAII wrapper
   const char* domain_name = "";
-  OrtModel* model_ptr = nullptr;
-  Ort::ThrowOnError(model_editor_api.CreateModel(&domain_name, &config.opset_version, 1, &model_ptr));
-  model.reset(model_ptr);
+  int opset = config.opset_version;
+  auto model = OrtModel::Create(&domain_name, &opset, 1);
 
   // Add graph to model (model takes ownership of graph)
   Ort::ThrowOnError(model_editor_api.AddGraphToModel(model.get(), graph.get()));

@@ -1338,6 +1338,46 @@ inline std::unique_ptr<OrtOpAttr> OrtOpAttr::Create(const char* name, const void
   return std::unique_ptr<OrtOpAttr>{p};
 }
 
+inline std::unique_ptr<OrtGraph> OrtGraph::Create() {
+  OrtGraph* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateGraph(&p));
+  return std::unique_ptr<OrtGraph>{p};
+}
+
+inline std::unique_ptr<OrtModel> OrtModel::Create(const char** domain_names, const int* opset_versions, size_t num_domains) {
+  OrtModel* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateModel(domain_names, opset_versions, num_domains, &p));
+  return std::unique_ptr<OrtModel>{p};
+}
+
+inline std::unique_ptr<OrtValueInfo> OrtValueInfo::Create(const char* name, const OrtTensorTypeAndShapeInfo* tensor_info) {
+  const auto& model_editor_api = Ort::GetModelEditorApi();
+
+  OrtTypeInfo* type_info;
+  Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
+
+  OrtValueInfo* p;
+  auto status = model_editor_api.CreateValueInfo(name, type_info, &p);
+  Ort::api->ReleaseTypeInfo(type_info);
+  Ort::ThrowOnError(status);
+
+  return std::unique_ptr<OrtValueInfo>{p};
+}
+
+inline std::unique_ptr<OrtNode> OrtNode::Create(const char* op_type, const char* domain, const char* name,
+                                                const char** input_names, size_t num_inputs,
+                                                const char** output_names, size_t num_outputs,
+                                                OrtOpAttr** attributes, size_t num_attributes) {
+  OrtNode* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateNode(
+      op_type, domain, name,
+      input_names, num_inputs,
+      output_names, num_outputs,
+      attributes, num_attributes,
+      &p));
+  return std::unique_ptr<OrtNode>{p};
+}
+
 inline std::unique_ptr<OrtKernelInfo> OrtKernelInfo::Clone() const {
   OrtKernelInfo* p;
   Ort::ThrowOnError(Ort::api->CopyKernelInfo(this, &p));
