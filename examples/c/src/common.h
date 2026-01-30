@@ -225,6 +225,7 @@ struct GuidanceArgs {
  * @param guidance_args Struct to hold args for guidance
  * @param model_path Path to model folder containing GenAI config
  * @param ep Name of execution provider to set
+ * @param ep_path Path to execution provider to register
  * @param system_prompt System prompt to use for the model
  * @param user_prompt User prompt to use for the model
  * @param verbose Use verbose logging
@@ -234,7 +235,7 @@ struct GuidanceArgs {
  *
  * @return true if command-line arguments can be parsed, else false
  */
-bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& system_prompt, std::string& user_prompt, bool& verbose, bool& debug, bool& interactive, bool& rewind);
+bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& ep_path, std::string& system_prompt, std::string& user_prompt, bool& verbose, bool& debug, bool& interactive, bool& rewind);
 
 /**
  * @brief Set log options inside ORT GenAI
@@ -245,6 +246,16 @@ bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args
  * @return None
  */
 void SetLogger(bool inputs = true, bool outputs = true);
+
+/**
+ * @brief Register execution provider if path is provided
+ *
+ * @param ep Name of execution provider
+ * @param ep_path Path to execution provider to register
+ *
+ * @return None
+ */
+void RegisterEP(const std::string& ep, const std::string& ep_path);
 
 /**
  * @brief Get OgaConfig object and set EP-specific and search-specific options inside it

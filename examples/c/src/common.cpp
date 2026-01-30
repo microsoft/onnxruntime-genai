@@ -167,6 +167,7 @@ bool ParseArgs(
     GuidanceArgs& guidance_args,
     std::string& model_path,
     std::string& ep,
+    std::string& ep_path,
     std::string& system_prompt,
     std::string& user_prompt,
     bool& verbose,
@@ -202,6 +203,8 @@ bool ParseArgs(
   app.add_option("-e,--execution_provider", ep, "Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.");
   app.add_flag("-v,--verbose", verbose, "Print verbose output and timing information. Defaults to false");
   app.add_flag("-d,--debug", debug, "Dump input and output tensors with debug mode. Defaults to false");
+
+  app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
   app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false");
@@ -221,6 +224,26 @@ void SetLogger(bool inputs, bool outputs) {
   Oga::SetLogBool("enabled", true);
   Oga::SetLogBool("model_input_values", inputs);
   Oga::SetLogBool("model_output_values", outputs);
+}
+
+void RegisterEP(const std::string& ep, const std::string& ep_path) {
+  if (ep_path.empty()) {
+    return;  // No library path specified, skip registration
+  }
+
+  std::cout << "Registering execution provider: " << ep_path << std::endl;
+
+  if (ep.compare("cuda") == 0) {
+    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", ep_path.c_str());
+  } else if (ep.compare("NvTensorRtRtx") == 0) {
+    OgaRegisterExecutionProviderLibrary("NvTensorRTRTXExecutionProvider", ep_path.c_str());
+  } else {
+    std::cout << "Warning: EP registration not supported for " << ep << std::endl;
+    std::cout << "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries." << std::endl;
+    return;
+  }
+
+  std::cout << "Registered " << ep << " successfully!" << std::endl;
 }
 
 std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string& ep, const std::unordered_map<std::string, std::string>& ep_options, GeneratorParamsArgs& search_options) {

@@ -330,6 +330,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaGetCurrentGpuDeviceId(out IntPtr /* int32_t */ deviceId);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaRegisterExecutionProviderLibrary(byte[] /* const char* */ name,
+                                                                                         byte[] /* const char* */ path);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaShutdown();
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

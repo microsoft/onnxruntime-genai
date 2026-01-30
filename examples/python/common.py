@@ -21,6 +21,32 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     """
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
 
+def register_ep(ep: str, ep_path: str) -> None:
+    """
+    Register execution provider if path is provided
+
+    Args:
+        ep (str): Name of execution provider
+        ep_path (str): Path to execution provider to register
+    Returns:
+        None
+    """
+    if not ep_path:
+        return  # No library path specified, skip registration
+
+    print(f"Registering execution provider: {ep}")
+
+    if ep == "cuda":
+        og.register_execution_provider_library("CUDAExecutionProvider", ep_path)
+    elif ep == "NvTensorRtRtx":
+        og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
+    else:
+        print(f"Warning: EP registration not supported for {ep}")
+        print("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries.")
+        return
+
+    print(f"Registered {ep} successfully!")
+
 def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it

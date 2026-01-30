@@ -26,6 +26,46 @@ namespace ModelChat
             Utils.SetLogBool("model_output_values", outputs);
         }
 
+        /**
+         * TODO: Uncomment the below snippet to use Utils.RegisterEPLibrary once
+         * the C# binding to Utils.RegisterEPLibrary is in a stable package release.
+         */
+
+        // /// <summary>
+        // /// Register execution provider if path is provided
+        // /// </summary>
+        // /// <param name="ep">Name of execution provider to set</param>
+        // /// <param name="ep_path">Path to execution provider to set</param>
+        // /// <returns>
+        // /// None
+        // /// </returns>
+        // public static void RegisterEP(string ep, string ep_path)
+        // {
+        //     if (string.IsNullOrEmpty(ep_path))
+        //     {
+        //         return; // No library path specified, skip registration
+        //     }
+
+        //     Console.WriteLine($"Registering execution provider: {ep_path}");
+
+        //     if (string.Equals(ep, "cuda", StringComparison.OrdinalIgnoreCase))
+        //     {
+        //         Utils.RegisterExecutionProviderLibrary("CUDAExecutionProvider", ep_path);
+        //     }
+        //     else if (string.Equals(ep, "NvTensorRtRtx", StringComparison.OrdinalIgnoreCase))
+        //     {
+        //         Utils.RegisterExecutionProviderLibrary("NvTensorRTRTXExecutionProvider", ep_path);
+        //     }
+        //     else
+        //     {
+        //         Console.WriteLine($"Warning: EP registration not supported for {ep}");
+        //         Console.WriteLine("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries.");
+        //         return;
+        //     }
+
+        //     Console.WriteLine($"Registered {ep} successfully!");
+        // }
+
         /// <summary>
         /// Get Config object and set EP-specific and search-specific options inside it
         /// </summary>

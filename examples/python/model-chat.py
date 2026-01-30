@@ -6,12 +6,13 @@ import json
 import time
 
 import onnxruntime_genai as og
-from common import apply_chat_template, get_config, get_generator_params_args, get_guidance, get_guidance_args, get_search_options, set_logger
+from common import apply_chat_template, get_config, get_generator_params_args, get_guidance, get_guidance_args, get_search_options, register_ep, set_logger
 
 
 def main(args):
     if args.debug:
         set_logger()
+    register_ep(args.execution_provider, args.ep_path)
 
     if args.verbose:
         print("Loading model...")
@@ -155,6 +156,7 @@ if __name__ == "__main__":
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
     parser.add_argument('-rw', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
+    parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
     
     get_generator_params_args(parser)
     get_guidance_args(parser)

@@ -59,6 +59,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToUtf8(name), StringUtils.ToUtf8(value)));
         }
+
+        public static void RegisterExecutionProviderLibrary(string name, string path)
+        {
+            Result.VerifySuccess(NativeMethods.OgaRegisterExecutionProviderLibrary(StringUtils.ToUtf8(name), StringUtils.ToUtf8(path)));
+        }
     }
 
     internal class StringUtils

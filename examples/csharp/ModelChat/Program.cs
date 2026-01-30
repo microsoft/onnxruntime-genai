@@ -492,7 +492,17 @@ RootCommand GetArgs()
         DefaultValueFactory = (_) => false,
         Description = "Run in interactive mode"
     };
-    
+
+    var ep_path = new Option<string>(
+        name: "ep_path",
+        aliases: ["--ep_path"]
+    )
+    {
+        Arity = ArgumentArity.ExactlyOne,
+        DefaultValueFactory = (_) => "",
+        Description = "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)"
+    };
+
     var system_prompt = new Option<string>(
         name: "system_prompt",
         aliases: ["-sp", "--system_prompt"]
@@ -525,6 +535,7 @@ RootCommand GetArgs()
 
     parser.Add(model_path);
     parser.Add(execution_provider);
+    parser.Add(ep_path);
     parser.Add(system_prompt);
     parser.Add(user_prompt);
     parser.Add(verbose);
@@ -566,6 +577,7 @@ void main(string[] args) {
     // Get main argument values
     string modelPath = parseResult.GetValue<string>("model_path")!;
     string executionProvider = parseResult.GetValue<string>("execution_provider")!;
+    string epPath = parseResult.GetValue<string>("ep_path")!;
     string systemPrompt = parseResult.GetValue<string>("system_prompt")!;
     string userPrompt = parseResult.GetValue<string>("user_prompt")!;
     bool verbose = parseResult.GetValue<bool>("verbose");
@@ -582,6 +594,10 @@ void main(string[] args) {
 
     Console.WriteLine("Model path: " + modelPath);
     Console.WriteLine("Execution provider: " + executionProvider);
+    if (!string.IsNullOrEmpty(epPath))
+    {
+        Console.WriteLine("Execution provider path: " + epPath);
+    }
     Console.WriteLine("System prompt: " + systemPrompt);
     if (!interactive)
     {
@@ -596,6 +612,11 @@ void main(string[] args) {
 
     // Enable debugging if requested
     if (debug) Common.SetLogger();
+    /**
+     * TODO: Uncomment the below snippet to use Utils.RegisterEPLibrary once
+     * the C# binding to Utils.RegisterEPLibrary is in a stable package release.
+     */
+    // RegisterEP(executionProvider, epPath);
 
     // Create model
     if (verbose) Console.WriteLine("Loading model...");
