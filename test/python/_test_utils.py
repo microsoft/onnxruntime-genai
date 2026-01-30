@@ -147,28 +147,29 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
             with open(config_path) as f:
                 config = json.load(f)
 
-            # Add session_options if not present
-            if "session_options" not in config:
-                config["session_options"] = {}
-
-            # Add log_id if not present
-            if "log_id" not in config["session_options"]:
-                config["session_options"]["log_id"] = "onnxruntime-genai"
+            # Navigate to model.decoder.session_options
+            if "model" not in config:
+                config["model"] = {}
+            if "decoder" not in config["model"]:
+                config["model"]["decoder"] = {}
+            if "session_options" not in config["model"]["decoder"]:
+                config["model"]["decoder"]["session_options"] = {}
 
             # Add provider_options for WebGPU
-            if "provider_options" not in config["session_options"]:
-                config["session_options"]["provider_options"] = []
+            if "provider_options" not in config["model"]["decoder"]["session_options"]:
+                config["model"]["decoder"]["session_options"]["provider_options"] = []
 
             # Find or create WebGPU provider options
             webgpu_options_entry = None
-            for i, provider in enumerate(config["session_options"]["provider_options"]):
+            provider_options = config["model"]["decoder"]["session_options"]["provider_options"]
+            for provider in provider_options:
                 if "webgpu" in provider:
                     webgpu_options_entry = provider
                     break
 
             if webgpu_options_entry is None:
                 webgpu_options_entry = {"webgpu": {"validationMode": "disabled", "enableGraphCapture": "1"}}
-                config["session_options"]["provider_options"].append(webgpu_options_entry)
+                provider_options.append(webgpu_options_entry)
             else:
                 # Update existing entry
                 webgpu_options_entry["webgpu"]["validationMode"] = "disabled"
