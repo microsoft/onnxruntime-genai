@@ -23,7 +23,7 @@ parameters:
   type: boolean
 - name: cuda_versions
   type: string
-  default: '12.2'
+  default: '12.8'
 
 
 stages:
@@ -67,12 +67,12 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.8')) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '12.2'
-        cuda_display_version: '122'
+        cuda_version: '12.8'
+        cuda_display_version: '128'
         ep: 'cuda'
         os: 'win'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
@@ -97,12 +97,12 @@ stages:
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
-  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.8')) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '12.2'
-        cuda_display_version: '122'
+        cuda_version: '12.8'
+        cuda_display_version: '128'
         ep: 'cuda'
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}

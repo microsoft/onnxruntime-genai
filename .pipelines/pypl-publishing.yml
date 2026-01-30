@@ -57,7 +57,7 @@ parameters:
   - name: cuda_versions
     displayName: 'CUDA versions'
     type: string
-    default: '12.2'
+    default: '12.8'
 
   - name: build_config
     displayName: 'Build Configuration'
