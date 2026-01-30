@@ -69,11 +69,6 @@ cd build\Debug
 ```
 
 ```powershell
-# The `model-generate` script generates the entire output sequence in one function call
-.\model_generate.exe -m {path to model folder} -e {execution provider}
-```
-
-```powershell
 # The `model-qa` script streams the output text token by token.
 .\model_qa.exe -m {path to model folder} -e {execution provider}
 ```
@@ -88,11 +83,6 @@ cd build
 ```bash
 # The `model-chat` script allows for multi-turn conversations.
 ./model_chat -m {path to model folder} -e {execution provider}
-```
-
-```bash
-# The `model-generate` script generates the entire output sequence in one function call
-./model_generate -m {path to model folder} -e {execution provider}
 ```
 
 ```bash
