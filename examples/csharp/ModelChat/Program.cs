@@ -100,7 +100,7 @@ void ModelGenerate(
         // Display output and timings
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
-        var totalTokens = outputSequence.Length;
+        var totalTokens = generator.TokenCount();
         Console.WriteLine($"Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
 
@@ -243,8 +243,7 @@ void ModelQA(
         input_list.RemoveAt(input_list.Count - 1);
 
         // Display output and timings
-        var outputSequence = generator.GetSequence(0);
-        var totalTokens = outputSequence.Length;
+        var totalTokens = generator.TokenCount();
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
@@ -399,8 +398,7 @@ void ModelChat(
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
 
         // Display output and timings
-        var outputSequence = generator.GetSequence(0);
-        var totalNewTokens = outputSequence.Length - prevTotalTokens;
+        var totalNewTokens = generator.TokenCount() - prevTotalTokens;
         prevTotalTokens = totalNewTokens;
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalNewTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
