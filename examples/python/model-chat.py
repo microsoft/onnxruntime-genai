@@ -6,10 +6,13 @@ import json
 import time
 
 import onnxruntime_genai as og
-from common import apply_chat_template, get_config, get_generator_params_args, get_guidance, get_guidance_args, get_search_options
-# og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
+from common import apply_chat_template, get_config, get_generator_params_args, get_guidance, get_guidance_args, get_search_options, set_logger
+
 
 def main(args):
+    if args.debug:
+        set_logger()
+
     if args.verbose:
         print("Loading model...")
 
@@ -148,6 +151,7 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--model_path', type=str, required=True, help='ONNX model folder path (must contain genai_config.json and model.onnx)')
     parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
+    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
     parser.add_argument('-rw', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')

@@ -473,6 +473,16 @@ RootCommand GetArgs()
         Description = "Print verbose output. Defaults to false"
     };
 
+    var debug = new Option<bool>(
+        name: "debug",
+        aliases: ["-d", "--debug"]
+    )
+    {
+        Arity = ArgumentArity.Zero,
+        DefaultValueFactory = (_) => false,
+        Description = "Dump input and output tensors with debug mode. Defaults to false"
+    };
+
     var non_interactive = new Option<bool>(
         name: "non_interactive",
         aliases: ["--non_interactive"]
@@ -518,6 +528,7 @@ RootCommand GetArgs()
     parser.Add(system_prompt);
     parser.Add(user_prompt);
     parser.Add(verbose);
+    parser.Add(debug);
     parser.Add(non_interactive);
     parser.Add(rewind);
 
@@ -558,6 +569,7 @@ void main(string[] args) {
     string systemPrompt = parseResult.GetValue<string>("system_prompt")!;
     string userPrompt = parseResult.GetValue<string>("user_prompt")!;
     bool verbose = parseResult.GetValue<bool>("verbose");
+    bool debug = parseResult.GetValue<bool>("debug");
     bool interactive = !parseResult.GetValue<bool>("non_interactive");
     bool rewind = parseResult.GetValue<bool>("rewind");
 
@@ -576,10 +588,14 @@ void main(string[] args) {
         Console.WriteLine("User prompt: " + userPrompt);
     }
     Console.WriteLine("Verbose: " + verbose);
+    Console.WriteLine("Debug: " + debug);
     Console.WriteLine("Interactive: " + interactive);
     Console.WriteLine("Rewind: " + rewind);
     Console.WriteLine("-----------------");
     Console.WriteLine();
+
+    // Enable debugging if requested
+    if (debug) Common.SetLogger();
 
     // Create model
     if (verbose) Console.WriteLine("Loading model...");

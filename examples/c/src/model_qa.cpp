@@ -31,7 +31,10 @@ void CXX_API(
     const std::string& system_prompt,
     const std::string& user_prompt,
     bool verbose,
+    bool debug,
     bool interactive) {
+  if (debug) SetLogger();
+
   if (verbose) std::cout << "Creating config..." << std::endl;
   std::unordered_map<std::string, std::string> ep_options;
   auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
@@ -179,8 +182,8 @@ int main(int argc, char** argv) {
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
   std::string model_path, ep = "follow_config", system_prompt = "You are a helpful AI assistant.", user_prompt = "What color is the sky?";
-  bool verbose = false, interactive = true, rewind = true;
-  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, interactive, rewind)) {
+  bool verbose = false, debug = false, interactive = true, rewind = true;
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, debug, interactive, rewind)) {
     return -1;
   }
 
@@ -201,7 +204,7 @@ int main(int argc, char** argv) {
   std::cout << std::endl;
 
   try {
-    CXX_API(generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, interactive);
+    CXX_API(generator_params_args, guidance_args, model_path, ep, system_prompt, user_prompt, verbose, debug, interactive);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return -1;

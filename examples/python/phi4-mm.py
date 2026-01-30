@@ -189,7 +189,7 @@ if __name__ == "__main__":
         "--non_interactive",
         action=argparse.BooleanOptionalAction,
         required=False,
-        help="non_interactive mode, mainly for CI usage",
+        help="non-interactive mode, mainly for CI usage",
     )
     args = parser.parse_args()
     run(args)

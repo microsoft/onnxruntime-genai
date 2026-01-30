@@ -177,14 +177,14 @@ jobs:
       HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
       LocalFolder: 'phi4-mm'
       RepoFolder: $(prebuild_phi4_mm_model_folder)
-      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/ModelChat4MM'
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/Phi4MM'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
   - template: steps/nuget-validation-step.yml
     parameters:
-      CsprojFolder: "examples/csharp/ModelChat4MM"
-      CsprojName: "ModelChat4MM"
+      CsprojFolder: "examples/csharp/Phi4MM"
+      CsprojName: "Phi4MM"
       CsprojConfiguration: $(csproj_configuration)
       LocalFolder: 'phi4-mm'
       ModelFolder: $(prebuild_phi4_mm_model_folder)
