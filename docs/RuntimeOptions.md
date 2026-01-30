@@ -1,6 +1,6 @@
 # Runtime Options
 
-This file will provide details on the usage of SetRuntimeOption API. It will list all the current key value pairs which can be used as an input for this API.
+This file will provide details on the usage of the SetRuntimeOption API. It will list all the current key value pairs which can be used as an input for this API.
 
 ## Set Terminate
 
