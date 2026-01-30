@@ -1,22 +1,20 @@
-# ONNX Runtime GenAI C# example 
+# ONNX Runtime GenAI C# Example 
 
-## Obtain a model
+> 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries built from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library. If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
 
-You can download a published model from Hugging Face. For example, this is Phi-4 mini optimized for CPU and mobile. You can find other models here: 
+## Install ONNX Runtime GenAI
 
-```script
-huggingface-cli download microsoft/Phi-4-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir models
-move models\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4 models\phi
-```
+Install the C# package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
 
-Alternatively you can build a model yourself using the model builder. See [here](https://github.com/microsoft/onnxruntime-genai/blob/main/src/python/py/models/README.md) for more details.
+## Download a Model
 
+There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/documents/DownloadModels.md).
 
-## Run the model
+## Run the Example
 
 Open [ModelChat.sln](ModelChat.sln) and run the console application.
 
-## Use constrained decoding
+## Use Constrained Decoding
 
 Constrained Decoding is useful when using function/tool calling as it helps in ensuring the output is in the correct format.
 

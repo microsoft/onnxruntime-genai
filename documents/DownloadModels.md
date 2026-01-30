@@ -1,10 +1,7 @@
 # Download Options for ONNX Runtime GenAI Models
 
-This guide covers two easy ways to download models for use with ONNX Runtime GenAI:
+This guide covers ways to download models for use with ONNX Runtime GenAI.
 
-Using Foundry Local
-
-Using Hugging Face CLI
 
 ## Download via Foundry Local
 
@@ -32,7 +29,7 @@ Using Hugging Face CLI
    huggingface-cli download <model_name> --include <subfolder_name>/* --local-dir .
    ```
 
-   For example, to download the Phi-4 mini instruct gpu model:
+   For example, to download the Phi-4 mini instruct generic-GPU model:
    ```
    huggingface-cli download microsoft/Phi-4-mini-instruct-onnx --include gpu/* --local-dir .
    ```

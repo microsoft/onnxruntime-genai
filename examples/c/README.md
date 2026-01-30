@@ -1,20 +1,16 @@
-# ONNX Runtime GenAI C Example
+# ONNX Runtime GenAI C Examples
 
 > 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries built from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library. If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
 
-## Download the model
+## Install ONNX Runtime GenAI
 
-1. Download and install [foundry-local](https://github.com/microsoft/Foundry-Local/releases)
-2. List available models: `foundry model list`
-3. Download a model you would like to run. For example: `foundry model download Phi-4-generic-cpu`
-4. Find out where the model is saved on disk: `foundry cache location`
-5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
+Install the C headers according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
 
-> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows or a macOS machine and copy it over to your Linux machine if you would like to run on Linux.
+## Download a Model
 
-For other options to download models, read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/documents/DownloadModels.md).
+There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/documents/DownloadModels.md).
 
-## Build the C++ Example
+## Build a C++ Example
 
 1. Clone the repo: `git clone https://github.com/microsoft/onnxruntime-genai.git`
    - Use the relevant release tag that aligns with the version of the libraries you're planning to use.
@@ -58,16 +54,53 @@ For other options to download models, read through [our download options](https:
       cmake --build build --parallel --config Debug
       ```
 
-## Run the sample
+## Run an Example
 
 1. On Windows:
-   - cd build\Debug
-   - .\model_qa.exe <path/to/model/from/above> <execution_provider>
-2. On Linux and macOS:
-   - cd build
-   - ./model_qa <path/to/model/from/above> <execution_provider>
 
-## Use constrained decoding
+```powershell
+# Prerequisite: navigate to the compiled binaries.
+cd build\Debug
+```
+
+```powershell
+# The `model-chat` script allows for multi-turn conversations.
+.\model_chat.exe -m {path to model folder} -e {execution provider}
+```
+
+```powershell
+# The `model-generate` script generates the entire output sequence in one function call
+.\model_generate.exe -m {path to model folder} -e {execution provider}
+```
+
+```powershell
+# The `model-qa` script streams the output text token by token.
+.\model_qa.exe -m {path to model folder} -e {execution provider}
+```
+
+2. On Linux and macOS:
+
+```powershell
+# Prerequisite: navigate to the compiled binaries.
+cd build
+```
+
+```bash
+# The `model-chat` script allows for multi-turn conversations.
+./model_chat -m {path to model folder} -e {execution provider}
+```
+
+```bash
+# The `model-generate` script generates the entire output sequence in one function call
+./model_generate -m {path to model folder} -e {execution provider}
+```
+
+```bash
+# The `model-qa` script streams the output text token by token.
+./model_qa -m {path to model folder} -e {execution provider}
+```
+
+## Use Constrained Decoding
 
 Constrained Decoding is useful when using function/tool calling as it helps in ensuring the output is in the correct format.
 
@@ -79,13 +112,13 @@ We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for c
 To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> and <|/tool_call|> tokens so you should set the `special` attribute for them as `true` inside `tokenizer.json`.
 
 To run the C examples with function/tool calling:
-```
+```bash
 # Using JSON Schema with only tool call output
-.\model_chat -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+./model_chat -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-.\model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+./model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
-.\model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+./model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 ```
