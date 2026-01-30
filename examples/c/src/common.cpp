@@ -53,13 +53,21 @@ std::string Trim(const std::string& str) {
 }
 
 static void print_usage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << " <model_path> <execution_provider>" << std::endl;
-  std::cerr << "  model_path: [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
-  std::cerr << "  execution_provider: [optional] Force use of a particular execution provider (e.g. \"cpu\")" << std::endl;
+  std::cerr << "usage: " << argv[0] << " <model_path> [execution_provider] [ep_library_path]" << std::endl;
+  std::cerr << "  model_path:         [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
+  std::cerr << "  execution_provider: [optional] Force use of a particular execution provider (e.g. \"cpu\", \"cuda\", \"NvTensorRtRtx\")" << std::endl;
   std::cerr << "                      If not specified, EP / provider options specified in genai_config.json will be used." << std::endl;
+  std::cerr << "  ep_library_path:    [optional] Path to execution provider DLL/SO for plug-in providers" << std::endl;
+  std::cerr << "                      Example: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll" << std::endl;
+  std::cerr << std::endl;
+  std::cerr << "Examples:" << std::endl;
+  std::cerr << "  " << argv[0] << " /path/to/model" << std::endl;
+  std::cerr << "  " << argv[0] << " /path/to/model cuda" << std::endl;
+  std::cerr << "  " << argv[0] << " /path/to/model cuda /path/to/onnxruntime_providers_cuda.dll" << std::endl;
+  std::cerr << "  " << argv[0] << " /path/to/model NvTensorRtRtx /path/to/onnxruntime_providers_tensorrt.dll" << std::endl;
 }
 
-bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep) {
+bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep, std::string* ep_library_path) {
   if (argc < 2) {
     print_usage(argc, argv);
     return false;
@@ -69,6 +77,13 @@ bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep)
     ep = argv[2];
   } else {
     ep = "follow_config";
+  }
+  if (ep_library_path) {
+    if (argc > 3) {
+      *ep_library_path = argv[3];
+    } else {
+      *ep_library_path = "";
+    }
   }
   return true;
 }
@@ -82,5 +97,24 @@ void append_provider(OgaConfig& config, const std::string& provider) {
         config.SetProviderOption(provider.c_str(), "enable_cuda_graph", "0");
       }
     }
+  }
+}
+
+void register_provider_library(const std::string& provider, const std::string& library_path) {
+  if (library_path.empty()) {
+    return;  // No library path specified, skip registration
+  }
+
+  std::cout << "Registering execution provider library: " << library_path << std::endl;
+
+  if (provider.compare("cuda") == 0) {
+    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", library_path.c_str());
+    std::cout << "Successfully registered CUDAExecutionProvider from " << library_path << std::endl;
+  } else if (provider.compare("NvTensorRtRtx") == 0) {
+    OgaRegisterExecutionProviderLibrary("NvTensorRTRTXExecutionProvider", library_path.c_str());
+    std::cout << "Successfully registered NvTensorRTRTXExecutionProvider from " << library_path << std::endl;
+  } else {
+    std::cerr << "Warning: Provider library registration not supported for provider '" << provider << "'" << std::endl;
+    std::cerr << "         Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries." << std::endl;
   }
 }

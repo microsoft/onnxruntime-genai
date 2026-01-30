@@ -460,6 +460,34 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
 
 def main(args):
+    # Register execution provider library if specified (for plug-in providers)
+    # This is done once at the start, before any benchmarks run
+    if args.ep_library_path:
+        if args.execution_provider == "follow_config":
+            raise ValueError(
+                "Cannot use --ep_library_path with --execution_provider=follow_config."
+                "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
+            )
+
+        if args.verbose:
+            print(f"Registering execution provider library: {args.ep_library_path}")
+
+        # Determine the provider registration name based on execution provider
+        provider_registration_name = None
+        if args.execution_provider == "cuda":
+            provider_registration_name = "CUDAExecutionProvider"
+        elif args.execution_provider == "NvTensorRtRtx":
+            provider_registration_name = "NvTensorRTRTXExecutionProvider"
+        else:
+            raise ValueError(
+                f"Provider library registration not supported for '{args.execution_provider}'. "
+                "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries."
+            )
+
+        og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
+        if args.verbose:
+            print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
+
     all_csv_metrics = []
 
     for batch_size in args.batch_sizes:
@@ -550,8 +578,18 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="follow_config",
-        choices=["cpu", "cuda", "dml", "follow_config"],
+        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+    )
+    parser.add_argument(
+        "-epl",
+        "--ep_library_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to the execution provider library DLL/SO for plug-in providers. "
+        "Use this to load CUDA or NvTensorRT as plug-in providers instead of built-in. "
+        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
     )
     args = parser.parse_args()
 
