@@ -12,7 +12,7 @@ from common import get_config, get_generator_params_args, get_search_options, re
 def main(args):
     if args.debug:
         set_logger()
-    register_ep(args.execution_provider, args.ep_path)
+    register_ep(args.execution_provider, args.ep_path, args.use_winml)
 
     if args.verbose:
         print("Loading model...")
@@ -96,6 +96,7 @@ if __name__ == "__main__":
     parser.add_argument("-ct", "--chat_template", type=str, default="", help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.")
     parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
     parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
+    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
 
     get_generator_params_args(parser)
 
