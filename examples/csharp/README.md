@@ -1,4 +1,4 @@
-# ONNX Runtime GenAI C# Example 
+# ONNX Runtime GenAI C# Examples
 
 > 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries built from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library. If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
 
