@@ -89,10 +89,10 @@ void ModelMM(
 
         // Construct user content based on inputs
         /**
-         * TODO: Uncomment the below snippet to use model.GetType() once
-         * the C# binding to Model.GetType() is in a stable package release.
+         * TODO: Uncomment the below snippet to use model.GetModelType() once
+         * the C# binding to Model.GetModelType() is in a stable package release.
          */
-        //var user_content = Common.GetUserContent(model.GetType(), num_images, num_audios, text);
+        //var user_content = Common.GetUserContent(model.GetModelType(), num_images, num_audios, text);
         var user_content = Common.GetUserContent("phi4mm", num_images, num_audios, text);
 
         // Add user message to list of messages

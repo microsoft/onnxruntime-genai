@@ -23,7 +23,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
-        public string GetType()
+        public string GetModelType()
         {
             IntPtr outStr = IntPtr.Zero;
             try
