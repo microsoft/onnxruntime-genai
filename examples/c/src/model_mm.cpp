@@ -29,6 +29,8 @@ void CXX_API(
     const std::string& model_path,
     const std::string& ep,
     const std::string& ep_path,
+    const std::vector<std::string>& image_paths,
+    const std::vector<std::string>& audio_paths,
     const std::string& system_prompt,
     const std::string& user_prompt,
     bool verbose,
@@ -47,6 +49,9 @@ void CXX_API(
   if (verbose) std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
+
+  if (verbose) std::cout << "Creating processor..." << std::endl;
+  auto processor = OgaMultiModalProcessor::Create(*model);
 
   // Create running list of messages
   std::vector<nlohmann::ordered_json> input_list;
@@ -72,6 +77,16 @@ void CXX_API(
 
   // Keep asking for input prompts in a loop
   while (true) {
+    // Get images
+    std::unique_ptr<OgaImages> images;
+    int num_images;
+    std::tie(images, num_images) = GetUserImages(image_paths, interactive);
+
+    // Get audios
+    std::unique_ptr<OgaAudios> audios;
+    int num_audios;
+    std::tie(audios, num_audios) = GetUserAudios(audio_paths, interactive);
+
     // Get user prompt
     std::string text = GetUserPrompt(user_prompt, interactive);
     signal(SIGINT, TerminateGeneration);
@@ -79,8 +94,12 @@ void CXX_API(
       break;  // Exit the loop
     }
 
+    // Construct user content based on inputs
+    auto type = model->GetType();
+    nlohmann::ordered_json user_content = GetUserContent(std::string(type), num_images, num_audios, text);
+
     // Add user message to list of messages
-    nlohmann::ordered_json user_message = nlohmann::ordered_json{{"role", "user"}, {"content", text}};
+    nlohmann::ordered_json user_message = nlohmann::ordered_json{{"role", "user"}, {"content", user_content}};
     input_list.push_back(user_message);
     nlohmann::ordered_json j = input_list;
     std::string messages = j.dump();
@@ -123,9 +142,9 @@ void CXX_API(
                            << std::endl;
 
     // Encode combined system + user prompt and append tokens to model
-    auto sequences = OgaSequences::Create();
-    tokenizer->Encode(prompt.c_str(), *sequences);
-    generator->AppendTokenSequences(*sequences);
+    auto input_tensors = processor->ProcessImagesAndAudios(prompt.c_str(), images.get(), audios.get());
+    generator->SetInputs(*input_tensors);
+    const int prompt_tokens_length = generator->GetSequenceCount(0);
 
     // Run generation loop
     if (verbose) std::cout << "Running generation loop..." << std::endl;
@@ -155,7 +174,6 @@ void CXX_API(
     // Remove user message from list of messages
     input_list.pop_back();
 
-    const int prompt_tokens_length = sequences->SequenceCount(0);
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
@@ -180,7 +198,7 @@ int main(int argc, char** argv) {
   OgaHandle handle;
 
   std::cout << "--------------------------" << std::endl;
-  std::cout << "Hello, ORT GenAI Model-QA!" << std::endl;
+  std::cout << "Hello, ORT GenAI Model-MM!" << std::endl;
   std::cout << "--------------------------" << std::endl;
 
   std::cout << "Model path: " << model_path << std::endl;
@@ -194,7 +212,7 @@ int main(int argc, char** argv) {
   std::cout << std::endl;
 
   try {
-    CXX_API(generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive);
+    CXX_API(generator_params_args, guidance_args, model_path, ep, ep_path, image_paths, audio_paths, system_prompt, user_prompt, verbose, debug, interactive);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return -1;

@@ -109,7 +109,7 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
-  - name: prebuild_phi4_mm_model_folder
+  - name: prebuild_model_mm_model_folder
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
     ${{ elseif eq(parameters.ep, 'cuda') }}:
@@ -202,8 +202,8 @@ jobs:
   - template: steps/utils/download-huggingface-model.yml
     parameters:
       HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
-      LocalFolder: 'phi4-mm'
-      RepoFolder: $(prebuild_phi4_mm_model_folder)
+      LocalFolder: 'model-mm'
+      RepoFolder: $(prebuild_model_mm_model_folder)
       WorkingDirectory: '$(Build.Repository.LocalPath)/examples/python'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
@@ -211,8 +211,8 @@ jobs:
   - template: steps/python-validation-step.yml
     parameters:
       PythonScriptFolder: "examples/python"
-      PythonScriptName: "phi4-mm.py"
-      LocalFolder: 'phi4-mm'
-      ModelFolder: $(prebuild_phi4_mm_model_folder)
+      PythonScriptName: "model-mm.py"
+      LocalFolder: 'model-mm'
+      ModelFolder: $(prebuild_model_mm_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml

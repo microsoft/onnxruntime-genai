@@ -232,10 +232,12 @@ struct GuidanceArgs {
  * @param debug Use debug mode to dump input and output tensors
  * @param interactive Run in interactive mode
  * @param rewind Rewind to the system prompt after each generation
+ * @param image_paths File paths to images
+ * @param audio_paths File paths to audios
  *
  * @return true if command-line arguments can be parsed, else false
  */
-bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& ep_path, std::string& system_prompt, std::string& user_prompt, bool& verbose, bool& debug, bool& interactive, bool& rewind);
+bool ParseArgs(int argc, char** argv, GeneratorParamsArgs& generator_params_args, GuidanceArgs& guidance_args, std::string& model_path, std::string& ep, std::string& ep_path, std::string& system_prompt, std::string& user_prompt, bool& verbose, bool& debug, bool& interactive, bool& rewind, std::vector<std::string>& image_paths, std::vector<std::string>& audio_paths);
 
 /**
  * @brief Set log options inside ORT GenAI
@@ -292,6 +294,59 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
  * @return Prompt to encode
  */
 std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& tokenizer, const std::string& messages, bool add_generation_prompt, const std::string& tools = "");
+
+/**
+ * @brief Get prompt for 'user' role in chat template
+ *
+ * @param prompt Provided prompt
+ * @param interactive Interactive mode (otherwise uses either user-provided prompt or default)
+ *
+ * @return Prompt to use
+ */
+std::string GetUserPrompt(const std::string& prompt, bool interactive);
+
+/**
+ * @brief Get paths to media for 'user' role in chat template
+ *
+ * @param media_paths User-provided media paths
+ * @param interactive Interactive mode (otherwise uses either user-provided media paths or default)
+ * @param media_type The media type being obtained
+ *
+ * @return all media filepaths to read and encode
+ */
+std::vector<std::string> GetUserMediaPaths(const std::vector<std::string>& media_paths, bool interactive, const std::string& media_type);
+
+/**
+ * @brief Get images for 'user' role in chat template
+ *
+ * @param image_paths User-provided image paths
+ * @param interactive Interactive mode (otherwise uses either user-provided image paths or default)
+ *
+ * @return (all images, number of images) as a tuple
+ */
+std::tuple<std::unique_ptr<OgaImages>, int> GetUserImages(const std::vector<std::string>& image_paths, bool interactive);
+
+/**
+ * @brief Get audios for 'user' role in chat template
+ *
+ * @param audio_paths User-provided audio paths
+ * @param interactive Interactive mode (otherwise uses either user-provided audio paths or default)
+ *
+ * @return (all audios, number of audios) as a tuple
+ */
+std::tuple<std::unique_ptr<OgaAudios>, int> GetUserAudios(const std::vector<std::string>& audio_paths, bool interactive);
+
+/**
+ * @brief Get content for 'user' role in chat template
+ *
+ * @param model_type Model type inside ORT GenAI
+ * @param num_images Number of images
+ * @param num_audios Number of audios
+ * @param prompt User prompt
+ *
+ * @return JSON-encoded combined content for 'user' role
+ */
+nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_images, int num_audios, const std::string& prompt);
 
 /**
  * @brief Convert a list of tools to a list of tool schemas

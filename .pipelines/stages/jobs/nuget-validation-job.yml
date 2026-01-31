@@ -175,8 +175,8 @@ jobs:
   - template: steps/utils/download-huggingface-model.yml
     parameters:
       HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
-      LocalFolder: 'phi4-mm'
-      RepoFolder: $(prebuild_phi4_mm_model_folder)
+      LocalFolder: 'model-mm'
+      RepoFolder: $(prebuild_model_mm_model_folder)
       WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/Phi4MM'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
@@ -186,7 +186,7 @@ jobs:
       CsprojFolder: "examples/csharp/Phi4MM"
       CsprojName: "Phi4MM"
       CsprojConfiguration: $(csproj_configuration)
-      LocalFolder: 'phi4-mm'
-      ModelFolder: $(prebuild_phi4_mm_model_folder)
+      LocalFolder: 'model-mm'
+      ModelFolder: $(prebuild_model_mm_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml

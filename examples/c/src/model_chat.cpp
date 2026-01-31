@@ -49,7 +49,7 @@ void CXX_API(
 
   if (verbose) std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   // Set search options for generator params
   auto params = OgaGeneratorParams::Create(*model);
@@ -168,7 +168,7 @@ void CXX_API(
         }
 
         const auto new_token = generator->GetNextTokens()[0];
-        std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+        std::cout << stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
       std::cout << "\n"
@@ -195,7 +195,9 @@ int main(int argc, char** argv) {
   GuidanceArgs guidance_args;
   std::string model_path, ep = "follow_config", ep_path = "", system_prompt = "You are a helpful AI assistant.", user_prompt = "What color is the sky?";
   bool verbose = false, debug = false, interactive = true, rewind = false;
-  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive, rewind)) {
+  std::vector<std::string> image_paths;
+  std::vector<std::string> audio_paths;
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive, rewind, image_paths, audio_paths)) {
     return -1;
   }
 

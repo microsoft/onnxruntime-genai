@@ -1,4 +1,4 @@
-# ONNX Runtime GenAI C Examples
+# ONNX Runtime GenAI C/C++ Examples
 
 > 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries built from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library. If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
 
@@ -10,7 +10,7 @@ Install the C headers according to the [installation instructions](https://onnxr
 
 There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/DownloadModels.md).
 
-## Build a C++ Example
+## Build a C/C++ Example
 
 1. Clone the repo: `git clone https://github.com/microsoft/onnxruntime-genai.git`
    - Use the relevant release tag that aligns with the version of the libraries you're planning to use.
@@ -73,6 +73,11 @@ cd build\Debug
 .\model_qa.exe -m {path to model folder} -e {execution provider}
 ```
 
+```powershell
+# The `model-mm` script works for multi-modal models and streams the output text token by token.
+.\model_mm.exe -m {path to model folder} -e {execution provider}
+```
+
 2. On Linux and macOS:
 
 ```powershell
@@ -90,17 +95,23 @@ cd build
 ./model_qa -m {path to model folder} -e {execution provider}
 ```
 
+```bash
+# The `model-mm` script works for multi-modal models and streams the output text token by token.
+./model_mm -m {path to model folder} -e {execution provider}
+```
+
 ## Tool Calling
 
 Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.
 
-To run the C examples with function/tool calling:
+Here are some examples of how you can run the C/C++ examples with function/tool calling.
+
 ```bash
 # Using JSON Schema with only tool call output
-./model_chat -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+./model_qa -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-./model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+./model_mm -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
 ./model_chat -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"

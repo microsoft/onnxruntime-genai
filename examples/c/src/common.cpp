@@ -173,7 +173,10 @@ bool ParseArgs(
     bool& verbose,
     bool& debug,
     bool& interactive,
-    bool& rewind) {
+    bool& rewind,
+    std::vector<std::string>& image_paths,
+    std::vector<std::string>& audio_paths
+  ) {
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -207,9 +210,12 @@ bool ParseArgs(
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
   app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
-  app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false");
+  app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
+
+  app.add_option("--image_paths", image_paths, "Space-separated list of paths to images. Only used in model_mm.")->expected(0, -1);
+  app.add_option("--audio_paths", audio_paths, "Space-separated list of paths to audios. Only used in model_mm.")->expected(0, -1);
 
   try {
     app.parse(argc, argv);
@@ -338,6 +344,152 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 
   std::string prompt = std::string(tokenizer.ApplyChatTemplate(template_str.c_str(), messages.c_str(), tools.c_str(), add_generation_prompt));
   return prompt;
+}
+
+std::string GetUserPrompt(const std::string& prompt, bool interactive) {
+  std::string text;
+
+  while (true) {
+    if (interactive) {
+      // If interactive mode is on
+      std::cout << "Prompt (Use quit() to exit):" << std::endl;
+      // Clear any cin error flags because of SIGINT
+      std::cin.clear();
+      std::getline(std::cin, text);  
+    } else {
+      // Use provided prompt (whether default or user-provided)
+      text = prompt;
+    }
+
+    if (text.empty()) {
+      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
+      continue;  // Skip to the next iteration if input is empty
+    } else {
+      break;
+    }
+  }
+
+  return text;
+}
+
+std::vector<std::string> GetUserMediaPaths(const std::vector<std::string>& media_paths, bool interactive, std::string& media_type) {
+  // Check media type
+  std::string media_type_lower = media_type;
+  std::transform(media_type_lower.begin(), media_type_lower.end(), media_type_lower.begin(), [](unsigned char c){ return std::tolower(c); });
+  if (!(media_type == "audio" || media_type == "image")) {
+    throw std::invalid_argument("Media type must be 'image' or 'audio'");
+  }
+  std::string media_type_capitalized = (char)std::toupper(media_type[0]) + media_type.substr(1);
+
+  std::vector<std::string> paths;
+  if (!media_paths.empty()) {
+    // If user-provided media paths
+    paths = media_paths;
+  } else if (interactive) {
+    // If interactive mode is on
+    std::string paths_str;
+    std::cout << media_type_capitalized << " Path (comma separated; leave empty if no " << media_type << "):" << std::endl;
+    std::getline(std::cin, paths_str);
+
+    std::unique_ptr<OgaImages> images;
+    for (size_t start = 0, end = 0; end < paths_str.size(); start = end + 1) {
+      end = paths_str.find(',', start);
+      paths.push_back(Trim(paths_str.substr(start, end - start)));
+    }
+  }
+
+  paths.erase(std::remove_if(paths.begin(), paths.end(), [](const std::string& s) { return s.empty(); }), paths.end());
+  for (const auto& path : paths) {
+    if (!std::filesystem::exists(path)) {
+      std::string error_message = media_type_capitalized + " file not found: " + path;
+      throw std::runtime_error(error_message);
+    }
+    std::cout << "Using " << media_type << ": " << path << std::endl;
+  }
+
+  return paths;
+}
+
+std::tuple<std::unique_ptr<OgaImages>, int> GetUserImages(const std::vector<std::string>& image_paths, bool interactive) {
+  std::string media_type = "image";
+  std::vector<std::string> paths = GetUserMediaPaths(image_paths, interactive, media_type);
+  if (paths.empty()) {
+    std::cout << "No " << media_type << " provided" << std::endl;
+    return std::make_tuple(nullptr, 0);
+  }
+
+  std::vector<const char*> paths_c;
+  for (const auto& path : paths) {
+    paths_c.push_back(path.c_str());
+  }
+
+  std::unique_ptr<OgaImages> images = OgaImages::Load(paths_c);
+  return std::make_tuple(std::move(images), static_cast<int>(paths.size()));
+}
+
+std::tuple<std::unique_ptr<OgaAudios>, int> GetUserAudios(const std::vector<std::string>& audio_paths, bool interactive) {
+  std::string media_type = "audio";
+  std::vector<std::string> paths = GetUserMediaPaths(audio_paths, interactive, media_type);
+  if (paths.empty()) {
+    std::cout << "No " << media_type << " provided" << std::endl;
+    return std::make_tuple(nullptr, 0);
+  }
+
+  std::vector<const char*> paths_c;
+  for (const auto& path : paths) {
+    paths_c.push_back(path.c_str());
+  }
+
+  std::unique_ptr<OgaAudios> audios = OgaAudios::Load(paths_c);
+  return std::make_tuple(std::move(audios), static_cast<int>(paths.size()));
+}
+
+nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_images, int num_audios, const std::string& prompt) {
+  nlohmann::ordered_json content_json;
+
+  // Combine all image tags, audio tags, and text into one user content
+  std::string image_tags = "", audio_tags = "", content = "";
+  if (model_type == "phi3v") {
+    // Phi-3 vision, Phi-3.5 vision
+    for (int i = 0; i < num_images; i++) {
+      image_tags += "<|image_" + std::to_string(i + 1) + "|>\\n";
+    }
+    content = image_tags + prompt;
+    content_json = nlohmann::ordered_json(content);
+
+  } else if (model_type == "phi4mm") {
+    // Phi-4 multimodal
+    for (int i = 0; i < num_images; i++) {
+      image_tags += "<|image_" + std::to_string(i + 1) + "|>\\n";
+    }
+    for (int i = 0; i < num_audios; i++) {
+      audio_tags += "<|audio_" + std::to_string(i + 1) + "|>\\n";
+    }
+    content = image_tags + audio_tags + prompt;
+    content_json = nlohmann::ordered_json(content);
+
+  } else if (model_type == "qwen2_5_vl" || model_type == "fara") {
+    // Qwen-2.5 VL, Fara
+    for (int i = 0; i < num_images; i++) {
+      image_tags += "<|vision_start|><|image_pad|><|vision_end|>";
+    }
+    content = image_tags + prompt;
+    content_json = nlohmann::ordered_json(content);
+
+  } else {
+    // Gemma-3 style: structured content
+    content_json = nlohmann::ordered_json::array();
+
+    // Add N image blocks
+    for (int i = 0; i < num_images; i++) {
+      content_json.push_back(nlohmann::ordered_json::object({{"type", "image"}}));
+    }
+
+    // Always add a text block (with the user prompt)
+    content_json.push_back(nlohmann::ordered_json::object({{"type", "text"}, {"text", prompt}}));
+  }
+
+  return content_json;
 }
 
 std::vector<ToolSchema> ToolsToSchemas(std::vector<Tool>& tools) {
