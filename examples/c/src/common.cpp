@@ -175,8 +175,7 @@ bool ParseArgs(
     bool& interactive,
     bool& rewind,
     std::vector<std::string>& image_paths,
-    std::vector<std::string>& audio_paths
-  ) {
+    std::vector<std::string>& audio_paths) {
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -355,7 +354,7 @@ std::string GetUserPrompt(const std::string& prompt, bool interactive) {
       std::cout << "Prompt (Use quit() to exit):" << std::endl;
       // Clear any cin error flags because of SIGINT
       std::cin.clear();
-      std::getline(std::cin, text);  
+      std::getline(std::cin, text);
     } else {
       // Use provided prompt (whether default or user-provided)
       text = prompt;
@@ -375,7 +374,7 @@ std::string GetUserPrompt(const std::string& prompt, bool interactive) {
 std::vector<std::string> GetUserMediaPaths(const std::vector<std::string>& media_paths, bool interactive, std::string& media_type) {
   // Check media type
   std::string media_type_lower = media_type;
-  std::transform(media_type_lower.begin(), media_type_lower.end(), media_type_lower.begin(), [](unsigned char c){ return std::tolower(c); });
+  std::transform(media_type_lower.begin(), media_type_lower.end(), media_type_lower.begin(), [](unsigned char c) { return std::tolower(c); });
   if (!(media_type == "audio" || media_type == "image")) {
     throw std::invalid_argument("Media type must be 'image' or 'audio'");
   }
