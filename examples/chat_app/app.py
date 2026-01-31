@@ -77,6 +77,20 @@ def interface_retry(*args):
 
 
 def get_ep_name(name):
+   
+   """
+    Return the ONNX Runtime execution provider name (cpu, cuda, dml, or NvTensorRtRtx)
+    derived from the given provider or folder name.
+
+    Args:
+        name: Provider name or folder containing provider identifier
+
+    Returns:
+        Canonical execution provider name
+
+    Raises:
+    ValueError: If the execution provider cannot be determined.
+    """
     new_name = name.lower().replace("directml", "dml")
     if "cpu" in new_name:
         return "cpu"
