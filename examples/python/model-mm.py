@@ -14,6 +14,9 @@ from common import (
     get_guidance_args,
     get_user_prompt,
     get_search_options,
+    get_user_audios,
+    get_user_content,
+    get_user_images,
     register_ep,
     set_logger,
 )
@@ -38,6 +41,11 @@ def main(args):
     stream = tokenizer.create_stream()
     if args.verbose:
         print("Tokenizer created")
+
+    # Create processor
+    processor = model.create_multimodal_processor()
+    if args.verbose:
+        print("Processor created")
 
     # Get search options for generator params
     search_options = get_search_options(args)
@@ -68,15 +76,24 @@ def main(args):
 
     # Keep asking for input prompts in a loop
     while True:
+        # Get images
+        images, num_images = get_user_images(args.image_paths, args.non_interactive)
+
+        # Get audios
+        audios, num_audios = get_user_audios(args.audio_paths, args.non_interactive)
+
         # Get user prompt
         text = get_user_prompt(args.user_prompt, args.non_interactive)
         if text == "quit()":
             break
 
-        # Add user message to list of messages
-        input_list.append({"role": "user", "content": text})
-        messages = json.dumps(input_list)
+        # Construct user content based on inputs
+        user_content = get_user_content(model.type, num_images, num_audios, text)
 
+        # Add user message to list of messages
+        input_list.append({"role": "user", "content": user_content})
+        messages = json.dumps(input_list)
+    
         if args.timings:
             started_timestamp = time.time()
 
@@ -108,9 +125,9 @@ def main(args):
         if args.verbose:
             print(f"Prompt: {prompt}")
 
-        # Encode combined system + user prompt and append tokens to model
-        input_tokens = tokenizer.encode(prompt)
-        generator.append_tokens(input_tokens)
+        # Encode combined system + user prompt and append inputs to model
+        inputs = processor(prompt, images=images, audios=audios)
+        generator.set_inputs(inputs)
 
         if args.verbose:
             print("Running generation loop...")
@@ -166,6 +183,8 @@ if __name__ == "__main__":
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
     parser.add_argument('-up', '--user_prompt', type=str, default='What color is the sky?', help='User prompt to use for the model.')
+    parser.add_argument("--image_paths", nargs="*", type=str, required=False, default=[], help="Path to the images, mainly for CI usage")
+    parser.add_argument("--audio_paths", nargs="*", type=str, required=False, default=[], help="Path to the audios, mainly for CI usage")
     parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
     parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
     parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
@@ -174,4 +193,5 @@ if __name__ == "__main__":
     get_guidance_args(parser)
 
     args = parser.parse_args()
+    args.max_length = args.max_length if hasattr(args, "max_length") else 7680
     main(args)

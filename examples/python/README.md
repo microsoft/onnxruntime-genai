@@ -27,18 +27,23 @@ python model-generate.py -m {path to model folder} -e {execution provider}
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
 
+```bash
+# The `model-mm` script works for multi-modal models and streams the output text token by token.
+python model-mm.py -m {path to model folder} -e {execution provider}
+```
+
 ## Tool Calling
 
 Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.
 
-To run the Python examples with function/tool calling:
-```
+Here are some examples of how you can run the Python examples with function/tool calling.
+
+```bash
 # Using JSON Schema with only tool call output
 python model-qa.py -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-python model-qa.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+python model-mm.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
 python model-chat.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
-```

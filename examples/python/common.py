@@ -21,13 +21,14 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     """
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
 
-def register_ep(ep: str, ep_path: str) -> None:
+def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
-    Register execution provider if path is provided
+    Register execution provider if path is provided or via Windows ML
 
     Args:
         ep (str): Name of execution provider
         ep_path (str): Path to execution provider to register
+        use_winml (bool): Use Windows ML to register execution providers
     Returns:
         None
     """
@@ -36,13 +37,23 @@ def register_ep(ep: str, ep_path: str) -> None:
 
     print(f"Registering execution provider: {ep}")
 
-    if ep == "cuda":
+    if use_winml:
+        # Requies winml.py file
+        # Modified from here: https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/tutorial?tabs=python#acquiring-the-model-and-preprocessing
+        try:
+            import winml
+            print(winml.register_execution_providers(ort=False, ort_genai=True))
+        except ImportError:
+            print("WinML not available, using default execution providers")
+        except Exception as e:
+            print(f"Failed to register WinML execution providers: {e}")
+    elif ep == "cuda":
         og.register_execution_provider_library("CUDAExecutionProvider", ep_path)
     elif ep == "NvTensorRtRtx":
         og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
     else:
         print(f"Warning: EP registration not supported for {ep}")
-        print("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries.")
+        print("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs.")
         return
 
     print(f"Registered {ep} successfully!")
@@ -139,6 +150,139 @@ def apply_chat_template(model_path: str, tokenizer: og.Tokenizer, messages: str,
         messages=messages, tools=tools, add_generation_prompt=add_generation_prompt, template_str=template_str
     )
     return prompt
+
+def get_user_prompt(prompt: str, non_interactive: bool) -> str:
+    """
+    Get prompt for 'user' role in chat template
+
+    Args:
+        prompt (str): provided prompt
+        non_interactive (bool): non-interactive mode (uses either provided prompt or default)
+    Returns:
+        str: prompt to encode
+    """
+    text = None
+
+    while True:
+        if not non_interactive:
+            # If interactive mode is on
+            text = input("Prompt (Use quit() to exit): ")
+        else:
+            # Use provided prompt (whether default or user-provided)
+            text = prompt
+
+        if not text:
+            print("Error, input cannot be empty")
+            continue
+        else:
+            break
+
+    return text
+
+def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_type: str) -> list[str]:
+    """
+    Get paths to media for 'user' role in chat template
+
+    Args:
+        media_paths (list[str]): user-provided media paths
+        non_interactive (bool): non-interactive mode (uses either user-provided media paths or default)
+        media_type (str): the media type being obtained
+    Returns:
+        list[str]: all media filepaths to read and encode
+    """
+    # Check media type
+    media_type = media_type.lower()
+    assert media_type in {"audio", "image"}, "Media type must be 'image' or 'audio'"
+
+    paths = []
+    if media_paths:
+        # If user-provided media paths
+        paths = media_paths
+    elif not non_interactive:
+        # If interactive mode is on
+        paths = [
+            path.strip()
+            for path in input(f"{media_type.capitalize()} Path (comma separated; leave empty if no {media_type}): ").split(",")
+        ]
+
+    paths = [path for path in paths if path]
+    for path in paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{media_type.capitalize()} file not found: {path}")
+        print(f"Using {media_type}: {path}")
+
+    return paths
+
+def get_user_images(image_paths: list[str], non_interactive: bool) -> tuple[og.Images, int]:
+    """
+    Get images for 'user' role in chat template
+
+    Args:
+        image_paths (list[str]): user-provided image paths
+        non_interactive (bool): non-interactive mode (uses either user-provided image paths or default)
+    Returns:
+        (og.Images, int): (all images, number of images) as a tuple
+    """
+    media_type = "image"
+    paths = get_user_media_paths(image_paths, non_interactive, media_type)
+    if not paths:
+        print(f"No {media_type} provided")
+        return None, 0
+
+    images = og.Images.open(*paths)
+    return images, len(paths)
+
+def get_user_audios(audio_paths: list[str], non_interactive: bool) -> tuple[og.Audios, int]:
+    """
+    Get audios for 'user' role in chat template
+
+    Args:
+        audio_paths (list[str]): user-provided audio paths
+        non_interactive (bool): non-interactive mode (uses either user-provided audio paths or default)
+    Returns:
+        (og.Audios, int): (all audios, number of audios) as a tuple
+    """
+    media_type = "audio"
+    paths = get_user_media_paths(audio_paths, non_interactive, media_type)
+    if not paths:
+        print(f"No {media_type} provided")
+        return None, 0
+
+    audios = og.Audios.open(*paths)
+    return audios, len(paths)
+
+def get_user_content(model_type, num_images, num_audios, prompt) -> str | list[dict[str, str]]:
+    """
+    Get content for 'user' role in chat template
+
+    Args:
+        model_type (str): model type inside ORT GenAI
+        num_images (int): number of images
+        num_audios (int): number of audios
+        prompt (str): user prompt
+    Returns:
+        str | list[dict[str, str]]: Combined content for 'user' role
+    """
+    content = None
+    # Combine all image tags, audio tags, and text into one user content
+    if model_type == "phi3v":
+        # Phi-3 vision, Phi-3.5 vision
+        image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
+        content = image_tags + prompt
+    elif model_type == "phi4mm":
+        # Phi-4 multimodal
+        image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
+        audio_tags = "".join([f"<|audio_{i + 1}|>\n" for i in range(num_audios)])
+        content = image_tags + audio_tags + prompt
+    elif model_type in {"qwen2_5_vl", "fara"}:
+        # Qwen-2.5 VL, Fara
+        image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
+        content = image_tags + prompt
+    else:
+        # Gemma-3 style: structured content
+        image_tags = [{"type": "image"} for _ in range(num_images)]
+        content = image_tags + [{"type": "text", "text": prompt}]
+    return content
 
 @dataclass
 class ToolSchema:
