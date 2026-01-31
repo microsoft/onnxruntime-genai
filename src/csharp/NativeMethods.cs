@@ -91,8 +91,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* OgaModel** */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaModelGetType(IntPtr /* OgaModel* */ model,
-                                                  out IntPtr /* const char** */ type);
+        public static extern IntPtr /* OgaResult* */ OgaModelGetType(IntPtr /* OgaModel* */ model,
+                                                                     out IntPtr /* const char** */ type);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyModel(IntPtr /* OgaModel* */ model);
