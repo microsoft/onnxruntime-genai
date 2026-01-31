@@ -28,7 +28,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             IntPtr outStr = IntPtr.Zero;
             try
             {
-                Result.VerifySuccess(NativeMethods.OgaModelGetType(_modelHandle), out outStr);
+                Result.VerifySuccess(NativeMethods.OgaModelGetType(_modelHandle, out outStr));
                 return StringUtils.FromUtf8(outStr);
             }
             finally
