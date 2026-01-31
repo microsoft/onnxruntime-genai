@@ -141,7 +141,7 @@ void CXX_API(
     if (verbose) std::cout << "Prompt: " << prompt << "\n"
                            << std::endl;
 
-    // Encode combined system + user prompt and append tokens to model
+    // Encode combined system + user prompt and append inputs to model
     auto input_tensors = processor->ProcessImagesAndAudios(prompt.c_str(), images.get(), audios.get());
     generator->SetInputs(*input_tensors);
     const int prompt_tokens_length = generator->GetSequenceCount(0);

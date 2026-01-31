@@ -23,6 +23,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
+        public string GetType()
+        {
+            IntPtr outStr = IntPtr.Zero;
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaModelGetType(_modelHandle), out outStr);
+                return StringUtils.FromUtf8(outStr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyString(outStr);
+            }
+        }
+
         ~Model()
         {
             Dispose(false);

@@ -10,9 +10,9 @@ Install the C# package according to the [installation instructions](https://onnx
 
 There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/DownloadModels.md).
 
-## Run the Example
+## Run an Example
 
-Open [ModelChat.sln](ModelChat.sln) and run the console application.
+Open `ModelChat.sln` or `ModelMM.sln` and run the console application.
 
 ## Tool Calling
 
@@ -24,7 +24,7 @@ To run the C# examples with function/tool calling:
 .\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-.\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+.\ModelMM.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
 .\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"

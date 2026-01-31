@@ -7,7 +7,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace ModelChat
+namespace CommonUtils
 {
     public static class Common
     {
@@ -193,6 +193,218 @@ namespace ModelChat
                 template_str: template_str
             );
             return prompt;
+        }
+
+        /// <summary>
+        /// Get prompt for 'user' role in chat template
+        /// </summary>
+        /// <param name="prompt">Provided prompt</param>
+        /// <param name="interactive">Interactive mode (otherwise uses either user-provided prompt or default)</param>
+        /// <returns>
+        /// Prompt to use
+        /// </returns>
+        public static string GetUserPrompt(string prompt, bool interactive)
+        {
+            string? text;
+            while (true)
+            {
+                if (interactive)
+                {
+                    Console.Write("Prompt (Use quit() to exit): ");
+                    text = Console.ReadLine();
+                }
+                else
+                {
+                    text = prompt;
+                }
+
+                if (string.IsNullOrEmpty(text))
+                {
+                    Console.WriteLine("Empty input. Please enter a valid prompt.");
+                    continue;  // Skip to the next iteration if input is empty
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return text;
+        }
+
+        /// <summary>
+        /// Get paths to media for user
+        /// </summary>
+        /// <param name="media_paths">User-provided media paths</param>
+        /// <param name="interactive">Interactive mode (otherwise uses either user-provided media paths or default)</param>
+        /// <param name="media_type">The media type being obtained</param>
+        /// <returns>
+        /// All media filepaths to read and encode
+        /// </returns>
+        public static List<string> GetUserMediaPaths(List<string> media_paths, bool interactive, string media_type)
+        {
+            // Check media type
+            var media_type_lower = media_type.ToLowerInvariant();
+            if (media_type_lower != "audio" && media_type_lower != "image")
+            {
+                throw new Exception("Media type must be 'image' or 'audio'");
+            }
+            var media_type_capitalized = char.ToUpperInvariant(media_type_lower[0]) + media_type_lower[1..];
+
+            var paths = new List<string>();
+            if (media_paths.Count > 0)
+            {
+                // If user-provided media paths
+                paths = media_paths;
+            }
+            else if (interactive)
+            {
+                // If interactive mode is on
+                Console.Write($"{media_type_capitalized} Path (comma separated; leave empty if no {media_type_lower}): ");
+                var line = Console.ReadLine() ?? string.Empty;
+
+                // Split by comma, trim whitespace and surrounding quotes
+                paths = line.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                            .Select(p =>
+                            {
+                                // Trim quotes
+                                var s = p.Trim();
+                                if (s.Length >= 2 && ((s[0] == '"' && s[^1] == '"') || (s[0] == '\'' && s[^1] == '\'')))
+                                {
+                                    s = s[1..^1]; // strip surrounding quotes
+                                }
+                                return s;
+                            })
+                            .Where(p => !string.IsNullOrWhiteSpace(p))
+                            .ToList();
+            }
+
+            paths = paths.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()).ToList();
+            foreach (var path in paths)
+            {
+                if (!File.Exists(path))
+                {
+                    throw new Exception($"{media_type_capitalized} file not found: {path}");
+                }
+                Console.WriteLine($"Using {media_type_lower}: {path}");
+            }
+
+            return paths;
+        }
+
+        /// <summary>
+        /// Get images for user
+        /// </summary>
+        /// <param name="image_paths">User-provided image paths</param>
+        /// <param name="interactive">Interactive mode (otherwise uses either user-provided image paths or default)</param>
+        /// <returns>
+        /// (all images, number of images) as a tuple
+        /// </returns>
+        public static (Images?, int) GetUserImages(List<string> image_paths, bool interactive)
+        {
+            var media_type = "image";
+            List<string> paths = GetUserMediaPaths(image_paths, interactive, media_type);
+            if (paths.Count == 0)
+            {
+                Console.WriteLine($"No {media_type} provided");
+                return (null, 0);
+            }
+
+            var images = Images.Load(paths.ToArray());
+            return (images, paths.Count);
+        }
+
+        /// <summary>
+        /// Get audios for user
+        /// </summary>
+        /// <param name="audio_paths">User-provided audio paths</param>
+        /// <param name="interactive">Interactive mode (otherwise uses either user-provided audio paths or default)</param>
+        /// <returns>
+        /// (all audios, number of audios) as a tuple
+        /// </returns>
+        public static (Audios?, int) GetUserAudios(List<string> audio_paths, bool interactive)
+        {
+            var media_type = "audio";
+            List<string> paths = GetUserMediaPaths(audio_paths, interactive, media_type);
+            if (paths.Count == 0)
+            {
+                Console.WriteLine($"No {media_type} provided");
+                return (null, 0);
+            }
+
+            var audios = Audios.Load(paths.ToArray());
+            return (audios, paths.Count);
+        }
+
+        /// <summary>
+        /// Get content for 'user' role in chat template
+        /// </summary>
+        /// <param name="model_type">Model type inside ORT GenAI</param>
+        /// <param name="num_images">Number of images</param>
+        /// <param name="num_audios">Number of audios</param>
+        /// <param name="prompt">User prompt</param>
+        /// <returns>
+        /// Combined content for 'user' role
+        /// </returns>
+        public static string GetUserContent(string model_type, int num_images, int num_audios, string prompt)
+        {
+            string content;
+            // Combine all image tags, audio tags, and text into one user content
+            if (model_type == "phi3v")
+            {
+                // Phi-3 vision, Phi-3.5 vision
+                var image_tags = "";
+                for (int i = 0; i < num_images; i++)
+                {
+                    image_tags += $"<|image_{i + 1}|>\n";
+                }
+                content = image_tags + prompt;
+            }
+            else if (model_type == "phi4mm")
+            {
+                // Phi-4 multimodal
+                var image_tags = "";
+                for (int i = 0; i < num_images; i++)
+                {
+                    image_tags += $"<|image_{i + 1}|>\n";
+                }
+                var audio_tags = "";
+                for (int i = 0; i < num_audios; i++)
+                {
+                    audio_tags += $"<|audio_{i + 1}|>\n";
+                }
+                content = image_tags + audio_tags + prompt;
+            }
+            else if (model_type == "qwen2_5_vl" || model_type == "fara")
+            {
+                // Qwen-2.5 VL, Fara
+                var image_tags = "";
+                for (int i = 0; i < num_images; i++)
+                {
+                    image_tags += "<|vision_start|><|image_pad|><|vision_end|>";
+                }
+                content = image_tags + prompt;
+            }
+            else
+            {
+                // Gemma-3 style: structured content
+                var list = new List<Dictionary<string, string>>();
+                for (int i = 0; i < num_images; i++)
+                {
+                    list.Add(new Dictionary<string, string>
+                    {
+                        ["type"] = "image"
+                    });
+                }
+                list.Add(new Dictionary<string, string>
+                {
+                    ["type"] = "text",
+                    ["text"] = prompt
+                });
+                content = JsonSerializer.Serialize(list);
+            }
+
+            return content;
         }
 
         /// <summary>

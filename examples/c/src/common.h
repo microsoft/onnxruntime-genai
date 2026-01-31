@@ -306,7 +306,7 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 std::string GetUserPrompt(const std::string& prompt, bool interactive);
 
 /**
- * @brief Get paths to media for 'user' role in chat template
+ * @brief Get paths to media for user
  *
  * @param media_paths User-provided media paths
  * @param interactive Interactive mode (otherwise uses either user-provided media paths or default)
@@ -317,7 +317,7 @@ std::string GetUserPrompt(const std::string& prompt, bool interactive);
 std::vector<std::string> GetUserMediaPaths(const std::vector<std::string>& media_paths, bool interactive, const std::string& media_type);
 
 /**
- * @brief Get images for 'user' role in chat template
+ * @brief Get images for user
  *
  * @param image_paths User-provided image paths
  * @param interactive Interactive mode (otherwise uses either user-provided image paths or default)
@@ -327,7 +327,7 @@ std::vector<std::string> GetUserMediaPaths(const std::vector<std::string>& media
 std::tuple<std::unique_ptr<OgaImages>, int> GetUserImages(const std::vector<std::string>& image_paths, bool interactive);
 
 /**
- * @brief Get audios for 'user' role in chat template
+ * @brief Get audios for user
  *
  * @param audio_paths User-provided audio paths
  * @param interactive Interactive mode (otherwise uses either user-provided audio paths or default)

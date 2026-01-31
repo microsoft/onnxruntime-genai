@@ -181,7 +181,7 @@ def get_user_prompt(prompt: str, non_interactive: bool) -> str:
 
 def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_type: str) -> list[str]:
     """
-    Get paths to media for 'user' role in chat template
+    Get paths to media for user
 
     Args:
         media_paths (list[str]): user-provided media paths
@@ -215,7 +215,7 @@ def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_ty
 
 def get_user_images(image_paths: list[str], non_interactive: bool) -> tuple[og.Images, int]:
     """
-    Get images for 'user' role in chat template
+    Get images for user
 
     Args:
         image_paths (list[str]): user-provided image paths
@@ -234,7 +234,7 @@ def get_user_images(image_paths: list[str], non_interactive: bool) -> tuple[og.I
 
 def get_user_audios(audio_paths: list[str], non_interactive: bool) -> tuple[og.Audios, int]:
     """
-    Get audios for 'user' role in chat template
+    Get audios for user
 
     Args:
         audio_paths (list[str]): user-provided audio paths
@@ -251,7 +251,7 @@ def get_user_audios(audio_paths: list[str], non_interactive: bool) -> tuple[og.A
     audios = og.Audios.open(*paths)
     return audios, len(paths)
 
-def get_user_content(model_type, num_images, num_audios, prompt) -> str | list[dict[str, str]]:
+def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: str) -> str | list[dict[str, str]]:
     """
     Get content for 'user' role in chat template
 

@@ -135,7 +135,7 @@ jobs:
           dotnet build -c Release
           cd ../ModelVision
           dotnet build -c Release
-          cd ../HelloPhi4MM
+          cd ../ModelMM
           dotnet build -c Release
 
       - name: Test the C# LLM Example with Tool Calling
