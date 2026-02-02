@@ -155,7 +155,7 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           cd examples/csharp/ModelChat
           dotnet build -c Release
-          cd ../ModelVision
+          cd ../ModelMM
           dotnet build -c Release
           cd ../ModelMM
           dotnet build -c Release

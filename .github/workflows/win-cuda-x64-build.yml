@@ -123,7 +123,7 @@ jobs:
         run: |
           cd examples\csharp\ModelChat
           dotnet build -c Release
-          cd ..\ModelVision
+          cd ..\ModelMM
           dotnet build -c Release
           cd ..\ModelMM
           dotnet build -c Release

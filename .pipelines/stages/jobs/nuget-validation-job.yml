@@ -160,14 +160,14 @@ jobs:
       HuggingFaceRepo: 'microsoft/Phi-3.5-vision-instruct-onnx'
       LocalFolder: 'phi3.5-vision'
       RepoFolder: $(prebuild_phi3_5_vision_model_folder)
-      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/ModelVision'
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/ModelMM'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
   - template: steps/nuget-validation-step.yml
     parameters:
-      CsprojFolder: "examples/csharp/ModelVision"
-      CsprojName: "ModelVision"
+      CsprojFolder: "examples/csharp/ModelMM"
+      CsprojName: "ModelMM"
       CsprojConfiguration: $(csproj_configuration)
       LocalFolder: 'phi3.5-vision'
       ModelFolder: $(prebuild_phi3_5_vision_model_folder)
