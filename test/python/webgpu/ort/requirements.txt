@@ -1,2 +1,1 @@
-# onnxruntime is provided via WebGPU-enabled DLLs from onnxruntime-node
-# Do not install onnxruntime here as it would override the WebGPU DLLs
+onnxruntime==1.23.0
