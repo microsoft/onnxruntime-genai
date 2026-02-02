@@ -59,46 +59,39 @@ namespace {
 
 // Helper to create OrtOpAttr from AttributeValue using Model Editor API
 OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
-  OrtOpAttr* op_attr = nullptr;
-
   switch (attr.type) {
     case AttributeType::INT:
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), &attr.int_value, 1,
-                                               OrtOpAttrType::ORT_OP_ATTR_INT, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), &attr.int_value, 1, OrtOpAttrType::ORT_OP_ATTR_INT).release();
     case AttributeType::FLOAT:
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), &attr.float_value, 1,
-                                               OrtOpAttrType::ORT_OP_ATTR_FLOAT, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), &attr.float_value, 1, OrtOpAttrType::ORT_OP_ATTR_FLOAT).release();
     case AttributeType::STRING:
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.string_value.c_str(),
-                                               static_cast<int>(attr.string_value.size()),
-                                               OrtOpAttrType::ORT_OP_ATTR_STRING, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), attr.string_value.c_str(),
+                               static_cast<int>(attr.string_value.size()),
+                               OrtOpAttrType::ORT_OP_ATTR_STRING)
+          .release();
     case AttributeType::INTS:
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.ints_value.data(),
-                                               static_cast<int>(attr.ints_value.size()),
-                                               OrtOpAttrType::ORT_OP_ATTR_INTS, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), attr.ints_value.data(),
+                               static_cast<int>(attr.ints_value.size()),
+                               OrtOpAttrType::ORT_OP_ATTR_INTS)
+          .release();
     case AttributeType::FLOATS:
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), attr.floats_value.data(),
-                                               static_cast<int>(attr.floats_value.size()),
-                                               OrtOpAttrType::ORT_OP_ATTR_FLOATS, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), attr.floats_value.data(),
+                               static_cast<int>(attr.floats_value.size()),
+                               OrtOpAttrType::ORT_OP_ATTR_FLOATS)
+          .release();
     case AttributeType::STRINGS: {
       std::vector<const char*> string_ptrs;
       string_ptrs.reserve(attr.strings_value.size());
       for (const auto& str : attr.strings_value) {
         string_ptrs.push_back(str.c_str());
       }
-      Ort::ThrowOnError(Ort::api->CreateOpAttr(attr.name.c_str(), string_ptrs.data(),
-                                               static_cast<int>(string_ptrs.size()),
-                                               OrtOpAttrType::ORT_OP_ATTR_STRINGS, &op_attr));
-      break;
+      return OrtOpAttr::Create(attr.name.c_str(), string_ptrs.data(),
+                               static_cast<int>(string_ptrs.size()),
+                               OrtOpAttrType::ORT_OP_ATTR_STRINGS)
+          .release();
     }
   }
-
-  return op_attr;
+  return nullptr;  // Should never reach here
 }
 
 }  // anonymous namespace
@@ -115,28 +108,22 @@ OrtModel* Build(const ModelConfig& config) {
   // Create input ValueInfos
   std::vector<std::unique_ptr<OrtValueInfo>> graph_inputs;
   for (const auto& input : config.inputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, input.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, input.shape.data(), input.shape.size()));
+    auto tensor_info = OrtTensorTypeAndShapeInfo::Create();
+    tensor_info->SetElementType(input.elem_type);
+    tensor_info->SetDimensions(input.shape.data(), input.shape.size());
 
-    auto value_info = OrtValueInfo::Create(input.name.c_str(), tensor_info);
-    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
-
+    auto value_info = OrtValueInfo::Create(input.name.c_str(), tensor_info.get());
     graph_inputs.push_back(std::move(value_info));
   }
 
   // Create output ValueInfos
   std::vector<std::unique_ptr<OrtValueInfo>> graph_outputs;
   for (const auto& output : config.outputs) {
-    OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&tensor_info));
-    Ort::ThrowOnError(Ort::api->SetTensorElementType(tensor_info, output.elem_type));
-    Ort::ThrowOnError(Ort::api->SetDimensions(tensor_info, output.shape.data(), output.shape.size()));
+    auto tensor_info = OrtTensorTypeAndShapeInfo::Create();
+    tensor_info->SetElementType(output.elem_type);
+    tensor_info->SetDimensions(output.shape.data(), output.shape.size());
 
-    auto value_info = OrtValueInfo::Create(output.name.c_str(), tensor_info);
-    Ort::api->ReleaseTensorTypeAndShapeInfo(tensor_info);
-
+    auto value_info = OrtValueInfo::Create(output.name.c_str(), tensor_info.get());
     graph_outputs.push_back(std::move(value_info));
   }
 
@@ -202,9 +189,11 @@ OrtModel* Build(const ModelConfig& config) {
   Ort::ThrowOnError(model_editor_api.AddGraphToModel(model.get(), graph.get()));
   graph.release();  // model now owns graph
 
-  // Release node attributes - must be done AFTER model is built since CreateNode stores references
+  // IMPORTANT: Release node attributes AFTER model is built.
+  // CreateNode stores references to the attributes (doesn't copy them), so they must
+  // stay alive until after AddGraphToModel is called. Now we explicitly release them.
   for (auto* attr : node_attributes) {
-    Ort::api->ReleaseOpAttr(attr);
+    delete attr;  // Uses OrtOpAttr::operator delete which calls ReleaseOpAttr
   }
 
   return model.release();  // Return ownership to caller

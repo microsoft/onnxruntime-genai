@@ -798,6 +798,11 @@ struct OrtMemoryInfo {
  *
  */
 struct OrtTensorTypeAndShapeInfo {
+  static std::unique_ptr<OrtTensorTypeAndShapeInfo> Create();
+
+  void SetElementType(ONNXTensorElementDataType type);
+  void SetDimensions(const int64_t* dim_values, size_t dim_count);
+
   ONNXTensorElementDataType GetElementType() const;  ///< Wraps OrtApi::GetTensorElementType
   size_t GetElementCount() const;                    ///< Wraps OrtApi::GetTensorShapeElementCount
 

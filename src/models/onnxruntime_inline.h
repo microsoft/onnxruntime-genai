@@ -1378,6 +1378,20 @@ inline std::unique_ptr<OrtNode> OrtNode::Create(const char* op_type, const char*
   return std::unique_ptr<OrtNode>{p};
 }
 
+inline std::unique_ptr<OrtTensorTypeAndShapeInfo> OrtTensorTypeAndShapeInfo::Create() {
+  OrtTensorTypeAndShapeInfo* p;
+  Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&p));
+  return std::unique_ptr<OrtTensorTypeAndShapeInfo>{p};
+}
+
+inline void OrtTensorTypeAndShapeInfo::SetElementType(ONNXTensorElementDataType type) {
+  Ort::ThrowOnError(Ort::api->SetTensorElementType(this, type));
+}
+
+inline void OrtTensorTypeAndShapeInfo::SetDimensions(const int64_t* dim_values, size_t dim_count) {
+  Ort::ThrowOnError(Ort::api->SetDimensions(this, dim_values, dim_count));
+}
+
 inline std::unique_ptr<OrtKernelInfo> OrtKernelInfo::Clone() const {
   OrtKernelInfo* p;
   Ort::ThrowOnError(Ort::api->CopyKernelInfo(this, &p));
