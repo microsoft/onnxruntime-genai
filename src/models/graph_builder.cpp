@@ -58,27 +58,24 @@ AttributeValue AttributeValue::Strings(const std::string& name, const std::vecto
 namespace {
 
 // Helper to create OrtOpAttr from AttributeValue using Model Editor API
-OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
+std::unique_ptr<OrtOpAttr> CreateOpAttr(const AttributeValue& attr) {
   switch (attr.type) {
     case AttributeType::INT:
-      return OrtOpAttr::Create(attr.name.c_str(), &attr.int_value, 1, OrtOpAttrType::ORT_OP_ATTR_INT).release();
+      return OrtOpAttr::Create(attr.name.c_str(), &attr.int_value, 1, OrtOpAttrType::ORT_OP_ATTR_INT);
     case AttributeType::FLOAT:
-      return OrtOpAttr::Create(attr.name.c_str(), &attr.float_value, 1, OrtOpAttrType::ORT_OP_ATTR_FLOAT).release();
+      return OrtOpAttr::Create(attr.name.c_str(), &attr.float_value, 1, OrtOpAttrType::ORT_OP_ATTR_FLOAT);
     case AttributeType::STRING:
       return OrtOpAttr::Create(attr.name.c_str(), attr.string_value.c_str(),
                                static_cast<int>(attr.string_value.size()),
-                               OrtOpAttrType::ORT_OP_ATTR_STRING)
-          .release();
+                               OrtOpAttrType::ORT_OP_ATTR_STRING);
     case AttributeType::INTS:
       return OrtOpAttr::Create(attr.name.c_str(), attr.ints_value.data(),
                                static_cast<int>(attr.ints_value.size()),
-                               OrtOpAttrType::ORT_OP_ATTR_INTS)
-          .release();
+                               OrtOpAttrType::ORT_OP_ATTR_INTS);
     case AttributeType::FLOATS:
       return OrtOpAttr::Create(attr.name.c_str(), attr.floats_value.data(),
                                static_cast<int>(attr.floats_value.size()),
-                               OrtOpAttrType::ORT_OP_ATTR_FLOATS)
-          .release();
+                               OrtOpAttrType::ORT_OP_ATTR_FLOATS);
     case AttributeType::STRINGS: {
       std::vector<const char*> string_ptrs;
       string_ptrs.reserve(attr.strings_value.size());
@@ -87,11 +84,10 @@ OrtOpAttr* CreateOpAttr(const AttributeValue& attr) {
       }
       return OrtOpAttr::Create(attr.name.c_str(), string_ptrs.data(),
                                static_cast<int>(string_ptrs.size()),
-                               OrtOpAttrType::ORT_OP_ATTR_STRINGS)
-          .release();
+                               OrtOpAttrType::ORT_OP_ATTR_STRINGS);
     }
   }
-  return nullptr;  // Should never reach here
+  throw std::runtime_error("CreateOpAttr: Unhandled attribute type");
 }
 
 }  // anonymous namespace
@@ -139,16 +135,22 @@ OrtModel* Build(const ModelConfig& config) {
   }
 
   graph->SetInputs(input_ptrs.data(), input_ptrs.size());
-  graph->SetOutputs(output_ptrs.data(), output_ptrs.size());
-
   // Release ownership since graph took it
   for (auto& vi : graph_inputs) vi.release();
+  graph->SetOutputs(output_ptrs.data(), output_ptrs.size());
   for (auto& vi : graph_outputs) vi.release();
 
   // Create node attributes
-  std::vector<OrtOpAttr*> node_attributes;
+  std::vector<std::unique_ptr<OrtOpAttr>> node_attributes;
   for (const auto& attr : config.attributes) {
     node_attributes.push_back(CreateOpAttr(attr));
+  }
+
+  // Extract raw pointers for CreateNode (which stores references, not copies)
+  std::vector<OrtOpAttr*> node_attr_ptrs;
+  node_attr_ptrs.reserve(node_attributes.size());
+  for (auto& attr : node_attributes) {
+    node_attr_ptrs.push_back(attr.get());
   }
 
   // Create input/output name vectors
@@ -171,12 +173,15 @@ OrtModel* Build(const ModelConfig& config) {
       input_names.size(),
       output_names.data(),
       output_names.size(),
-      node_attributes.empty() ? nullptr : node_attributes.data(),
-      node_attributes.size());
+      node_attr_ptrs.empty() ? nullptr : node_attr_ptrs.data(),
+      node_attr_ptrs.size());
 
   // Add node to graph (graph takes ownership of node)
   graph->AddNode(node.get());
-  node.release();  // graph now owns node
+  for (auto& attr : node_attributes) {
+    attr.release();
+  }
+  node.release();
 
   // Create model with opset using RAII wrapper
   const char* domain_name = "";
@@ -185,14 +190,8 @@ OrtModel* Build(const ModelConfig& config) {
 
   // Add graph to model (model takes ownership of graph)
   model->AddGraph(graph.get());
-  graph.release();  // model now owns graph
-
-  // IMPORTANT: Release node attributes AFTER model is built.
-  // CreateNode stores references to the attributes (doesn't copy them), so they must
-  // stay alive until after AddGraphToModel is called. Now we explicitly release them.
-  for (auto* attr : node_attributes) {
-    delete attr;  // Uses OrtOpAttr::operator delete which calls ReleaseOpAttr
-  }
+  // Release ownership - model now owns the entire graph structure
+  graph.release();
 
   return model.release();  // Return ownership to caller
 }
