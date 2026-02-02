@@ -1344,10 +1344,26 @@ inline std::unique_ptr<OrtGraph> OrtGraph::Create() {
   return std::unique_ptr<OrtGraph>{p};
 }
 
+inline void OrtGraph::SetInputs(OrtValueInfo** inputs, size_t input_count) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().SetGraphInputs(this, inputs, input_count));
+}
+
+inline void OrtGraph::SetOutputs(OrtValueInfo** outputs, size_t output_count) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().SetGraphOutputs(this, outputs, output_count));
+}
+
+inline void OrtGraph::AddNode(OrtNode* node) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().AddNodeToGraph(this, node));
+}
+
 inline std::unique_ptr<OrtModel> OrtModel::Create(const char** domain_names, const int* opset_versions, size_t num_domains) {
   OrtModel* p;
   Ort::ThrowOnError(Ort::GetModelEditorApi().CreateModel(domain_names, opset_versions, num_domains, &p));
   return std::unique_ptr<OrtModel>{p};
+}
+
+inline void OrtModel::AddGraph(OrtGraph* graph) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().AddGraphToModel(this, graph));
 }
 
 inline std::unique_ptr<OrtValueInfo> OrtValueInfo::Create(const char* name, const OrtTensorTypeAndShapeInfo* tensor_info) {

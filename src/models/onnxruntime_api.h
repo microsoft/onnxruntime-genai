@@ -1326,6 +1326,11 @@ struct OrtOpAttr {
 /// </summary>
 struct OrtGraph {
   static std::unique_ptr<OrtGraph> Create();
+
+  void SetInputs(OrtValueInfo** inputs, size_t input_count);
+  void SetOutputs(OrtValueInfo** outputs, size_t output_count);
+  void AddNode(OrtNode* node);
+
   static void operator delete(void* p) { Ort::api->ReleaseGraph(reinterpret_cast<OrtGraph*>(p)); }
   Ort::Abstract make_abstract;
 };
@@ -1335,6 +1340,9 @@ struct OrtGraph {
 /// </summary>
 struct OrtModel {
   static std::unique_ptr<OrtModel> Create(const char** domain_names, const int* opset_versions, size_t num_domains);
+
+  void AddGraph(OrtGraph* graph);
+
   static void operator delete(void* p) { Ort::api->ReleaseModel(reinterpret_cast<OrtModel*>(p)); }
   Ort::Abstract make_abstract;
 };

@@ -100,8 +100,6 @@ namespace GraphBuilder {
 
 // Build complete ONNX model using the Model Editor API
 OrtModel* Build(const ModelConfig& config) {
-  const auto& model_editor_api = Ort::GetModelEditorApi();
-
   // Create graph using RAII wrapper
   auto graph = OrtGraph::Create();
 
@@ -140,8 +138,8 @@ OrtModel* Build(const ModelConfig& config) {
     output_ptrs.push_back(vi.get());
   }
 
-  Ort::ThrowOnError(model_editor_api.SetGraphInputs(graph.get(), input_ptrs.data(), input_ptrs.size()));
-  Ort::ThrowOnError(model_editor_api.SetGraphOutputs(graph.get(), output_ptrs.data(), output_ptrs.size()));
+  graph->SetInputs(input_ptrs.data(), input_ptrs.size());
+  graph->SetOutputs(output_ptrs.data(), output_ptrs.size());
 
   // Release ownership since graph took it
   for (auto& vi : graph_inputs) vi.release();
@@ -177,7 +175,7 @@ OrtModel* Build(const ModelConfig& config) {
       node_attributes.size());
 
   // Add node to graph (graph takes ownership of node)
-  Ort::ThrowOnError(model_editor_api.AddNodeToGraph(graph.get(), node.get()));
+  graph->AddNode(node.get());
   node.release();  // graph now owns node
 
   // Create model with opset using RAII wrapper
@@ -186,7 +184,7 @@ OrtModel* Build(const ModelConfig& config) {
   auto model = OrtModel::Create(&domain_name, &opset, 1);
 
   // Add graph to model (model takes ownership of graph)
-  Ort::ThrowOnError(model_editor_api.AddGraphToModel(model.get(), graph.get()));
+  model->AddGraph(graph.get());
   graph.release();  // model now owns graph
 
   // IMPORTANT: Release node attributes AFTER model is built.
