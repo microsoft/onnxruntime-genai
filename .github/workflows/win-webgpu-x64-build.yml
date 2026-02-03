@@ -42,11 +42,6 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'false'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
@@ -68,59 +63,6 @@ jobs:
           mkdir ort/lib
           move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
           move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
-
-      - name: Download WebGPU-enabled DLLs from onnxruntime-node
-        shell: pwsh
-        run: |
-          Write-Host "Downloading onnxruntime-node@dev for WebGPU DLLs..."
-
-          # Install onnxruntime-node@dev to get WebGPU-enabled binaries
-          npm install onnxruntime-node@dev --no-save
-
-          # Create temp directory for extracted DLLs
-          New-Item -ItemType Directory -Force -Path ort/dlls | Out-Null
-
-          # Path to WebGPU DLLs (napi-v6 for latest version, x64 for 64-bit Windows)
-          $dllPath = "node_modules/onnxruntime-node/bin/napi-v6/win32/x64"
-
-          if (Test-Path $dllPath) {
-            Write-Host "Found DLLs at: $dllPath"
-
-            # Copy WebGPU DLLs (excluding DirectML.dll which is not needed)
-            $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
-            foreach ($dllName in $dllsToCopy) {
-              $sourcePath = Join-Path $dllPath $dllName
-              if (Test-Path $sourcePath) {
-                Copy-Item $sourcePath ort/dlls/ -Force
-                $fileInfo = Get-Item $sourcePath
-                Write-Host "  Copied: $dllName ($([math]::Round($fileInfo.Length / 1MB, 2)) MB)"
-              } else {
-                Write-Warning "  Not found: $dllName"
-              }
-            }
-
-            $copiedCount = (Get-ChildItem ort/dlls/*.dll).Count
-            Write-Host "Total DLLs extracted: $copiedCount"
-          } else {
-            Write-Error "Could not find DLLs at: $dllPath"
-            Write-Host "Searching for onnxruntime.dll..."
-            $found = Get-ChildItem node_modules/onnxruntime-node -Recurse -Filter "onnxruntime.dll" | Select-Object -First 3
-            $found | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
-            exit 1
-          }
-
-      - name: Replace CPU DLLs with WebGPU DLLs
-        shell: pwsh
-        run: |
-          Write-Host "Replacing CPU DLLs with WebGPU-enabled DLLs..."
-
-          # Overwrite CPU DLLs with WebGPU DLLs
-          Copy-Item ort/dlls/*.dll ort/lib/ -Force
-
-          Write-Host "Updated DLLs in ort/lib:"
-          Get-ChildItem ort/lib/*.dll | ForEach-Object {
-            Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
-          }
 
       - name: Install Rust Toolchain
         run: |
