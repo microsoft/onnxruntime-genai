@@ -1,3 +1,7 @@
+<!--
+Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content
+-->
+
 # InternLM2 Model Export for ONNX Runtime GenAI
 
 This example demonstrates how to export InternLM2 models to ONNX format using ONNX Runtime GenAI.

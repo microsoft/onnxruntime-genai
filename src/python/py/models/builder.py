@@ -3,6 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
 """
