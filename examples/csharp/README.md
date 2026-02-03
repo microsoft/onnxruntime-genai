@@ -37,7 +37,7 @@ dotnet build ModelMM -c Release
 
 ```powershell
 # Prerequisite: navigate to the compiled binaries. This is an example. Your navigation may change depending on your target.
-cd ./ModelChat/build/Debug/net8.0/
+cd ./ModelChat/bin/Debug/net8.0/
 
 # The `model-chat` script allows for multi-turn conversations.
 .\ModelChat.exe -m {path to model folder} -e {execution provider}
@@ -45,7 +45,7 @@ cd ./ModelChat/build/Debug/net8.0/
 
 ```powershell
 # Prerequisite: navigate to the compiled binaries. This is an example. Your navigation may change depending on your target.
-cd ./ModelMM/build/Debug/net8.0/
+cd ./ModelMM/bin/Debug/net8.0/
 
 # The `model-mm` script works for multi-modal models and streams the output text token by token.
 .\ModelMM.exe -m {path to model folder} -e {execution provider}
@@ -55,7 +55,7 @@ cd ./ModelMM/build/Debug/net8.0/
 
 ```bash
 # Prerequisite: navigate to the compiled binaries. This is an example. Your navigation may change depending on your target.
-cd ./ModelChat/build/Debug/net8.0/
+cd ./ModelChat/bin/Debug/net8.0/
 
 # The `model-chat` script allows for multi-turn conversations.
 ./ModelChat -m {path to model folder} -e {execution provider}
@@ -63,7 +63,7 @@ cd ./ModelChat/build/Debug/net8.0/
 
 ```bash
 # Prerequisite: navigate to the compiled binaries. This is an example. Your navigation may change depending on your target.
-cd ./ModelMM/build/Debug/net8.0/
+cd ./ModelMM/bin/Debug/net8.0/
 
 # The `model-mm` script works for multi-modal models and streams the output text token by token.
 ./ModelMM -m {path to model folder} -e {execution provider}

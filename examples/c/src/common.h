@@ -15,6 +15,7 @@
 
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
+#include "onnxruntime_cxx_api.h"
 #include "ort_genai.h"
 
 using Clock = std::chrono::high_resolution_clock;
