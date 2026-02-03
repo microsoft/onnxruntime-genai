@@ -239,9 +239,9 @@ void RegisterEP(const std::string& ep, const std::string& ep_path) {
   std::cout << "Registering execution provider: " << ep_path << std::endl;
   auto env = Ort::Env();
   if (ep.compare("cuda") == 0) {
-    env.RegisterExecutionProviderLibrary("CUDAExecutionProvider", ep_path.c_str());
+    env.RegisterExecutionProviderLibrary("CUDAExecutionProvider", std::filesystem::path(ep_path).c_str());
   } else if (ep.compare("NvTensorRtRtx") == 0) {
-    env.RegisterExecutionProviderLibrary("NvTensorRTRTXExecutionProvider", ep_path.c_str());
+    env.RegisterExecutionProviderLibrary("NvTensorRTRTXExecutionProvider", std::filesystem::path(ep_path).c_str());
   } else {
     std::cout << "Warning: EP registration not supported for " << ep << std::endl;
     std::cout << "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries." << std::endl;

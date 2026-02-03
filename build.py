@@ -779,11 +779,13 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DWHISPER=ON",
     ]
 
-    include_dir = REPO_ROOT / "src"
-    lib_dir = args.build_dir
+    ort_include_dir = REPO_ROOT / "ort" / "include"
+    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    oga_include_dir = REPO_ROOT / "src"
+    oga_lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
-        lib_dir = lib_dir / args.config
+        oga_lib_dir = oga_lib_dir / args.config
 
     cmake_command = (
         [
@@ -797,8 +799,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ]
         + samples_to_build
         + [
-            "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
-            "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
+            "-DORT_LIB_DIR=" + str(ort_lib_dir),
+            "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
+            "-DOGA_LIB_DIR=" + str(oga_lib_dir),
         ]
     )
 
