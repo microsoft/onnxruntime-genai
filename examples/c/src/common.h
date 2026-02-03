@@ -39,11 +39,16 @@ bool FileExists(const char* path);
 
 std::string Trim(const std::string& str);
 
-// Returns true if model_path & ep were able to be set from user cmd-line args.
+// Returns true if model_path, ep, and ep_library_path were able to be set from user cmd-line args.
 // Returns false if insufficient cmd-line arguments were passed.
 // Note: ep will be set to "follow_config" if user only gives model_path
-bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string& ep);
+// Note: ep_library_path will be empty if not provided (or if nullptr is passed)
+bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string& ep, std::string* ep_library_path = nullptr);
 
 // Append provider / options to config.
 // This is a no-op if provider=="follow_config"
 void append_provider(OgaConfig& config, const std::string& provider);
+
+// Register execution provider library if specified
+// This enables plug-in provider support for CUDA and NvTensorRT
+void register_provider_library(const std::string& provider, const std::string& library_path);
