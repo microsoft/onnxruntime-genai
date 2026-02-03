@@ -95,7 +95,7 @@ std::unique_ptr<OrtOpAttr> CreateOpAttr(const AttributeValue& attr) {
 namespace GraphBuilder {
 
 // Build complete ONNX model using the Model Editor API
-OrtModel* Build(const ModelConfig& config) {
+std::unique_ptr<OrtModel> Build(const ModelConfig& config) {
   // Create graph using RAII wrapper
   auto graph = OrtGraph::Create();
 
@@ -193,7 +193,7 @@ OrtModel* Build(const ModelConfig& config) {
   // Release ownership - model now owns the entire graph structure
   graph.release();
 
-  return model.release();  // Return ownership to caller
+  return model;
 }
 
 }  // namespace GraphBuilder
