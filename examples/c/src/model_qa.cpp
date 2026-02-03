@@ -1,17 +1,18 @@
+// -----------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
-#include <iomanip>
-#include <string>
-#include <csignal>
-
-#include "ort_genai.h"
-#include "common.h"
-
+//
 // C++ API Example for Model Question-Answering
 // This example demonstrates how to use the C++ API of the ONNX Runtime GenAI library
 // to perform model question-answering tasks. It includes functionalities to create a model,
 // tokenizer, and generator, and to handle user input for generating responses based on prompts.
+// -----------------------------------------------------------------------------------------------
+
+#include <csignal>
+#include <iomanip>
+#include <string>
+
+#include "common.h"
 
 OgaGenerator* g_generator = nullptr;
 
@@ -22,69 +23,114 @@ void TerminateGeneration(int signum) {
   g_generator->SetRuntimeOption("terminate_session", "1");
 }
 
-void CXX_API(const char* model_path, const char* execution_provider, const char* ep_library_path) {
-  // Register execution provider library if specified (for plug-in providers)
-  std::string provider(execution_provider);
-  std::string library_path(ep_library_path);
-  register_provider_library(provider, library_path);
+void CXX_API(
+    GeneratorParamsArgs& generator_params_args,
+    GuidanceArgs& guidance_args,
+    const std::string& model_path,
+    const std::string& ep,
+    const std::string& ep_path,
+    const std::string& system_prompt,
+    const std::string& user_prompt,
+    bool verbose,
+    bool debug,
+    bool interactive) {
+  if (debug) SetLogger();
+  RegisterEP(ep, ep_path);
 
-  std::cout << "Creating config..." << std::endl;
-  auto config = OgaConfig::Create(model_path);
+  if (verbose) std::cout << "Creating config..." << std::endl;
+  std::unordered_map<std::string, std::string> ep_options;
+  auto config = GetConfig(model_path, ep, ep_options, generator_params_args);
 
-  append_provider(*config, provider);
-
-  std::cout << "Creating model..." << std::endl;
+  if (verbose) std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
 
-  std::cout << "Creating tokenizer..." << std::endl;
+  if (verbose) std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
+  // Create running list of messages
+  std::vector<nlohmann::ordered_json> input_list;
+  nlohmann::ordered_json system_message = nlohmann::ordered_json{{"role", "system"}, {"content", system_prompt}};
+  input_list.push_back(system_message);
+
+  // Get and set guidance info if requested
+  std::string guidance_type, guidance_data, tools;
+  if (!guidance_args.response_format.empty()) {
+    std::cout << "Make sure your tool call start id and tool call end id are marked as special in tokenizer.json" << std::endl;
+    std::tie(guidance_type, guidance_data, tools) = GetGuidance(
+        guidance_args.response_format,
+        guidance_args.tools_file,
+        "",       // tools_str
+        nullptr,  // tools
+        guidance_args.text_output,
+        guidance_args.tool_output,
+        guidance_args.tool_call_start,
+        guidance_args.tool_call_end);
+
+    input_list[0]["tools"] = tools;
+  }
+
+  // Keep asking for input prompts in a loop
   while (true) {
-    std::string text;
-    std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
-    // Clear Any cin error flags because of SIGINT
-    std::cin.clear();
-    std::getline(std::cin, text);
-
-    if (text.empty()) {
-      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
-      continue;  // Skip to the next iteration if input is empty
-    } else if (text == "quit()") {
+    // Get user prompt
+    std::string text = GetUserPrompt(user_prompt, interactive);
+    signal(SIGINT, TerminateGeneration);
+    if (text == "quit()") {
       break;  // Exit the loop
     }
 
-    signal(SIGINT, TerminateGeneration);
+    // Add user message to list of messages
+    nlohmann::ordered_json user_message = nlohmann::ordered_json{{"role", "user"}, {"content", text}};
+    input_list.push_back(user_message);
+    nlohmann::ordered_json j = input_list;
+    std::string messages = j.dump();
 
-    const std::string messages = R"(
-      [
-        {
-          "role": "system",
-          "content": "You are a helpful AI assistant."
-        },
-        {
-          "role": "user",
-          "content": ")" + text + R"("
-        }
-      ]
-    )";
-    const std::string prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
-
+    // Start timings
     bool is_first_token = true;
     Timing timing;
     timing.RecordStartTimestamp();
 
-    auto sequences = OgaSequences::Create();
-    tokenizer->Encode(prompt.c_str(), *sequences);
-
-    std::cout << "Generating response..." << std::endl;
-
+    // Initialize generator params
     auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", 1024);
+    SetSearchOptions(*params, generator_params_args, verbose);
+
+    // Initialize guidance info
+    if (!guidance_args.response_format.empty()) {
+      params->SetGuidance(guidance_type.c_str(), guidance_data.c_str());
+      if (verbose) {
+        std::cout << std::endl;
+        std::cout << "Guidance type is: " << guidance_type << std::endl;
+        std::cout << "Guidance data is: \n"
+                  << guidance_data << std::endl;
+        std::cout << std::endl;
+      }
+    }
+
+    // Create generator
     auto generator = OgaGenerator::Create(*model, *params);
     g_generator = generator.get();  // Store the current generator for termination
+    if (verbose) std::cout << "Generator created" << std::endl;
+
+    // Apply chat template
+    std::string prompt;
+    try {
+      bool add_generation_prompt = true;
+      prompt = ApplyChatTemplate(model_path, *tokenizer, messages, add_generation_prompt, tools);
+    } catch (...) {
+      prompt = text;
+    }
+    if (verbose) std::cout << "Prompt: " << prompt << "\n"
+                           << std::endl;
+
+    // Encode combined system + user prompt and append tokens to model
+    auto sequences = OgaSequences::Create();
+    tokenizer->Encode(prompt.c_str(), *sequences);
     generator->AppendTokenSequences(*sequences);
 
+    // Run generation loop
+    if (verbose) std::cout << "Running generation loop..." << std::endl;
+    std::cout << std::endl;
+    std::cout << "Output: ";
     try {
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
@@ -95,40 +141,60 @@ void CXX_API(const char* model_path, const char* execution_provider, const char*
         }
 
         const auto new_token = generator->GetNextTokens()[0];
-        std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+        std::cout << stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "\n\033[31mTerminating generation: " << e.what() << "\033[0m" << std::endl;
+      std::cout << "\n"
+                << "Terminating generation: " << e.what() << std::endl;
     }
-
     timing.RecordEndTimestamp();
+
+    // Clear the generator after use
+    g_generator = nullptr;
+
+    // Remove user message from list of messages
+    input_list.pop_back();
+
     const int prompt_tokens_length = sequences->SequenceCount(0);
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    for (int i = 0; i < 3; ++i)
-      std::cout << std::endl;
-
-    g_generator = nullptr;  // Clear the generator after use
+    std::cout << "\n\n\n";
+    if (!interactive) break;
   }
 }
 
 int main(int argc, char** argv) {
-  std::string model_path, ep, ep_library_path;
-  if (!parse_args(argc, argv, model_path, ep, &ep_library_path)) {
+  // Get command-line args
+  GeneratorParamsArgs generator_params_args;
+  GuidanceArgs guidance_args;
+  std::string model_path, ep = "follow_config", ep_path = "", system_prompt = "You are a helpful AI assistant.", user_prompt = "What color is the sky?";
+  bool verbose = false, debug = false, interactive = true, rewind = true;
+  std::vector<std::string> image_paths;
+  std::vector<std::string> audio_paths;
+  if (!ParseArgs(argc, argv, generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive, rewind, image_paths, audio_paths)) {
     return -1;
   }
 
   // Responsible for cleaning up the library during shutdown
   OgaHandle handle;
 
-  std::cout << "-------------------------" << std::endl;
+  std::cout << "--------------------------" << std::endl;
   std::cout << "Hello, ORT GenAI Model-QA!" << std::endl;
-  std::cout << "-------------------------" << std::endl;
+  std::cout << "--------------------------" << std::endl;
 
-  std::cout << "C++ API" << std::endl;
+  std::cout << "Model path: " << model_path << std::endl;
+  std::cout << "Execution provider: " << ep << std::endl;
+  if (!ep_path.empty()) std::cout << "Execution provider path: " << ep_path << std::endl;
+  std::cout << "System prompt: " << system_prompt << std::endl;
+  if (!interactive) std::cout << "User prompt: " << user_prompt << std::endl;
+  std::cout << "Verbose: " << verbose << std::endl;
+  std::cout << "Interactive: " << interactive << std::endl;
+  std::cout << "--------------------------" << std::endl;
+  std::cout << std::endl;
+
   try {
-    CXX_API(model_path.c_str(), ep.c_str(), ep_library_path.c_str());
+    CXX_API(generator_params_args, guidance_args, model_path, ep, ep_path, system_prompt, user_prompt, verbose, debug, interactive);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return -1;

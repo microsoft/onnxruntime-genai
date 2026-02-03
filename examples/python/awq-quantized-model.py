@@ -78,7 +78,7 @@ def run_model(args):
     model = og.Model(config)
     print("Model loaded")
     tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    stream = tokenizer.create_stream()
 
     # Override any default search options in `genai_config.json`
     search_options = {
@@ -111,7 +111,7 @@ def run_model(args):
             while not generator.is_done():
                 generator.generate_next_token()
                 new_token = generator.get_next_tokens()[0]
-                print(tokenizer_stream.decode(new_token), end="", flush=True)
+                print(stream.decode(new_token), end="", flush=True)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()

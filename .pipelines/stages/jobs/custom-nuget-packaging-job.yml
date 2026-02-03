@@ -167,4 +167,3 @@ jobs:
     inputs:
       targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
       artifactName: $(genai_nuget_package_name)
-      

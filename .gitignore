@@ -27,7 +27,7 @@ models_outputs_cpu
 benchmark/python/output
 examples/python/genai_models
 examples/python/hf_cache
-examples/csharp/HelloPhi/models
+examples/csharp/ModelChat/models
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx

@@ -3,202 +3,83 @@
 
 import argparse
 import json
-import os
 import time
 
 import onnxruntime_genai as og
-
-
-def get_tools_list(input_tools):
-    # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
-    # {"fn2": 2},{"fn3": 3}]'
-    tools_list = []
-    try:
-        tools_list = json.loads(input_tools)
-    except json.JSONDecodeError:
-        raise ValueError('Invalid JSON format for tools list, expected format: \'[{"name": "fn1"},{"name": "fn2"}]\'')
-    if len(tools_list) == 0:
-        raise ValueError("Tools list cannot be empty")
-    return tools_list
-
-
-def create_prompt_tool_input(tools_list):
-    tool_input = str(tools_list[0])
-    for tool in tools_list[1:]:
-        tool_input += "," + str(tool)
-    return tool_input
-
-
-def get_json_grammar(input_tools):
-    tools_list = get_tools_list(input_tools)
-    prompt_tool_input = create_prompt_tool_input(tools_list)
-    if len(tools_list) == 1:
-        return prompt_tool_input, json.dumps(tools_list[0])
-    else:
-        output = '{ "anyOf": [' + json.dumps(tools_list[0])
-        for tool in tools_list[1:]:
-            output += "," + json.dumps(tool)
-        output += "] }"
-        return prompt_tool_input, output
-
-
-def get_lark_grammar(input_tools):
-    tools_list = get_tools_list(input_tools)
-    prompt_tool_input = create_prompt_tool_input(tools_list)
-    if len(tools_list) == 1:
-        # output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(tools_list[0]))
-        output = "start: TEXT | fun_call\nTEXT: /[^{](.|\\n)*/\n fun_call: <|tool_call|> %json " + json.dumps(
-            convert_tool_to_grammar_input(tools_list[0])
-        )
-        return prompt_tool_input, output
-    else:
-        return (
-            prompt_tool_input,
-            'start: TEXT | fun_call \n TEXT: /[^{](.|\n)*/ \n fun_call: <|tool_call|> %json {"anyOf": ['
-            + ",".join([json.dumps(tool) for tool in tools_list])
-            + "]}",
-        )
-
-
-def convert_tool_to_grammar_input(tool):
-    param_props = {}
-    required_params = []
-    for param_name, param_info in tool.get("parameters", {}).items():
-        param_props[param_name] = {
-            "type": param_info.get("type", "string"),
-            "description": param_info.get("description", ""),
-        }
-        required_params.append(param_name)
-    output_schema = {
-        "description": tool.get("description", ""),
-        "type": "object",
-        "required": ["name", "parameters"],
-        "additionalProperties": False,
-        "properties": {
-            "name": {"const": tool["name"]},
-            "parameters": {
-                "type": "object",
-                "properties": param_props,
-                "required": required_params,
-                "additionalProperties": False,
-            },
-        },
-    }
-    if len(param_props) == 0:
-        output_schema["required"] = ["name"]
-    return output_schema
+from common import apply_chat_template, get_config, get_generator_params_args, get_guidance, get_guidance_args, get_search_options, register_ep, set_logger
 
 
 def main(args):
+    if args.debug:
+        set_logger()
+    register_ep(args.execution_provider, args.ep_path, args.use_winml)
+
     if args.verbose:
         print("Loading model...")
-    if args.timings:
-        started_timestamp = 0
-        first_token_timestamp = 0
 
-    # Register execution provider library if specified (for plug-in providers)
-    if args.ep_library_path:
-        if args.verbose:
-            print(f"Registering execution provider library: {args.ep_library_path}")
-
-        # Determine the provider registration name based on execution provider
-        provider_registration_name = None
-        if args.execution_provider == "cuda":
-            provider_registration_name = "CUDAExecutionProvider"
-        elif args.execution_provider == "NvTensorRtRtx":
-            provider_registration_name = "NvTensorRTRTXExecutionProvider"
-        else:
-            raise ValueError(
-                f"Provider library registration not supported for '{args.execution_provider}'. Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries."
-            )
-
-        og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
-        if args.verbose:
-            print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
-
-    config = og.Config(args.model_path)
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            if args.verbose:
-                print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
+    # Create model
+    config = get_config(args.model_path, args.execution_provider)
     model = og.Model(config)
-
     if args.verbose:
         print("Model loaded")
 
+    # Create tokenizer
     tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    stream = tokenizer.create_stream()
     if args.verbose:
         print("Tokenizer created")
-    if args.verbose:
-        print()
 
-    search_options = {
-        name: getattr(args, name)
-        for name in ["do_sample", "max_length", "min_length", "top_p", "top_k", "temperature", "repetition_penalty"]
-        if name in args
-    }
-    search_options["batch_size"] = 1
-
-    if args.verbose:
-        print(search_options)
-
-    system_prompt = args.system_prompt
-    guidance_type = ""
-    prompt_tool_input = ""
-    guidance_input = ""
-    if args.guidance_type != "none":
-        guidance_type = args.guidance_type
-        if not args.guidance_info:
-            raise ValueError("Guidance information is required if guidance type is provided")
-        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-            tools_list = args.guidance_info
-            if guidance_type == "json_schema":
-                prompt_tool_input, guidance_input = get_json_grammar(tools_list)
-            elif guidance_type == "lark_grammar":
-                prompt_tool_input, guidance_input = get_lark_grammar(tools_list)
-        elif guidance_type == "regex":
-            guidance_input = args.guidance_info
-        else:
-            raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
-
+    # Get and set search options for generator params
     params = og.GeneratorParams(model)
+    search_options = get_search_options(args)
     params.set_search_options(**search_options)
-    if guidance_type:
-        params.set_guidance(guidance_type, guidance_input)
-        if args.verbose:
-            print("Guidance type is set to:", guidance_type)
-            print("Guidance input is:", guidance_input)
+    if args.verbose:
+        print(f"GeneratorParams created: {search_options}")
 
+    # Create system message
+    message = [{"role": "system", "content": args.system_prompt}]
+
+    # Get and set guidance info if requested
+    if args.response_format != "":
+        print("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json")
+        guidance_type, guidance_data, tools = get_guidance(
+            response_format=args.response_format,
+            filepath=args.tools_file,
+            text_output=args.text_output,
+            tool_output=args.tool_output,
+            tool_call_start=args.tool_call_start,
+            tool_call_end=args.tool_call_end,
+        )
+        message[0]["tools"] = tools
+
+        params.set_guidance(guidance_type, guidance_data)
+        if args.verbose:
+            print()
+            print(f"Guidance type is: {guidance_type}")
+            print(f"Guidance data is: \n{guidance_data}")
+            print()
+
+    # Create generator
     generator = og.Generator(model, params)
     if args.verbose:
         print("Generator created")
-    if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-        messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}]"""
-    else:
-        messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
 
-    # Apply Chat Template
-    template_str = ""
-    tokenizer_input_system_prompt = None
-    jinja_path = os.path.join(args.model_path, "chat_template.jinja")
-    if os.path.exists(jinja_path):
-        with open(jinja_path, encoding="utf-8") as f:
-            template_str = f.read()
-            tokenizer_input_system_prompt = tokenizer.apply_chat_template(
-                messages=messages, add_generation_prompt=False, template_str=template_str
-            )
-    else:
-        tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+    # Apply chat template
+    try:
+        system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
+    except:
+        system_prompt = args.system_prompt
+    if args.verbose:
+        print(f"System prompt: {system_prompt}")
 
-    input_tokens = tokenizer.encode(tokenizer_input_system_prompt)
-    # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
-    if guidance_type:
-        input_tokens = input_tokens[:-1]
-    system_prompt_length = len(input_tokens)
-    generator.append_tokens(input_tokens)
+    # Encode system prompt and append tokens to model
+    system_tokens = tokenizer.encode(system_prompt)
+    system_prompt_length = len(system_tokens)
+    generator.append_tokens(system_tokens)
+
+    if args.timings:
+        started_timestamp = 0
+        first_token_timestamp = 0
 
     # Keep asking for input prompts in a loop
     while True:
@@ -213,21 +94,23 @@ def main(args):
         if args.timings:
             started_timestamp = time.time()
 
-        messages = f"""[{{"role": "user", "content": "{text}"}}]"""
+        # Create user message
+        message = [{"role": "user", "content": text}]
+        
+        # Apply chat template
+        try:
+            user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
+        except:
+            user_prompt = text
+        if args.verbose:
+            print(f"User prompt: {user_prompt}")
 
-        # Apply Chat Template
-        user_prompt = ""
-        if os.path.exists(jinja_path):
-            user_prompt = tokenizer.apply_chat_template(
-                messages=messages, add_generation_prompt=True, template_str=template_str
-            )
-        else:
-            user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
-        input_tokens = tokenizer.encode(user_prompt)
-        generator.append_tokens(input_tokens)
+        # Encode user prompt and append tokens to model
+        user_tokens = tokenizer.encode(user_prompt)
+        generator.append_tokens(user_tokens)
 
         if args.verbose:
-            print("Running generation loop ...")
+            print("Running generation loop...")
         if args.timings:
             first = True
             new_tokens = []
@@ -235,6 +118,7 @@ def main(args):
         print()
         print("Output: ", end="", flush=True)
 
+        # Run generation loop
         try:
             while not generator.is_done():
                 generator.generate_next_token()
@@ -244,9 +128,8 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
-                print(tokenizer_stream.decode(new_token), end="", flush=True)
-                if args.timings:
-                    new_tokens.append(new_token)
+                print(stream.decode(new_token), end='', flush=True)
+                if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -259,95 +142,25 @@ def main(args):
                 f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens) / prompt_time:.2f} tps, New tokens per second: {len(new_tokens) / run_time:.2f} tps"
             )
 
-        # Rewind the generator to the system prompt, this will erase all the memory of the model.
+        # Rewind the generator to the system prompt. This will erase all the chat history with the model.
         if args.rewind:
             generator.rewind_to(system_prompt_length)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai"
-    )
-    parser.add_argument(
-        "-m",
-        "--model_path",
-        type=str,
-        required=True,
-        help="Onnx model folder path (must contain genai_config.json and model.onnx)",
-    )
-    parser.add_argument(
-        "-e",
-        "--execution_provider",
-        type=str,
-        required=False,
-        default="follow_config",
-        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
-        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
-    )
-    parser.add_argument(
-        "-epl",
-        "--ep_library_path",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to the execution provider library DLL/SO for plug-in providers. "
-        "Use this to load CUDA or NvTensorRT as plug-in providers instead of built-in. "
-        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
-    )
-    parser.add_argument("-i", "--min_length", type=int, help="Min number of tokens to generate including the prompt")
-    parser.add_argument("-l", "--max_length", type=int, help="Max number of tokens to generate including the prompt")
-    parser.add_argument(
-        "-ds",
-        "--do_sample",
-        action="store_true",
-        help="Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false",
-    )
-    parser.add_argument("-p", "--top_p", type=float, help="Top p probability to sample with")
-    parser.add_argument("-k", "--top_k", type=int, help="Top k tokens to sample from")
-    parser.add_argument("-t", "--temperature", type=float, help="Temperature to sample with")
-    parser.add_argument("-re", "--repetition_penalty", type=float, help="Repetition penalty to sample with")
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        default=False,
-        help="Print verbose output and timing information. Defaults to false",
-    )
-    parser.add_argument(
-        "-g",
-        "--timings",
-        action="store_true",
-        default=False,
-        help="Print timing information for each generation step. Defaults to false",
-    )
-    parser.add_argument(
-        "-gtype",
-        "--guidance_type",
-        type=str,
-        default="none",
-        choices=["none", "json_schema", "regex", "lark_grammar"],
-        help="Provide guidance type for the model, options are json_schema, regex, or lark_grammar.",
-    )
-    parser.add_argument(
-        "-ginfo",
-        "--guidance_info",
-        type=str,
-        default="",
-        help="Provide information of the guidance type used, it could be either tools or regex string. It is required if guidance_type is provided",
-    )
-    parser.add_argument(
-        "-s",
-        "--system_prompt",
-        type=str,
-        default="You are a helpful AI assistant.",
-        help="System prompt to use for the prompt.",
-    )
-    parser.add_argument(
-        "-r",
-        "--rewind",
-        action="store_true",
-        default=False,
-        help="Rewind to the system prompt after each generation. Defaults to false",
-    )
+    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI chat example for ORT GenAI")
+    parser.add_argument('-m', '--model_path', type=str, required=True, help='ONNX model folder path (must contain genai_config.json and model.onnx)')
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
+    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
+    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
+    parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
+    parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
+    parser.add_argument('-rw', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
+    parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
+    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers') 
+
+    get_generator_params_args(parser)
+    get_guidance_args(parser)
+
     args = parser.parse_args()
     main(args)
