@@ -35,6 +35,10 @@ steps:
         python -m pip install -r test/python/directml/torch/requirements.txt
         python -m pip install -r test/python/directml/ort/requirements.txt
       }
+      elseif ("$(ep)" -eq "webgpu") {
+        python -m pip install -r test/python/webgpu/torch/requirements.txt
+        python -m pip install -r test/python/webgpu/ort/requirements.txt
+      }
       elseif ("$(arch)" -eq "arm64") {
         python -m pip install onnxruntime-qnn
       }
@@ -47,6 +51,9 @@ steps:
 
       if ("$(ep)" -eq "directml") {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e dml --non_interactive
+      } elseif ("$(ep)" -eq "webgpu") {
+        $env:TEST_WEBGPU = "true"
+        python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e $(ep) --non_interactive
       } else {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e $(ep) --non_interactive
       }
