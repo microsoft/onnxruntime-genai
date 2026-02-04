@@ -134,15 +134,6 @@ stages:
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
-        arch: 'x64'
-        ep: 'cpu'
-        ort_version: ${{ parameters.ort_version }}
-        os: 'osx'
-        build_config: ${{ parameters.build_config }}
-        enable_winml: ${{ parameters.enable_winml }}
-
-    - template: jobs/capi-packaging-job.yml
-      parameters:
         arch: 'arm64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
