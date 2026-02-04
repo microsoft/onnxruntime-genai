@@ -87,7 +87,24 @@ jobs:
           python -m pip install -r test\python\webgpu\torch\requirements.txt
           python -m pip install -r test\python\webgpu\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+      - name: Copy WebGPU OnnxRuntime DLL for C# Tests
+        shell: pwsh
+        run: |
+          # Find where pip installed onnxruntime-webgpu
+          $pythonSitePackages = python -c "import site; print(site.getsitepackages()[0])"
+          $webgpuCapi = Join-Path $pythonSitePackages "onnxruntime\capi"
 
+          # Copy all required WebGPU DLLs
+          $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
+          foreach ($dll in $dllsToCopy) {
+            $sourcePath = Join-Path $webgpuCapi $dll
+            if (Test-Path $sourcePath) {
+              Copy-Item -Path $sourcePath -Destination "$env:GITHUB_WORKSPACE\ort\lib\$dll" -Force
+              Write-Host "Copied $dll to ort/lib/"
+            } else {
+              Write-Host "Warning: $dll not found at $sourcePath"
+            }
+          }
       - name: Build the Java API and Run the Java Tests
         run: |
           python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
