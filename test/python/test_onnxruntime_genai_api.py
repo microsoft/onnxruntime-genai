@@ -353,10 +353,10 @@ def test_phi2_chat_template(device, phi2_for):
     reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
-def test_tokenizer_stream(device, phi2_for):
+def test_stream(device, phi2_for):
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    stream = tokenizer.create_stream()
 
     prompts = [
         "This is a test.",
@@ -368,7 +368,7 @@ def test_tokenizer_stream(device, phi2_for):
         sequence = tokenizer.encode(prompt)
         decoded_string = ""
         for token in sequence:
-            decoded_string += tokenizer_stream.decode(token)
+            decoded_string += stream.decode(token)
 
         assert decoded_string == prompt
 

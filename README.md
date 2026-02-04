@@ -51,7 +51,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
    model = og.Model('cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4')
    tokenizer = og.Tokenizer(model)
-   tokenizer_stream = tokenizer.create_stream()
+   stream = tokenizer.create_stream()
     
    # Set the max length to something sensible by default,
    # since otherwise it will be set to the entire context length
@@ -81,7 +81,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
       while not generator.is_done():
          generator.generate_next_token()
          new_token = generator.get_next_tokens()[0]
-         print(tokenizer_stream.decode(new_token), end='', flush=True)
+         print(stream.decode(new_token), end='', flush=True)
    except KeyboardInterrupt:
          print("  --control+c pressed, aborting generation--")
 

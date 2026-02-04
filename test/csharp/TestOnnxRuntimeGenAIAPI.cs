@@ -161,9 +161,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             generator.AppendTokens(inputIDs);
 
                             Assert.False(generator.IsDone());
-                            Assert.Equal(generatorParams.GetSearchNumber("max_length"), maxLength);
-                            Assert.Equal(generatorParams.GetSearchBool("early_stopping"), true);
-                            Assert.Equal((int)generator.TokenCount(), generator.GetSequence(0).Length);
+                            Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
+                            Assert.Equal(true, generatorParams.GetSearchBool("early_stopping"));
+                            Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
 
                             while (!generator.IsDone())
                             {
@@ -175,7 +175,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                                 var sequence = generator.GetSequence(i).ToArray();
                                 var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                                 Assert.Equal(expectedSequence, sequence);
-                                Assert.Equal((int)generator.TokenCount(), generator.GetSequence(i).Length);
+                                Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
                             }
                         }
                     }

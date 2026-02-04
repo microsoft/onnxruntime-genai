@@ -211,7 +211,7 @@ jobs:
   - template: steps/python-validation-step.yml
     parameters:
       PythonScriptFolder: "examples/python"
-      PythonScriptName: "phi4-mm.py"
+      PythonScriptName: "model-mm.py"
       LocalFolder: 'phi4-mm'
       ModelFolder: $(prebuild_phi4_mm_model_folder)
 

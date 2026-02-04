@@ -107,12 +107,12 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -169,12 +169,12 @@ TEST(CAPITests, TokenizerUpdateOptions) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -383,7 +383,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -396,7 +396,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
 
     engine->Add(*requests.back());
   }
@@ -446,7 +446,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -459,7 +459,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
   }
 
   // Add the first request to the engine
@@ -893,7 +893,7 @@ TEST(CAPITests, SetTerminate) {
     generator->SetRuntimeOption("terminate_session", "1");
   };
 
-  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> stream) {
     EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
@@ -902,7 +902,7 @@ TEST(CAPITests, SetTerminate) {
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   const char* input_string = "She sells sea shells by the sea shore.";
   auto input_sequences = OgaSequences::Create();
@@ -914,7 +914,7 @@ TEST(CAPITests, SetTerminate) {
   generator->AppendTokenSequences(*input_sequences);
   EXPECT_EQ(generator->IsSessionTerminated(), false);
   std::vector<std::thread> threads;
-  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(stream)));
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
@@ -1337,7 +1337,7 @@ TEST(CAPITests, SetGuidance) {
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   const char* input_string = "who are you?";
   auto input_sequences = OgaSequences::Create();
