@@ -101,7 +101,7 @@ jobs:
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
-      - name: Install the python wheel and test dependencies
+      - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
@@ -115,9 +115,14 @@ jobs:
           ls -l ${{ github.workspace }}/build/cpu
           ls -l ${{ github.workspace }}/build/cpu/wheel
 
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          set -e -x
+          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
-      - name: Run the python tests
+      - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
@@ -128,10 +133,19 @@ jobs:
           cd test/csharp
           dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Build the C# Examples
         run: |
-          set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd examples/csharp/ModelChat
+          dotnet build -c Release
+          cd ../ModelMM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Run tests
         run: |

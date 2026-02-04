@@ -245,8 +245,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
 
 /**
- * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
- * if it already exists, does nothing.
+ * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist.
+ * If it already exists, do nothing.
  * \param[in] config The config to set the provider on.
  * \param[in] provider The provider to set on the config.
  * \return OgaResult containing the error message if the setting of the provider failed.
@@ -411,9 +411,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* params);
 
+/**
+ * \brief Set a numerical value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[in] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value);
+
+/**
+ * \brief Set a boolean value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[in] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size);
 
 /**
  * \brief Sets the guidance type and data for the Generator params
@@ -424,6 +438,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
+
+/**
+ * \brief Get a numerical value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[out] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
+ * \brief Get a boolean value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[out] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -446,6 +478,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
+
+/**
+ * \brief Returns true if the session has been terminated.
+ * \param[in] generator The generator to add the inputs to.
+ * \return True if the session has been terminated, false otherwise.
+ */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
@@ -482,6 +520,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
+ * \brief Returns the number of tokens in the generator
+ * \param[in] generator The generator containing the appended tokens.
+ * \return The number of tokens that have been added.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator);
+
+/**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
  * \param[in] generator The generator to compute the logits for.
  * \return OgaResult containing the error message if the computation of the logits failed.
@@ -497,6 +542,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
+/**
+ * \brief Set a runtime option's name and value.
+ * \param[in] generator The generator to rewind to the given length.
+ * \param[in] key The runtime option's name
+ * \param[in] value The runtime option's value
+ * \return OgaResult containing the error message if setting the runtime option failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /**
@@ -611,17 +663,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     size_t num_options);
 
 /**
- * Return the int representation of the BOS token
+ * \brief Return the int representation of the BOS token
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOS token id
+ * \return OgaResult containing the error message if returning the BOS token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * Return an array containing the int representations of the EOS tokens. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ * \brief Return an array containing the int representations of the EOS token ids. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] eos_token_ids The array of EOS token ids
+ * \param[out] token_count The length of the array
+ * \return OgaResult containing the error message if returning the EOS token ids fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
 
 /**
- * Return the int representation of the BOS token
+ * \brief Return the int representation of the PAD token
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The PAD token id
+ * \return OgaResult containing the error message if returning the PAD token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 

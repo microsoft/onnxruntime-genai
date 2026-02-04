@@ -359,11 +359,17 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
 
-        # Validate that only CPU and WebGPU EPs support int4_block_size for QMoE
-        if self.ep not in ["cpu", "webgpu"] and "int4_block_size" in extra_options and moe_op_type == "QMoE":
+        # CPU, WebGPU, and TRT-RTX support block-wise quantization for QMoE.
+        # TRT-RTX defaults to 128; others default to 32 for consistency with MatMulNBits.
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
+        default_qmoe_block_size = 128 if self.ep == "trt-rtx" else 32
+        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", default_qmoe_block_size))
+
+        # Validate that unsupported EPs don't explicitly request block-wise quantization
+        if self.ep not in supported_blockwise_eps and "qmoe_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
-                f"The 'int4_block_size' option is not supported for {self.ep} execution provider with QMoE. "
-                "Block-wise quantization (block_size attribute) is only supported for CPU and WebGPU execution providers."
+                f"The 'qmoe_block_size' option is not supported for {self.ep} execution provider with QMoE. "
+                f"Block-wise quantization is only supported for: {', '.join(supported_blockwise_eps)}."
             )
 
         self.quant_attrs = {
@@ -371,7 +377,8 @@ class Model:
                 "accuracy_level": int(
                     extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)
                 ),
-                "block_size": int(self.int4_block_size),
+                "qmoe_block_size": int(self.qmoe_block_size),
+                "qdq_block_size": int(self.int4_block_size),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
                 "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
@@ -380,11 +387,11 @@ class Model:
             "use_qdq": extra_options.get("use_qdq", False),
         }
 
-        # Propagate block_size to MoE/QMoE op when supported and requested.
-        # QMoE on CPU/WebGPU supports block-wise quantization via the 'block_size' attribute.
+        # Propagate block_size to MoE/QMoE op when supported.
+        # QMoE on supported EPs uses block-wise quantization via the 'block_size' attribute.
         # Ensure the attribute is set on the MoE op so runtime kernels can honor it.
-        if self.moe_attrs.get("op_type") == "QMoE" and self.ep in ["cpu", "webgpu"]:
-            self.moe_attrs["block_size"] = int(self.int4_block_size)
+        if self.moe_attrs.get("op_type") == "QMoE" and self.ep in supported_blockwise_eps:
+            self.moe_attrs["block_size"] = int(self.qmoe_block_size)
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
@@ -501,6 +508,7 @@ class Model:
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
             ("trt-rtx", ir.DataType.FLOAT16),
+            ("trt-rtx", ir.DataType.BFLOAT16),
         }
         return (self.ep, self.io_dtype) in valid_gqa_configurations
 
@@ -551,7 +559,7 @@ class Model:
             }
             for key, default_val in defaults.items():
                 val = getattr(gen_config, key)
-                if val != default_val:
+                if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
         except:
             pass
@@ -623,8 +631,8 @@ class Model:
                 else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") else 50,
-                "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
+                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k is not None else 50,
+                "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
             },
         }
 
@@ -703,7 +711,7 @@ class Model:
     def to_int4(self) -> ir.Model:
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
-            block_size=self.quant_attrs["int4"]["block_size"],
+            block_size=self.quant_attrs["int4"]["qdq_block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=self.quant_attrs["int4"]["nodes_to_exclude"],
@@ -1324,9 +1332,12 @@ class Model:
             self.make_reshape(
                 weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim]
             )
+            input_names = [weight_reshape_output, "input_ids", "lm_head.MatMul.weight_scale"];
+            if not self.quant_attrs["int4"]["is_symmetric"]:
+                input_names.append("lm_head.MatMul.weight_zp")
             self.make_node(
                 "GatherBlockQuantized",
-                inputs=[weight_reshape_output, "input_ids", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"],
+                inputs=input_names,
                 outputs=[gather_output],
                 name=gather_name,
                 domain="com.microsoft",
@@ -3227,10 +3238,16 @@ class Model:
             kwargs.get("weight3", ""),
             kwargs.get("scales3", ""),
             kwargs.get("bias3", ""),
-            kwargs.get("zero_points1", ""),
-            kwargs.get("zero_points2", ""),
-            kwargs.get("zero_points3", ""),
         ]
+
+        # TRT-RTX doesn't support zero_points inputs at all
+        # For other EPs, always include as optional inputs (even empty strings)
+        if self.ep != "trt-rtx":
+            inputs.extend([
+                kwargs.get("zero_points1", ""),
+                kwargs.get("zero_points2", ""),
+                kwargs.get("zero_points3", ""),
+            ])
 
         output = f"{name}/output_0"
 
@@ -3264,13 +3281,13 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
-        # For QMoE, only use block-wise quantization when explicitly requested
-        # via int4_block_size and when using CPU or WebGPU execution providers, since
-        # block_size is only supported for these EPs in the QMoE operator.
-        use_blockwise_quant = "int4_block_size" in self.extra_options and self.ep in ["cpu", "webgpu"]
+        # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
+        # TRT-RTX defaults to 128; others default to 32.
+        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
+        use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:
-            block_size = self.quant_attrs["int4"]["block_size"]
+            block_size = self.quant_attrs["int4"]["qmoe_block_size"]
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3278,7 +3295,7 @@ class Model:
             except Exception as e:
                 raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
 
-        # Use tensor-level quantization (default for QMoE)
+        # Use tensor-level quantization (default for QMoE on CPU/WebGPU when not explicitly requested)
         self.moe_attrs["block_size"] = 0
 
         # Existing tensor-level quantization implementation (fallback)
@@ -3354,6 +3371,7 @@ class Model:
 
             quantized_flat = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
 
+            # remove padding
             if pad_size > 0:
                 quantized_flat = quantized_flat[..., :-pad_size]
 

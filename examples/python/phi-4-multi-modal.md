@@ -179,20 +179,20 @@ Currently, the JSON files needed to run with ONNX Runtime GenAI are created by h
 
 ## 4. Run Phi-4 Multimodal ONNX models
 
-[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi4-mm.py) is an example of how you can run your Phi-4 multimodal model with ONNX Runtime GenAI.
+[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-mm.py) is an example of how you can run your Phi-4 multimodal model with ONNX Runtime GenAI.
 
 ### CPU
 ```bash
-$ python3 phi4-mm.py -m ./phi4-mm/cpu -e cpu
+$ python3 model-mm.py -m ./model-mm/cpu -e cpu
 ```
 
 ### CUDA
 ```bash
-$ python3 phi4-mm.py -m ./phi4-mm/cuda -e cuda
+$ python3 model-mm.py -m ./model-mm/cuda -e cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python phi4-mm.py -m ./phi4-mm/dml -e dml
+$ python model-mm.py -m ./model-mm/dml -e dml
 ```

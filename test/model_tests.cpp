@@ -5,12 +5,16 @@
 #include <iostream>
 #include <random>
 #include <filesystem>
+#include <string>
 #include <gtest/gtest.h>
 
 #include "span.h"
 #define OGA_USE_SPAN 1
 #include <ort_genai.h>
 #include <gtest/gtest.h>
+
+// External global variable from main.cpp for custom model path
+extern std::string g_custom_model_path;
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -80,11 +84,8 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -124,11 +125,8 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -161,11 +159,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -186,11 +181,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -201,11 +193,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator->RewindTo(3);
   std::vector<int32_t> next_ids{731, 731};
   generator->AppendTokens(next_ids);
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -247,11 +236,8 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -274,9 +260,12 @@ static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
 };
 
 void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  // Use custom path if provided, otherwise use default
+  std::string resolved_path = g_custom_model_path.empty() ? model_path : g_custom_model_path;
+
   // Skip test if NvTensorRT model is not available
-  if (!std::filesystem::exists(model_path)) {
-    GTEST_SKIP() << "NvTensorRT model not available at: " << model_path;
+  if (!std::filesystem::exists(resolved_path)) {
+    GTEST_SKIP() << "NvTensorRT model not available at: " << resolved_path;
   }
   const std::vector<int64_t> input_ids_shape{1, 19};
   const std::vector<int32_t> input_ids{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
@@ -285,7 +274,7 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
   const std::vector<int32_t> expected_output{
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
       15043, 29991, 306, 29915, 29885, 2599};
-  auto config = OgaConfig::Create(model_path);
+  auto config = OgaConfig::Create(resolved_path.c_str());
   config->ClearProviders();
   config->AppendProvider("NvTensorRtRtx");
   auto model = OgaModel::Create(*config);
@@ -299,11 +288,8 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -321,9 +307,12 @@ TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
 }
 
 void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  // Use custom path if provided, otherwise use default
+  std::string resolved_path = g_custom_model_path.empty() ? model_path : g_custom_model_path;
+
   // Skip test if NvTensorRT model is not available
-  if (!std::filesystem::exists(model_path)) {
-    GTEST_SKIP() << "NvTensorRT model not available at: " << model_path;
+  if (!std::filesystem::exists(resolved_path)) {
+    GTEST_SKIP() << "NvTensorRT model not available at: " << resolved_path;
   }
 
   const std::vector<int64_t> input_ids_shape{1, 19};
@@ -336,7 +325,7 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
       15043, 1554, 13, 16271, 29892, 8733};
 
-  auto config = OgaConfig::Create(model_path);
+  auto config = OgaConfig::Create(resolved_path.c_str());
   config->ClearProviders();
   config->AppendProvider("NvTensorRtRtx");
   auto model = OgaModel::Create(*config);
@@ -352,11 +341,8 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   auto sequence = generator->GetSequence(0);
@@ -394,11 +380,8 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   auto result = generator->GetSequence(0);
@@ -428,11 +411,8 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   auto result = generator->GetSequence(0);

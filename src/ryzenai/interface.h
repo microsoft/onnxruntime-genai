@@ -1,3 +1,5 @@
+// Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
 #pragma once
 
 namespace Generators {
@@ -12,5 +14,8 @@ struct RyzenAIInterface : DeviceInterface {
 };
 
 RyzenAIInterface* GetRyzenAIInterface();
+
+struct Model;
+bool IsRyzenAIPrunedModel(const Model& model);
 
 }  // namespace Generators

@@ -1,11 +1,19 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
 import argparse
 import json
 import time
 
 import onnxruntime_genai as og
+from common import get_config, get_generator_params_args, get_search_options, register_ep, set_logger
 
 
 def main(args):
+    if args.debug:
+        set_logger()
+    register_ep(args.execution_provider, args.ep_path, args.use_winml)
+
     if args.verbose:
         print("Loading model...")
 
@@ -22,39 +30,13 @@ def main(args):
             text = input("Input: ")
             prompts = [text]
 
-    batch_size = len(prompts)
-
-    config = og.Config(args.model_path)
-
-    # Configure search options
-    search_config = {"batch_size": batch_size, "num_beams": args.num_beams}
-
-    # Configure execution provider if specified
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            if args.verbose:
-                print(f"Setting model to {args.execution_provider}...")
-            config.append_provider(args.execution_provider)
-
-    # Disable CUDA graph if using beam search (num_beams > 1),
-    # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
-    if args.num_beams > 1:
-        config.set_provider_option(args.execution_provider, "enable_cuda_graph", "0")
-        if args.verbose:
-            print("Set enable_cuda_graph to '0' via set_provider_option()")
-
-    # Add chunk_size only for NvTensorRtRtx execution provider
-    if args.execution_provider == "NvTensorRtRtx" and args.chunk_size > 0:
-        search_config["chunk_size"] = args.chunk_size
-
-    # Apply search configuration overlay
-    config.overlay(json.dumps({"search": search_config}))
+    search_config = {"batch_size": len(prompts), "chunk_size": args.chunk_size, "num_beams": args.num_beams}
+    config = get_config(args.model_path, args.execution_provider, ep_options={}, search_options=search_config)
 
     model = og.Model(config)
-
     if args.verbose:
         print("Model loaded")
+
     tokenizer = og.Tokenizer(model)
     if args.verbose:
         print("Tokenizer created")
@@ -72,21 +54,10 @@ def main(args):
         print(f"Prompt(s) encoded: {prompts}")
 
     params = og.GeneratorParams(model)
-
-    search_options = {
-        name: getattr(args, name)
-        for name in ["do_sample", "max_length", "min_length", "top_p", "top_k", "temperature", "repetition_penalty"]
-        if name in args
-    }
-
-    if args.verbose:
-        print(f"Args: {args}")
-    if args.verbose:
-        print(f"Search options: {search_options}")
-
+    search_options = get_search_options(args)
     params.set_search_options(**search_options)
     if args.verbose:
-        print("GeneratorParams created")
+        print(f"GeneratorParams created: {search_options}")
 
     generator = og.Generator(model, params)
     if args.verbose:
@@ -97,12 +68,10 @@ def main(args):
         print("Input tokens added")
 
     if args.verbose:
-        print("Generating tokens ...\n")
+        print("Running generation loop...\n")
     start_time = time.time()
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
-            break
     run_time = time.time() - start_time
 
     for i in range(len(prompts)):
@@ -118,77 +87,18 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai"
-    )
-    parser.add_argument(
-        "-m",
-        "--model_path",
-        type=str,
-        required=True,
-        help="Onnx model folder path (must contain genai_config.json and model.onnx)",
-    )
-    parser.add_argument(
-        "-e",
-        "--execution_provider",
-        type=str,
-        required=False,
-        default="follow_config",
-        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
-        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
-    )
-    parser.add_argument(
-        "-pr",
-        "--prompts",
-        nargs="*",
-        required=False,
-        help="Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts",
-    )
-    parser.add_argument(
-        "-i", "--min_length", type=int, default=25, help="Min number of tokens to generate including the prompt"
-    )
-    parser.add_argument(
-        "-l", "--max_length", type=int, default=50, help="Max number of tokens to generate including the prompt"
-    )
-    parser.add_argument(
-        "-ds",
-        "--do_sample",
-        action="store_true",
-        help="Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false",
-    )
-    parser.add_argument("--top_p", type=float, help="Top p probability to sample with")
-    parser.add_argument("-k", "--top_k", type=int, help="Top k tokens to sample from")
-    parser.add_argument("-t", "--temperature", type=float, help="Temperature to sample with")
-    parser.add_argument("-r", "--repetition_penalty", type=float, help="Repetition penalty to sample with")
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        default=False,
-        help="Print verbose output and timing information. Defaults to false",
-    )
-    parser.add_argument("-b", "--batch_size_for_cuda_graph", type=int, default=1, help="Max batch size for CUDA graph")
-    parser.add_argument(
-        "-c",
-        "--chat_template",
-        type=str,
-        default="",
-        help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.",
-    )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=0,
-        help="Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)",
-    )
-    parser.add_argument("-n", "--num_beams", type=int, default=3, help="Number of beams for beam search (default: 3)")
-    parser.add_argument(
-        "--non-interactive",
-        action=argparse.BooleanOptionalAction,
-        required=False,
-        default=False,
-        help="Non-interactive mode, mainly for CI usage",
-    )
+    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for ORT GenAI")
+    parser.add_argument("-m", "--model_path", type=str, required=True, help="ONNX model folder path (must contain genai_config.json and model.onnx)")
+    parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config", choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
+    parser.add_argument("-v", "--verbose", action="store_true", default=False, help="Print verbose output and timing information. Defaults to false")
+    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
+    parser.add_argument("-pr", "--prompts", nargs="*", required=False, help="Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts")
+    parser.add_argument("-ct", "--chat_template", type=str, default="", help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.")
+    parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
+    parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
+    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
+
+    get_generator_params_args(parser)
 
     args = parser.parse_args()
     main(args)

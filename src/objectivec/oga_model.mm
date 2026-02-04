@@ -21,6 +21,18 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+- (nullable instancetype)initWithConfig:(OGAConfig*)config error:(NSError**)error {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
+  try {
+    _model = OgaModel::Create([config CXXAPIOgaConfig]);
+    return self;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
 - (const OgaModel&)CXXAPIOgaModel {
   return *(_model.get());
 }

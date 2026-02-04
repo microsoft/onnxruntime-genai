@@ -15,8 +15,8 @@ env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  cuda_version: "12.2"
-  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
+  cuda_version: "12.8"
+  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
   binaryDir: 'build/cuda/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
@@ -98,6 +98,10 @@ jobs:
           python -m pip install -r test\python\cuda\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+
       - name: Run the Python Tests
         run: |
           python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
@@ -114,6 +118,18 @@ jobs:
           $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           cd test\csharp
           dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+
+      - name: Build the C# Examples
+        run: |
+          cd examples\csharp\ModelChat
+          dotnet build -c Release
+          cd ..\ModelMM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+        run: |
+          python test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\test_models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\test_models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Prepend CUDA to PATH and Run tests
         run: |-

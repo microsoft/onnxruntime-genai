@@ -124,6 +124,19 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
+/// <summary>
+/// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
+/// </summary>
+/// <returns>ORT C Model Editor API reference</returns>
+inline const OrtModelEditorApi& GetModelEditorApi() {
+  auto* model_editor_api = api->GetModelEditorApi();
+  if (model_editor_api == nullptr) {
+    // minimal build
+    throw std::runtime_error("Model Editor API is not available in this build");
+  }
+  return *model_editor_api;
+}
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
@@ -787,6 +800,11 @@ struct OrtMemoryInfo {
  *
  */
 struct OrtTensorTypeAndShapeInfo {
+  static std::unique_ptr<OrtTensorTypeAndShapeInfo> Create();
+
+  void SetElementType(ONNXTensorElementDataType type);
+  void SetDimensions(const int64_t* dim_values, size_t dim_count);
+
   ONNXTensorElementDataType GetElementType() const;  ///< Wraps OrtApi::GetTensorElementType
   size_t GetElementCount() const;                    ///< Wraps OrtApi::GetTensorShapeElementCount
 
@@ -1302,6 +1320,53 @@ struct OrtOpAttr {
   static std::unique_ptr<OrtOpAttr> Create(const char* name, const void* data, int len, OrtOpAttrType type);
 
   static void operator delete(void* p) { Ort::api->ReleaseOpAttr(reinterpret_cast<OrtOpAttr*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtGraph used in Model Editor API
+/// </summary>
+struct OrtGraph {
+  static std::unique_ptr<OrtGraph> Create();
+
+  void SetInputs(OrtValueInfo** inputs, size_t input_count);
+  void SetOutputs(OrtValueInfo** outputs, size_t output_count);
+  void AddNode(OrtNode* node);
+
+  static void operator delete(void* p) { Ort::api->ReleaseGraph(reinterpret_cast<OrtGraph*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtModel used in Model Editor API
+/// </summary>
+struct OrtModel {
+  static std::unique_ptr<OrtModel> Create(const char** domain_names, const int* opset_versions, size_t num_domains);
+
+  void AddGraph(OrtGraph* graph);
+
+  static void operator delete(void* p) { Ort::api->ReleaseModel(reinterpret_cast<OrtModel*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtValueInfo used in Model Editor API
+/// </summary>
+struct OrtValueInfo {
+  static std::unique_ptr<OrtValueInfo> Create(const char* name, const OrtTensorTypeAndShapeInfo* tensor_info);
+  static void operator delete(void* p) { Ort::api->ReleaseValueInfo(reinterpret_cast<OrtValueInfo*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/// <summary>
+/// This struct provides life time management for OrtNode used in Model Editor API
+/// </summary>
+struct OrtNode {
+  static std::unique_ptr<OrtNode> Create(const char* op_type, const char* domain, const char* name,
+                                         const char** input_names, size_t num_inputs,
+                                         const char** output_names, size_t num_outputs,
+                                         OrtOpAttr** attributes, size_t num_attributes);
+  static void operator delete(void* p) { Ort::api->ReleaseNode(reinterpret_cast<OrtNode*>(p)); }
   Ort::Abstract make_abstract;
 };
 

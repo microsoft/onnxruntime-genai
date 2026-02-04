@@ -16,7 +16,7 @@ See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/gena
 
 | Support matrix | Supported now | Under development | On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | ChatGLM</br>DeepSeek</br>Ernie</br>Fara</br>Gemma</br>GPTOSS</br>Granite</br>Llama</br>Mistral</br>Nemotron</br>OLMo</br>Phi</br>Phi3V</br>Phi4MM</br>Qwen</br>Qwen-2.5VL</br>SmolLM3</br>Whisper</br>| Stable diffusion ||
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
 | API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
 | O/S | Linux <br/> Windows <br/>Mac  <br/>Android   || iOS |||
 | Architecture | x86 <br/> x64 <br/> arm64 ||||
@@ -51,7 +51,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
    model = og.Model('cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4')
    tokenizer = og.Tokenizer(model)
-   tokenizer_stream = tokenizer.create_stream()
+   stream = tokenizer.create_stream()
     
    # Set the max length to something sensible by default,
    # since otherwise it will be set to the entire context length
@@ -78,12 +78,10 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
    try:
       generator.append_tokens(input_tokens)
-      while True:
+      while not generator.is_done():
          generator.generate_next_token()
-         if generator.is_done():
-            break
          new_token = generator.get_next_tokens()[0]
-         print(tokenizer_stream.decode(new_token), end='', flush=True)
+         print(stream.decode(new_token), end='', flush=True)
    except KeyboardInterrupt:
          print("  --control+c pressed, aborting generation--")
 
@@ -115,13 +113,13 @@ Windows:
 pip list | findstr "onnxruntime-genai"
 ```
 
-Checkout the version of the examples that correspond to that release.
+Then, check out the version of the examples that corresponds to that release.
 
 ```bash
 # Clone the repo
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
 # Checkout the branch for the version you are using
-git checkout v0.11.4
+git checkout v0.11.5
 cd examples
 ```
 
@@ -145,30 +143,11 @@ Navigate to the examples folder in the main branch.
 cd examples
 ```
 
-## Breaking API changes
+To install the nightly Python build:
 
-### v0.11.0
-
-Between `v0.11.0` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
-
-Previously, the decoding loop could be written as follows.
-
-```
-while not IsDone():
-    GenerateToken()
-    GetLastToken()
-    PrintLastToken()
-```
-
-In 0.11.0, the decoding loop should now be written as follows.
-
-```
-while True:
-    GenerateToken()
-    if IsDone():
-        break
-    GetLastToken()
-    PrintLastToken()
+```bash
+# Change onnxruntime-genai to the Python package you want to install
+pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime-genai
 ```
 
 ## Roadmap

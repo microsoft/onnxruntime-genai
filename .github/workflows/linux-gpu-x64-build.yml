@@ -104,7 +104,7 @@ jobs:
           set -e -x
           az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.2  \
+          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8  \
             --context tools/ci_build/github/linux/docker/manylinux  \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
@@ -112,7 +112,7 @@ jobs:
             --multiple_repos \
             --repository onnxruntimecudabuildx64
 
-      - name: Config with Cmake in Docker
+      - name: Config with CMake in Docker
         run: |
           set -e -x
           docker run \
@@ -125,7 +125,7 @@ jobs:
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
 
-      - name: Build with Cmake in Docker
+      - name: Build with CMake in Docker
         run: |
           set -e -x
           docker run \
@@ -136,7 +136,23 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
 
-      - name: Install the onnxruntime-genai Python wheel and run python test
+      - name: Build the Java API and Run the Java Tests in Docker
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --user 0 \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              alias python3=${{ env.PYTHON_EXECUTABLE }} && \
+              dnf -y update && dnf install -y python3.11-devel && dnf install -y python3-pip python3-setuptools python3-wheel && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja --cmake_extra_defines PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }}"
+
+      - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
           docker run \

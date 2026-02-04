@@ -74,18 +74,23 @@ def monitor_cpu_memory():
 
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, override_max_length) -> str:
     text = "a"
     prompt = f"{args.chat_template.format(input=text)}"
     tokens = tokenizer.encode(prompt)
     params = og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
-    params.set_search_options(max_length=max_length_to_use, min_length=prompt_length)
+    params.set_search_options(
+        min_length=prompt_length,
+        **({ "max_length": max_length_to_use } if override_max_length else {})
+    )
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokens)
-    while not generator.is_done():
+    i = 0
+    while not generator.is_done() and i < prompt_length:
         generator.generate_next_token()
+        i += 1
     return tokenizer.decode(generator.get_sequence(0))
 
 
@@ -280,6 +285,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             raise ValueError(
                 f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
             )
+    
+    # When -1 is passed as max_length we should not override that search option
+    override_max_length = max_length != -1
 
     # Generate prompt
     if args.use_random_tokens:
@@ -294,7 +302,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        text = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+        text = [generate_prompt(model, tokenizer, prompt_length, override_max_length)] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
@@ -307,7 +315,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        max_length=max_length,
+        **({ "max_length": max_length } if override_max_length else {}),
         min_length=max_length,
         batch_size=batch_size,
     )
@@ -317,8 +325,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         generator.append_tokens(tokens)
-        while not generator.is_done():
+        i = 0
+        while not generator.is_done() and i < generation_length:
             generator.generate_next_token()
+            i += 1
         if args.print_model_output:
             print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -350,7 +360,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             top_k=args.top_k,
             top_p=args.top_p,
             temperature=temperature,
-            max_length=max_length,
+            **({ "max_length": max_length } if override_max_length else {}),
             min_length=max_length,
             batch_size=batch_size,
         )
@@ -450,6 +460,34 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
 
 def main(args):
+    # Register execution provider library if specified (for plug-in providers)
+    # This is done once at the start, before any benchmarks run
+    if args.ep_library_path:
+        if args.execution_provider == "follow_config":
+            raise ValueError(
+                "Cannot use --ep_library_path with --execution_provider=follow_config."
+                "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
+            )
+
+        if args.verbose:
+            print(f"Registering execution provider library: {args.ep_library_path}")
+
+        # Determine the provider registration name based on execution provider
+        provider_registration_name = None
+        if args.execution_provider == "cuda":
+            provider_registration_name = "CUDAExecutionProvider"
+        elif args.execution_provider == "NvTensorRtRtx":
+            provider_registration_name = "NvTensorRTRTXExecutionProvider"
+        else:
+            raise ValueError(
+                f"Provider library registration not supported for '{args.execution_provider}'. "
+                "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries."
+            )
+
+        og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
+        if args.verbose:
+            print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
+
     all_csv_metrics = []
 
     for batch_size in args.batch_sizes:
@@ -508,7 +546,7 @@ if __name__ == "__main__":
         "--max_lengths",
         type=str2intlist,
         default=[],
-        help="Max length is either a combination of prompt and generation length or one value broadcasting for all.",
+        help="Max length is either a combination of prompt and generation length or one value broadcasting for all. Pass -1 to disable override.",
     )
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
@@ -540,8 +578,18 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="follow_config",
-        choices=["cpu", "cuda", "dml", "follow_config"],
+        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+    )
+    parser.add_argument(
+        "-epl",
+        "--ep_library_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to the execution provider library DLL/SO for plug-in providers. "
+        "Use this to load CUDA or NvTensorRT as plug-in providers instead of built-in. "
+        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
     )
     args = parser.parse_args()
 

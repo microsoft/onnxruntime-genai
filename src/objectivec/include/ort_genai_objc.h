@@ -48,6 +48,63 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 };
 
 /**
+ * An ORT GenAI config.
+ */
+@interface OGAConfig : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Creates a config.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Clear the list of providers in the given config
+ *
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)clearProvidersWithError:(NSError**)error;
+
+/**
+ * Add the provider at the end of the list of providers in the given config if it doesn't already exist.
+ * If it already exists, do nothing.
+ *
+ * @param provider The provider to set on the config.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)appendProvider:(NSString*)provider
+                 error:(NSError**)error;
+
+/**
+ * Set a provider option.
+ *
+ * @param provider The provider to set the option on
+ * @param key The key of the option to set
+ * @param value The value of the option to set
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setProviderOption:(NSString*)provider
+                      key:(NSString*)key
+                    value:(NSString*)value
+                    error:(NSError**)error;
+
+/**
+ * Overlay JSON on top of config file
+ *
+ * @param json The JSON to overlay on the config.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)overlay:(NSString*)json
+          error:(NSError**)error;
+
+@end
+
+/**
  * An ORT GenAI model.
  */
 @interface OGAModel : NSObject
@@ -63,6 +120,14 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable instancetype)initWithPath:(NSString*)path
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Creates a model.
+ *
+ * @param config The OGAConfig object
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithConfig:(OGAConfig*)config
+                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 @end
 
 /**
@@ -80,6 +145,27 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (nullable instancetype)initWithModel:(OGAModel*)model
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Return the int representation of the BOS token.
+ *
+ * @return The BOS token id
+ */
+- (int32_t)getBosTokenId:(NSError**)error;
+
+/**
+ * Return the int representations of the array of EOS tokens.
+ *
+ * @return The array of EOS token ids
+ */
+- (nullable NSArray<NSNumber*>*)getEosTokenIds:(NSError**)error;
+
+/**
+ * Return the int representation of the PAD token.
+ *
+ * @return The PAD token id
+ */
+- (int32_t)getPadTokenId:(NSError**)error;
 
 /**
  * Encode text to sequences
@@ -208,6 +294,23 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (BOOL)setSearchOption:(NSString*)key
               boolValue:(BOOL)value
                   error:(NSError**)error;
+
+/**
+ * Get numerical value of option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (double)getSearchNumber:(NSString*)key
+                    error:(NSError**)error;
+/**
+ * Get boolean value of option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (BOOL)getSearchBool:(NSString*)key
+                error:(NSError**)error;
 @end
 
 /**
@@ -265,6 +368,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  */
 - (BOOL)appendTokens:(NSArray<NSNumber*>*)tokens error:(NSError**)error;
+
+/**
+ * Get the number of tokens in the generator.
+ * @param error Optional error information set if an error occurs.
+ * @return The number of tokens in the generator
+ */
+- (size_t)tokenCount:(NSError**)error;
 
 /**
  * Rewinds the generator to the given length.
