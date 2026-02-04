@@ -83,7 +83,8 @@ def main():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda", log)
         if og.is_dml_available():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "dml", log)
-        if og.is_webgpu_available():
+        # Only build WebGPU models if TEST_WEBGPU environment variable is set
+        if og.is_webgpu_available() and os.environ.get("TEST_WEBGPU", "").lower() in ["true", "1", "yes"]:
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "webgpu", log)
 
     # Run ONNX Runtime GenAI tests

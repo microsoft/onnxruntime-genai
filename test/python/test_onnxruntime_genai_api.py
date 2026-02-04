@@ -34,6 +34,8 @@ if og.is_rocm_available():
 if og.is_openvino_available():
     devices.append("openvino")
 
+if og.is_webgpu_available():
+    devices.append("webgpu")
 
 def test_config(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")

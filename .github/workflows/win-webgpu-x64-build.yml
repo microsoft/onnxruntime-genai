@@ -17,6 +17,7 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   binaryDir: 'build/cpu/win-x64'
+  TEST_WEBGPU: 'true'
 
 jobs:
   windows-webgpu-x64-build:
@@ -29,7 +30,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.11.x'
+          python-version: '3.12.x'
           architecture: 'x64'
 
       - name: Setup VCPKG
@@ -73,7 +74,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DUSE_WEBGPU=ON
 
       - name: Build with CMake
         run: |
