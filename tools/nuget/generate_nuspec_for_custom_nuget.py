@@ -18,7 +18,7 @@ def generate_files(lines, args):
         "linux-x64": args.linux_x64,
     }
 
-    avoid_keywords = {"pdb", "onnxruntime-genai-cuda.dll"}
+    avoid_keywords = {"pdb", "onnxruntime-genai-cuda.dll", "onnxruntime-genai-cuda.lib"}
     processed_includes = set()
     for platform, platform_dir in platform_map.items():
         for file in glob.glob(os.path.join(platform_dir, "lib", "*")):

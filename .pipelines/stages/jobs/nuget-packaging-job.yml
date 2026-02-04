@@ -186,11 +186,6 @@ jobs:
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
-        StepName: 'Download osx-cpu-x64 capi Artifacts'
-        ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
-        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
         StepName: 'Download osx-cpu-arm64 capi Artifacts'
         ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
@@ -267,8 +262,6 @@ jobs:
           $rid = "win-arm64"
         } elseif ($a -like "*linux-x64*") {
           $rid = "linux-x64"
-        } elseif ($a -like "*osx-x64*") {
-          $rid = "osx-x64"
         } elseif ($a -like "*osx-arm64*") {
           $rid = "osx-arm64"
         } elseif ($a -like "*android*") {
@@ -311,7 +304,7 @@ jobs:
 
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: 3.10
+      versionSpec: 3.11
       addToPath: true
 
   - powershell: |
