@@ -76,49 +76,54 @@ jobs:
         run: |
           cmake --preset windows_x64_webgpu_release -DTEST_PHI2=True
 
+      - name: Install Python dependencies to get WebGPU OnnxRuntime
+        run: |
+          python -m pip install -r test\python\requirements.txt
+          python -m pip install -r test\python\webgpu\torch\requirements.txt
+          python -m pip install -r test\python\webgpu\ort\requirements.txt
+
+      - name: Replace onnxruntime CPU DLLs with WebGPU DLLs
+        shell: pwsh
+        run: |
+          Write-Host "Replacing onnxruntime CPU DLLs with WebGPU DLLs before building..."
+
+          # Find onnxruntime-webgpu package location (installed via pip)
+          $ortWebGpuLocation = python -c "import onnxruntime; import os; print(os.path.dirname(onnxruntime.__file__))"
+          Write-Host "onnxruntime-webgpu package location: $ortWebGpuLocation"
+
+          # Find the capi directory where WebGPU DLLs are located
+          $webgpuCapiDir = Join-Path $ortWebGpuLocation "capi"
+          if (-not (Test-Path $webgpuCapiDir)) {
+            Write-Error "Could not find onnxruntime capi directory at: $webgpuCapiDir"
+            exit 1
+          }
+
+          # Copy WebGPU DLLs to ort/lib (for building genai with WebGPU support)
+          Write-Host "`nCopying WebGPU DLLs to ort/lib..."
+          $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
+          foreach ($dll in $dllsToCopy) {
+            $sourcePath = Join-Path $webgpuCapiDir $dll
+            if (Test-Path $sourcePath) {
+              Copy-Item -Path $sourcePath -Destination "$env:GITHUB_WORKSPACE\ort\lib\$dll" -Force
+              Write-Host "  Copied: $dll"
+            } else {
+              Write-Host "  Warning: $dll not found at $sourcePath"
+            }
+          }
+
+          Write-Host "`nWebGPU DLLs successfully replaced in ort/lib/"
+          Get-ChildItem "$env:GITHUB_WORKSPACE\ort\lib\*.dll" | ForEach-Object {
+            Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+          }
+
       - name: Build with CMake
         run: |
           cmake --build --preset windows_x64_webgpu_release --parallel
           cmake --build --preset windows_x64_webgpu_release --target PyPackageBuild
 
-      - name: Install the Python Wheel and Test Dependencies
+      - name: Install the Python Wheel
         run: |
-          python -m pip install -r test\python\requirements.txt
-          python -m pip install -r test\python\webgpu\torch\requirements.txt
-          python -m pip install -r test\python\webgpu\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
-
-      - name: Replace onnxruntime CPU DLLs with WebGPU DLLs in site-packages
-        shell: pwsh
-        run: |
-          Write-Host "Replacing onnxruntime CPU DLLs with WebGPU DLLs in Python site-packages..."
-
-          # Find onnxruntime package location
-          $ortLocation = python -c "import onnxruntime; import os; print(os.path.dirname(onnxruntime.__file__))"
-          Write-Host "onnxruntime package location: $ortLocation"
-
-          # Find the capi directory where DLLs are located
-          $capiDir = Join-Path $ortLocation "capi"
-          if (Test-Path $capiDir) {
-            Write-Host "`nReplacing DLLs in: $capiDir"
-
-            # Backup and replace
-            $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
-            foreach ($dll in $dllsToCopy) {
-              if (Test-Path "$env:GITHUB_WORKSPACE\ort\lib\$dll") {
-                Copy-Item "$env:GITHUB_WORKSPACE\ort\lib\$dll" $capiDir -Force
-                Write-Host "  Replaced: $dll"
-              }
-            }
-
-            Write-Host "`nFinal DLLs in onnxruntime package:"
-            Get-ChildItem "$capiDir\*.dll" | ForEach-Object {
-              Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
-            }
-          } else {
-            Write-Error "Could not find onnxruntime capi directory at: $capiDir"
-            exit 1
-          }
 
       - name: Build the Java API and Run the Java Tests
         run: |
