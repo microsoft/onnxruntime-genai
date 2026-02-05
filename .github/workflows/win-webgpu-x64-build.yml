@@ -16,7 +16,7 @@ env:
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  binaryDir: 'build/cpu/win-x64'
+  binaryDir: 'build/webgpu/win-x64'
   TEST_WEBGPU: 'true'
 
 jobs:
@@ -74,12 +74,12 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DUSE_WEBGPU=ON
+          cmake --preset windows_x64_webgpu_release -DTEST_PHI2=True -DUSE_WEBGPU=ON
 
       - name: Build with CMake
         run: |
-          cmake --build --preset windows_x64_cpu_release --parallel
-          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+          cmake --build --preset windows_x64_webgpu_release --parallel
+          cmake --build --preset windows_x64_webgpu_release --target PyPackageBuild
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -87,6 +87,38 @@ jobs:
           python -m pip install -r test\python\webgpu\torch\requirements.txt
           python -m pip install -r test\python\webgpu\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Replace onnxruntime CPU DLLs with WebGPU DLLs in site-packages
+        shell: pwsh
+        run: |
+          Write-Host "Replacing onnxruntime CPU DLLs with WebGPU DLLs in Python site-packages..."
+
+          # Find onnxruntime package location
+          $ortLocation = python -c "import onnxruntime; import os; print(os.path.dirname(onnxruntime.__file__))"
+          Write-Host "onnxruntime package location: $ortLocation"
+
+          # Find the capi directory where DLLs are located
+          $capiDir = Join-Path $ortLocation "capi"
+          if (Test-Path $capiDir) {
+            Write-Host "`nReplacing DLLs in: $capiDir"
+
+            # Backup and replace
+            $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
+            foreach ($dll in $dllsToCopy) {
+              if (Test-Path "$env:GITHUB_WORKSPACE\ort\lib\$dll") {
+                Copy-Item "$env:GITHUB_WORKSPACE\ort\lib\$dll" $capiDir -Force
+                Write-Host "  Replaced: $dll"
+              }
+            }
+
+            Write-Host "`nFinal DLLs in onnxruntime package:"
+            Get-ChildItem "$capiDir\*.dll" | ForEach-Object {
+              Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+            }
+          } else {
+            Write-Error "Could not find onnxruntime capi directory at: $capiDir"
+            exit 1
+          }
 
       - name: Build the Java API and Run the Java Tests
         run: |
