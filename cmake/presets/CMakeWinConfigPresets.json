@@ -45,6 +45,13 @@
       }
     },
     {
+      "name": "windows_webgpu_default",
+      "inherits": "windows_cpu_default",
+      "cacheVariables": {
+        "USE_WEBGPU": "ON"
+      }
+    },
+    {
       "name": "windows_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -384,6 +391,42 @@
       ],
       "displayName": "windows x64 directml minsizerel",
       "binaryDir": "${sourceDir}/build/directml/win-x64"
+    },
+    {
+      "name": "windows_x64_webgpu_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_webgpu_default"
+      ],
+      "displayName": "windows x64 webgpu release",
+      "binaryDir": "${sourceDir}/build/webgpu/win-x64"
+    },
+    {
+      "name": "windows_x64_webgpu_debug",
+      "inherits": [
+        "windows_debug_default",
+        "windows_webgpu_default"
+      ],
+      "displayName": "windows x64 webgpu debug",
+      "binaryDir": "${sourceDir}/build/webgpu/win-x64"
+    },
+    {
+      "name": "windows_x64_webgpu_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_webgpu_default"
+      ],
+      "displayName": "windows x64 webgpu relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/webgpu/win-x64"
+    },
+    {
+      "name": "windows_x64_webgpu_minsizerel",
+      "inherits": [
+        "windows_minsizerel_default",
+        "windows_webgpu_default"
+      ],
+      "displayName": "windows x64 webgpu minsizerel",
+      "binaryDir": "${sourceDir}/build/webgpu/win-x64"
     },
     {
       "name": "windows_arm64_cpu_relwithdebinfo",

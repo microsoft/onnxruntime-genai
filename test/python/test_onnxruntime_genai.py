@@ -6,7 +6,6 @@ import logging
 import os
 import pathlib
 import sys
-import sysconfig
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess

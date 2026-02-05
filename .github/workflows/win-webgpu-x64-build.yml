@@ -74,7 +74,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_webgpu_release -DTEST_PHI2=True -DUSE_WEBGPU=ON
+          cmake --preset windows_x64_webgpu_release -DTEST_PHI2=True
 
       - name: Build with CMake
         run: |
