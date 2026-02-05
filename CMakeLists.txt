@@ -236,7 +236,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
+  target_link_libraries(onnxruntime-genai PUBLIC dl)  # For dlopen & co
 endif()
 
 if(USE_DML)
