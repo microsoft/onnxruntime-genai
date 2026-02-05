@@ -317,9 +317,9 @@ TEST(CAPIEngineTests, MaxLength) {
 }
 #endif
 
-// DML doesn't support batch_size > 1
+// DML and WebGPU don't support batch_size > 1
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2 && !USE_DML
+#if TEST_PHI2 && !USE_DML && !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -370,6 +370,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiBatch) {
+#if !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -428,11 +429,13 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
+#endif
 }
 #endif
 
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
+#if !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -500,6 +503,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
+#endif
 }
 #endif
 
