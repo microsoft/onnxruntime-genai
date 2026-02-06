@@ -498,6 +498,20 @@ struct OrtEnv {
                    const std::vector<OrtValue*>& dst_tensors,
                    OrtSyncStream* stream = nullptr) const;
 
+  /// \brief Copy tensors between devices with offsets. Wraps OrtApi::CopyTensorsEx
+  /// \param src_tensors Array of source OrtValue tensors
+  /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
+  /// \param source_offsets Optional array of byte offsets for source tensors (can be nullptr)
+  /// \param destination_offsets Optional array of byte offsets for destination tensors (can be nullptr)
+  /// \param sizes Optional array of byte sizes to copy (can be nullptr for full tensor)
+  /// \param stream Optional sync stream for asynchronous copy (can be nullptr for synchronous)
+  void CopyTensorsEx(const std::vector<const OrtValue*>& src_tensors,
+                     const std::vector<OrtValue*>& dst_tensors,
+                     const std::vector<size_t>* source_offsets = nullptr,
+                     const std::vector<size_t>* destination_offsets = nullptr,
+                     const std::vector<size_t>* sizes = nullptr,
+                     OrtSyncStream* stream = nullptr) const;
+
   std::vector<const OrtEpDevice*> GetEpDevices();
 
   static void operator delete(void* p) { Ort::api->ReleaseEnv(reinterpret_cast<OrtEnv*>(p)); }

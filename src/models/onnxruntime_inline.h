@@ -417,6 +417,22 @@ inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
   Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
 }
 
+inline void OrtEnv::CopyTensorsEx(const std::vector<const OrtValue*>& src_tensors,
+                                  const std::vector<OrtValue*>& dst_tensors,
+                                  const std::vector<size_t>* source_offsets,
+                                  const std::vector<size_t>* destination_offsets,
+                                  const std::vector<size_t>* sizes,
+                                  OrtSyncStream* stream) const {
+  Ort::ThrowOnError(Ort::api->CopyTensorsEx(this,
+                                            src_tensors.data(),
+                                            dst_tensors.data(),
+                                            source_offsets ? source_offsets->data() : nullptr,
+                                            destination_offsets ? destination_offsets->data() : nullptr,
+                                            sizes ? sizes->data() : nullptr,
+                                            stream,
+                                            src_tensors.size()));
+}
+
 inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
   size_t num_devices = 0;
   const OrtEpDevice* const* device_ptrs = nullptr;
