@@ -173,6 +173,17 @@ void State::SetRunOption(const char* key, const char* value) {
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
     }
     return;
+  } else if (strcmp(key, "enable_profiling") == 0) {
+    if (strcmp(value, "0") == 0) {
+      run_options_->DisableProfiling();
+    } else {
+      // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
+      // Value "1" uses the default prefix; any other value is treated as a custom prefix.
+      constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
+      const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
+      run_options_->EnableProfiling(fs::path(prefix).c_str());
+    }
+    return;
   }
   run_options_->AddConfigEntry(key, value);
 }
