@@ -41,13 +41,14 @@ The tool currently supports the following model architectures.
 - Gemma
 - gpt-oss
 - Granite
+- InternLM2
 - Llama
 - Mistral
 - Nemotron
 - Phi
 - Qwen
 - SmolLM3
-- InternLM2
+
 
 It is intended for supporting the latest, popular state-of-the-art models.
 

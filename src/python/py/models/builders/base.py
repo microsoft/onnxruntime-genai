@@ -3,7 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 #
-# Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 from __future__ import annotations
 
@@ -673,6 +673,15 @@ class Model:
         )
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
+        # Overwrite model_max_length with the model's context_length so it is a normal integer
+        # (HF often uses 1e30 for "no limit", which can serialize to a huge decimal in JSON)
+        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
+        if os.path.isfile(tokenizer_config_path):
+            with open(tokenizer_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            config["model_max_length"] = self.context_length
+            with open(tokenizer_config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
 
     def make_int4_algo_config(self, quant_method: str):
         customized_weight_config = {}

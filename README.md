@@ -16,7 +16,7 @@ See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/gena
 
 | Support matrix | Supported now | Under development | On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> InternLM2 <br/> Whisper | Stable diffusion | Multi-modal models |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> InternLM2 <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
 | API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
 | O/S | Linux <br/> Windows <br/>Mac  <br/>Android   || iOS |||
 | Architecture | x86 <br/> x64 <br/> arm64 ||||

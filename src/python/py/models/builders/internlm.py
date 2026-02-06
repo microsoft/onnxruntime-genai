@@ -10,8 +10,8 @@ import torch.nn as nn
 class InternLM2Model(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # InternLM2 is based on Llama architecture, so use 'llama' as model_type for GenAI compatibility
-        self.model_type = "LlamaForCausalLM"
+        # Export genai_config with type "internlm2" (C++ model_type.h already lists "internlm2" as LLM)
+        self.model_type = "InternLM2ForCausalLM"
 
     def load_weights(self, input_path):
         """
