@@ -24,6 +24,8 @@ extern std::string g_custom_model_path;
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
 #elif USE_DML
 #define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
+#elif USE_WEBGPU
+#define PHI2_PATH MODEL_PATH "phi-2/int4/webgpu"
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
