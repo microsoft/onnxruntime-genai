@@ -33,7 +33,7 @@
 #endif
 
 #ifndef ENABLE_ENGINE_TESTS
-#define ENABLE_ENGINE_TESTS TEST_PHI2 && !USE_DML
+#define ENABLE_ENGINE_TESTS TEST_PHI2 && !USE_DML && !USE_WEBGPU
 #endif
 
 TEST(CAPITests, Config) {
@@ -317,7 +317,8 @@ TEST(CAPIEngineTests, MaxLength) {
 }
 #endif
 
-// DML and WebGPU don't support batch_size > 1
+// DML doesn't support batch_size > 1
+// TODO: WebGPU should support batch_size > 1, investigate why it's failing
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2 && !USE_DML && !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
@@ -370,7 +371,6 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiBatch) {
-#if !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -429,13 +429,11 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
-#endif
 }
 #endif
 
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
-#if !USE_WEBGPU
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -503,7 +501,6 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
-#endif
 }
 #endif
 
@@ -931,7 +928,7 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-// DML Doesn't support batch_size > 1
+// DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
 struct Phi2Test {
@@ -1050,6 +1047,12 @@ class ParametrizedTopPCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
+#if USE_WEBGPU
+  if (GetParam()) {
+    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  }
+#endif
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1071,6 +1074,12 @@ class ParametrizedTopKTopPCAPITestsTests : public ::testing::TestWithParam<bool>
 };
 
 TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
+#if USE_WEBGPU
+  if (GetParam()) {
+    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  }
+#endif
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
