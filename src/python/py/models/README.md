@@ -47,6 +47,7 @@ The tool currently supports the following model architectures.
 - Phi
 - Qwen
 - SmolLM3
+- InternLM2
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
