@@ -1023,6 +1023,12 @@ class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
+#if USE_WEBGPU
+  if (GetParam()) {
+    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  }
+#endif
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
