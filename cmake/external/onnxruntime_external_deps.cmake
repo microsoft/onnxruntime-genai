@@ -88,22 +88,6 @@ FetchContent_Declare(
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
-# Add InternLM2Tokenizer support: same BPE/LLaMA format as LlamaTokenizer (see Hugging Face model card).
-# This allows exported models to keep the official tokenizer_config.json (InternLM2Tokenizer) per
-# https://huggingface.co/internlm/internlm2-1_8b/blob/main/tokenizer_config.json
-FetchContent_GetProperties(onnxruntime_extensions)
-if(onnxruntime_extensions_POPULATED)
-  set(ORTX_TOKENIZER_CONFIG "${onnxruntime_extensions_SOURCE_DIR}/operators/tokenizer/tokenizer_jsconfig.hpp")
-  if(EXISTS "${ORTX_TOKENIZER_CONFIG}")
-    file(READ "${ORTX_TOKENIZER_CONFIG}" ORTX_TOKENIZER_CONFIG_CONTENT)
-    string(REPLACE "{\"LlamaTokenizer\", TokenType::kBPE},"
-      "{\"LlamaTokenizer\", TokenType::kBPE},\n  {\"InternLM2Tokenizer\", TokenType::kBPE},"
-      ORTX_TOKENIZER_CONFIG_CONTENT "${ORTX_TOKENIZER_CONFIG_CONTENT}")
-    file(WRITE "${ORTX_TOKENIZER_CONFIG}" "${ORTX_TOKENIZER_CONFIG_CONTENT}")
-    message(STATUS "Patched onnxruntime_extensions: added InternLM2Tokenizer support")
-  endif()
-endif()
-
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions
   ocos_operators
