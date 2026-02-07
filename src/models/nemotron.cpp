@@ -158,6 +158,7 @@ void NemotronState::RunStreamingEncoder() {
 
   // Initialize caches on first call
   if (!caches_initialized_) {
+    // Cache format: [B, n_layers, cache_len, d_model] — matches ONNX model I/O
     auto cache_ch_shape = std::array<int64_t, 4>{
         static_cast<int64_t>(batch_size_),
         static_cast<int64_t>(model_.num_encoder_layers_),

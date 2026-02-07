@@ -149,24 +149,19 @@ def _make_streaming_encoder_wrapper(encoder):
 
         def forward(self, audio_signal, length,
                     cache_last_channel, cache_last_time, cache_last_channel_len):
-            # NeMo CacheAware conformer expects cache in [n_layers, B, ...] order,
-            # but ONNX convention uses [B, n_layers, ...] for batch-first.
-            # Transpose: [B, n_layers, cache_len, d_model] -> [n_layers, B, cache_len, d_model]
-            cache_ch = cache_last_channel.transpose(0, 1).contiguous()
-            cache_tm = cache_last_time.transpose(0, 1).contiguous()
-
+            # forward_for_export() handles all transposes internally:
+            #   Input:  caches [B, n_layers, ...] -> transpose(0,1) -> [n_layers, B, ...]
+            #   forward_internal indexes cache[layer_idx] at dim 0
+            #   Output: caches [n_layers, B, ...] -> transpose(0,1) -> [B, n_layers, ...]
+            # So ONNX I/O consistently uses [B, n_layers, ...] for caches.
             encoded, encoded_len, cache_ch_next, cache_tm_next, cache_len_next = \
                 self.enc.forward_for_export(
                     audio_signal=audio_signal,
                     length=length,
-                    cache_last_channel=cache_ch,
-                    cache_last_time=cache_tm,
+                    cache_last_channel=cache_last_channel,
+                    cache_last_time=cache_last_time,
                     cache_last_channel_len=cache_last_channel_len,
                 )
-
-            # Transpose back: [n_layers, B, ...] -> [B, n_layers, ...]
-            cache_ch_next = cache_ch_next.transpose(0, 1).contiguous()
-            cache_tm_next = cache_tm_next.transpose(0, 1).contiguous()
 
             return encoded, encoded_len, cache_ch_next, cache_tm_next, cache_len_next
 
@@ -248,6 +243,7 @@ def _verify_streaming_encoder(encoder_path, batch_size, mel_features, chunk_fram
 
     audio = np.random.randn(batch_size, mel_features, chunk_frames).astype(np.float32)
     length = np.array([chunk_frames], dtype=np.int64)
+    # ONNX cache format: [B, n_layers, ...]
     cache_ch = np.zeros((batch_size, n_layers, cache_len, d_model), dtype=np.float32)
     cache_tm = np.zeros((batch_size, n_layers, d_model, conv_context), dtype=np.float32)
     cache_len_val = np.zeros((batch_size,), dtype=np.int64)
@@ -395,6 +391,7 @@ def export_model(args):
 
         dummy_audio = torch.randn(batch_size, mel_features, chunk_frames)
         dummy_length = torch.tensor([chunk_frames], dtype=torch.int64)
+        # forward_for_export expects cache inputs in [B, n_layers, ...] format
         dummy_cache_ch = torch.zeros(batch_size, n_layers, last_channel_cache_size, d_model)
         dummy_cache_tm = torch.zeros(batch_size, n_layers, d_model, conv_context)
         dummy_cache_len = torch.zeros(batch_size, dtype=torch.int64)
@@ -434,10 +431,11 @@ def export_model(args):
                 dynamic_axes={
                     "audio_signal": {0: "batch", 2: "time"},
                     "length": {0: "batch"},
+                    # All cache tensors use [B, n_layers, ...] format
                     "cache_last_channel": {0: "batch"},
                     "cache_last_time": {0: "batch"},
                     "cache_last_channel_len": {0: "batch"},
-                    "outputs": {0: "batch", 1: "time_encoded"},
+                    "outputs": {0: "batch", 2: "time_encoded"},
                     "encoded_lengths": {0: "batch"},
                     "cache_last_channel_next": {0: "batch"},
                     "cache_last_time_next": {0: "batch"},
