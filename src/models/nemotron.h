@@ -20,7 +20,7 @@ namespace Generators {
 //               cache_last_channel[B,24,70,1024] + cache_last_time[B,24,1024,8] +
 //               cache_last_channel_len[B]
 //            -> outputs[B,1024,T'] + encoded_lengths[B] +
-//               cache_last_channel_next[...] + cache_last_time_next[...] +
+//               cache_last_channel_next[B,24,...] + cache_last_time_next[B,24,...] +
 //               cache_last_channel_len_next[B]
 //    - Processes audio chunk-by-chunk with carried-forward caches
 //
