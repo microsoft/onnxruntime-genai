@@ -6,9 +6,19 @@ This script downloads the model from HuggingFace and exports it to ONNX format
 suitable for inference with ONNX Runtime. The decoder is exported with explicit
 LSTM state inputs/outputs for stateful RNNT decoding.
 
+Streaming mode (--streaming):
+  Exports the encoder with cache-aware streaming I/O:
+    Inputs:  audio_signal[B,128,T], length[B],
+             cache_last_channel[B,24,70,1024], cache_last_time[B,24,1024,8],
+             cache_last_channel_len[B]
+    Outputs: outputs[B,1024,T'], encoded_lengths[B],
+             cache_last_channel_next[B,24,70,1024], cache_last_time_next[B,24,1024,8],
+             cache_last_channel_len_next[B]
+
 Usage:
     python export_nemotron_to_onnx.py --output_dir ./onnx_models
-    python export_nemotron_to_onnx.py --output_dir ./onnx_models --chunk_size 1.12
+    python export_nemotron_to_onnx.py --output_dir ./onnx_models --streaming
+    python export_nemotron_to_onnx.py --output_dir ./onnx_models --chunk_size 1.12 --streaming
 """
 
 import argparse
@@ -33,12 +43,59 @@ def parse_args():
         help="ONNX opset version")
     parser.add_argument("--device", type=str, default="cpu",
         choices=["cpu", "cuda"], help="Device to use for export")
+    parser.add_argument("--streaming", action="store_true",
+        help="Export encoder with cache-aware streaming I/O for incremental processing")
     return parser.parse_args()
 
 
 def get_att_context_size(chunk_size: float) -> list:
     """Get attention context size based on chunk size."""
     return {0.08: [70, 0], 0.16: [70, 1], 0.56: [70, 6], 1.12: [70, 13]}.get(chunk_size, [70, 13])
+
+
+def get_streaming_cache_shapes(encoder, att_context_size):
+    """
+    Get cache tensor shapes for streaming export from the NeMo encoder.
+
+    Returns dict with: n_layers, d_model, last_channel_cache_size,
+    conv_context, chunk_mel_frames, pre_encode_cache_size
+    """
+    n_layers = getattr(encoder, 'num_layers', 24)
+    d_model = getattr(encoder, 'd_model', 1024)
+
+    # Try to get streaming config from NeMo
+    if hasattr(encoder, 'get_streaming_config'):
+        cfg = encoder.get_streaming_config()
+        last_channel_cache_size = cfg.get('last_channel_cache_size', att_context_size[0])
+        shift_size = cfg.get('shift_size', [105, 112])
+        chunk_frames = shift_size[1] if len(shift_size) > 1 else shift_size[0]
+        pre_encode_cache = cfg.get('pre_encode_cache_size', [0, 9])
+    else:
+        last_channel_cache_size = att_context_size[0]  # 70
+        # Default shift sizes for common chunk sizes
+        # chunk_size=1.12s → 112 mel frames, chunk_size=0.56s → 56 frames, etc.
+        chunk_frames = 112
+        pre_encode_cache = [0, 9]
+
+    # Get conv context from encoder layers
+    conv_context = 8  # default: conv_kernel_size(9) - 1 = 8
+    if hasattr(encoder, 'layers') and len(encoder.layers) > 0:
+        layer = encoder.layers[0]
+        if hasattr(layer, 'conv') and hasattr(layer.conv, 'conv'):
+            # ConvolutionModule kernel_size
+            conv = layer.conv.conv
+            if hasattr(conv, 'kernel_size'):
+                ks = conv.kernel_size[0] if isinstance(conv.kernel_size, tuple) else conv.kernel_size
+                conv_context = ks - 1
+
+    return {
+        'n_layers': n_layers,
+        'd_model': d_model,
+        'last_channel_cache_size': last_channel_cache_size,
+        'conv_context': conv_context,
+        'chunk_mel_frames': chunk_frames,
+        'pre_encode_cache_size': pre_encode_cache,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +125,52 @@ def _make_encoder_wrapper(encoder):
             return encoded, encoded_len
 
     return EncoderWrapper(encoder)
+
+
+def _make_streaming_encoder_wrapper(encoder):
+    """
+    Wrap the NeMo CacheAware encoder for streaming export.
+
+    The encoder's forward_for_export() accepts cache tensors for incremental
+    chunk-by-chunk processing. Cache tensors:
+      - cache_last_channel: [B, n_layers, cache_len, d_model] — MHA left-context
+      - cache_last_time:    [B, n_layers, d_model, conv_ctx]  — causal conv buffer
+      - cache_last_channel_len: [B] — how many cache positions are filled
+
+    Returns updated caches alongside encoder output.
+    """
+    import torch
+    import torch.nn as nn
+
+    class StreamingEncoderWrapper(nn.Module):
+        def __init__(self, enc):
+            super().__init__()
+            self.enc = enc
+
+        def forward(self, audio_signal, length,
+                    cache_last_channel, cache_last_time, cache_last_channel_len):
+            # NeMo CacheAware conformer expects cache in [n_layers, B, ...] order,
+            # but ONNX convention uses [B, n_layers, ...] for batch-first.
+            # Transpose: [B, n_layers, cache_len, d_model] -> [n_layers, B, cache_len, d_model]
+            cache_ch = cache_last_channel.transpose(0, 1).contiguous()
+            cache_tm = cache_last_time.transpose(0, 1).contiguous()
+
+            encoded, encoded_len, cache_ch_next, cache_tm_next, cache_len_next = \
+                self.enc.forward_for_export(
+                    audio_signal=audio_signal,
+                    length=length,
+                    cache_last_channel=cache_ch,
+                    cache_last_time=cache_tm,
+                    cache_last_channel_len=cache_last_channel_len,
+                )
+
+            # Transpose back: [n_layers, B, ...] -> [B, n_layers, ...]
+            cache_ch_next = cache_ch_next.transpose(0, 1).contiguous()
+            cache_tm_next = cache_tm_next.transpose(0, 1).contiguous()
+
+            return encoded, encoded_len, cache_ch_next, cache_tm_next, cache_len_next
+
+    return StreamingEncoderWrapper(encoder)
 
 
 def _make_stateful_decoder_wrapper(decoder):
@@ -132,6 +235,48 @@ def _verify_stateful_decoder(decoder_path):
         print(f"      [OK] LSTM states evolve correctly (h_diff={h_diff:.4f}, c_diff={c_diff:.4f})")
     else:
         print(f"      [WARNING] States may not be changing (h_diff={h_diff:.6f}, c_diff={c_diff:.6f})")
+
+
+def _verify_streaming_encoder(encoder_path, batch_size, mel_features, chunk_frames,
+                               n_layers, d_model, cache_len, conv_context):
+    """ORT smoke-test: two chunks, verify cache states evolve."""
+    import numpy as np
+    import onnxruntime as ort
+
+    print("      Verifying streaming encoder with ONNX Runtime...")
+    sess = ort.InferenceSession(str(encoder_path), providers=["CPUExecutionProvider"])
+
+    audio = np.random.randn(batch_size, mel_features, chunk_frames).astype(np.float32)
+    length = np.array([chunk_frames], dtype=np.int64)
+    cache_ch = np.zeros((batch_size, n_layers, cache_len, d_model), dtype=np.float32)
+    cache_tm = np.zeros((batch_size, n_layers, d_model, conv_context), dtype=np.float32)
+    cache_len_val = np.zeros((batch_size,), dtype=np.int64)
+
+    # Run chunk 1
+    out1 = sess.run(None, {
+        "audio_signal": audio, "length": length,
+        "cache_last_channel": cache_ch, "cache_last_time": cache_tm,
+        "cache_last_channel_len": cache_len_val,
+    })
+    enc_out1, enc_len1, cache_ch1, cache_tm1, cache_len1 = out1
+
+    # Run chunk 2 with updated caches
+    audio2 = np.random.randn(batch_size, mel_features, chunk_frames).astype(np.float32)
+    out2 = sess.run(None, {
+        "audio_signal": audio2, "length": length,
+        "cache_last_channel": cache_ch1, "cache_last_time": cache_tm1,
+        "cache_last_channel_len": cache_len1,
+    })
+
+    ch_diff = float(np.abs(out2[2] - cache_ch1).max())
+    tm_diff = float(np.abs(out2[3] - cache_tm1).max())
+    print(f"      Encoder output shape: {enc_out1.shape}")
+    print(f"      Encoded length: {enc_len1}")
+    print(f"      cache_last_channel_len after chunk 1: {cache_len1}")
+    if ch_diff > 0.001 or tm_diff > 0.001:
+        print(f"      [OK] Encoder caches evolve (ch_diff={ch_diff:.4f}, tm_diff={tm_diff:.4f})")
+    else:
+        print(f"      [WARNING] Caches may not be updating (ch_diff={ch_diff:.6f}, tm_diff={tm_diff:.6f})")
 
 
 def consolidate_single_model(onnx_path):
@@ -229,38 +374,116 @@ def export_model(args):
     time_steps = 100    # ~1 second of audio
 
     # ---------- Encoder ----------
-    print("      Exporting encoder...")
-    encoder_wrapper = _make_encoder_wrapper(encoder)
-    encoder_wrapper.eval()
+    if args.streaming:
+        print("      Exporting STREAMING encoder (cache-aware)...")
+        streaming_wrapper = _make_streaming_encoder_wrapper(encoder)
+        streaming_wrapper.eval()
 
-    dummy_audio = torch.randn(batch_size, mel_features, time_steps)
-    dummy_length = torch.tensor([time_steps], dtype=torch.int64)
-    if device == "cuda":
-        dummy_audio = dummy_audio.cuda()
-        dummy_length = dummy_length.cuda()
+        # Get streaming config from encoder to determine cache shapes
+        cache_cfg = get_streaming_cache_shapes(encoder, att_context_size)
+        n_layers = cache_cfg['n_layers']
+        d_model = cache_cfg['d_model']
+        last_channel_cache_size = cache_cfg['last_channel_cache_size']
+        conv_context = cache_cfg['conv_context']
+        chunk_frames = cache_cfg['chunk_mel_frames']
 
-    encoder_path = output_dir / "encoder.onnx"
-    encoder_data = output_dir / "encoder.onnx.data"
-    if encoder_data.exists():
-        encoder_data.unlink()
+        print(f"      Streaming config:")
+        print(f"        n_layers={n_layers}, d_model={d_model}")
+        print(f"        last_channel_cache_size={last_channel_cache_size}")
+        print(f"        conv_context={conv_context}")
+        print(f"        chunk_mel_frames={chunk_frames}")
 
-    with torch.no_grad():
-        torch.onnx.export(
-            encoder_wrapper, (dummy_audio, dummy_length), str(encoder_path),
-            export_params=True, opset_version=args.opset_version,
-            do_constant_folding=True,
-            input_names=["audio_signal", "length"],
-            output_names=["outputs", "encoded_lengths"],
-            dynamic_axes={
-                "audio_signal": {0: "batch", 2: "time"},
-                "length": {0: "batch"},
-                "outputs": {0: "batch", 1: "time_encoded"},
-                "encoded_lengths": {0: "batch"},
-            },
-            dynamo=False,
-        )
-    print(f"      [OK] Encoder exported to {encoder_path}")
-    consolidate_single_model(encoder_path)
+        dummy_audio = torch.randn(batch_size, mel_features, chunk_frames)
+        dummy_length = torch.tensor([chunk_frames], dtype=torch.int64)
+        dummy_cache_ch = torch.zeros(batch_size, n_layers, last_channel_cache_size, d_model)
+        dummy_cache_tm = torch.zeros(batch_size, n_layers, d_model, conv_context)
+        dummy_cache_len = torch.zeros(batch_size, dtype=torch.int64)
+
+        if device == "cuda":
+            dummy_audio = dummy_audio.cuda()
+            dummy_length = dummy_length.cuda()
+            dummy_cache_ch = dummy_cache_ch.cuda()
+            dummy_cache_tm = dummy_cache_tm.cuda()
+            dummy_cache_len = dummy_cache_len.cuda()
+
+        # Verify forward pass works
+        with torch.no_grad():
+            test_out = streaming_wrapper(dummy_audio, dummy_length,
+                                         dummy_cache_ch, dummy_cache_tm, dummy_cache_len)
+            print(f"      Forward check: output={test_out[0].shape}, "
+                  f"cache_ch_next={test_out[2].shape}, cache_tm_next={test_out[3].shape}")
+
+        encoder_path = output_dir / "encoder.onnx"
+        encoder_data = output_dir / "encoder.onnx.data"
+        if encoder_data.exists():
+            encoder_data.unlink()
+
+        with torch.no_grad():
+            torch.onnx.export(
+                streaming_wrapper,
+                (dummy_audio, dummy_length, dummy_cache_ch, dummy_cache_tm, dummy_cache_len),
+                str(encoder_path),
+                export_params=True, opset_version=args.opset_version,
+                do_constant_folding=True,
+                input_names=["audio_signal", "length",
+                             "cache_last_channel", "cache_last_time",
+                             "cache_last_channel_len"],
+                output_names=["outputs", "encoded_lengths",
+                              "cache_last_channel_next", "cache_last_time_next",
+                              "cache_last_channel_len_next"],
+                dynamic_axes={
+                    "audio_signal": {0: "batch", 2: "time"},
+                    "length": {0: "batch"},
+                    "cache_last_channel": {0: "batch"},
+                    "cache_last_time": {0: "batch"},
+                    "cache_last_channel_len": {0: "batch"},
+                    "outputs": {0: "batch", 1: "time_encoded"},
+                    "encoded_lengths": {0: "batch"},
+                    "cache_last_channel_next": {0: "batch"},
+                    "cache_last_time_next": {0: "batch"},
+                    "cache_last_channel_len_next": {0: "batch"},
+                },
+                dynamo=False,
+            )
+        print(f"      [OK] Streaming encoder exported to {encoder_path}")
+        consolidate_single_model(encoder_path)
+
+        # Verify streaming encoder with ORT
+        _verify_streaming_encoder(encoder_path, batch_size, mel_features, chunk_frames,
+                                  n_layers, d_model, last_channel_cache_size, conv_context)
+    else:
+        print("      Exporting encoder (non-streaming)...")
+        encoder_wrapper = _make_encoder_wrapper(encoder)
+        encoder_wrapper.eval()
+
+        dummy_audio = torch.randn(batch_size, mel_features, time_steps)
+        dummy_length = torch.tensor([time_steps], dtype=torch.int64)
+        if device == "cuda":
+            dummy_audio = dummy_audio.cuda()
+            dummy_length = dummy_length.cuda()
+
+        encoder_path = output_dir / "encoder.onnx"
+        encoder_data = output_dir / "encoder.onnx.data"
+        if encoder_data.exists():
+            encoder_data.unlink()
+
+        with torch.no_grad():
+            torch.onnx.export(
+                encoder_wrapper, (dummy_audio, dummy_length), str(encoder_path),
+                export_params=True, opset_version=args.opset_version,
+                do_constant_folding=True,
+                input_names=["audio_signal", "length"],
+                output_names=["outputs", "encoded_lengths"],
+                dynamic_axes={
+                    "audio_signal": {0: "batch", 2: "time"},
+                    "length": {0: "batch"},
+                    "outputs": {0: "batch", 1: "time_encoded"},
+                    "encoded_lengths": {0: "batch"},
+                },
+                dynamo=False,
+            )
+        print(f"      [OK] Encoder exported to {encoder_path}")
+        consolidate_single_model(encoder_path)
 
     # ---------- Decoder (stateful LSTM) ----------
     print("      Exporting stateful decoder...")
@@ -372,6 +595,7 @@ def export_model(args):
     print("=" * 60)
     print(f"Model:        {args.model_name}")
     print(f"Chunk size:   {args.chunk_size}s")
+    print(f"Streaming:    {args.streaming}")
     print(f"Output dir:   {output_dir.absolute()}")
     print(f"ONNX opset:   {args.opset_version}")
     print("=" * 60)

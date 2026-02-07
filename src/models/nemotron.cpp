@@ -19,6 +19,11 @@ NemotronModel::NemotronModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   blank_id_ = vocab_size_ - 1;  // RNNT blank is the last token
   num_decoder_layers_ = 2;      // Nemotron uses 2-layer LSTM
 
+  // Read streaming config if present
+  // genai_config.json can have: "streaming": { "enabled": true, "cache_last_channel_size": 70, ... }
+  // For now, detect streaming by checking if encoder ONNX model has cache inputs
+  // This is done after session creation by probing input names.
+
   // Create encoder session with its own options
   encoder_session_options_ = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(
@@ -35,6 +40,18 @@ NemotronModel::NemotronModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   if (!config_->model.decoder.pipeline.empty()) {
     auto& joint_config = config_->model.decoder.pipeline[0];
     session_joint_ = CreateSession(ort_env, joint_config.filename, session_options_.get());
+  }
+
+  // Detect streaming mode by checking if encoder has cache_last_channel input
+  {
+    auto input_count = session_encoder_->GetInputCount();
+    for (size_t i = 0; i < input_count; i++) {
+      auto name = session_encoder_->GetInputName(i);
+      if (std::string(name) == "cache_last_channel") {
+        streaming_enabled_ = true;
+        break;
+      }
+    }
   }
 
   session_info_.Add(*session_encoder_);
@@ -57,6 +74,7 @@ NemotronState::NemotronState(const NemotronModel& model, const GeneratorParams& 
     : State{params, model},
       model_{model} {
   batch_size_ = 1;  // RNNT operates on single utterances
+  last_decoder_token_ = model_.blank_id_;  // SOS = blank
 }
 
 void NemotronState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -76,6 +94,7 @@ void NemotronState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) 
         auto src_size = type_info->GetElementCount() * sizeof(float);
         std::memcpy(audio_signal_->GetTensorMutableData<float>(),
                     ort_val->GetTensorData<float>(), src_size);
+        has_new_audio_ = true;
       }
       break;
     }
@@ -87,7 +106,7 @@ void NemotronState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) 
 }
 
 // ============================================================================
-// Encoder
+// Encoder (Non-streaming / Batch mode)
 // ============================================================================
 
 void NemotronState::RunEncoder() {
@@ -127,6 +146,87 @@ void NemotronState::RunEncoder() {
   TransposeEncoderOutput();
 
   encoder_done_ = true;
+}
+
+// ============================================================================
+// Streaming Encoder (Cache-Aware)
+// ============================================================================
+
+void NemotronState::RunStreamingEncoder() {
+  if (!has_new_audio_) return;
+  has_new_audio_ = false;
+
+  // Initialize caches on first call
+  if (!caches_initialized_) {
+    auto cache_ch_shape = std::array<int64_t, 4>{
+        static_cast<int64_t>(batch_size_),
+        static_cast<int64_t>(model_.num_encoder_layers_),
+        static_cast<int64_t>(model_.cache_last_channel_size_),
+        static_cast<int64_t>(model_.encoder_hidden_size_)};
+    size_t cache_ch_size = batch_size_ * model_.num_encoder_layers_ *
+                           model_.cache_last_channel_size_ * model_.encoder_hidden_size_;
+    cache_last_channel_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, cache_ch_shape);
+    std::memset(cache_last_channel_->GetTensorMutableData<float>(), 0, cache_ch_size * sizeof(float));
+
+    auto cache_tm_shape = std::array<int64_t, 4>{
+        static_cast<int64_t>(batch_size_),
+        static_cast<int64_t>(model_.num_encoder_layers_),
+        static_cast<int64_t>(model_.encoder_hidden_size_),
+        static_cast<int64_t>(model_.conv_context_size_)};
+    size_t cache_tm_size = batch_size_ * model_.num_encoder_layers_ *
+                           model_.encoder_hidden_size_ * model_.conv_context_size_;
+    cache_last_time_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, cache_tm_shape);
+    std::memset(cache_last_time_->GetTensorMutableData<float>(), 0, cache_tm_size * sizeof(float));
+
+    auto cache_len_shape = std::array<int64_t, 1>{static_cast<int64_t>(batch_size_)};
+    cache_last_channel_len_ = OrtValue::CreateTensor<int64_t>(model_.allocator_cpu_, cache_len_shape);
+    cache_last_channel_len_->GetTensorMutableData<int64_t>()[0] = 0;
+
+    caches_initialized_ = true;
+  }
+
+  // Get audio shape info
+  auto type_info = audio_signal_->GetTensorTypeAndShapeInfo();
+  auto shape = type_info->GetShape();
+  int64_t num_frames = shape[2];  // [B, 128, chunk_T]
+
+  // Create length input
+  auto length_shape = std::array<int64_t, 1>{static_cast<int64_t>(batch_size_)};
+  audio_length_ = OrtValue::CreateTensor<int64_t>(
+      model_.allocator_cpu_, length_shape);
+  audio_length_->GetTensorMutableData<int64_t>()[0] = num_frames;
+
+  // Set up streaming encoder inputs: audio + length + 3 caches
+  const char* enc_input_names[] = {
+      "audio_signal", "length",
+      "cache_last_channel", "cache_last_time", "cache_last_channel_len"};
+  const OrtValue* enc_inputs[] = {
+      audio_signal_.get(), audio_length_.get(),
+      cache_last_channel_.get(), cache_last_time_.get(), cache_last_channel_len_.get()};
+
+  const char* enc_output_names[] = {
+      "outputs", "encoded_lengths",
+      "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_len_next"};
+
+  // Run streaming encoder
+  auto enc_outputs = model_.session_encoder_->Run(
+      nullptr,
+      enc_input_names, enc_inputs, 5,
+      enc_output_names, 5);
+
+  encoder_output_raw_ = std::move(enc_outputs[0]);
+  encoded_lengths_ = std::move(enc_outputs[1]);
+
+  // Update caches for next chunk
+  cache_last_channel_ = std::move(enc_outputs[2]);
+  cache_last_time_ = std::move(enc_outputs[3]);
+  cache_last_channel_len_ = std::move(enc_outputs[4]);
+
+  // Read how many encoder output frames this chunk produced
+  encoded_length_ = static_cast<int>(encoded_lengths_->GetTensorData<int64_t>()[0]);
+
+  // Transpose encoder output: [B, 1024, T'] -> [B, T', 1024]
+  TransposeEncoderOutput();
 }
 
 void NemotronState::TransposeEncoderOutput() {
@@ -264,7 +364,7 @@ int NemotronState::RunJoint(const float* enc_frame, const float* dec_hidden) {
 }
 
 // ============================================================================
-// RNNT Greedy Decode
+// RNNT Greedy Decode (Full utterance)
 // ============================================================================
 
 void NemotronState::GreedyDecode() {
@@ -274,33 +374,62 @@ void NemotronState::GreedyDecode() {
   ResetDecoderState();
 
   const int max_symbols_per_step = 10;  // Prevent infinite non-blank emissions per frame
-  int64_t current_token = model_.blank_id_;  // SOS = blank (blank embedding is zero vector, matches NeMo convention)
-
-  // Standard RNNT greedy: run decoder once with SOS to get initial hidden state.
-  // Then for each encoder frame:
-  //   1. Joint(enc_frame, dec_hidden) -> argmax
-  //   2. If blank: advance to next frame (keep decoder state unchanged)
-  //   3. If non-blank: emit token, run decoder with new token to update state, repeat at same frame
+  int64_t current_token = model_.blank_id_;  // SOS = blank
 
   // Initial decoder run with SOS token
   RunDecoder(current_token);
+  decoder_initialized_ = true;
 
   for (int t = 0; t < encoded_length_; t++) {
     // Get encoder frame at time t: pointer into transposed output [B, T', 1024]
     const float* enc_frame = encoder_output_transposed_.data() + t * model_.encoder_hidden_size_;
 
     for (int sym = 0; sym < max_symbols_per_step; sym++) {
-      // Run joint network with current encoder frame and current decoder hidden
       int next_token = RunJoint(enc_frame, decoder_hidden_out_.data());
 
       if (next_token == model_.blank_id_) {
-        // Blank: advance to next encoder frame, decoder state stays the same
-        break;
+        break;  // Advance to next encoder frame
       } else {
-        // Non-blank: emit token, then update decoder with the emitted token
         decoded_tokens_.push_back(next_token);
         current_token = next_token;
         RunDecoder(current_token);
+      }
+    }
+  }
+  last_decoder_token_ = current_token;
+}
+
+// ============================================================================
+// RNNT Greedy Decode (Incremental — for streaming)
+//
+// Decodes only the NEW encoder frames from the latest chunk.
+// Decoder LSTM state is carried forward from the previous chunk.
+// ============================================================================
+
+void NemotronState::GreedyDecodeIncremental(int num_new_frames) {
+  if (num_new_frames <= 0) return;
+
+  // Initialize decoder on first-ever chunk
+  if (!decoder_initialized_) {
+    ResetDecoderState();
+    RunDecoder(last_decoder_token_);
+    decoder_initialized_ = true;
+  }
+
+  const int max_symbols_per_step = 10;
+
+  for (int t = 0; t < num_new_frames; t++) {
+    const float* enc_frame = encoder_output_transposed_.data() + t * model_.encoder_hidden_size_;
+
+    for (int sym = 0; sym < max_symbols_per_step; sym++) {
+      int next_token = RunJoint(enc_frame, decoder_hidden_out_.data());
+
+      if (next_token == model_.blank_id_) {
+        break;  // Advance to next encoder frame
+      } else {
+        decoded_tokens_.push_back(next_token);
+        last_decoder_token_ = next_token;
+        RunDecoder(last_decoder_token_);
       }
     }
   }
@@ -308,16 +437,50 @@ void NemotronState::GreedyDecode() {
 
 // ============================================================================
 // State::Run — Main entry point
+//
+// Streaming mode:
+//   Each call to Run() processes one chunk of audio through the streaming
+//   encoder, then runs incremental RNNT decode on the new encoder frames.
+//   Decoded tokens are emitted one at a time through the logits mechanism.
+//
+// Batch mode:
+//   First call runs entire encoder + full RNNT decode. Subsequent calls
+//   emit pre-decoded tokens one at a time.
 // ============================================================================
 
 DeviceSpan<float> NemotronState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                                      DeviceSpan<int32_t> next_indices) {
-  // On first call: run encoder + full RNNT greedy decode
-  if (!encoder_done_) {
-    RunEncoder();
-    GreedyDecode();
-    emit_index_ = 0;
-    rnnt_done_ = false;
+  if (model_.streaming_enabled_) {
+    // --- Streaming mode ---
+    // When new audio arrives via SetExtraInputs, run streaming encoder + incremental decode
+    if (has_new_audio_) {
+      // Run encoder on the new audio chunk (with cache carry-forward)
+      RunStreamingEncoder();
+
+      // Run RNNT decode on the NEW encoder output frames only
+      GreedyDecodeIncremental(encoded_length_);
+
+      // Update emit_index if new tokens were decoded
+      // (emit_index tracks position within decoded_tokens_ for drip-feeding)
+      // We don't reset it — just continue from where we left off
+    }
+  } else {
+    // --- Batch mode ---
+    // When new audio arrives, run full encoder + RNNT decode (independent per chunk)
+    if (has_new_audio_) {
+      has_new_audio_ = false;
+      encoder_done_ = false;  // Allow re-running encoder for each new chunk
+      RunEncoder();
+      GreedyDecode();
+      emit_index_ = 0;
+      rnnt_done_ = false;
+    } else if (!encoder_done_) {
+      // First call without explicit SetExtraInputs (shouldn't happen normally)
+      RunEncoder();
+      GreedyDecode();
+      emit_index_ = 0;
+      rnnt_done_ = false;
+    }
   }
 
   // Create logits tensor if not yet allocated
@@ -353,6 +516,12 @@ OrtValue* NemotronState::GetInput(const char* name) {
     return audio_signal_.get();
   if (audio_length_ && std::strcmp(name, "length") == 0)
     return audio_length_.get();
+  if (cache_last_channel_ && std::strcmp(name, "cache_last_channel") == 0)
+    return cache_last_channel_.get();
+  if (cache_last_time_ && std::strcmp(name, "cache_last_time") == 0)
+    return cache_last_time_.get();
+  if (cache_last_channel_len_ && std::strcmp(name, "cache_last_channel_len") == 0)
+    return cache_last_channel_len_.get();
   return nullptr;
 }
 
