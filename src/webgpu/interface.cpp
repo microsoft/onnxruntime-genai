@@ -174,6 +174,10 @@ struct InterfaceImpl : DeviceInterface {
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
+
+    // Cache memory info for reuse
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info_));
+    cpu_mem_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   }
 
   Ort::Allocator& GetAllocator() override {
@@ -198,10 +202,6 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
     // WebGPU-specific session configuration
     static const char* webgpu_config_key = "ep.webgpuexecutionprovider.enableInt64";
     static const char* webgpu_config_value = "1";
@@ -216,7 +216,7 @@ struct InterfaceImpl : DeviceInterface {
         output_type,
         element_count,
         "WebGPU",
-        webgpu_mem_info,
+        webgpu_mem_info_,
         session_config_keys,
         session_config_values);
 
@@ -233,24 +233,17 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
-    // Create CPU memory info
-    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-
     if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       // For static mask handling: Only update the new portion with offset-based copying
       std::vector<int32_t> cpu_data(new_kv_length, 1);  // Fill new portion with 1s
 
       // Create source tensor (CPU memory) - only the new data
       std::array<int64_t, 2> src_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data.data(), new_kv_length * sizeof(int32_t), src_shape, type);
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int32_t), src_shape, type);
 
       // Create destination tensor (WebGPU device memory) - full buffer
       std::array<int64_t, 2> dst_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(max_length)};
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, mask_data, max_length * sizeof(int32_t), dst_shape, type);
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int32_t), dst_shape, type);
 
       // Calculate offset for where to write the new data
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int32_t);
@@ -270,11 +263,11 @@ struct InterfaceImpl : DeviceInterface {
 
       // Create source tensor (CPU memory) - only the new data
       std::array<int64_t, 2> src_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data.data(), new_kv_length * sizeof(int64_t), src_shape, type);
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int64_t), src_shape, type);
 
       // Create destination tensor (WebGPU device memory) - full buffer
       std::array<int64_t, 2> dst_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(max_length)};
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, mask_data, max_length * sizeof(int64_t), dst_shape, type);
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int64_t), dst_shape, type);
 
       // Calculate offset for where to write the new data
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int64_t);
@@ -292,6 +285,10 @@ struct InterfaceImpl : DeviceInterface {
 
     return true;
   }
+
+ private:
+  const OrtMemoryInfo* webgpu_mem_info_ = nullptr;
+  std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;
 };
 
 }  // namespace WebGPU
