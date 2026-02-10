@@ -186,8 +186,11 @@ def stage2_int4_quantization(
         return False
 
 
-def copy_supporting_files(src_dir: str, dst_dir: str):
-    """Copy non-encoder files (decoder, joint, configs, tokenizer) as-is."""
+def copy_supporting_files(src_dir: str, dst_dir: str, quantized: bool = False):
+    """Copy non-encoder files (decoder, joint, configs, tokenizer) as-is.
+    
+    If quantized=True, updates genai_config.json with optimization metadata.
+    """
     files_to_copy = [
         "decoder.onnx", "decoder.onnx.data",
         "joint.onnx", "joint.onnx.data",
@@ -205,6 +208,26 @@ def copy_supporting_files(src_dir: str, dst_dir: str):
             shutil.copy2(src, dst)
             copied += 1
     print(f"\n  Copied {copied} supporting files (decoder, joint, configs, tokenizer) → FP32 as-is")
+
+    # Add optimization metadata to genai_config.json
+    if quantized:
+        import json
+        config_path = os.path.join(dst_dir, "genai_config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            if "encoder" in config.get("model", {}):
+                config["model"]["encoder"]["optimization"] = {
+                    "graph_fusion": "conformer",
+                    "quantization": "int4",
+                    "quantization_details": {
+                        "method": "MatMulNBits",
+                        "algorithm": "RTN",
+                    },
+                }
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            print(f"  Updated {os.path.basename(config_path)} with optimization metadata")
 
 
 def main():
@@ -295,7 +318,8 @@ def main():
         print(f"\n  Cleaned up intermediate file: {fused_path.name}")
 
     # --- Copy decoder, joint, configs (FP32 as-is) ---
-    copy_supporting_files(str(model_dir), str(output_dir))
+    did_quantize = not args.skip_quantization
+    copy_supporting_files(str(model_dir), str(output_dir), quantized=did_quantize)
 
     # --- Summary ---
     print("\n" + "=" * 60)
