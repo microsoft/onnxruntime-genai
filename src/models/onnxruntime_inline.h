@@ -532,6 +532,16 @@ inline OrtRunOptions& OrtRunOptions::AddActiveLoraAdapter(const OrtLoraAdapter& 
   return *this;
 }
 
+inline OrtRunOptions& OrtRunOptions::EnableProfiling(const ORTCHAR_T* profile_file_prefix) {
+  Ort::ThrowOnError(Ort::api->RunOptionsEnableProfiling(this, profile_file_prefix));
+  return *this;
+}
+
+inline OrtRunOptions& OrtRunOptions::DisableProfiling() {
+  Ort::ThrowOnError(Ort::api->RunOptionsDisableProfiling(this));
+  return *this;
+}
+
 inline std::unique_ptr<OrtCUDAProviderOptionsV2> OrtCUDAProviderOptionsV2::Create() {
   OrtCUDAProviderOptionsV2* p;
   Ort::ThrowOnError(Ort::api->CreateCUDAProviderOptions(&p));
