@@ -70,7 +70,7 @@ def main(args):
         system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
     except Exception as e:
         if args.verbose:
-            print("Exception in apply_chat_template for system_prompt.", e)
+            print(f"Exception in apply_chat_template for system_prompt: {e}")
         system_prompt = args.system_prompt
     if args.verbose:
         print(f"System prompt: {system_prompt}")
