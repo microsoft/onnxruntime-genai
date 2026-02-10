@@ -44,9 +44,10 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
   return 0;
 }
 
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs,
+                          const std::string& pixel_values_name) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::PixelValuesName) {
+    if (extra_inputs[i].name == pixel_values_name) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto num_dims = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
       if (num_dims < 3) {
@@ -119,7 +120,7 @@ void VisionPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
   for (const auto& ei : extra_inputs) {
-    if (ei.name == "pixel_values") {
+    if (ei.name == model_.config_->model.vision.inputs.pixel_values) {
       pixel_values_tensor_ = ei.tensor;
       break;
     }
@@ -192,7 +193,7 @@ DeviceSpan<float> VisionPipelineState::Run(int current_length,
 
   for (int64_t i = 0; i < total_images; ++i) {
     auto pixel_values_i = MakeSingleImagePixelValues(pixel_values_tensor_, i, model_.p_device_);
-    extra_inputs_.Replace("pixel_values", pixel_values_i);
+    extra_inputs_.Replace(model_.config_->model.vision.inputs.pixel_values, pixel_values_i);
 
     State::Run(*model_.vision_session_);
 
@@ -338,12 +339,29 @@ static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) 
   return m;
 }
 
-static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
-    const NameToLayerIdxMap& past_key_name_to_layer_idx, std::span<const std::string> inputs) {
+static NameToLayerIdxMap GeneratePresentKeyNameToLayerIdxMap(const Config& config) {
+  const size_t num_layers = config.model.decoder.num_hidden_layers;
+  const std::string& present_key_name_template = config.model.decoder.outputs.present_key_names;
+  NameToLayerIdxMap m{};
+  for (size_t i = 0; i < num_layers; ++i) {
+    m.emplace(ComposeKeyValueName(present_key_name_template, static_cast<int>(i)), i);
+  }
+  return m;
+}
+
+static std::vector<size_t> GetLayerIndicesSetFromPastAndPresentKeyNames(
+    const NameToLayerIdxMap& past_key_name_to_layer_idx, const NameToLayerIdxMap& present_key_name_to_layer_idx,
+    std::span<const std::string> inputs, std::span<const std::string> outputs) {
   std::vector<size_t> layer_indices{};
   for (const auto& input_name : inputs) {
     const auto it = past_key_name_to_layer_idx.find(input_name);
     if (it != past_key_name_to_layer_idx.end()) {
+      layer_indices.push_back(it->second);
+    }
+  }
+  for (const auto& output_name : outputs) {
+    const auto it = present_key_name_to_layer_idx.find(output_name);
+    if (it != present_key_name_to_layer_idx.end()) {
       layer_indices.push_back(it->second);
     }
   }
@@ -352,6 +370,17 @@ static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
   layer_indices.erase(std::unique(layer_indices.begin(), layer_indices.end()),
                       layer_indices.end());
   return layer_indices;
+}
+
+static bool ContainsPresentKeyNameOutputs(const NameToLayerIdxMap& present_key_name_to_layer_idx,
+    std::span<const std::string> outputs) {
+  for (const auto& output_name : outputs) {
+    const auto it = present_key_name_to_layer_idx.find(output_name);
+    if (it != present_key_name_to_layer_idx.end()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 DecoderPipelineState::DecoderPipelineState(const MultiModalPipelineLanguageModel& model,
@@ -384,6 +413,7 @@ DecoderPipelineState::DecoderPipelineState(const MultiModalPipelineLanguageModel
 
   if (do_key_value_cache_partial_update_) {
     const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+    const auto present_key_name_to_layer_idx = GeneratePresentKeyNameToLayerIdxMap(*model_.config_);
 
     std::map<std::vector<size_t>, size_t> layer_indices_to_update_record_idx{};
     std::unordered_set<size_t> layer_indices_encountered{};
@@ -391,8 +421,10 @@ DecoderPipelineState::DecoderPipelineState(const MultiModalPipelineLanguageModel
     for (size_t i = 0; i < config_pipeline.size(); ++i) {
       const auto& pipeline_model = config_pipeline[i];
 
-      const auto layer_indices = GetLayerIndicesSetFromPastKeyNameInputs(past_key_name_to_layer_idx,
-                                                                         pipeline_model.inputs);
+      const auto layer_indices = GetLayerIndicesSetFromPastAndPresentKeyNames(past_key_name_to_layer_idx, present_key_name_to_layer_idx,
+                                                                        pipeline_model.inputs, pipeline_model.outputs);
+
+      pipeline_states_[i]->constains_kv_cache_output_ = ContainsPresentKeyNameOutputs(present_key_name_to_layer_idx, pipeline_model.outputs);
 
       if (layer_indices.empty()) {
         continue;
@@ -560,8 +592,8 @@ void DecoderPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& ne
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
-    // If there is any partial KV cache update to start, enqueue it.
-    if (partial_kv_cache_update_record) {
+    // If there is any partial KV cache update to start and if KV cache is present in the output, enqueue it.
+    if (partial_kv_cache_update_record && pipeline_state->constains_kv_cache_output_) {
       assert(key_value_cache_update_worker_thread_.has_value());
       auto update_fn = [&key_value_cache = *key_value_cache_.get(),
                         layer_indices = partial_kv_cache_update_record->layer_indices,
@@ -702,7 +734,7 @@ MultiModalDecoderPipelineState::MultiModalDecoderPipelineState(const MultiModalP
 void MultiModalDecoderPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
