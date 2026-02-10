@@ -22,7 +22,7 @@
 #endif
 
 // Helper function to get the appropriate PHI2 model path based on available models
-static const char* GetPhi2Path() {
+const char* GetPhi2Path() {
   static std::string phi2_path;
   if (!phi2_path.empty()) {
     return phi2_path.c_str();

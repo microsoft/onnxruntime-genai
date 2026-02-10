@@ -21,7 +21,7 @@ extern std::string g_custom_model_path;
 #endif
 
 // Helper function to get the appropriate PHI2 model path based on available models
-static std::string GetPhi2Path() {
+std::string GetPhi2Path() {
   std::vector<std::string> candidate_paths = {
       MODEL_PATH "phi-2/int4/cuda",
       MODEL_PATH "phi-2/int4/dml",
