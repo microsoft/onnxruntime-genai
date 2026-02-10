@@ -47,6 +47,7 @@ struct IntermediatePipelineState : State {
   bool SupportsPrimaryDevice() const;
 
   size_t id_;
+  bool constains_kv_cache_output_ = false; //Specifies if the intermediate pipeline state output conatins present kv cache
 
  private:
   const DecoderOnlyPipelineModel& model_;

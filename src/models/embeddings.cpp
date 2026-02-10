@@ -103,6 +103,8 @@ void WindowedEmbeddings::Update(Embeddings& embeddings) {
 
   const uint16_t* full_data = full_embeddings->GetTensorData<uint16_t>();
 
+  const int mem_copy_factor = (type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 2 : 1;
+
   if (window_index_ == 0) {
     num_windows_ = (sequence_length + window_size_ - 1) / window_size_;
     shape_ = {
@@ -114,7 +116,7 @@ void WindowedEmbeddings::Update(Embeddings& embeddings) {
     embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
     std::copy_n(
         full_data,
-        window_size_ * hidden_size * 2,
+        window_size_ * hidden_size * mem_copy_factor,
         embeddings_->GetTensorMutableData<uint16_t>());
 
   } else if (window_index_ < num_windows_) {
@@ -125,8 +127,8 @@ void WindowedEmbeddings::Update(Embeddings& embeddings) {
     };
     embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
     std::copy_n(
-        full_data + window_index_ * window_size_ * hidden_size * 2,
-        window_size_ * hidden_size * 2,
+        full_data + window_index_ * window_size_ * hidden_size * mem_copy_factor,
+        window_size_ * hidden_size * mem_copy_factor,
         embeddings_->GetTensorMutableData<uint16_t>());
 
   } else {
@@ -134,8 +136,8 @@ void WindowedEmbeddings::Update(Embeddings& embeddings) {
     shape_ = {1, 1, hidden_size};
     embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
     std::copy_n(
-        full_data + (sequence_length - 1) * hidden_size * 2,
-        hidden_size * 2,
+        full_data + (sequence_length - 1) * hidden_size * mem_copy_factor,
+        hidden_size * mem_copy_factor,
         embeddings_->GetTensorMutableData<uint16_t>());
 
   }

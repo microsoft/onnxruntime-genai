@@ -88,12 +88,29 @@ static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) 
   return m;
 }
 
-static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
-    const NameToLayerIdxMap& past_key_name_to_layer_idx, std::span<const std::string> inputs) {
+static NameToLayerIdxMap GeneratePresentKeyNameToLayerIdxMap(const Config& config) {
+  const size_t num_layers = config.model.decoder.num_hidden_layers;
+  const std::string& present_key_name_template = config.model.decoder.outputs.present_key_names;
+  NameToLayerIdxMap m{};
+  for (size_t i = 0; i < num_layers; ++i) {
+    m.emplace(ComposeKeyValueName(present_key_name_template, static_cast<int>(i)), i);
+  }
+  return m;
+}
+
+static std::vector<size_t> GetLayerIndicesSetFromPastAndPresentKeyNames(
+    const NameToLayerIdxMap& past_key_name_to_layer_idx, const NameToLayerIdxMap& present_key_name_to_layer_idx,
+    std::span<const std::string> inputs, std::span<const std::string> outputs) {
   std::vector<size_t> layer_indices{};
   for (const auto& input_name : inputs) {
     const auto it = past_key_name_to_layer_idx.find(input_name);
     if (it != past_key_name_to_layer_idx.end()) {
+      layer_indices.push_back(it->second);
+    }
+  }
+  for (const auto& output_name : outputs) {
+    const auto it = present_key_name_to_layer_idx.find(output_name);
+    if (it != present_key_name_to_layer_idx.end()) {
       layer_indices.push_back(it->second);
     }
   }
@@ -102,6 +119,17 @@ static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
   layer_indices.erase(std::unique(layer_indices.begin(), layer_indices.end()),
                       layer_indices.end());
   return layer_indices;
+}
+
+static bool ContainsPresentKeyNameOutputs(const NameToLayerIdxMap& present_key_name_to_layer_idx,
+    std::span<const std::string> outputs) {
+  for (const auto& output_name : outputs) {
+    const auto it = present_key_name_to_layer_idx.find(output_name);
+    if (it != present_key_name_to_layer_idx.end()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
@@ -129,6 +157,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 
   if (do_key_value_cache_partial_update_) {
     const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+    const auto present_key_name_to_layer_idx = GeneratePresentKeyNameToLayerIdxMap(*model_.config_);
 
     std::map<std::vector<size_t>, size_t> layer_indices_to_update_record_idx{};
     std::unordered_set<size_t> layer_indices_encountered{};
@@ -136,8 +165,10 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     for (size_t i = 0; i < config_pipeline.size(); ++i) {
       const auto& pipeline_model = config_pipeline[i];
 
-      const auto layer_indices = GetLayerIndicesSetFromPastKeyNameInputs(past_key_name_to_layer_idx,
-                                                                         pipeline_model.inputs);
+      const auto layer_indices = GetLayerIndicesSetFromPastAndPresentKeyNames(past_key_name_to_layer_idx, present_key_name_to_layer_idx,
+                                                                        pipeline_model.inputs, pipeline_model.outputs);
+
+      pipeline_states_[i]->constains_kv_cache_output_ = ContainsPresentKeyNameOutputs(present_key_name_to_layer_idx, pipeline_model.outputs);
 
       if (layer_indices.empty()) {
         continue;
@@ -308,8 +339,8 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
-    // If there is any partial KV cache update to start, enqueue it.
-    if (partial_kv_cache_update_record) {
+    // If there is any partial KV cache update to start and if KV cache is present in the output, enqueue it.
+    if (partial_kv_cache_update_record && pipeline_state->constains_kv_cache_output_) {
       assert(key_value_cache_update_worker_thread_.has_value());
       auto update_fn = [&key_value_cache = *key_value_cache_.get(),
                         layer_indices = partial_kv_cache_update_record->layer_indices,
