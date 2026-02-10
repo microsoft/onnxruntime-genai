@@ -1,1 +1,1 @@
-onnxruntime-webgpu==1.24.0.dev20251218001
+onnxruntime-webgpu==1.24.1.dev20260203002
