@@ -430,6 +430,10 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
   }
 
+  // Clear extra_inputs_ to avoid accumulating stale tensors from previous calls
+  // (e.g., old audio_signal tensors from earlier chunks in streaming mode)
+  extra_inputs_.clear();
+
   cpu_span<int32_t> input_ids;
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
@@ -443,11 +447,12 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
-  // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
-  if (set_extra_inputs_) {
+  // Always forward extra inputs to the state — streaming models like Nemotron
+  // need SetExtraInputs called on every chunk to update has_new_audio_.
+  if (!extra_inputs_.empty()) {
     state_->SetExtraInputs(extra_inputs_);
-    set_extra_inputs_ = false;
   }
+  set_extra_inputs_ = false;
 
   // Append tokens and run ComputeLogits after setting all other possible inputs
   if (input_ids.size() > 0) {

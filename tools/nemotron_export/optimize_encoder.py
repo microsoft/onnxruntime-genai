@@ -6,13 +6,22 @@ Two-stage optimization:
   1. Graph fusion  — Fuse Conformer attention subgraphs into MultiHeadAttention,
                      SkipLayerNormalization, BiasGelu, etc.
   2. INT4 quantization — Quantize FP32 MatMul weights to 4-bit (MatMulNBits).
-                          Uses symmetric RTN with block_size=32.
+
+     Quantization methods:
+       - rtn:          Round-to-nearest (simplest, block_size=32, symmetric)
+       - k_quant_mixed: K-quant with mixed precision — sensitive layers
+                        (first/last encoder, attention Q/K/V/Out, pre_encode)
+                        are excluded from quantization and stay FP32.
+                        Uses Intel Neural Compressor's k_quant algorithm for
+                        remaining layers.
+       - hqq:          Half-Quadratic Quantization (no calibration data needed)
 
 The decoder and joint models are tiny (<35 MB combined) and stay FP32.
 
 Usage:
     python optimize_encoder.py [--model_dir ./onnx_models] [--output_dir ./onnx_models_optimized]
                                [--skip_fusion] [--skip_quantization]
+                               [--quant_method rtn|k_quant_mixed|hqq]
                                [--block_size 32] [--accuracy_level 4]
 """
 
@@ -145,16 +154,53 @@ def stage1_graph_fusion(input_path: str, output_path: str) -> bool:
         return False
 
 
+def _get_sensitive_node_names(model_path: str) -> list:
+    """Identify sensitive MatMul nodes that should stay FP32 for quality.
+
+    Sensitive layers for Conformer ASR:
+      - pre_encode (input projection — first bottleneck)
+      - layers.0 (first encoder layer — initial feature extraction)
+      - layers.23 (last encoder layer — final representation)
+      - self_attn/linear_q, linear_k, linear_v, linear_out (attention projections)
+        for ALL layers (attention is more sensitive than FFN to quantization)
+    """
+    import onnx as _onnx
+    model = _onnx.load(model_path, load_external_data=False)
+    sensitive = []
+    for node in model.graph.node:
+        if node.op_type != "MatMul":
+            continue
+        name = node.name
+        # First/last encoder layers — keep FP32
+        if "/pre_encode/" in name:
+            sensitive.append(name)
+        elif "/layers.0/" in name:
+            sensitive.append(name)
+        elif "/layers.23/" in name:
+            sensitive.append(name)
+        # Attention Q/K/V/Out projections in ALL layers — keep FP32
+        elif any(p in name for p in ["/linear_q/", "/linear_k/", "/linear_v/", "/linear_out/"]):
+            sensitive.append(name)
+    return sensitive
+
+
 def stage2_int4_quantization(
     input_path: str,
     output_path: str,
     block_size: int = 32,
     is_symmetric: bool = True,
     accuracy_level: int = 4,
+    quant_method: str = "rtn",
 ) -> bool:
-    """Quantize FP32 MatMul weights to INT4 (MatMulNBits)."""
+    """Quantize FP32 MatMul weights to INT4 (MatMulNBits).
+
+    Methods:
+      rtn           — Round-to-nearest symmetric (original, simplest)
+      k_quant_mixed — K-quant with sensitive layers excluded (best quality/size trade-off)
+      hqq           — Half-Quadratic Quantization (no calibration data needed)
+    """
     print("\n" + "=" * 60)
-    print("  STAGE 2: INT4 Weight Quantization")
+    print(f"  STAGE 2: INT4 Weight Quantization ({quant_method})")
     print("=" * 60)
 
     from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
@@ -164,15 +210,48 @@ def stage2_int4_quantization(
     print(f"  Block size:     {block_size}")
     print(f"  Symmetric:      {is_symmetric}")
     print(f"  Accuracy level: {accuracy_level}")
+    print(f"  Method:         {quant_method}")
 
     try:
+        algo_config = None
+        nodes_to_exclude = []
+
+        if quant_method == "k_quant_mixed":
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+
+            # Identify sensitive layers to keep FP32
+            nodes_to_exclude = _get_sensitive_node_names(input_path)
+            print(f"  Sensitive layers (FP32): {len(nodes_to_exclude)}")
+            for n in nodes_to_exclude:
+                print(f"    {n}")
+
+            algo_config = KQuantWeightOnlyQuantConfig()
+            print(f"  Algorithm: k_quant (Intel Neural Compressor)")
+            print(f"  FFN layers: INT4 quantized")
+            print(f"  Attention+first/last: FP32 preserved")
+
+        elif quant_method == "hqq":
+            from onnxruntime.quantization.matmul_nbits_quantizer import HQQWeightOnlyQuantConfig
+
+            algo_config = HQQWeightOnlyQuantConfig(
+                block_size=block_size,
+                bits=4,
+                axis=1,
+            )
+            print(f"  Algorithm: HQQ (Half-Quadratic Quantization)")
+
+        # else: rtn — uses default MatMulNBitsQuantizer behavior
+
         # Load model with external data resolved relative to its directory
         model = onnx.load(input_path, load_external_data=True)
+
         quantizer = MatMulNBitsQuantizer(
             model=model,
             block_size=block_size,
             is_symmetric=is_symmetric,
             accuracy_level=accuracy_level,
+            nodes_to_exclude=nodes_to_exclude if nodes_to_exclude else None,
+            algo_config=algo_config,
         )
         quantizer.process()
         quantizer.model.save_model_to_file(output_path, use_external_data_format=True)
@@ -244,6 +323,9 @@ def main():
                         help="INT4 quantization block size (default: 32)")
     parser.add_argument("--accuracy_level", type=int, default=4,
                         help="INT4 accuracy level: 0=unset, 1=fp32, 2=fp16, 3=bf16, 4=int8 (default: 4)")
+    parser.add_argument("--quant_method", type=str, default="rtn",
+                        choices=["rtn", "k_quant_mixed", "hqq"],
+                        help="Quantization method: rtn (round-to-nearest), k_quant_mixed (mixed precision), hqq (half-quadratic)")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir).resolve()
@@ -262,7 +344,7 @@ def main():
     print(f"  Source:  {model_dir}")
     print(f"  Output:  {output_dir}")
     print(f"  Fusion:  {'skip' if args.skip_fusion else 'conformer'}")
-    print(f"  Quantize: {'skip' if args.skip_quantization else f'INT4 (block={args.block_size}, sym=True)'}")
+    print(f"  Quantize: {'skip' if args.skip_quantization else f'INT4 {args.quant_method} (block={args.block_size}, sym=True)'}")
 
     # --- Print original encoder stats ---
     orig_stats = get_model_stats(str(encoder_path))
@@ -294,6 +376,7 @@ def main():
             block_size=args.block_size,
             is_symmetric=True,
             accuracy_level=args.accuracy_level,
+            quant_method=args.quant_method,
         )
         if quant_ok:
             final_stats = get_model_stats(str(final_path))
@@ -302,12 +385,18 @@ def main():
                   f"({orig_stats['total_size_mb'] / max(final_stats['total_size_mb'], 0.1):.1f}x)")
     else:
         print("\n  [Skipping INT4 quantization]")
-        # Copy the fusion output (or original) as the final encoder
+        # Copy the fusion output as the final encoder.
+        # IMPORTANT: Keep the original external data filename reference intact
+        # (e.g. encoder_fused.onnx.data). Renaming via onnx.save + convert_model_to_external_data
+        # can produce layouts incompatible with onnxruntime-genai.
         if stage1_output != final_path:
             shutil.copy2(str(stage1_output), str(final_path))
             data_file = str(stage1_output) + ".data"
             if os.path.exists(data_file):
-                shutil.copy2(data_file, str(final_path) + ".data")
+                # Keep the original data filename that the ONNX protobuf references
+                orig_data_name = Path(stage1_output).name + ".data"
+                dest_data = output_dir / orig_data_name
+                shutil.copy2(data_file, str(dest_data))
 
     # --- Cleanup intermediate fusion file ---
     if fused_path.exists() and fused_path != final_path:
@@ -330,13 +419,14 @@ def main():
     total_size = sum(f.stat().st_size for f in final_files if f.is_file())
     print(f"\n  Output directory: {output_dir}")
     print(f"  Total size: {total_size / (1024 * 1024):.1f} MB")
+    quant_label = "FP32 fused" if args.skip_quantization else f"FP32 + INT4 ({args.quant_method})"
     print(f"\n  Files:")
     for f in final_files:
         if f.is_file():
             size_mb = f.stat().st_size / (1024 * 1024)
             tag = ""
             if "encoder" in f.name:
-                tag = " ← optimized (FP32 + INT4)"
+                tag = f" ← optimized ({quant_label})"
             elif "decoder" in f.name or "joint" in f.name:
                 tag = " (FP32, unchanged)"
             print(f"    {f.name:40s} {size_mb:8.1f} MB{tag}")
