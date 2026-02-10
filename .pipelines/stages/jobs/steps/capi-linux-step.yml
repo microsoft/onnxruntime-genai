@@ -67,6 +67,16 @@ steps:
   condition: ne(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- bash: |
+    set -e -x
+    cmake_extra_args=""
+    if [ "$(ep)" = "cuda" ]; then
+      cmake_extra_args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"
+    fi
+    echo "##vso[task.setvariable variable=CMAKE_EXTRA_ARGS;]$cmake_extra_args"
+  displayName: 'Set CMake Extra Args'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
@@ -76,7 +86,7 @@ steps:
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF && \
+            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF $(CMAKE_EXTRA_ARGS) && \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
@@ -120,7 +130,8 @@ steps:
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
+            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) \
+            $(CMAKE_EXTRA_ARGS) && \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'

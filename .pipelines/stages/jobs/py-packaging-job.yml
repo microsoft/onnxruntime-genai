@@ -66,11 +66,14 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
+        Python313:
+          PyDotVer: '3.13'
+          PyNoDotVer: '313'
+        Python314:
+          PyDotVer: '3.14'
+          PyNoDotVer: '314'
     ${{ else }}:
       matrix:
-        Python310:
-          PyDotVer: '3.10'
-          PyNoDotVer: '310'
         Python311:
           PyDotVer: '3.11'
           PyNoDotVer: '311'
@@ -80,6 +83,9 @@ jobs:
         Python313:
           PyDotVer: '3.13'
           PyNoDotVer: '313'
+        Python314:
+          PyDotVer: '3.14'
+          PyNoDotVer: '314'
 
   timeoutInMinutes: 240
   workspace:

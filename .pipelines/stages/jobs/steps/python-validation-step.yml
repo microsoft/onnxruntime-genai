@@ -64,7 +64,7 @@ steps:
   - bash: |
       set -e -x
       docker pull $(cuda_docker_image)
-      python_exe=/opt/python/cp310-cp310/bin/python3.10
+      python_exe=/opt/python/cp312-cp312/bin/python3.12
 
       docker run \
         --gpus all \
