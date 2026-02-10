@@ -95,6 +95,12 @@ void NemotronState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) 
         std::memcpy(audio_signal_->GetTensorMutableData<float>(),
                     ort_val->GetTensorData<float>(), src_size);
         has_new_audio_ = true;
+
+        // Always save current mel chunk so we can add it to replay buffer
+        // if this chunk turns out to be blank
+        current_mel_chunk_.mel_frames = shape[2];
+        current_mel_chunk_.data.resize(type_info->GetElementCount());
+        std::memcpy(current_mel_chunk_.data.data(), ort_val->GetTensorData<float>(), src_size);
       }
       break;
     }
@@ -151,6 +157,61 @@ void NemotronState::RunEncoder() {
 // ============================================================================
 // Streaming Encoder (Cache-Aware)
 // ============================================================================
+
+void NemotronState::ResetEncoderCaches() {
+  if (!caches_initialized_) return;  // Nothing to reset
+
+  // Zero out cache_last_channel: [B, n_layers, cache_len, d_model]
+  size_t cache_ch_size = batch_size_ * model_.num_encoder_layers_ *
+                         model_.cache_last_channel_size_ * model_.encoder_hidden_size_;
+  std::memset(cache_last_channel_->GetTensorMutableData<float>(), 0, cache_ch_size * sizeof(float));
+
+  // Zero out cache_last_time: [B, n_layers, d_model, conv_ctx]
+  size_t cache_tm_size = batch_size_ * model_.num_encoder_layers_ *
+                         model_.encoder_hidden_size_ * model_.conv_context_size_;
+  std::memset(cache_last_time_->GetTensorMutableData<float>(), 0, cache_tm_size * sizeof(float));
+
+  // Reset cache length to 0
+  cache_last_channel_len_->GetTensorMutableData<int64_t>()[0] = 0;
+}
+
+// Run the streaming encoder on a given mel buffer (used for replay).
+// Assumes caches are already initialized. Runs encoder, updates caches,
+// transposes output, and sets encoded_length_.
+void NemotronState::RunEncoderOnMel(const std::vector<float>& mel_data, int64_t mel_frames) {
+  // Create audio signal tensor: [1, 128, mel_frames]
+  auto sig_shape = std::array<int64_t, 3>{1, 128, mel_frames};
+  audio_signal_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, sig_shape);
+  std::memcpy(audio_signal_->GetTensorMutableData<float>(), mel_data.data(),
+              mel_data.size() * sizeof(float));
+
+  // Create length tensor
+  auto length_shape = std::array<int64_t, 1>{1};
+  audio_length_ = OrtValue::CreateTensor<int64_t>(model_.allocator_cpu_, length_shape);
+  audio_length_->GetTensorMutableData<int64_t>()[0] = mel_frames;
+
+  // Run streaming encoder with current caches
+  const char* enc_input_names[] = {
+      "audio_signal", "length",
+      "cache_last_channel", "cache_last_time", "cache_last_channel_len"};
+  const OrtValue* enc_inputs[] = {
+      audio_signal_.get(), audio_length_.get(),
+      cache_last_channel_.get(), cache_last_time_.get(), cache_last_channel_len_.get()};
+  const char* enc_output_names[] = {
+      "outputs", "encoded_lengths",
+      "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_len_next"};
+
+  auto enc_outputs = model_.session_encoder_->Run(
+      nullptr, enc_input_names, enc_inputs, 5, enc_output_names, 5);
+
+  encoder_output_raw_ = std::move(enc_outputs[0]);
+  encoded_lengths_ = std::move(enc_outputs[1]);
+  cache_last_channel_ = std::move(enc_outputs[2]);
+  cache_last_time_ = std::move(enc_outputs[3]);
+  cache_last_channel_len_ = std::move(enc_outputs[4]);
+  encoded_length_ = static_cast<int>(encoded_lengths_->GetTensorData<int64_t>()[0]);
+  TransposeEncoderOutput();
+}
 
 void NemotronState::RunStreamingEncoder() {
   if (!has_new_audio_) return;
@@ -351,7 +412,7 @@ int NemotronState::RunJoint(const float* enc_frame, const float* dec_hidden) {
   // joint_output shape: [1, 1, 1, 1025]
   const float* logits = joint_outputs[0]->GetTensorData<float>();
 
-  // Argmax over vocab dimension
+  // Simple argmax over vocab dimension
   int best_token = 0;
   float best_score = logits[0];
   for (int v = 1; v < model_.vocab_size_; v++) {
@@ -374,7 +435,7 @@ void NemotronState::GreedyDecode() {
   // Initialize LSTM states to zeros for new utterance
   ResetDecoderState();
 
-  const int max_symbols_per_step = 10;  // Prevent infinite non-blank emissions per frame
+  const int max_symbols_per_step = 30;  // Prevent infinite non-blank emissions per frame
   int64_t current_token = model_.blank_id_;  // SOS = blank
 
   // Initial decoder run with SOS token
@@ -404,7 +465,12 @@ void NemotronState::GreedyDecode() {
 // RNNT Greedy Decode (Incremental — for streaming)
 //
 // Decodes only the NEW encoder frames from the latest chunk.
-// Decoder LSTM state is carried forward from the previous chunk.
+// Uses hybrid stateful/stateless approach:
+//   - Normally carries decoder LSTM state across chunks for context continuity
+//   - Resets decoder state when previous chunk produced zero tokens (stuck detector)
+//   - This addresses the known RNNT streaming issue where the decoder LSTM enters
+//     a degenerate blank-producing state after sentence-ending tokens like '.'
+//     (NeMo #14430, FluidAudio #128)
 // ============================================================================
 
 void NemotronState::GreedyDecodeIncremental(int num_new_frames) {
@@ -413,12 +479,54 @@ void NemotronState::GreedyDecodeIncremental(int num_new_frames) {
   // Initialize decoder on first-ever chunk
   if (!decoder_initialized_) {
     ResetDecoderState();
-    RunDecoder(last_decoder_token_);
+    RunDecoder(model_.blank_id_);  // SOS = blank
     decoder_initialized_ = true;
+  } else if (prev_chunk_blank_) {
+    // Previous chunk produced zero non-blank tokens. Reset decoder.
+    ResetDecoderState();
+    RunDecoder(model_.blank_id_);
+    last_decoder_token_ = model_.blank_id_;
+
+    // If decoder reset alone hasn't helped (2+ consecutive blank chunks),
+    // the encoder caches are also degenerate. Reset them AND replay
+    // all buffered mel chunks to recover the lost audio.
+    if (consecutive_blank_chunks_ >= 2) {
+      ResetEncoderCaches();
+
+      // Replay buffered mel chunks through fresh encoder + decoder
+      if (!mel_replay_buffer_.empty()) {
+        for (auto& mc : mel_replay_buffer_) {
+          RunEncoderOnMel(mc.data, mc.mel_frames);
+          // Decode the replayed encoder output
+          int replay_frames = encoded_length_;
+          for (int t = 0; t < replay_frames; t++) {
+            const float* enc_frame = encoder_output_transposed_.data() + t * model_.encoder_hidden_size_;
+            for (int sym = 0; sym < 30; sym++) {
+              int next_token = RunJoint(enc_frame, decoder_hidden_out_.data());
+              if (next_token == model_.blank_id_) {
+                break;
+              } else {
+                decoded_tokens_.push_back(next_token);
+                last_decoder_token_ = next_token;
+                RunDecoder(last_decoder_token_);
+              }
+            }
+          }
+        }
+        mel_replay_buffer_.clear();
+      }
+      collecting_replay_ = false;
+
+      // Re-encode the CURRENT chunk with the fresh encoder caches
+      // (it was previously encoded with degenerate caches)
+      RunEncoderOnMel(current_mel_chunk_.data, current_mel_chunk_.mel_frames);
+      num_new_frames = encoded_length_;
+    }
   }
 
-  const int max_symbols_per_step = 10;
+  const int max_symbols_per_step = 30;
 
+  int tokens_this_chunk = 0;
   for (int t = 0; t < num_new_frames; t++) {
     const float* enc_frame = encoder_output_transposed_.data() + t * model_.encoder_hidden_size_;
 
@@ -431,9 +539,31 @@ void NemotronState::GreedyDecodeIncremental(int num_new_frames) {
         decoded_tokens_.push_back(next_token);
         last_decoder_token_ = next_token;
         RunDecoder(last_decoder_token_);
+        tokens_this_chunk++;
       }
     }
   }
+
+  // Track whether this chunk produced any tokens for the stuck detector
+  bool was_blank = (tokens_this_chunk == 0);
+  if (was_blank) {
+    consecutive_blank_chunks_++;
+    // Save this blank chunk's mel data for potential replay
+    if (!collecting_replay_) {
+      collecting_replay_ = true;
+      mel_replay_buffer_.clear();
+    }
+    // Always push the current chunk's mel data so it can be replayed
+    mel_replay_buffer_.push_back(current_mel_chunk_);
+  } else {
+    consecutive_blank_chunks_ = 0;
+    // Good chunk — stop collecting, discard any partial buffer
+    if (collecting_replay_) {
+      collecting_replay_ = false;
+      mel_replay_buffer_.clear();
+    }
+  }
+  prev_chunk_blank_ = was_blank;
 }
 
 // ============================================================================

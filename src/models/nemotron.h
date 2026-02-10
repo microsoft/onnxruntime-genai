@@ -82,6 +82,7 @@ struct NemotronState : State {
   // --- Encoder ---
   void RunEncoder();
   void RunStreamingEncoder();        // Cache-aware chunked encoder
+  void ResetEncoderCaches();         // Reset encoder caches to zeros (stuck recovery)
   void TransposeEncoderOutput();     // [B,1024,T'] -> [B,T',1024]
   bool encoder_done_{false};
   int encoded_length_{0};
@@ -135,6 +136,22 @@ struct NemotronState : State {
 
   // Track the last decoder token for RNNT continuity across chunks
   int64_t last_decoder_token_{0};  // Carries across chunks in streaming mode
+
+  // Stuck detector: resets decoder + encoder caches when stuck in blank-producing state
+  bool prev_chunk_blank_{false};
+  int consecutive_blank_chunks_{0};
+
+  // --- Mel replay buffer ---
+  // Saves mel chunks during blank periods so they can be replayed after
+  // encoder+decoder reset to recover lost audio content.
+  void RunEncoderOnMel(const std::vector<float>& mel_data, int64_t mel_frames);
+  struct MelChunk {
+    std::vector<float> data;  // [128 * mel_frames] flat
+    int64_t mel_frames;
+  };
+  MelChunk current_mel_chunk_;                // Current chunk saved in SetExtraInputs
+  std::vector<MelChunk> mel_replay_buffer_;   // Chunks accumulated during blank periods
+  bool collecting_replay_{false};             // True while in blank-period collection
 };
 
 }  // namespace Generators
