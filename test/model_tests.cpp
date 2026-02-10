@@ -19,16 +19,27 @@ extern std::string g_custom_model_path;
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
+
+// Helper function to get the appropriate PHI2 model path based on available models
+static std::string GetPhi2Path() {
+  std::vector<std::string> candidate_paths = {
+      MODEL_PATH "phi-2/int4/cuda",
+      MODEL_PATH "phi-2/int4/dml",
+      MODEL_PATH "phi-2/int4/webgpu",
+      MODEL_PATH "phi-2/int4/cpu"};
+
+  for (const auto& path : candidate_paths) {
+    if (std::filesystem::exists(path)) {
+      return path;
+    }
+  }
+
+  // Fallback to CPU path if nothing found
+  return MODEL_PATH "phi-2/int4/cpu";
+}
+
 #ifndef PHI2_PATH
-#if USE_CUDA
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
-#elif USE_DML
-#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
-#elif USE_WEBGPU
-#define PHI2_PATH MODEL_PATH "phi-2/int4/webgpu"
-#else
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
-#endif
+#define PHI2_PATH GetPhi2Path().c_str()
 #endif
 
 // To generate this file:

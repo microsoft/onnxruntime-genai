@@ -140,26 +140,6 @@
       "configurePreset": "windows_x64_directml_minsizerel"
     },
     {
-      "name": "windows_x64_webgpu_release",
-      "configuration": "Release",
-      "configurePreset": "windows_x64_webgpu_release"
-    },
-    {
-      "name": "windows_x64_webgpu_debug",
-      "configuration": "Debug",
-      "configurePreset": "windows_x64_webgpu_debug"
-    },
-    {
-      "name": "windows_x64_webgpu_relwithdebinfo",
-      "configuration": "RelWithDebInfo",
-      "configurePreset": "windows_x64_webgpu_relwithdebinfo"
-    },
-    {
-      "name": "windows_x64_webgpu_minsizerel",
-      "configuration": "MinSizeRel",
-      "configurePreset": "windows_x64_webgpu_minsizerel"
-    },
-    {
       "name": "windows_arm64_cpu_relwithdebinfo",
       "configuration": "RelWithDebInfo",
       "configurePreset": "windows_arm64_cpu_relwithdebinfo"

@@ -20,21 +20,48 @@
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
+
+// Helper function to get the appropriate PHI2 model path based on available models
+static const char* GetPhi2Path() {
+  static std::string phi2_path;
+  if (!phi2_path.empty()) {
+    return phi2_path.c_str();
+  }
+
+  std::vector<std::string> candidate_paths = {
+      MODEL_PATH "phi-2/int4/cuda",
+      MODEL_PATH "phi-2/int4/dml",
+      MODEL_PATH "phi-2/int4/webgpu",
+      MODEL_PATH "phi-2/int4/cpu"};
+
+  for (const auto& path : candidate_paths) {
+    std::ifstream test_file(path + std::string("/genai_config.json"));
+    if (test_file.good()) {
+      phi2_path = path;
+      return phi2_path.c_str();
+    }
+  }
+
+  // Fallback to CPU path
+  phi2_path = MODEL_PATH "phi-2/int4/cpu";
+  return phi2_path.c_str();
+}
+
 #ifndef PHI2_PATH
-#if USE_CUDA
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
-#elif USE_DML
-#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
-#elif USE_WEBGPU
-#define PHI2_PATH MODEL_PATH "phi-2/int4/webgpu"
-#else
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
-#endif
+#define PHI2_PATH GetPhi2Path()
 #endif
 
-#ifndef ENABLE_ENGINE_TESTS
-#define ENABLE_ENGINE_TESTS TEST_PHI2 && !USE_DML && !USE_WEBGPU
+// Helper to detect if we're using WebGPU or DML EP based on the model path
+static bool IsEngineTestsEnabled() {
+#if TEST_PHI2
+  std::string path = GetPhi2Path();
+  // Skip engine tests for DML and WebGPU (batching not fully tested)
+  return path.find("/dml") == std::string::npos &&
+         path.find("/webgpu") == std::string::npos;
+#else
+  return false;
 #endif
+}
 
 TEST(CAPITests, Config) {
 #if TEST_PHI2
@@ -320,7 +347,10 @@ TEST(CAPIEngineTests, MaxLength) {
 // DML doesn't support batch_size > 1
 // TODO: WebGPU should support batch_size > 1, investigate why it's failing
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2 && !USE_DML && !USE_WEBGPU
+#if TEST_PHI2
+  if (!IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping batch test for DML/WebGPU";
+  }
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -1020,11 +1050,9 @@ class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
-#if USE_WEBGPU
-  if (GetParam()) {
-    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  if (GetParam() && !IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
-#endif
 
   Phi2Test test;
 
@@ -1047,11 +1075,9 @@ class ParametrizedTopPCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
-#if USE_WEBGPU
-  if (GetParam()) {
-    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  if (GetParam() && !IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
-#endif
 
   Phi2Test test;
 
@@ -1074,11 +1100,9 @@ class ParametrizedTopKTopPCAPITestsTests : public ::testing::TestWithParam<bool>
 };
 
 TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
-#if USE_WEBGPU
-  if (GetParam()) {
-    GTEST_SKIP() << "Skipping Engine test for WebGPU";
+  if (GetParam() && !IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
-#endif
 
   Phi2Test test;
 

@@ -16,7 +16,7 @@ env:
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  binaryDir: 'build/webgpu/win-x64'
+  binaryDir: 'build/cpu/win-x64'
   TEST_WEBGPU: 'true'
 
 jobs:
@@ -47,23 +47,22 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download OnnxRuntime Nightly (CPU package for headers and lib)
+      - name: Download OnnxRuntime Foundry Package (includes WebGPU support)
         shell: pwsh
         run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "OnnxRuntime version: $ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+          # Use Foundry package which includes WebGPU DLLs (dxil.dll, dxcompiler.dll)
+          $FOUNDRY_VERSION = "1.24.1.1"
+          Write-Host "Downloading OnnxRuntime.Foundry version: $FOUNDRY_VERSION"
+          nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive
 
-      - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      - run: Get-ChildItem Microsoft.ML.OnnxRuntime.Foundry.* -Recurse
         continue-on-error: true
 
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir ort/lib
-          move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
-          move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
+          move Microsoft.ML.OnnxRuntime.Foundry.*/build/native/include ort/
+          move Microsoft.ML.OnnxRuntime.Foundry.*/runtimes/win-x64/native/* ort/lib/
 
       - name: Install Rust Toolchain
         run: |
@@ -74,55 +73,18 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_webgpu_release -DTEST_PHI2=True
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True
 
-      - name: Install Python dependencies to get WebGPU OnnxRuntime
+      - name: Build with CMake
+        run: |
+          cmake --build --preset windows_x64_cpu_release --parallel
+          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+
+      - name: Install Python dependencies and Wheel
         run: |
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\webgpu\torch\requirements.txt
           python -m pip install -r test\python\webgpu\ort\requirements.txt
-
-      - name: Replace onnxruntime CPU DLLs with WebGPU DLLs
-        shell: pwsh
-        run: |
-          Write-Host "Replacing onnxruntime CPU DLLs with WebGPU DLLs before building..."
-
-          # Find onnxruntime-webgpu package location (installed via pip)
-          $ortWebGpuLocation = python -c "import onnxruntime; import os; print(os.path.dirname(onnxruntime.__file__))"
-          Write-Host "onnxruntime-webgpu package location: $ortWebGpuLocation"
-
-          # Find the capi directory where WebGPU DLLs are located
-          $webgpuCapiDir = Join-Path $ortWebGpuLocation "capi"
-          if (-not (Test-Path $webgpuCapiDir)) {
-            Write-Error "Could not find onnxruntime capi directory at: $webgpuCapiDir"
-            exit 1
-          }
-
-          # Copy WebGPU DLLs to ort/lib (for building genai with WebGPU support)
-          Write-Host "`nCopying WebGPU DLLs to ort/lib..."
-          $dllsToCopy = @("onnxruntime.dll", "dxil.dll", "dxcompiler.dll")
-          foreach ($dll in $dllsToCopy) {
-            $sourcePath = Join-Path $webgpuCapiDir $dll
-            if (Test-Path $sourcePath) {
-              Copy-Item -Path $sourcePath -Destination "$env:GITHUB_WORKSPACE\ort\lib\$dll" -Force
-              Write-Host "  Copied: $dll"
-            } else {
-              Write-Host "  Warning: $dll not found at $sourcePath"
-            }
-          }
-
-          Write-Host "`nWebGPU DLLs successfully replaced in ort/lib/"
-          Get-ChildItem "$env:GITHUB_WORKSPACE\ort\lib\*.dll" | ForEach-Object {
-            Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
-          }
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_x64_webgpu_release --parallel
-          cmake --build --preset windows_x64_webgpu_release --target PyPackageBuild
-
-      - name: Install the Python Wheel
-        run: |
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Build the Java API and Run the Java Tests
