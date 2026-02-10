@@ -44,9 +44,10 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
   return 0;
 }
 
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs,
+                          const std::string& pixel_values_name) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::PixelValuesName) {
+    if (extra_inputs[i].name == pixel_values_name) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto num_dims = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
       if (num_dims < 3) {
@@ -119,7 +120,7 @@ void VisionPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
   for (const auto& ei : extra_inputs) {
-    if (ei.name == "pixel_values") {
+    if (ei.name == model_.config_->model.vision.inputs.pixel_values) {
       pixel_values_tensor_ = ei.tensor;
       break;
     }
@@ -192,7 +193,7 @@ DeviceSpan<float> VisionPipelineState::Run(int current_length,
 
   for (int64_t i = 0; i < total_images; ++i) {
     auto pixel_values_i = MakeSingleImagePixelValues(pixel_values_tensor_, i, model_.p_device_);
-    extra_inputs_.Replace("pixel_values", pixel_values_i);
+    extra_inputs_.Replace(model_.config_->model.vision.inputs.pixel_values, pixel_values_i);
 
     State::Run(*model_.vision_session_);
 
@@ -733,7 +734,7 @@ MultiModalDecoderPipelineState::MultiModalDecoderPipelineState(const MultiModalP
 void MultiModalDecoderPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
