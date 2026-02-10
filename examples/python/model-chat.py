@@ -39,8 +39,8 @@ def main(args):
     # Create system message
     message = [{"role": "system", "content": args.system_prompt}]
 
-    # Get and set guidance info if requested
-    tools = "" # optional; initialize to empty string to avoid uninitialized variable error later
+    # Get guidance info if requested
+    guidance_type, guidance_data, tools = "", "", ""
     if args.response_format != "":
         print("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json")
         guidance_type, guidance_data, tools = get_guidance(
