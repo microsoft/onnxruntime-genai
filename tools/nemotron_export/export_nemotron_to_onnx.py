@@ -315,6 +315,192 @@ def consolidate_single_model(onnx_path):
         return False
 
 
+def generate_genai_config(asr_model, output_dir, streaming=False):
+    """Generate genai_config.json from the loaded NeMo model."""
+    import json
+
+    encoder = asr_model.encoder
+    decoder = asr_model.decoder
+    joint = asr_model.joint
+
+    # Extract dimensions from model
+    encoder_hidden = getattr(encoder, 'd_model', 1024)
+    encoder_layers = getattr(encoder, 'num_layers', 24)
+    encoder_heads = getattr(encoder, 'num_attention_heads',
+                   getattr(encoder, '_num_heads', 8))
+    # Try to get from encoder layer attention
+    if encoder_heads == 8 and hasattr(encoder, 'layers') and len(encoder.layers) > 0:
+        layer = encoder.layers[0]
+        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'h'):
+            encoder_heads = layer.self_attn.h
+    head_size = encoder_hidden // encoder_heads
+
+    decoder_hidden = getattr(decoder, 'pred_hidden',
+                    getattr(decoder, 'd_model', 640))
+    decoder_layers = getattr(decoder, 'pred_rnn_layers',
+                    getattr(decoder, 'num_layers', 2))
+
+    vocab_size = joint.num_classes_with_blank
+    blank_id = vocab_size - 1  # blank is last token
+
+    # Encoder I/O names
+    encoder_config = {
+        "filename": "encoder.onnx",
+        "hidden_size": encoder_hidden,
+        "num_hidden_layers": encoder_layers,
+        "num_attention_heads": encoder_heads,
+        "head_size": head_size,
+        "inputs": {
+            "audio_features": "audio_signal",
+            "encoder_input_lengths": "length",
+        },
+        "outputs": {
+            "hidden_states": "outputs",
+            "encoder_output_lengths": "encoded_lengths",
+        },
+    }
+
+    # Add streaming cache I/O if applicable
+    if streaming:
+        encoder_config["inputs"]["cache_last_channel"] = "cache_last_channel"
+        encoder_config["inputs"]["cache_last_time"] = "cache_last_time"
+        encoder_config["inputs"]["cache_last_channel_len"] = "cache_last_channel_len"
+        encoder_config["outputs"]["cache_last_channel_next"] = "cache_last_channel_next"
+        encoder_config["outputs"]["cache_last_time_next"] = "cache_last_time_next"
+        encoder_config["outputs"]["cache_last_channel_len_next"] = "cache_last_channel_len_next"
+
+    # Decoder I/O names (stateful with LSTM h/c)
+    decoder_config = {
+        "filename": "decoder.onnx",
+        "hidden_size": decoder_hidden,
+        "num_hidden_layers": decoder_layers,
+        "inputs": {
+            "input_ids": "targets",
+            "input_ids_length": "target_length_orig",
+            "encoder_hidden_states": "encoder_outputs",
+        },
+        "outputs": {
+            "logits": "decoder_output",
+        },
+        "pipeline": {
+            "joint": {
+                "filename": "joint.onnx",
+                "inputs": ["encoder_output", "decoder_output"],
+                "outputs": ["joint_output"],
+            }
+        },
+    }
+
+    # Audio preprocessing config
+    preprocessor_cfg = asr_model.cfg.get('preprocessor', {})
+    sample_rate = preprocessor_cfg.get('sample_rate', 16000)
+    n_mels = preprocessor_cfg.get('features', preprocessor_cfg.get('nfilt', 128))
+    window_size = preprocessor_cfg.get('window_size', preprocessor_cfg.get('n_window_size', 0.025))
+    window_stride = preprocessor_cfg.get('window_stride', preprocessor_cfg.get('n_window_stride', 0.01))
+    # Convert to ms if given in seconds
+    if isinstance(window_size, float) and window_size < 1.0:
+        frame_length_ms = window_size * 1000
+    elif isinstance(window_size, int) and window_size > 100:
+        frame_length_ms = window_size / sample_rate * 1000
+    else:
+        frame_length_ms = 25
+    if isinstance(window_stride, float) and window_stride < 1.0:
+        frame_shift_ms = window_stride * 1000
+    elif isinstance(window_stride, int) and window_stride > 10:
+        frame_shift_ms = window_stride / sample_rate * 1000
+    else:
+        frame_shift_ms = 10
+
+    config = {
+        "model": {
+            "type": "nemotron_asr",
+            "vocab_size": vocab_size,
+            "context_length": 8192,
+            "bos_token_id": 0,
+            "eos_token_id": blank_id,
+            "pad_token_id": blank_id,
+            "encoder": encoder_config,
+            "decoder": decoder_config,
+            "speech": {
+                "config_filename": "audio_processor_config.json",
+                "sample_rate": sample_rate,
+                "mel_bins": n_mels,
+                "frame_length_ms": frame_length_ms,
+                "frame_shift_ms": frame_shift_ms,
+            },
+        },
+        "search": {
+            "max_length": 8192,
+            "min_length": 0,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+            "do_sample": False,
+            "early_stopping": True,
+        },
+    }
+
+    config_path = output_dir / "genai_config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"      [OK] Generated {config_path.name}")
+
+
+def generate_audio_processor_config(asr_model, output_dir):
+    """Generate audio_processor_config.json from the loaded NeMo model."""
+    import json
+
+    preprocessor_cfg = asr_model.cfg.get('preprocessor', {})
+    sample_rate = preprocessor_cfg.get('sample_rate', 16000)
+    n_fft = preprocessor_cfg.get('n_fft', 512)
+    n_mels = preprocessor_cfg.get('features', preprocessor_cfg.get('nfilt', 128))
+    window_size = preprocessor_cfg.get('window_size', preprocessor_cfg.get('n_window_size', 0.025))
+    window_stride = preprocessor_cfg.get('window_stride', preprocessor_cfg.get('n_window_stride', 0.01))
+
+    # Convert to samples
+    if isinstance(window_size, float) and window_size < 1.0:
+        window_length = int(window_size * sample_rate)
+    elif isinstance(window_size, int):
+        window_length = window_size
+    else:
+        window_length = 400
+    if isinstance(window_stride, float) and window_stride < 1.0:
+        hop_length = int(window_stride * sample_rate)
+    elif isinstance(window_stride, int):
+        hop_length = window_stride
+    else:
+        hop_length = 160
+
+    dither = preprocessor_cfg.get('dither', 0.0)
+    preemphasis = preprocessor_cfg.get('preemph', preprocessor_cfg.get('preemphasis', 0.97))
+    normalize = preprocessor_cfg.get('normalize', 'none')
+
+    audio_config = {
+        "model_type": "speech_features",
+        "audio_params": {
+            "sample_rate": sample_rate,
+            "n_fft": n_fft,
+            "hop_length": hop_length,
+            "n_mels": n_mels,
+            "window_length": window_length,
+            "window_type": "hann",
+            "fmin": 0,
+            "fmax": sample_rate // 2,
+            "dither": dither,
+            "preemphasis": preemphasis,
+            "log_zero_guard_type": "add",
+            "log_zero_guard_value": 1e-10,
+            "normalize": normalize,
+            "center": True,
+            "mag_power": 2.0,
+        },
+    }
+
+    config_path = output_dir / "audio_processor_config.json"
+    with open(config_path, "w") as f:
+        json.dump(audio_config, f, indent=2)
+    print(f"      [OK] Generated {config_path.name}")
+
+
 def export_model(args):
     """Export the Nemotron ASR model components to ONNX."""
     print("=" * 60)
@@ -576,6 +762,11 @@ def export_model(args):
         )
     print(f"      [OK] Joint network exported to {joint_path}")
     consolidate_single_model(joint_path)
+
+    # ---------- Generate config files ----------
+    print("\n      Generating config files...")
+    generate_genai_config(asr_model, output_dir, args.streaming)
+    generate_audio_processor_config(asr_model, output_dir)
 
     # Summary
     print(f"\n[5/5] Export complete! Generated files:")
