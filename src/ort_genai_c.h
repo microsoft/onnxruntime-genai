@@ -79,6 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaStreamingASR OgaStreamingASR;
 
 //! @}
 
@@ -1145,6 +1146,45 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
  *
  */
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
+/**
+ * \brief Creates a StreamingASR instance for real-time streaming speech recognition.
+ * \param[in] model The model to use for streaming ASR (must be nemotron_speech type).
+ * \param[out] out Pointer to store the created StreamingASR instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStreamingASR(OgaModel* model, OgaStreamingASR** out);
+
+/**
+ * \brief Transcribe an audio chunk. Returns newly transcribed text.
+ * \param[in] asr The StreamingASR instance.
+ * \param[in] audio_data Pointer to float32 PCM audio samples (mono, 16kHz).
+ * \param[in] num_samples Number of audio samples.
+ * \param[out] text Pointer to store the transcribed text. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRTranscribeChunk(OgaStreamingASR* asr, const float* audio_data, size_t num_samples, const char** text);
+
+/**
+ * \brief Get the full transcript accumulated so far.
+ * \param[in] asr The StreamingASR instance.
+ * \param[out] text Pointer to store the transcript. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRGetTranscript(const OgaStreamingASR* asr, const char** text);
+
+/**
+ * \brief Reset streaming state for a new utterance.
+ * \param[in] asr The StreamingASR instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRReset(OgaStreamingASR* asr);
+
+/**
+ * \brief Destroy a StreamingASR instance.
+ * \param[in] asr The StreamingASR instance to destroy.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* asr);
 
 #ifdef __cplusplus
 }

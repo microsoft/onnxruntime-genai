@@ -133,11 +133,13 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        std::string audio_features_length;  // For models that need explicit length input (e.g., Nemotron)
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
+        std::string encoder_output_length;  // For models that output explicit length (e.g., Nemotron)
         std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
       } outputs;
     } encoder;

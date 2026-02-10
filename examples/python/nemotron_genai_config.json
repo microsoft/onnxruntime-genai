@@ -1,0 +1,40 @@
+{
+  "model": {
+    "type": "nemotron_speech",
+    "vocab_size": 1025,
+    "context_length": 1,
+    "encoder": {
+      "filename": "encoder.onnx",
+      "inputs": {
+        "audio_features": "processed_signal",
+        "audio_features_length": "processed_signal_length"
+      },
+      "outputs": {
+        "encoder_outputs": "encoded",
+        "encoder_output_length": "encoded_len"
+      }
+    },
+    "decoder": {
+      "filename": "decoder_joint.onnx",
+      "inputs": {
+        "encoder_hidden_states": "encoder_output",
+        "input_ids": "targets"
+      },
+      "outputs": {
+        "logits": "outputs"
+      }
+    },
+    "speech": {
+      "config_filename": "preprocessor_config.json",
+      "feature_size": 80,
+      "sampling_rate": 16000,
+      "chunk_length_seconds": 0.56
+    }
+  },
+  "search": {
+    "max_length": 512,
+    "num_beams": 1,
+    "blank_token_id": 1024,
+    "eos_token_id": -1
+  }
+}

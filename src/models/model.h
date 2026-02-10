@@ -9,6 +9,7 @@
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
+#include "nemotron_speech_processor.h"
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
 #include "adapters.h"

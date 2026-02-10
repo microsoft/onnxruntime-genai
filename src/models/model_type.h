@@ -33,6 +33,12 @@ struct ModelType {
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
   }
 
+  inline static bool IsStreamingASR(const std::string& model_type) {
+    // Streaming ASR model (cache-aware encoder + RNNT decoder)
+    static constexpr std::array<std::string_view, 1> StreamingASR = {"nemotron_speech"};
+    return std::find(StreamingASR.begin(), StreamingASR.end(), model_type) != StreamingASR.end();
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 1> MMM = {"phi4mm"};

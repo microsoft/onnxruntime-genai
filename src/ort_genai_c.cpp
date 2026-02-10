@@ -13,6 +13,7 @@
 #include "search.h"
 #include "smartptrs.h"
 #include "engine/engine.h"
+#include "streaming_asr.h"
 
 namespace Generators {
 
@@ -60,6 +61,7 @@ struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
+struct OgaStreamingASR : Generators::StreamingASR, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -1083,5 +1085,37 @@ void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_n
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
 }
+
+OgaResult* OGA_API_CALL OgaCreateStreamingASR(OgaModel* model, OgaStreamingASR** out) {
+  OGA_TRY
+  auto asr = Generators::CreateStreamingASR(*model);
+  *out = ReturnUnique<OgaStreamingASR>(std::move(asr));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingASRTranscribeChunk(OgaStreamingASR* asr, const float* audio_data, size_t num_samples, const char** text) {
+  OGA_TRY
+  std::string result = asr->TranscribeChunk(audio_data, num_samples);
+  *text = AllocOgaString(result);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingASRGetTranscript(const OgaStreamingASR* asr, const char** text) {
+  OGA_TRY
+  *text = AllocOgaString(asr->GetTranscript());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingASRReset(OgaStreamingASR* asr) {
+  OGA_TRY
+  asr->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* p) { delete p; }
 
 }  // extern "C"
