@@ -105,7 +105,7 @@ def main(args):
             user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
         except Exception as e:
             if args.verbose:
-                print("Exception in apply_chat_template for user_prompt.", e)
+                print(f"Exception in apply_chat_template for user_prompt: {e}")
             user_prompt = text
         if args.verbose:
             print(f"User prompt: {user_prompt}")
