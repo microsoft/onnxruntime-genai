@@ -53,16 +53,16 @@ jobs:
           # Use Foundry package which includes WebGPU DLLs (dxil.dll, dxcompiler.dll)
           $FOUNDRY_VERSION = "1.24.1.1"
           Write-Host "Downloading OnnxRuntime.Foundry version: $FOUNDRY_VERSION"
-          nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive
+          nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
 
-      - run: Get-ChildItem Microsoft.ML.OnnxRuntime.Foundry.* -Recurse
+      - run: Get-ChildItem Microsoft.ML.OnnxRuntime.Foundry -Recurse
         continue-on-error: true
 
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir ort/lib
-          move Microsoft.ML.OnnxRuntime.Foundry.*/build/native/include ort/
-          move Microsoft.ML.OnnxRuntime.Foundry.*/runtimes/win-x64/native/* ort/lib/
+          move Microsoft.ML.OnnxRuntime.Foundry/build/native/include ort/
+          move Microsoft.ML.OnnxRuntime.Foundry/runtimes/win-x64/native/* ort/lib/
 
       - name: Install Rust Toolchain
         run: |
