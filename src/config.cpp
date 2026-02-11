@@ -13,6 +13,14 @@
 
 namespace Generators {
 
+// SinkElement: silently consumes any JSON subtree (values, arrays, objects)
+// Used to skip over config sections that are informational but not needed at runtime.
+struct SinkElement : JSON::Element {
+  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {}
+  Element& OnArray(std::string_view /*name*/) override { return *this; }
+  Element& OnObject(std::string_view /*name*/) override { return *this; }
+};
+
 // Fix casing of certain historical names to match current Onnxruntime names
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
@@ -243,6 +251,12 @@ struct EncoderInputs_Element : JSON::Element {
       v_.audio_features = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_input_lengths") {
       v_.encoder_input_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel") {
+      v_.cache_last_channel = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time") {
+      v_.cache_last_time = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len") {
+      v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -266,6 +280,12 @@ struct EncoderOutputs_Element : JSON::Element {
       v_.cross_present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_output_lengths") {
       v_.encoder_output_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_next") {
+      v_.cache_last_channel_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time_next") {
+      v_.cache_last_time_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len_next") {
+      v_.cache_last_channel_len_next = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -542,6 +562,9 @@ struct Encoder_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
+    if (name == "optimization") {
+      return sink_;  // Informational only — silently skip
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -551,6 +574,7 @@ struct Encoder_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
   EncoderInputs_Element inputs_{v_.inputs};
   EncoderOutputs_Element outputs_{v_.outputs};
+  SinkElement sink_;
 };
 
 struct Decoder_Element : JSON::Element {

@@ -134,6 +134,10 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
         std::string encoder_input_lengths;  // Nemotron ASR: input length for variable-length audio
+        // Nemotron ASR streaming encoder cache inputs
+        std::string cache_last_channel;
+        std::string cache_last_time;
+        std::string cache_last_channel_len;
       } inputs;
 
       struct Outputs {
@@ -141,6 +145,10 @@ struct Config {
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
         std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
         std::string encoder_output_lengths;  // Nemotron ASR: output length after subsampling
+        // Nemotron ASR streaming encoder cache outputs
+        std::string cache_last_channel_next;
+        std::string cache_last_time_next;
+        std::string cache_last_channel_len_next;
       } outputs;
     } encoder;
 
