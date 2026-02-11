@@ -18,51 +18,11 @@
 
 #include <gtest/gtest.h>
 
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
-
-// Helper function to get the appropriate PHI2 model path based on available models
-const char* GetPhi2Path() {
-  static std::string phi2_path;
-  if (!phi2_path.empty()) {
-    return phi2_path.c_str();
-  }
-
-  std::vector<std::string> candidate_paths = {
-      MODEL_PATH "phi-2/int4/cuda",
-      MODEL_PATH "phi-2/int4/dml",
-      MODEL_PATH "phi-2/int4/webgpu",
-      MODEL_PATH "phi-2/int4/cpu"};
-
-  for (const auto& path : candidate_paths) {
-    std::ifstream test_file(path + std::string("/genai_config.json"));
-    if (test_file.good()) {
-      phi2_path = path;
-      return phi2_path.c_str();
-    }
-  }
-
-  // Fallback to CPU path
-  phi2_path = MODEL_PATH "phi-2/int4/cpu";
-  return phi2_path.c_str();
-}
+#include "test_utils.h"
 
 #ifndef PHI2_PATH
-#define PHI2_PATH GetPhi2Path()
+#define PHI2_PATH test_utils::GetPhi2Path()
 #endif
-
-// Helper to detect if we're using WebGPU or DML EP based on the model path
-bool IsEngineTestsEnabled() {
-#if TEST_PHI2
-  std::string path = GetPhi2Path();
-  // Skip engine tests for DML and WebGPU (batching not fully tested)
-  return path.find("/dml") == std::string::npos &&
-         path.find("/webgpu") == std::string::npos;
-#else
-  return false;
-#endif
-}
 
 TEST(CAPITests, Config) {
 #if TEST_PHI2
@@ -349,7 +309,7 @@ TEST(CAPIEngineTests, MaxLength) {
 // TODO: WebGPU should support batch_size > 1, investigate why it's failing
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
-  if (!IsEngineTestsEnabled()) {
+  if (!test_utils::IsEngineTestsEnabled()) {
     GTEST_SKIP() << "Skipping batch test for DML/WebGPU";
   }
   auto model = OgaModel::Create(PHI2_PATH);
@@ -1051,7 +1011,7 @@ class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
-  if (GetParam() && !IsEngineTestsEnabled()) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
     GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
 
@@ -1076,7 +1036,7 @@ class ParametrizedTopPCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
-  if (GetParam() && !IsEngineTestsEnabled()) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
     GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
 
@@ -1101,7 +1061,7 @@ class ParametrizedTopKTopPCAPITestsTests : public ::testing::TestWithParam<bool>
 };
 
 TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
-  if (GetParam() && !IsEngineTestsEnabled()) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
     GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
   }
 
