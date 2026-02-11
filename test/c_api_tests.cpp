@@ -5,6 +5,7 @@
 #include <fstream>
 #include <numeric>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 #include <regex>
@@ -52,7 +53,7 @@ const char* GetPhi2Path() {
 #endif
 
 // Helper to detect if we're using WebGPU or DML EP based on the model path
-static bool IsEngineTestsEnabled() {
+bool IsEngineTestsEnabled() {
 #if TEST_PHI2
   std::string path = GetPhi2Path();
   // Skip engine tests for DML and WebGPU (batching not fully tested)
@@ -663,7 +664,7 @@ TEST(CAPIEngineTests, EndToEndPhi) {
 TEST(CAPITests, LoadModelFromMemory) {
 #if TEST_PHI2
 
-  const char* model_path = PHI2_PATH "/model.onnx";
+  std::string model_path = std::string(PHI2_PATH) + "/model.onnx";
   std::ifstream model_file(model_path, std::ios::binary | std::ios::ate);
   ASSERT_TRUE(model_file.is_open()) << "Failed to open model file: " << model_path;
   std::streamsize size = model_file.tellg();
