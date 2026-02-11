@@ -671,17 +671,11 @@ class Model:
         tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
         )
-        print(f"Saving processing files in {out_dir} for GenAI")
-        tokenizer.save_pretrained(out_dir)
         # Overwrite model_max_length with the model's context_length so it is a normal integer
         # (HF often uses 1e30 for "no limit", which can serialize to a huge decimal in JSON)
-        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
-        if os.path.isfile(tokenizer_config_path):
-            with open(tokenizer_config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            config["model_max_length"] = self.context_length
-            with open(tokenizer_config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+        tokenizer.model_max_length = self.context_length
+        print(f"Saving processing files in {out_dir} for GenAI")
+        tokenizer.save_pretrained(out_dir)
 
     def make_int4_algo_config(self, quant_method: str):
         customized_weight_config = {}
