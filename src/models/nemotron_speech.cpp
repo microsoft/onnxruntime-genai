@@ -19,17 +19,17 @@ namespace Generators {
 // ─── NemotronEncoderCache ───────────────────────────────────────────────────
 
 void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
-  // cache_last_channel: [num_layers, 1, left_context, hidden_dim]
-  auto ch_shape = std::array<int64_t, 4>{cfg.num_encoder_layers, 1, cfg.left_context, cfg.hidden_dim};
+  // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
+  auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
   cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   std::memset(cache_last_channel->GetTensorMutableRawData(), 0,
-              cfg.num_encoder_layers * 1 * cfg.left_context * cfg.hidden_dim * sizeof(float));
+              1 * cfg.num_encoder_layers * cfg.left_context * cfg.hidden_dim * sizeof(float));
 
-  // cache_last_time: [num_layers, 1, hidden_dim, conv_context]
-  auto tm_shape = std::array<int64_t, 4>{cfg.num_encoder_layers, 1, cfg.hidden_dim, cfg.conv_context};
+  // cache_last_time: [batch, num_layers, hidden_dim, conv_context]
+  auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
   cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   std::memset(cache_last_time->GetTensorMutableRawData(), 0,
-              cfg.num_encoder_layers * 1 * cfg.hidden_dim * cfg.conv_context * sizeof(float));
+              1 * cfg.num_encoder_layers * cfg.hidden_dim * cfg.conv_context * sizeof(float));
 
   // cache_last_channel_len: [1]
   auto len_shape = std::array<int64_t, 1>{1};
@@ -54,7 +54,7 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocat
   std::memset(state_2->GetTensorMutableRawData(), 0,
               cfg.decoder_lstm_layers * 1 * cfg.decoder_lstm_dim * sizeof(float));
 
-  last_token = 0;
+  last_token = cfg.blank_id;  // Start with blank/SOS token (not token 0)
 }
 
 void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
@@ -92,35 +92,58 @@ void ComputeSTFTFrame(const float* frame, int fft_size, const float* window, int
   }
 }
 
-// Mel filter bank (HTK style)
-float HzToMel(float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); }
-float MelToHz(float mel) { return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f); }
+// Mel filter bank (Slaney scale, matching librosa/NeMo)
+// Slaney mel scale: linear below 1000 Hz, logarithmic above
+static constexpr float kMinLogHz = 1000.0f;
+static constexpr float kMinLogMel = 15.0f;              // 1000 / (200/3)
+static constexpr float kLinScale = 200.0f / 3.0f;       // Hz per mel (linear region)
+static constexpr float kLogStep = 0.06875177742094912f;  // log(6.4) / 27
+
+float HzToMel(float hz) {
+  if (hz < kMinLogHz) return hz / kLinScale;
+  return kMinLogMel + std::log(hz / kMinLogHz) / kLogStep;
+}
+float MelToHz(float mel) {
+  if (mel < kMinLogMel) return mel * kLinScale;
+  return kMinLogHz * std::exp((mel - kMinLogMel) * kLogStep);
+}
 
 std::vector<std::vector<float>> CreateMelFilterbank(int num_mels, int fft_size, int sample_rate) {
   int num_bins = fft_size / 2 + 1;
   float mel_low = HzToMel(0.0f);
   float mel_high = HzToMel(static_cast<float>(sample_rate) / 2.0f);
 
-  std::vector<float> mel_points(num_mels + 2);
+  // Compute mel center frequencies in Hz (num_mels + 2 points)
+  std::vector<float> mel_f(num_mels + 2);
   for (int i = 0; i < num_mels + 2; ++i) {
-    mel_points[i] = MelToHz(mel_low + (mel_high - mel_low) * i / (num_mels + 1));
+    float mel = mel_low + (mel_high - mel_low) * i / (num_mels + 1);
+    mel_f[i] = MelToHz(mel);
   }
 
-  // Convert to FFT bin indices
-  std::vector<float> bin_points(num_mels + 2);
-  for (int i = 0; i < num_mels + 2; ++i) {
-    bin_points[i] = (fft_size + 1) * mel_points[i] / sample_rate;
+  // Differences between consecutive mel center frequencies (Hz)
+  std::vector<float> fdiff(num_mels + 1);
+  for (int i = 0; i < num_mels + 1; ++i) {
+    fdiff[i] = mel_f[i + 1] - mel_f[i];
   }
 
+  // FFT bin center frequencies in Hz
+  std::vector<float> fft_freqs(num_bins);
+  for (int k = 0; k < num_bins; ++k) {
+    fft_freqs[k] = static_cast<float>(k) * sample_rate / fft_size;
+  }
+
+  // Build triangular filterbank with Slaney normalization (matches librosa exactly)
   std::vector<std::vector<float>> filterbank(num_mels, std::vector<float>(num_bins, 0.0f));
   for (int m = 0; m < num_mels; ++m) {
     for (int k = 0; k < num_bins; ++k) {
-      float fk = static_cast<float>(k);
-      if (fk >= bin_points[m] && fk <= bin_points[m + 1]) {
-        filterbank[m][k] = (fk - bin_points[m]) / (bin_points[m + 1] - bin_points[m] + 1e-10f);
-      } else if (fk >= bin_points[m + 1] && fk <= bin_points[m + 2]) {
-        filterbank[m][k] = (bin_points[m + 2] - fk) / (bin_points[m + 2] - bin_points[m + 1] + 1e-10f);
-      }
+      float lower = (fft_freqs[k] - mel_f[m]) / (fdiff[m] + 1e-10f);
+      float upper = (mel_f[m + 2] - fft_freqs[k]) / (fdiff[m + 1] + 1e-10f);
+      filterbank[m][k] = std::max(0.0f, std::min(lower, upper));
+    }
+    // Slaney area normalization: 2 / bandwidth
+    float enorm = 2.0f / (mel_f[m + 2] - mel_f[m] + 1e-10f);
+    for (int k = 0; k < num_bins; ++k) {
+      filterbank[m][k] *= enorm;
     }
   }
   return filterbank;
@@ -134,9 +157,15 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
   static auto mel_filters = CreateMelFilterbank(num_mels, fft_size, sample_rate);
   static auto window = HannWindow(win_length);
 
-  // Pad audio if needed
-  std::vector<float> padded(audio, audio + num_samples);
-  if (static_cast<int>(num_samples) < win_length) {
+  // Center-pad: prepend fft_size/2 zeros to match NeMo's center=True STFT
+  int pad = fft_size / 2;
+  int n = static_cast<int>(num_samples);
+  std::vector<float> padded(pad + n, 0.0f);
+  if (n > 0) {
+    std::memcpy(padded.data() + pad, audio, n * sizeof(float));
+  }
+
+  if (static_cast<int>(padded.size()) < win_length) {
     padded.resize(win_length, 0.0f);
   }
 
@@ -156,8 +185,8 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
       for (int k = 0; k < num_bins; ++k) {
         val += mel_filters[m][k] * magnitudes[k];
       }
-      // Log-mel with floor
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 1e-10f));
+      // Log-mel with floor (2^-24, NeMo default)
+      mel_spec[m * num_frames + t] = std::log(std::max(val, 5.96046448e-08f));
     }
   }
 
@@ -177,6 +206,7 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   // Create session options
   encoder_session_options_ = OrtSessionOptions::Create();
   decoder_session_options_ = OrtSessionOptions::Create();
+  joiner_session_options_ = OrtSessionOptions::Create();
 
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
@@ -187,21 +217,34 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *decoder_session_options_, true, false);
+  if (config_->model.joiner.session_options.has_value()) {
+    CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
+                                   *joiner_session_options_, true, false);
+  } else {
+    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                   *joiner_session_options_, true, false);
+  }
 
-  // Load the two ONNX models
+  // Load the three ONNX models
   // encoder.onnx - cache-aware streaming encoder
   std::string encoder_filename = config_->model.encoder.filename;
   if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
 
-  // decoder_joint.onnx - RNNT decoder + joint network
+  // decoder.onnx - RNNT prediction network
   std::string decoder_filename = config_->model.decoder.filename;
-  if (decoder_filename.empty()) decoder_filename = "decoder_joint.onnx";
+  if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
+
+  // joiner.onnx - RNNT joint network
+  std::string joiner_filename = config_->model.joiner.filename;
+  if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
 
   session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
-  session_decoder_joint_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
+  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
+  session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
 
   session_info_.Add(*session_encoder_);
-  session_info_.Add(*session_decoder_joint_);
+  session_info_.Add(*session_decoder_);
+  session_info_.Add(*session_joiner_);
 }
 
 std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
@@ -245,10 +288,11 @@ void NemotronSpeechState::LoadVocab() {
   if (tokens_file.is_open()) {
     std::string line;
     while (std::getline(tokens_file, line)) {
-      // Format: "token index" or just "token"
-      auto space_pos = line.find('\t');
-      if (space_pos != std::string::npos) {
-        vocab_.push_back(line.substr(0, space_pos));
+      // Format: "token_text index" (space-separated) or "token_text\tindex" (tab-separated)
+      auto sep_pos = line.rfind(' ');
+      if (sep_pos == std::string::npos) sep_pos = line.rfind('\t');
+      if (sep_pos != std::string::npos) {
+        vocab_.push_back(line.substr(0, sep_pos));
       } else {
         vocab_.push_back(line);
       }
@@ -298,8 +342,8 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
 
   // Set up encoder inputs
   std::vector<const char*> input_names = {
-      "processed_signal",
-      "processed_signal_length",
+      "audio_signal",
+      "length",
       "cache_last_channel",
       "cache_last_time",
       "cache_last_channel_len"};
@@ -313,11 +357,11 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
 
   // Set up encoder outputs
   std::vector<const char*> output_names = {
-      "encoded",
-      "encoded_len",
+      "outputs",
+      "encoded_lengths",
       "cache_last_channel_next",
       "cache_last_time_next",
-      "cache_last_channel_len_next"};
+      "cache_last_channel_next_len"};
 
   // Create output tensors (sizes determined by the model)
   // encoded: [1, hidden_dim, time_out]
@@ -332,11 +376,11 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
                                               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
 
   // Allocate output cache tensors
-  auto ch_shape = std::array<int64_t, 4>{cfg.num_encoder_layers, 1, cfg.left_context, cfg.hidden_dim};
+  auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
   auto new_cache_channel = OrtValue::CreateTensor(allocator, ch_shape,
                                                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-  auto tm_shape = std::array<int64_t, 4>{cfg.num_encoder_layers, 1, cfg.hidden_dim, cfg.conv_context};
+  auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
   auto new_cache_time = OrtValue::CreateTensor(allocator, tm_shape,
                                                 ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
@@ -405,7 +449,7 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
     // Greedy RNNT decoding loop for this time step
     constexpr int kMaxSymbolsPerStep = 10;  // Safety limit
     for (int sym = 0; sym < kMaxSymbolsPerStep; ++sym) {
-      // Prepare decoder inputs
+      // ── Step 1: Run decoder (prediction network) ──
       // targets: [1, 1] - last emitted token
       auto targets_shape = std::array<int64_t, 2>{1, 1};
       auto targets = OrtValue::CreateTensor(allocator, targets_shape,
@@ -418,33 +462,36 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
                                                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
       *target_length->GetTensorMutableData<int32_t>() = 1;
 
-      // Set up decoder inputs
-      std::vector<const char*> dec_input_names = {
-          "encoder_outputs", "targets", "target_length",
-          "input_states_1", "input_states_2"};
+      // Decoder outputs
+      // outputs (prediction): [1, decoder_lstm_dim, 1]
+      auto dec_out_shape = std::array<int64_t, 3>{1, cfg.decoder_lstm_dim, 1};
+      auto decoder_output = OrtValue::CreateTensor(allocator, dec_out_shape,
+                                                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-      std::vector<OrtValue*> dec_inputs = {
-          encoder_frame.get(), targets.get(), target_length.get(),
-          decoder_state_.state_1.get(), decoder_state_.state_2.get()};
+      // prednet_lengths: [1]
+      auto prednet_len_shape = std::array<int64_t, 1>{1};
+      auto prednet_lengths = OrtValue::CreateTensor(allocator, prednet_len_shape,
+                                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
 
-      // Set up decoder outputs
-      // outputs: [1, 1, vocab_size+1]
-      auto logits_shape = std::array<int64_t, 3>{1, 1, cfg.vocab_size + 1};
-      auto logits = OrtValue::CreateTensor(allocator, logits_shape,
-                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-
-      // New LSTM states
+      // New LSTM states: [lstm_layers, 1, lstm_dim]
       auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
       auto new_state_1 = OrtValue::CreateTensor(allocator, state_shape,
                                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       auto new_state_2 = OrtValue::CreateTensor(allocator, state_shape,
                                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-      std::vector<const char*> dec_output_names = {
-          "outputs", "output_states_1", "output_states_2"};
+      // Decoder I/O names (matching the ONNX graph)
+      std::vector<const char*> dec_input_names = {
+          "targets", "target_length", "states.1", "onnx::Slice_3"};
+      std::vector<OrtValue*> dec_inputs = {
+          targets.get(), target_length.get(),
+          decoder_state_.state_1.get(), decoder_state_.state_2.get()};
 
+      std::vector<const char*> dec_output_names = {
+          "outputs", "prednet_lengths", "states", "162"};
       std::vector<OrtValue*> dec_outputs = {
-          logits.get(), new_state_1.get(), new_state_2.get()};
+          decoder_output.get(), prednet_lengths.get(),
+          new_state_1.get(), new_state_2.get()};
 
       // Set State I/O for decoder run
       input_names_.clear();
@@ -461,8 +508,40 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
         outputs_.push_back(dec_outputs[i]);
       }
 
-      // Run decoder_joint
-      State::Run(*model_.session_decoder_joint_);
+      // Run decoder (prediction network)
+      State::Run(*model_.session_decoder_);
+
+      // ── Step 2: Run joiner (joint network) ──
+      // Joiner takes encoder frame + decoder output → logits
+      // Output shape: [1, 1, 1, vocab_size+1]
+      auto logits_shape = std::array<int64_t, 4>{1, 1, 1, cfg.vocab_size + 1};
+      auto logits = OrtValue::CreateTensor(allocator, logits_shape,
+                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+      std::vector<const char*> join_input_names = {
+          "encoder_outputs", "decoder_outputs"};
+      std::vector<OrtValue*> join_inputs = {
+          encoder_frame.get(), decoder_output.get()};
+
+      std::vector<const char*> join_output_names = {"outputs"};
+      std::vector<OrtValue*> join_outputs = {logits.get()};
+
+      input_names_.clear();
+      inputs_.clear();
+      output_names_.clear();
+      outputs_.clear();
+
+      for (size_t i = 0; i < join_input_names.size(); ++i) {
+        input_names_.push_back(join_input_names[i]);
+        inputs_.push_back(join_inputs[i]);
+      }
+      for (size_t i = 0; i < join_output_names.size(); ++i) {
+        output_names_.push_back(join_output_names[i]);
+        outputs_.push_back(join_outputs[i]);
+      }
+
+      // Run joiner (joint network)
+      State::Run(*model_.session_joiner_);
 
       // Find argmax of logits
       const float* logits_data = logits->GetTensorData<float>();
@@ -481,7 +560,7 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
         break;
       }
 
-      // Emit token
+      // Emit token — update decoder state for next iteration
       decoder_state_.last_token = best_token;
       decoder_state_.state_1 = std::move(new_state_1);
       decoder_state_.state_2 = std::move(new_state_2);

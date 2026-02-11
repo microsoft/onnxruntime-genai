@@ -19,35 +19,59 @@
 
 namespace Generators {
 
-// ─── Mel spectrogram utilities ──────────────────────────────────────────────
+// ─── Mel spectrogram utilities (Slaney scale, matching librosa/NeMo) ────────
 
-static float HzToMel(float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); }
-static float MelToHz(float mel) { return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f); }
+// Slaney mel scale: linear below 1000 Hz, logarithmic above
+static constexpr float kMinLogHz = 1000.0f;
+static constexpr float kMinLogMel = 15.0f;              // 1000 / (200/3)
+static constexpr float kLinScale = 200.0f / 3.0f;       // Hz per mel (linear region)
+static constexpr float kLogStep = 0.06875177742094912f;  // log(6.4) / 27
+
+static float HzToMel(float hz) {
+  if (hz < kMinLogHz) return hz / kLinScale;
+  return kMinLogMel + std::log(hz / kMinLogHz) / kLogStep;
+}
+static float MelToHz(float mel) {
+  if (mel < kMinLogMel) return mel * kLinScale;
+  return kMinLogHz * std::exp((mel - kMinLogMel) * kLogStep);
+}
 
 void StreamingASR::InitMelFilterbank() {
   int num_bins = kFFTSize / 2 + 1;
   float mel_low = HzToMel(0.0f);
   float mel_high = HzToMel(static_cast<float>(kSampleRate) / 2.0f);
 
-  std::vector<float> mel_points(kNumMels + 2);
+  // Compute mel center frequencies in Hz (num_mels + 2 points)
+  std::vector<float> mel_f(kNumMels + 2);
   for (int i = 0; i < kNumMels + 2; ++i) {
-    mel_points[i] = MelToHz(mel_low + (mel_high - mel_low) * i / (kNumMels + 1));
+    float mel = mel_low + (mel_high - mel_low) * i / (kNumMels + 1);
+    mel_f[i] = MelToHz(mel);
   }
 
-  std::vector<float> bin_points(kNumMels + 2);
-  for (int i = 0; i < kNumMels + 2; ++i) {
-    bin_points[i] = (kFFTSize + 1) * mel_points[i] / kSampleRate;
+  // Differences between consecutive mel center frequencies (Hz)
+  std::vector<float> fdiff(kNumMels + 1);
+  for (int i = 0; i < kNumMels + 1; ++i) {
+    fdiff[i] = mel_f[i + 1] - mel_f[i];
   }
 
+  // FFT bin center frequencies in Hz
+  std::vector<float> fft_freqs(num_bins);
+  for (int k = 0; k < num_bins; ++k) {
+    fft_freqs[k] = static_cast<float>(k) * kSampleRate / kFFTSize;
+  }
+
+  // Build triangular filterbank with Slaney normalization (matches librosa exactly)
   mel_filters_.resize(kNumMels, std::vector<float>(num_bins, 0.0f));
   for (int m = 0; m < kNumMels; ++m) {
     for (int k = 0; k < num_bins; ++k) {
-      float fk = static_cast<float>(k);
-      if (fk >= bin_points[m] && fk <= bin_points[m + 1]) {
-        mel_filters_[m][k] = (fk - bin_points[m]) / (bin_points[m + 1] - bin_points[m] + 1e-10f);
-      } else if (fk >= bin_points[m + 1] && fk <= bin_points[m + 2]) {
-        mel_filters_[m][k] = (bin_points[m + 2] - fk) / (bin_points[m + 2] - bin_points[m + 1] + 1e-10f);
-      }
+      float lower = (fft_freqs[k] - mel_f[m]) / (fdiff[m] + 1e-10f);
+      float upper = (mel_f[m + 2] - fft_freqs[k]) / (fdiff[m + 1] + 1e-10f);
+      mel_filters_[m][k] = std::max(0.0f, std::min(lower, upper));
+    }
+    // Slaney area normalization: 2 / bandwidth
+    float enorm = 2.0f / (mel_f[m + 2] - mel_f[m] + 1e-10f);
+    for (int k = 0; k < num_bins; ++k) {
+      mel_filters_[m][k] *= enorm;
     }
   }
 
@@ -58,9 +82,26 @@ void StreamingASR::InitMelFilterbank() {
 }
 
 std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audio, size_t num_samples) {
-  // Pad if too short
-  std::vector<float> padded(audio, audio + num_samples);
-  if (static_cast<int>(num_samples) < kWinLength) {
+  // Center-padded STFT: prepend overlap from previous chunk (or zeros for first chunk)
+  // This ensures we get exactly 56 mel frames for 8960-sample chunks,
+  // matching NeMo's center=True STFT behavior.
+  int pad = kFFTSize / 2;  // 256 samples
+  std::vector<float> padded(pad + num_samples);
+  std::memcpy(padded.data(), audio_overlap_.data(), pad * sizeof(float));
+  std::memcpy(padded.data() + pad, audio, num_samples * sizeof(float));
+
+  // Update overlap buffer with tail of current chunk for next call
+  if (num_samples >= static_cast<size_t>(pad)) {
+    audio_overlap_.assign(audio + num_samples - pad, audio + num_samples);
+  } else {
+    size_t keep = pad - num_samples;
+    std::vector<float> new_overlap(pad, 0.0f);
+    std::memcpy(new_overlap.data(), audio_overlap_.data() + num_samples, keep * sizeof(float));
+    std::memcpy(new_overlap.data() + keep, audio, num_samples * sizeof(float));
+    audio_overlap_ = std::move(new_overlap);
+  }
+
+  if (static_cast<int>(padded.size()) < kWinLength) {
     padded.resize(kWinLength, 0.0f);
   }
 
@@ -91,7 +132,7 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
       for (int k = 0; k < num_bins; ++k) {
         val += mel_filters_[m][k] * magnitudes[k];
       }
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 1e-10f));
+      mel_spec[m * num_frames + t] = std::log(std::max(val, 5.96046448e-08f));  // 2^-24 (NeMo default)
     }
   }
 
@@ -111,9 +152,11 @@ void StreamingASR::LoadVocab() {
   if (tokens_file.is_open()) {
     std::string line;
     while (std::getline(tokens_file, line)) {
-      auto tab_pos = line.find('\t');
-      if (tab_pos != std::string::npos) {
-        vocab_.push_back(line.substr(0, tab_pos));
+      // Format: "token_text index" (space-separated) or "token_text\tindex" (tab-separated)
+      auto sep_pos = line.rfind(' ');
+      if (sep_pos == std::string::npos) sep_pos = line.rfind('\t');
+      if (sep_pos != std::string::npos) {
+        vocab_.push_back(line.substr(0, sep_pos));
       } else {
         vocab_.push_back(line);
       }
@@ -158,11 +201,15 @@ StreamingASR::StreamingASR(Model& model)
   }
 
   encoder_session_ = nemotron_model->session_encoder_.get();
-  decoder_session_ = nemotron_model->session_decoder_joint_.get();
+  decoder_session_ = nemotron_model->session_decoder_.get();
+  joiner_session_ = nemotron_model->session_joiner_.get();
   cache_config_ = nemotron_model->cache_config_;
 
   // Initialize mel filterbank
   InitMelFilterbank();
+
+  // Initialize audio overlap buffer for center-padded STFT
+  audio_overlap_.assign(kFFTSize / 2, 0.0f);
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
@@ -177,6 +224,7 @@ void StreamingASR::Reset() {
   encoder_cache_.Reset(cache_config_, allocator);
   decoder_state_.Reset(cache_config_, allocator);
   full_transcript_.clear();
+  audio_overlap_.assign(kFFTSize / 2, 0.0f);
 }
 
 std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
@@ -199,7 +247,7 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
 
   // Encoder inputs
   const char* enc_input_names[] = {
-      "processed_signal", "processed_signal_length",
+      "audio_signal", "length",
       "cache_last_channel", "cache_last_time", "cache_last_channel_len"};
   OrtValue* enc_inputs[] = {
       processed_signal.get(), signal_length.get(),
@@ -209,8 +257,8 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
 
   // Encoder outputs — let ORT allocate
   const char* enc_output_names[] = {
-      "encoded", "encoded_len",
-      "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_len_next"};
+      "outputs", "encoded_lengths",
+      "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_next_len"};
 
   // Run encoder
   auto run_options = OrtRunOptions::Create();
@@ -258,7 +306,7 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
 
     constexpr int kMaxSymbolsPerStep = 10;
     for (int sym = 0; sym < kMaxSymbolsPerStep; ++sym) {
-      // Prepare decoder inputs
+      // ── Step 1: Run decoder (prediction network) ──
       auto targets_shape = std::array<int64_t, 2>{1, 1};
       auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
       *targets->GetTensorMutableData<int32_t>() = decoder_state_.last_token;
@@ -268,23 +316,41 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
       *target_length->GetTensorMutableData<int32_t>() = 1;
 
       const char* dec_input_names[] = {
-          "encoder_outputs", "targets", "target_length",
-          "input_states_1", "input_states_2"};
+          "targets", "target_length",
+          "states.1", "onnx::Slice_3"};
       OrtValue* dec_inputs[] = {
-          encoder_frame.get(), targets.get(), target_length.get(),
+          targets.get(), target_length.get(),
           decoder_state_.state_1.get(), decoder_state_.state_2.get()};
 
       const char* dec_output_names[] = {
-          "outputs", "output_states_1", "output_states_2"};
+          "outputs", "prednet_lengths", "states", "162"};
 
       auto dec_outputs = decoder_session_->Run(
           run_options.get(),
-          dec_input_names, dec_inputs, 5,
-          dec_output_names, 3);
+          dec_input_names, dec_inputs, 4,
+          dec_output_names, 4);
+
+      // dec_outputs[0] = decoder hidden [1, 640, 1]
+      // dec_outputs[1] = prednet_lengths [1]
+      // dec_outputs[2] = new states h [2, ?, 640]
+      // dec_outputs[3] = new states c [2, ?, 640]
+
+      // ── Step 2: Run joiner (joint network) ──
+      const char* join_input_names[] = {
+          "encoder_outputs", "decoder_outputs"};
+      OrtValue* join_inputs[] = {
+          encoder_frame.get(), dec_outputs[0].get()};
+
+      const char* join_output_names[] = {"outputs"};
+
+      auto join_outputs = joiner_session_->Run(
+          run_options.get(),
+          join_input_names, join_inputs, 2,
+          join_output_names, 1);
 
       // Find argmax
-      const float* logits_data = dec_outputs[0]->GetTensorData<float>();
-      auto logits_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+      const float* logits_data = join_outputs[0]->GetTensorData<float>();
+      auto logits_shape = join_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       int total_logits = 1;
       for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
@@ -304,8 +370,8 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
 
       // Emit token & update state
       decoder_state_.last_token = best_token;
-      decoder_state_.state_1 = std::move(dec_outputs[1]);
-      decoder_state_.state_2 = std::move(dec_outputs[2]);
+      decoder_state_.state_1 = std::move(dec_outputs[2]);
+      decoder_state_.state_2 = std::move(dec_outputs[3]);
 
       if (best_token < static_cast<int>(vocab_.size())) {
         std::string token_str = vocab_[best_token];

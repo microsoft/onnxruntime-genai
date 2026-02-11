@@ -57,12 +57,14 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
-  // Two ONNX sessions: encoder + decoder_joint
+  // Three ONNX sessions: encoder, decoder (prediction network), joiner
   std::unique_ptr<OrtSession> session_encoder_;
-  std::unique_ptr<OrtSession> session_decoder_joint_;
+  std::unique_ptr<OrtSession> session_decoder_;
+  std::unique_ptr<OrtSession> session_joiner_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
+  std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
   NemotronCacheConfig cache_config_;
 };
@@ -126,7 +128,7 @@ struct NemotronSpeechState : State {
   // Mel feature extractor (log-mel spectrogram)
   // We use ORT extensions if available, otherwise a simple built-in extraction
   // For nemotron: 80-dim mel, 10ms hop, 25ms window
-  static constexpr int kNumMels = 80;
+  static constexpr int kNumMels = 128;
   static constexpr int kHopLength = 160;    // 10ms * 16kHz
   static constexpr int kWinLength = 400;    // 25ms * 16kHz
   static constexpr int kFFTSize = 512;

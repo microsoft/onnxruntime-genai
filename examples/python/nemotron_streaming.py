@@ -109,7 +109,6 @@ def transcribe_file(model_path, audio_path, execution_provider="cpu"):
     print("Streaming: ", end="", flush=True)
 
     start_time = time.time()
-    all_token_ids = []
 
     # Process audio in streaming chunks
     for i in range(0, len(audio), CHUNK_SAMPLES):
@@ -123,43 +122,24 @@ def transcribe_file(model_path, audio_path, execution_provider="cpu"):
         raw_text = asr.transcribe_chunk(chunk)
 
         if raw_text:
-            # Parse token IDs from <id> format and decode with sentencepiece
-            token_ids = parse_token_ids(raw_text)
-            if token_ids:
-                all_token_ids.extend(token_ids)
-                if sp_tokenizer:
-                    decoded = sp_tokenizer.Decode(token_ids)
-                    print(decoded, end="", flush=True)
-                else:
-                    print(raw_text, end="", flush=True)
+            print(raw_text, end="", flush=True)
 
     # Flush with silence to get remaining tokens
     for _ in range(3):
         silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
         raw_text = asr.transcribe_chunk(silence)
         if raw_text:
-            token_ids = parse_token_ids(raw_text)
-            if token_ids:
-                all_token_ids.extend(token_ids)
-                if sp_tokenizer:
-                    decoded = sp_tokenizer.Decode(token_ids)
-                    print(decoded, end="", flush=True)
-                else:
-                    print(raw_text, end="", flush=True)
+            print(raw_text, end="", flush=True)
 
     elapsed = time.time() - start_time
 
-    # Final full decode
-    if sp_tokenizer and all_token_ids:
-        final_text = sp_tokenizer.Decode(all_token_ids)
-    else:
-        final_text = asr.get_transcript()
+    # Final full transcript from internal accumulation
+    final_text = asr.get_transcript()
 
     print(f"\n\n{'='*60}")
     print(f"Final transcript: {final_text.strip()}")
     print(f"{'='*60}")
     print(f"Completed in {elapsed:.2f}s (audio: {duration:.2f}s, RTF: {duration / elapsed:.2f}x realtime)")
-    print(f"Tokens: {len(all_token_ids)}, Execution: CPU")
 
     return final_text.strip()
 

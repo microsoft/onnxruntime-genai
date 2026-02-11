@@ -854,6 +854,37 @@ struct Speech_Element : JSON::Element {
   SpeechOutputs_Element outputs_{v_.outputs};
 };
 
+struct Joiner_Element : JSON::Element {
+  explicit Joiner_Element(Config::Model::Joiner& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Joiner& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -980,6 +1011,9 @@ struct Model_Element : JSON::Element {
     if (name == "speech") {
       return speech_;
     }
+    if (name == "joiner") {
+      return joiner_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -991,6 +1025,7 @@ struct Model_Element : JSON::Element {
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
+  Joiner_Element joiner_{v_.joiner};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {

@@ -41,6 +41,7 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   // Encoder ONNX session (borrowed from model)
   OrtSession* encoder_session_{};
   OrtSession* decoder_session_{};
+  OrtSession* joiner_session_{};
 
   // Streaming state
   NemotronEncoderCache encoder_cache_;
@@ -54,6 +55,9 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   // Log-mel feature extraction
   std::vector<std::vector<float>> mel_filters_;
   std::vector<float> hann_window_;
+
+  // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 samples)
+  std::vector<float> audio_overlap_;
 
   static constexpr int kNumMels = 128;
   static constexpr int kHopLength = 160;

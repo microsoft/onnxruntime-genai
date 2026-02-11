@@ -216,6 +216,12 @@ struct Config {
       } outputs;
     } speech;
 
+    struct Joiner {
+      std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } joiner;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
