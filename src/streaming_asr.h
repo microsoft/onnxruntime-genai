@@ -7,6 +7,7 @@
 
 #include "models/model.h"
 #include "models/nemotron_speech.h"
+#include "models/nemotron_audio_processor.h"
 
 namespace Generators {
 
@@ -51,19 +52,11 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   std::vector<std::string> vocab_;
   bool vocab_loaded_{false};
 
-  // Log-mel feature extraction
-  std::vector<std::vector<float>> mel_filters_;
-  std::vector<float> hann_window_;
-
-  static constexpr int kNumMels = 128;
-  static constexpr int kHopLength = 160;
-  static constexpr int kWinLength = 400;
-  static constexpr int kFFTSize = 512;
-  static constexpr int kSampleRate = 16000;
+  // Audio preprocessor — reads params from audio_processor_config.json.
+  // Swap this for an ORT Extensions implementation when available.
+  std::shared_ptr<NemotronAudioProcessor> audio_processor_;
 
   void LoadVocab();
-  void InitMelFilterbank();
-  std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples);
   std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
 };
 

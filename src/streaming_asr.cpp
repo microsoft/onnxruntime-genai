@@ -4,99 +4,14 @@
 // StreamingASR implementation — high-level streaming speech recognition.
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <fstream>
-#include <numeric>
 #include <sstream>
 
 #include "generators.h"
 #include "streaming_asr.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
 namespace Generators {
-
-// ─── Mel spectrogram utilities ──────────────────────────────────────────────
-
-static float HzToMel(float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); }
-static float MelToHz(float mel) { return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f); }
-
-void StreamingASR::InitMelFilterbank() {
-  int num_bins = kFFTSize / 2 + 1;
-  float mel_low = HzToMel(0.0f);
-  float mel_high = HzToMel(static_cast<float>(kSampleRate) / 2.0f);
-
-  std::vector<float> mel_points(kNumMels + 2);
-  for (int i = 0; i < kNumMels + 2; ++i) {
-    mel_points[i] = MelToHz(mel_low + (mel_high - mel_low) * i / (kNumMels + 1));
-  }
-
-  std::vector<float> bin_points(kNumMels + 2);
-  for (int i = 0; i < kNumMels + 2; ++i) {
-    bin_points[i] = (kFFTSize + 1) * mel_points[i] / kSampleRate;
-  }
-
-  mel_filters_.resize(kNumMels, std::vector<float>(num_bins, 0.0f));
-  for (int m = 0; m < kNumMels; ++m) {
-    for (int k = 0; k < num_bins; ++k) {
-      float fk = static_cast<float>(k);
-      if (fk >= bin_points[m] && fk <= bin_points[m + 1]) {
-        mel_filters_[m][k] = (fk - bin_points[m]) / (bin_points[m + 1] - bin_points[m] + 1e-10f);
-      } else if (fk >= bin_points[m + 1] && fk <= bin_points[m + 2]) {
-        mel_filters_[m][k] = (bin_points[m + 2] - fk) / (bin_points[m + 2] - bin_points[m + 1] + 1e-10f);
-      }
-    }
-  }
-
-  hann_window_.resize(kWinLength);
-  for (int i = 0; i < kWinLength; ++i) {
-    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / kWinLength));
-  }
-}
-
-std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audio, size_t num_samples) {
-  // Pad if too short
-  std::vector<float> padded(audio, audio + num_samples);
-  if (static_cast<int>(num_samples) < kWinLength) {
-    padded.resize(kWinLength, 0.0f);
-  }
-
-  int num_frames = static_cast<int>((padded.size() - kWinLength) / kHopLength) + 1;
-  int num_bins = kFFTSize / 2 + 1;
-
-  std::vector<float> mel_spec(kNumMels * num_frames);
-
-  for (int t = 0; t < num_frames; ++t) {
-    // Compute power spectrum for this frame
-    std::vector<float> magnitudes(num_bins);
-    const float* frame = padded.data() + t * kHopLength;
-
-    for (int k = 0; k < num_bins; ++k) {
-      float real_sum = 0.0f, imag_sum = 0.0f;
-      for (int n = 0; n < kWinLength; ++n) {
-        float val = frame[n] * hann_window_[n];
-        float angle = 2.0f * static_cast<float>(M_PI) * k * n / kFFTSize;
-        real_sum += val * std::cos(angle);
-        imag_sum -= val * std::sin(angle);
-      }
-      magnitudes[k] = real_sum * real_sum + imag_sum * imag_sum;
-    }
-
-    // Apply mel filterbank
-    for (int m = 0; m < kNumMels; ++m) {
-      float val = 0.0f;
-      for (int k = 0; k < num_bins; ++k) {
-        val += mel_filters_[m][k] * magnitudes[k];
-      }
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 1e-10f));
-    }
-  }
-
-  return {mel_spec, num_frames};
-}
 
 // ─── Vocabulary loading ─────────────────────────────────────────────────────
 
@@ -161,8 +76,8 @@ StreamingASR::StreamingASR(Model& model)
   decoder_session_ = nemotron_model->session_decoder_joint_.get();
   cache_config_ = nemotron_model->cache_config_;
 
-  // Initialize mel filterbank
-  InitMelFilterbank();
+  // Initialize audio processor from config JSON
+  audio_processor_ = std::make_shared<NemotronAudioProcessor>(model_.config_->config_path);
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
@@ -182,20 +97,21 @@ void StreamingASR::Reset() {
 std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
   LoadVocab();
 
-  // Compute log-mel spectrogram
-  auto [mel_data, num_frames] = ComputeLogMel(audio_data, num_samples);
+  // Compute log-mel spectrogram via the audio processor
+  auto mel = audio_processor_->ComputeLogMel(audio_data, num_samples);
 
   auto& allocator = model_.allocator_cpu_;
 
   // Create processed_signal: [1, num_mels, num_frames]
-  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
+  auto signal_shape = std::array<int64_t, 3>{1, static_cast<int64_t>(mel.num_mels),
+                                              static_cast<int64_t>(mel.num_frames)};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memcpy(processed_signal->GetTensorMutableRawData(), mel_data.data(), mel_data.size() * sizeof(float));
+  std::memcpy(processed_signal->GetTensorMutableRawData(), mel.data.data(), mel.data.size() * sizeof(float));
 
   // Create processed_signal_length: [1]
   auto len_shape = std::array<int64_t, 1>{1};
   auto signal_length = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(num_frames);
+  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(mel.num_frames);
 
   // Encoder inputs
   const char* enc_input_names[] = {
@@ -241,19 +157,22 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
 
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
-  int64_t hidden_dim = enc_shape[1];
-  int64_t time_steps = std::min(enc_shape[2], encoded_len);
+  // Encoder output shape is [batch, time, hidden_dim]
+  int64_t time_steps = std::min(enc_shape[1], encoded_len);
+  int64_t hidden_dim = enc_shape[2];
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   auto run_options = OrtRunOptions::Create();
 
   for (int64_t t = 0; t < time_steps; ++t) {
     // Extract single encoder frame: [1, hidden_dim, 1]
+    // Decoder expects encoder_outputs shape [B, D, T] so we provide [1, hidden_dim, 1]
     auto frame_shape = std::array<int64_t, 3>{1, hidden_dim, 1};
     auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     float* frame_data = encoder_frame->GetTensorMutableData<float>();
+    // Encoder output is [batch, time, hidden] — row-major, so frame t starts at t * hidden_dim
     for (int64_t d = 0; d < hidden_dim; ++d) {
-      frame_data[d] = enc_data[d * enc_shape[2] + t];
+      frame_data[d] = enc_data[t * hidden_dim + d];
     }
 
     constexpr int kMaxSymbolsPerStep = 10;

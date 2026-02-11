@@ -17,17 +17,14 @@ NemotronSpeechProcessor::NemotronSpeechProcessor(Config& config, const SessionIn
   }
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), encoder_input);
 
-  // Try to load a speech feature extractor config (like Whisper does)
+  // Load the speech feature extractor config (same as Whisper)
   auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
-  // The feature extractor is optional for Nemotron — if it exists, use it;
-  // otherwise the StreamingASR class handles mel extraction internally.
-  // The feature extractor is optional for Nemotron — if config exists, use it;
-  // otherwise the StreamingASR class handles mel extraction internally.
   if (std::filesystem::exists(processor_config)) {
     processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(
         OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
   }
-  // else processor_ stays default-initialized (null)
+  // If no config exists, the processor_ stays null and feature extraction
+  // will be handled by NemotronSpeechState::RunEncoder via ORT Extensions.
 }
 
 std::unique_ptr<NamedTensors> NemotronSpeechProcessor::Process(const Tokenizer& tokenizer,

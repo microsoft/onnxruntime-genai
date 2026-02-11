@@ -4,10 +4,8 @@
 // Nemotron Speech Streaming ASR — cache-aware encoder + RNNT decoder_joint.
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <fstream>
-#include <numeric>
 #include <sstream>
 #include <vector>
 
@@ -54,117 +52,12 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocat
   std::memset(state_2->GetTensorMutableRawData(), 0,
               cfg.decoder_lstm_layers * 1 * cfg.decoder_lstm_dim * sizeof(float));
 
-  last_token = 0;
+  last_token = cfg.blank_id;
 }
 
 void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
   Initialize(cfg, allocator);
 }
-
-// ─── Simple log-mel spectrogram (CPU) ───────────────────────────────────────
-
-namespace {
-
-// Hann window
-std::vector<float> HannWindow(int length) {
-  std::vector<float> window(length);
-  for (int i = 0; i < length; ++i) {
-    window[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / length));
-  }
-  return window;
-}
-
-// Simple DFT-based STFT for a single frame
-void ComputeSTFTFrame(const float* frame, int fft_size, const float* window, int win_length,
-                      std::vector<float>& magnitudes) {
-  int num_bins = fft_size / 2 + 1;
-  magnitudes.resize(num_bins);
-
-  for (int k = 0; k < num_bins; ++k) {
-    float real_sum = 0.0f, imag_sum = 0.0f;
-    for (int n = 0; n < win_length; ++n) {
-      float val = frame[n] * window[n];
-      float angle = 2.0f * static_cast<float>(M_PI) * k * n / fft_size;
-      real_sum += val * std::cos(angle);
-      imag_sum -= val * std::sin(angle);
-    }
-    magnitudes[k] = real_sum * real_sum + imag_sum * imag_sum;
-  }
-}
-
-// Mel filter bank (HTK style)
-float HzToMel(float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); }
-float MelToHz(float mel) { return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f); }
-
-std::vector<std::vector<float>> CreateMelFilterbank(int num_mels, int fft_size, int sample_rate) {
-  int num_bins = fft_size / 2 + 1;
-  float mel_low = HzToMel(0.0f);
-  float mel_high = HzToMel(static_cast<float>(sample_rate) / 2.0f);
-
-  std::vector<float> mel_points(num_mels + 2);
-  for (int i = 0; i < num_mels + 2; ++i) {
-    mel_points[i] = MelToHz(mel_low + (mel_high - mel_low) * i / (num_mels + 1));
-  }
-
-  // Convert to FFT bin indices
-  std::vector<float> bin_points(num_mels + 2);
-  for (int i = 0; i < num_mels + 2; ++i) {
-    bin_points[i] = (fft_size + 1) * mel_points[i] / sample_rate;
-  }
-
-  std::vector<std::vector<float>> filterbank(num_mels, std::vector<float>(num_bins, 0.0f));
-  for (int m = 0; m < num_mels; ++m) {
-    for (int k = 0; k < num_bins; ++k) {
-      float fk = static_cast<float>(k);
-      if (fk >= bin_points[m] && fk <= bin_points[m + 1]) {
-        filterbank[m][k] = (fk - bin_points[m]) / (bin_points[m + 1] - bin_points[m] + 1e-10f);
-      } else if (fk >= bin_points[m + 1] && fk <= bin_points[m + 2]) {
-        filterbank[m][k] = (bin_points[m + 2] - fk) / (bin_points[m + 2] - bin_points[m + 1] + 1e-10f);
-      }
-    }
-  }
-  return filterbank;
-}
-
-// Compute log-mel spectrogram for an audio chunk
-// Output shape: [1, num_mels, num_frames]
-std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
-                                 int num_mels, int fft_size, int hop_length, int win_length,
-                                 int sample_rate, int& out_num_frames) {
-  static auto mel_filters = CreateMelFilterbank(num_mels, fft_size, sample_rate);
-  static auto window = HannWindow(win_length);
-
-  // Pad audio if needed
-  std::vector<float> padded(audio, audio + num_samples);
-  if (static_cast<int>(num_samples) < win_length) {
-    padded.resize(win_length, 0.0f);
-  }
-
-  int num_frames = static_cast<int>((padded.size() - win_length) / hop_length) + 1;
-  out_num_frames = num_frames;
-
-  std::vector<float> magnitudes;
-  std::vector<float> mel_spec(num_mels * num_frames);
-
-  for (int t = 0; t < num_frames; ++t) {
-    const float* frame = padded.data() + t * hop_length;
-    ComputeSTFTFrame(frame, fft_size, window.data(), win_length, magnitudes);
-
-    for (int m = 0; m < num_mels; ++m) {
-      float val = 0.0f;
-      int num_bins = fft_size / 2 + 1;
-      for (int k = 0; k < num_bins; ++k) {
-        val += mel_filters[m][k] * magnitudes[k];
-      }
-      // Log-mel with floor
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 1e-10f));
-    }
-  }
-
-  return mel_spec;
-}
-
-}  // anonymous namespace
 
 // ─── NemotronSpeechModel ────────────────────────────────────────────────────
 
@@ -276,25 +169,28 @@ void NemotronSpeechState::ResetStreaming() {
 void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples) {
   const auto& cfg = model_.cache_config_;
 
-  // Compute log-mel spectrogram
-  int num_frames = 0;
-  auto mel_data = ComputeLogMel(audio_data, num_samples,
-                                kNumMels, kFFTSize, kHopLength, kWinLength,
-                                cfg.sample_rate, num_frames);
+  // Lazily create the audio processor on first use
+  if (!audio_processor_) {
+    audio_processor_ = std::make_shared<NemotronAudioProcessor>(model_.config_->config_path);
+  }
+
+  // Compute log-mel spectrogram via the audio processor
+  auto mel = audio_processor_->ComputeLogMel(audio_data, num_samples);
 
   // Create processed_signal tensor: [1, num_mels, num_frames]
-  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
+  auto signal_shape = std::array<int64_t, 3>{1, static_cast<int64_t>(mel.num_mels),
+                                              static_cast<int64_t>(mel.num_frames)};
   auto& allocator = model_.p_device_inputs_->GetAllocator();
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape,
                                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memcpy(processed_signal->GetTensorMutableRawData(), mel_data.data(),
-              mel_data.size() * sizeof(float));
+  std::memcpy(processed_signal->GetTensorMutableRawData(), mel.data.data(),
+              mel.data.size() * sizeof(float));
 
   // Create processed_signal_length tensor: [1]
   auto len_shape = std::array<int64_t, 1>{1};
   auto signal_length = OrtValue::CreateTensor(allocator, len_shape,
                                                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(num_frames);
+  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(mel.num_frames);
 
   // Set up encoder inputs
   std::vector<const char*> input_names = {
@@ -322,7 +218,7 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
   // Create output tensors (sizes determined by the model)
   // encoded: [1, hidden_dim, time_out]
   // For streaming, time_out is typically num_frames / subsampling_factor
-  int time_out = std::max(1, num_frames / 8);  // Approximate: FastConformer uses 8x subsampling
+  int time_out = std::max(1, mel.num_frames / 8);  // Approximate: FastConformer uses 8x subsampling
   auto encoded_shape = std::array<int64_t, 3>{1, cfg.hidden_dim, time_out};
   last_encoder_output_ = OrtValue::CreateTensor(allocator, encoded_shape,
                                                  ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -386,9 +282,9 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
   // Get encoder output data
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
-  // enc_shape: [1, hidden_dim, time_steps]
-  int64_t hidden_dim = enc_shape[1];
-  int64_t time_steps = enc_shape[2];
+  // enc_shape: [batch, time_steps, hidden_dim]
+  int64_t time_steps = enc_shape[1];
+  int64_t hidden_dim = enc_shape[2];
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   // Iterate over each encoder time step
@@ -398,8 +294,9 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
     auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape,
                                                  ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     float* frame_data = encoder_frame->GetTensorMutableData<float>();
+    // Encoder output is [batch, time, hidden] — row-major, frame t at t * hidden_dim
     for (int64_t d = 0; d < hidden_dim; ++d) {
-      frame_data[d] = enc_data[d * time_steps + t];
+      frame_data[d] = enc_data[t * hidden_dim + d];
     }
 
     // Greedy RNNT decoding loop for this time step

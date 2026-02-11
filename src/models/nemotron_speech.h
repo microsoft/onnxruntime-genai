@@ -7,6 +7,7 @@
 
 #include "model.h"
 #include "audio_features.h"
+#include "nemotron_audio_processor.h"
 
 namespace Generators {
 
@@ -18,7 +19,7 @@ struct NemotronCacheConfig {
   int conv_context{8};    // Convolution context for cache_last_time
   int decoder_lstm_dim{640};
   int decoder_lstm_layers{2};
-  int vocab_size{1024};
+  int vocab_size{1025};
   int blank_id{1024};      // CTC blank / RNNT blank token
   int chunk_frames{56};    // Number of mel frames per chunk (560ms @ 16kHz with 10ms hop)
   int sample_rate{16000};
@@ -43,7 +44,7 @@ struct NemotronDecoderState {
   // input_states_1 / input_states_2: [lstm_layers, 1, lstm_dim]
   std::unique_ptr<OrtValue> state_1;
   std::unique_ptr<OrtValue> state_2;
-  int last_token{0};  // Last emitted non-blank token (for autoregressive feedback)
+  int last_token{1024};  // Last emitted non-blank token — init to blank_id per NeMo RNNT
 
   void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
   void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
@@ -123,13 +124,9 @@ struct NemotronSpeechState : State {
   std::unique_ptr<OrtValue> last_encoder_output_;
   std::unique_ptr<OrtValue> last_encoded_len_;
 
-  // Mel feature extractor (log-mel spectrogram)
-  // We use ORT extensions if available, otherwise a simple built-in extraction
-  // For nemotron: 80-dim mel, 10ms hop, 25ms window
-  static constexpr int kNumMels = 80;
-  static constexpr int kHopLength = 160;    // 10ms * 16kHz
-  static constexpr int kWinLength = 400;    // 25ms * 16kHz
-  static constexpr int kFFTSize = 512;
+  // Audio preprocessor — reads params from audio_processor_config.json.
+  // Swap this for an ORT Extensions implementation when available.
+  std::shared_ptr<NemotronAudioProcessor> audio_processor_;
 };
 
 }  // namespace Generators
