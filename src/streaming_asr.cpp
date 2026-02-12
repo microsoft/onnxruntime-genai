@@ -75,6 +75,7 @@ void StreamingASR::InitMelFilterbank() {
     }
   }
 
+  // Build Hann window (periodic, matching torch.hann_window(periodic=True))
   hann_window_.resize(kWinLength);
   for (int i = 0; i < kWinLength; ++i) {
     hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / kWinLength));
@@ -82,22 +83,32 @@ void StreamingASR::InitMelFilterbank() {
 }
 
 std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audio, size_t num_samples) {
-  // Center-padded STFT: prepend overlap from previous chunk (or zeros for first chunk)
-  // This ensures we get exactly 56 mel frames for 8960-sample chunks,
-  // matching NeMo's center=True STFT behavior.
+  // Apply pre-emphasis filter: y[n] = x[n] - 0.97 * x[n-1]
+  std::vector<float> preemphasized(num_samples);
+  if (num_samples > 0) {
+    preemphasized[0] = audio[0] - kPreemph * preemph_last_sample_;
+    for (size_t i = 1; i < num_samples; ++i) {
+      preemphasized[i] = audio[i] - kPreemph * audio[i - 1];
+    }
+    preemph_last_sample_ = audio[num_samples - 1];
+  }
+
+  // Left-only center pad for streaming: prepend overlap from previous chunk.
+  // For the first chunk this is zeros (matching center=True left edge).
+  // Right-side context comes naturally from the next chunk's overlap.
   int pad = kFFTSize / 2;  // 256 samples
   std::vector<float> padded(pad + num_samples);
   std::memcpy(padded.data(), audio_overlap_.data(), pad * sizeof(float));
-  std::memcpy(padded.data() + pad, audio, num_samples * sizeof(float));
+  std::memcpy(padded.data() + pad, preemphasized.data(), num_samples * sizeof(float));
 
-  // Update overlap buffer with tail of current chunk for next call
+  // Update overlap buffer with tail of current pre-emphasized chunk for next call
   if (num_samples >= static_cast<size_t>(pad)) {
-    audio_overlap_.assign(audio + num_samples - pad, audio + num_samples);
+    audio_overlap_.assign(preemphasized.data() + num_samples - pad, preemphasized.data() + num_samples);
   } else {
     size_t keep = pad - num_samples;
     std::vector<float> new_overlap(pad, 0.0f);
     std::memcpy(new_overlap.data(), audio_overlap_.data() + num_samples, keep * sizeof(float));
-    std::memcpy(new_overlap.data() + keep, audio, num_samples * sizeof(float));
+    std::memcpy(new_overlap.data() + keep, preemphasized.data(), num_samples * sizeof(float));
     audio_overlap_ = std::move(new_overlap);
   }
 
@@ -105,13 +116,15 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
     padded.resize(kWinLength, 0.0f);
   }
 
+  // Frame count: use win_length for frame boundaries.
+  // DFT with win_length loop is mathematically identical to zero-padded n_fft DFT
+  // for power spectrum computation (|F|² is time-shift invariant).
   int num_frames = static_cast<int>((padded.size() - kWinLength) / kHopLength) + 1;
   int num_bins = kFFTSize / 2 + 1;
 
   std::vector<float> mel_spec(kNumMels * num_frames);
 
   for (int t = 0; t < num_frames; ++t) {
-    // Compute power spectrum for this frame
     std::vector<float> magnitudes(num_bins);
     const float* frame = padded.data() + t * kHopLength;
 
@@ -132,7 +145,7 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
       for (int k = 0; k < num_bins; ++k) {
         val += mel_filters_[m][k] * magnitudes[k];
       }
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 5.96046448e-08f));  // 2^-24 (NeMo default)
+      mel_spec[m * num_frames + t] = std::log(val + 5.96046448e-08f);  // log(mel + eps), NeMo default
     }
   }
 
@@ -225,6 +238,7 @@ void StreamingASR::Reset() {
   decoder_state_.Reset(cache_config_, allocator);
   full_transcript_.clear();
   audio_overlap_.assign(kFFTSize / 2, 0.0f);
+  preemph_last_sample_ = 0.0f;
 }
 
 std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {

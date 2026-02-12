@@ -65,24 +65,26 @@ void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& a
 
 namespace {
 
-// Hann window
-std::vector<float> HannWindow(int length) {
-  std::vector<float> window(length);
-  for (int i = 0; i < length; ++i) {
-    window[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / length));
+// Hann window centered in n_fft frame (matching torch.stft)
+// Window of win_length is placed at offset (fft_size - win_length) / 2
+std::vector<float> HannWindow(int fft_size, int win_length) {
+  std::vector<float> window(fft_size, 0.0f);
+  int offset = (fft_size - win_length) / 2;
+  for (int i = 0; i < win_length; ++i) {
+    window[offset + i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / win_length));
   }
   return window;
 }
 
-// Simple DFT-based STFT for a single frame
-void ComputeSTFTFrame(const float* frame, int fft_size, const float* window, int win_length,
+// Simple DFT-based STFT for a single frame (n_fft samples, centered window)
+void ComputeSTFTFrame(const float* frame, int fft_size, const float* window,
                       std::vector<float>& magnitudes) {
   int num_bins = fft_size / 2 + 1;
   magnitudes.resize(num_bins);
 
   for (int k = 0; k < num_bins; ++k) {
     float real_sum = 0.0f, imag_sum = 0.0f;
-    for (int n = 0; n < win_length; ++n) {
+    for (int n = 0; n < fft_size; ++n) {
       float val = frame[n] * window[n];
       float angle = 2.0f * static_cast<float>(M_PI) * k * n / fft_size;
       real_sum += val * std::cos(angle);
@@ -155,21 +157,32 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
                                  int num_mels, int fft_size, int hop_length, int win_length,
                                  int sample_rate, int& out_num_frames) {
   static auto mel_filters = CreateMelFilterbank(num_mels, fft_size, sample_rate);
-  static auto window = HannWindow(win_length);
+  static auto window = HannWindow(fft_size, win_length);
 
-  // Center-pad: prepend fft_size/2 zeros to match NeMo's center=True STFT
-  int pad = fft_size / 2;
+  // Apply pre-emphasis: y[n] = x[n] - 0.97 * x[n-1]
+  constexpr float preemph = 0.97f;
   int n = static_cast<int>(num_samples);
-  std::vector<float> padded(pad + n, 0.0f);
+  std::vector<float> preemphasized(n);
   if (n > 0) {
-    std::memcpy(padded.data() + pad, audio, n * sizeof(float));
+    preemphasized[0] = audio[0];  // No previous sample for first sample
+    for (int i = 1; i < n; ++i) {
+      preemphasized[i] = audio[i] - preemph * audio[i - 1];
+    }
   }
 
-  if (static_cast<int>(padded.size()) < win_length) {
-    padded.resize(win_length, 0.0f);
+  // Center-pad both sides: fft_size/2 zeros on each side (matching torch.stft center=True)
+  int pad = fft_size / 2;
+  std::vector<float> padded(pad + n + pad, 0.0f);
+  if (n > 0) {
+    std::memcpy(padded.data() + pad, preemphasized.data(), n * sizeof(float));
   }
 
-  int num_frames = static_cast<int>((padded.size() - win_length) / hop_length) + 1;
+  if (static_cast<int>(padded.size()) < fft_size) {
+    padded.resize(fft_size, 0.0f);
+  }
+
+  // Frame count using n_fft as frame size (matching torch.stft)
+  int num_frames = static_cast<int>((padded.size() - fft_size) / hop_length) + 1;
   out_num_frames = num_frames;
 
   std::vector<float> magnitudes;
@@ -177,7 +190,7 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
 
   for (int t = 0; t < num_frames; ++t) {
     const float* frame = padded.data() + t * hop_length;
-    ComputeSTFTFrame(frame, fft_size, window.data(), win_length, magnitudes);
+    ComputeSTFTFrame(frame, fft_size, window.data(), magnitudes);
 
     for (int m = 0; m < num_mels; ++m) {
       float val = 0.0f;
@@ -185,8 +198,8 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
       for (int k = 0; k < num_bins; ++k) {
         val += mel_filters[m][k] * magnitudes[k];
       }
-      // Log-mel with floor (2^-24, NeMo default)
-      mel_spec[m * num_frames + t] = std::log(std::max(val, 5.96046448e-08f));
+      // Log-mel: log(mel + eps), NeMo default (log_zero_guard_type=add)
+      mel_spec[m * num_frames + t] = std::log(val + 5.96046448e-08f);
     }
   }
 

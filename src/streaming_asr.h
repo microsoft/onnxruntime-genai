@@ -59,6 +59,10 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 samples)
   std::vector<float> audio_overlap_;
 
+  // Pre-emphasis state (last sample from previous chunk)
+  float preemph_last_sample_{0.0f};
+  static constexpr float kPreemph = 0.97f;
+
   static constexpr int kNumMels = 128;
   static constexpr int kHopLength = 160;
   static constexpr int kWinLength = 400;
