@@ -25,13 +25,14 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   ~StreamingASR();
 
   /// Feed a chunk of raw PCM audio (mono, 16kHz, float32).
-  /// Audio is accumulated internally and processed in overlapping encoder
-  /// windows (stride < chunk_size) for improved boundary quality.
+  /// Each chunk is converted to mel, prepended with a 9-frame pre-encode cache
+  /// (last 9 mel frames from the previous chunk), then fed to the encoder.
+  /// This matches NeMo's CacheAwareStreamingAudioBuffer behavior.
   /// Returns newly transcribed text from this call.
   std::string TranscribeChunk(const float* audio_data, size_t num_samples);
 
   /// Flush remaining buffered audio (call after last TranscribeChunk).
-  /// Processes any pending/buffered audio with silence as right context.
+  /// Processes any pending/buffered audio with silence padding.
   /// Returns final transcribed text.
   std::string Flush();
 
@@ -63,16 +64,18 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   std::vector<std::vector<float>> mel_filters_;
   std::vector<float> hann_window_;
 
-  // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 samples)
+  // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 pre-emphasized samples)
   std::vector<float> audio_overlap_;
-  // Pending audio buffer: one-chunk delay so we can provide right context
-  std::vector<float> pending_audio_;
-  bool has_pending_{false};
-  // Audio accumulation buffer for overlapping-window processing
+
+  // Mel pre-encode cache: last pre_encode_cache_size mel frames from previous chunk.
+  // Prepended to the current chunk's mel before feeding the encoder.
+  // Size: kNumMels * pre_encode_cache_size floats (row-major: [kNumMels, cache_size]).
+  std::vector<float> mel_pre_encode_cache_;
+  bool is_first_chunk_{true};
+
+  // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
-  // Overlap stride config (from NemotronCacheConfig)
-  int stride_samples_{7680};       // Audio advance per encoder window
-  int drop_last_frames_{1};        // Encoder frames to drop at chunk end
+
   // Pre-emphasis state (last sample from previous chunk)
   float preemph_last_sample_{0.0f};
   static constexpr float kPreemph = 0.97f;
@@ -88,9 +91,8 @@ struct StreamingASR : LeakChecked<StreamingASR> {
 
     void LoadVocab();
     void InitMelFilterbank();
-    std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples,
-                                                      const float* right_ctx = nullptr, size_t right_ctx_len = 0);
-    std::string ProcessPendingChunk(const float* right_ctx_audio, size_t right_ctx_len);
+    std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples);
+    std::string ProcessMelChunk(const std::vector<float>& mel_data, int num_frames);
     std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
 
     // Save a float tensor as .npy file (row-major)

@@ -83,8 +83,7 @@ void StreamingASR::InitMelFilterbank() {
 }
 
 std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
-    const float* audio, size_t num_samples,
-    const float* right_ctx, size_t right_ctx_len) {
+    const float* audio, size_t num_samples) {
   // Apply pre-emphasis filter: y[n] = x[n] - 0.97 * x[n-1]
   std::vector<float> preemphasized(num_samples);
   if (num_samples > 0) {
@@ -95,32 +94,14 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
     preemph_last_sample_ = audio[num_samples - 1];
   }
 
-  // Pre-emphasize right context audio (from start of next chunk).
-  // This provides real data for the last mel frame's window instead of zeros.
-  // NOTE: preemph_last_sample_ is NOT updated from right context — it stays
-  // set from the main audio so the next chunk's pre-emphasis is correct.
-  std::vector<float> preemph_right;
-  if (right_ctx && right_ctx_len > 0 && num_samples > 0) {
-    preemph_right.resize(right_ctx_len);
-    preemph_right[0] = right_ctx[0] - kPreemph * audio[num_samples - 1];
-    for (size_t i = 1; i < right_ctx_len; ++i) {
-      preemph_right[i] = right_ctx[i] - kPreemph * right_ctx[i - 1];
-    }
-  }
-
   // Left-only center pad for streaming: prepend overlap from previous chunk.
   // For the first chunk this is zeros (matching center=True left edge).
   int pad = kFFTSize / 2;  // 256 samples
-  size_t total_signal = num_samples + preemph_right.size();
-  std::vector<float> padded(pad + total_signal);
+  std::vector<float> padded(pad + num_samples);
   std::memcpy(padded.data(), audio_overlap_.data(), pad * sizeof(float));
   std::memcpy(padded.data() + pad, preemphasized.data(), num_samples * sizeof(float));
-  if (!preemph_right.empty()) {
-    std::memcpy(padded.data() + pad + num_samples, preemph_right.data(),
-                preemph_right.size() * sizeof(float));
-  }
 
-  // Update overlap buffer from main audio only (not right context)
+  // Update overlap buffer for next chunk
   if (num_samples >= static_cast<size_t>(pad)) {
     audio_overlap_.assign(preemphasized.data() + num_samples - pad, preemphasized.data() + num_samples);
   } else {
@@ -131,8 +112,7 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
     audio_overlap_ = std::move(new_overlap);
   }
 
-  // Window centering offset: torch.stft centers win_length window within n_fft frame.
-  // This shifts the effective analysis position by (n_fft - win_length) / 2 samples.
+  // Window centering offset
   constexpr int kWinOffset = (kFFTSize - kWinLength) / 2;  // 56
 
   // Right-pad to accommodate the window offset for the last frame
@@ -142,14 +122,8 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
     padded.resize(kWinOffset + kWinLength, 0.0f);
   }
 
-  // Frame count from full padded array
+  // Frame count
   int num_frames = static_cast<int>((padded.size() - kWinOffset - kWinLength) / kHopLength) + 1;
-
-  // Cap frame count: right context provides real data for boundary frames
-  // but should not create additional frames beyond what main audio produces.
-  int expected_main_padded = pad + static_cast<int>(num_samples) + kWinOffset;
-  int expected_frames = (expected_main_padded - kWinOffset - kWinLength) / kHopLength + 1;
-  num_frames = std::min(num_frames, expected_frames);
 
   int num_bins = kFFTSize / 2 + 1;
 
@@ -255,9 +229,10 @@ StreamingASR::StreamingASR(Model& model)
   // Initialize audio overlap buffer for center-padded STFT
   audio_overlap_.assign(kFFTSize / 2, 0.0f);
 
-  // Overlap stride config from model (O8b strategy by default)
-  stride_samples_ = cache_config_.stride_samples();
-  drop_last_frames_ = cache_config_.drop_last_encoder_frames;
+  // Initialize mel pre-encode cache (zeros for first chunk)
+  mel_pre_encode_cache_.assign(
+      static_cast<size_t>(kNumMels) * cache_config_.pre_encode_cache_size, 0.0f);
+  is_first_chunk_ = true;
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
@@ -274,8 +249,9 @@ void StreamingASR::Reset() {
   full_transcript_.clear();
   audio_overlap_.assign(kFFTSize / 2, 0.0f);
   preemph_last_sample_ = 0.0f;
-  pending_audio_.clear();
-  has_pending_ = false;
+  mel_pre_encode_cache_.assign(
+      static_cast<size_t>(kNumMels) * cache_config_.pre_encode_cache_size, 0.0f);
+  is_first_chunk_ = true;
   audio_buffer_.clear();
   chunk_index_ = 0;
 }
@@ -289,24 +265,17 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
   std::string result;
   const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
 
-  // Process as many overlapping encoder windows as possible.
-  // Each window is chunk_sz samples of audio (56 mel frames → 6 encoder frames).
-  // We advance by stride_samples_ (< chunk_sz), so consecutive windows share
-  // (chunk_sz - stride_samples_) samples of audio (= overlap_mel_frames mel frames).
+  // Process complete chunks of audio (each = chunk_samples = 8960 samples = 56 mel frames)
   while (audio_buffer_.size() >= chunk_sz) {
-    if (has_pending_) {
-      // Use start of current window as right context for pending chunk's mel
-      size_t right_ctx_len = std::min(static_cast<size_t>(kWinLength), audio_buffer_.size());
-      result += ProcessPendingChunk(audio_buffer_.data(), right_ctx_len);
-    }
+    // Compute mel for this chunk
+    auto [mel_data, num_frames] = ComputeLogMel(audio_buffer_.data(), chunk_sz);
 
-    // Buffer current window as pending (processed when next window provides right ctx)
-    pending_audio_.assign(audio_buffer_.data(), audio_buffer_.data() + chunk_sz);
-    has_pending_ = true;
+    // Prepend pre-encode cache → feed [cache | new_mel] to encoder
+    result += ProcessMelChunk(mel_data, num_frames);
 
-    // Advance by stride (< chunk_sz = overlap)
+    // Advance by full chunk (no overlap — NeMo native: shift == chunk)
     audio_buffer_.erase(audio_buffer_.begin(),
-                        audio_buffer_.begin() + static_cast<ptrdiff_t>(stride_samples_));
+                        audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_sz));
   }
 
   return result;
@@ -318,59 +287,69 @@ std::string StreamingASR::Flush() {
   std::string result;
   const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
 
-  // If there's remaining audio in the buffer, pad it to a full window and process
+  // Process any remaining audio (pad to full chunk with silence)
   if (!audio_buffer_.empty()) {
     audio_buffer_.resize(chunk_sz, 0.0f);
 
-    if (has_pending_) {
-      size_t right_ctx_len = std::min(static_cast<size_t>(kWinLength), audio_buffer_.size());
-      result += ProcessPendingChunk(audio_buffer_.data(), right_ctx_len);
-    }
+    auto [mel_data, num_frames] = ComputeLogMel(audio_buffer_.data(), chunk_sz);
+    result += ProcessMelChunk(mel_data, num_frames);
 
-    pending_audio_ = std::move(audio_buffer_);
     audio_buffer_.clear();
-    has_pending_ = true;
-  }
-
-  // Process the final pending chunk with silence as right context
-  if (has_pending_) {
-    std::vector<float> silence(kWinLength, 0.0f);
-    result += ProcessPendingChunk(silence.data(), silence.size());
-    has_pending_ = false;
-    pending_audio_.clear();
   }
 
   return result;
 }
 
-std::string StreamingASR::ProcessPendingChunk(const float* right_ctx_audio, size_t right_ctx_len) {
-  // Compute log-mel spectrogram for the pending audio with right context
-  auto [mel_data, num_frames] = ComputeLogMel(pending_audio_.data(), pending_audio_.size(),
-                                               right_ctx_audio, right_ctx_len);
-
+std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
+  int cache_size = cache_config_.pre_encode_cache_size;  // 9
 
-  // ── Debug: dump mel and raw audio to /tmp/mel_dumps/ ──
-  {
-    if (chunk_index_ == 0) {
-      std::system("mkdir -p /tmp/mel_dumps");
-    }
-    std::string mel_path = "/tmp/mel_dumps/mel_chunk_" + std::to_string(chunk_index_) + ".npy";
-    SaveNpy(mel_path, mel_data.data(), {static_cast<int64_t>(kNumMels), static_cast<int64_t>(num_frames)});
+  // Build encoder input: [pre_encode_cache (9 mel) | new_mel (num_frames mel)]
+  int total_mel_frames = cache_size + num_frames;  // e.g. 9 + 56 = 65
 
-    std::string audio_path = "/tmp/mel_dumps/audio_chunk_" + std::to_string(chunk_index_) + ".npy";
-    SaveNpy(audio_path, pending_audio_.data(), {static_cast<int64_t>(pending_audio_.size())});
+  // Create processed_signal: [1, num_mels, total_mel_frames]
+  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, total_mel_frames};
+  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  float* signal_data = processed_signal->GetTensorMutableData<float>();
+
+  // Fill row by row: mel is [kNumMels, time] in row-major layout
+  for (int m = 0; m < kNumMels; ++m) {
+    // Pre-encode cache columns for this mel bin
+    std::memcpy(signal_data + m * total_mel_frames,
+                mel_pre_encode_cache_.data() + m * cache_size,
+                cache_size * sizeof(float));
+    // New mel columns for this mel bin
+    std::memcpy(signal_data + m * total_mel_frames + cache_size,
+                mel_data.data() + m * num_frames,
+                num_frames * sizeof(float));
   }
 
-  // Create processed_signal: [1, num_mels, num_frames]
-  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
-  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memcpy(processed_signal->GetTensorMutableRawData(), mel_data.data(), mel_data.size() * sizeof(float));
+  // Update pre-encode cache: save last cache_size mel frames from current chunk
+  // (these will be prepended to the next chunk)
+  if (num_frames >= cache_size) {
+    for (int m = 0; m < kNumMels; ++m) {
+      std::memcpy(mel_pre_encode_cache_.data() + m * cache_size,
+                  mel_data.data() + m * num_frames + (num_frames - cache_size),
+                  cache_size * sizeof(float));
+    }
+  } else {
+    // Short chunk: shift existing cache left, append new frames
+    int keep = cache_size - num_frames;
+    for (int m = 0; m < kNumMels; ++m) {
+      std::memmove(mel_pre_encode_cache_.data() + m * cache_size,
+                   mel_pre_encode_cache_.data() + m * cache_size + num_frames,
+                   keep * sizeof(float));
+      std::memcpy(mel_pre_encode_cache_.data() + m * cache_size + keep,
+                  mel_data.data() + m * num_frames,
+                  num_frames * sizeof(float));
+    }
+  }
+  is_first_chunk_ = false;
 
   // Create processed_signal_length: [1]
   auto len_shape = std::array<int64_t, 1>{1};
   auto signal_length = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(num_frames);
+  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(total_mel_frames);
 
   // Encoder inputs
   const char* enc_input_names[] = {
@@ -382,7 +361,6 @@ std::string StreamingASR::ProcessPendingChunk(const float* right_ctx_audio, size
       encoder_cache_.cache_last_time.get(),
       encoder_cache_.cache_last_channel_len.get()};
 
-  // Encoder outputs — let ORT allocate
   const char* enc_output_names[] = {
       "outputs", "encoded_lengths",
       "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_next_len"};
@@ -398,29 +376,12 @@ std::string StreamingASR::ProcessPendingChunk(const float* right_ctx_audio, size
   auto* encoded = enc_outputs[0].get();
   int64_t encoded_len = *enc_outputs[1]->GetTensorData<int64_t>();
 
-  // ── Debug: dump encoder output ──
-  {
-    auto enc_info2 = encoded->GetTensorTypeAndShapeInfo();
-    auto enc_shape2 = enc_info2->GetShape();
-    // Shape is [1, hidden_dim, time_steps]
-    int64_t total_enc = 1;
-    for (auto d : enc_shape2) total_enc *= d;
-    std::string enc_path = "/tmp/mel_dumps/encoder_out_" + std::to_string(chunk_index_) + ".npy";
-    SaveNpy(enc_path, encoded->GetTensorData<float>(),
-            {enc_shape2.begin(), enc_shape2.end()});
-
-    std::string len_path = "/tmp/mel_dumps/encoder_len_" + std::to_string(chunk_index_) + ".txt";
-    std::ofstream(len_path) << encoded_len << " shape:";
-    for (auto d : enc_shape2) std::ofstream(len_path, std::ios::app) << " " << d;
-    std::ofstream(len_path, std::ios::app) << "\n";
-  }
-
   // Update cache
   encoder_cache_.cache_last_channel = std::move(enc_outputs[2]);
   encoder_cache_.cache_last_time = std::move(enc_outputs[3]);
   encoder_cache_.cache_last_channel_len = std::move(enc_outputs[4]);
 
-  // Run RNNT decoder
+  // Run RNNT decoder on ALL encoder output frames (no drop_last needed)
   std::string chunk_text = RunRNNTDecoder(encoded, encoded_len);
   full_transcript_ += chunk_text;
   chunk_index_++;
@@ -435,33 +396,12 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
   int64_t hidden_dim = enc_shape[1];
-  int64_t total_frames = std::min(enc_shape[2], encoded_len);
-  // Drop last N encoder frames per chunk — they have subsampling boundary
-  // artifacts (no right context for the conv subsampling layer at chunk edge).
-  // With overlapping windows, these frames are re-encoded with proper context
-  // in the next window.
-  int64_t time_steps = std::max(int64_t{0}, total_frames - static_cast<int64_t>(drop_last_frames_));
+  // Decode ALL encoder output frames — pre-encode cache artifacts are already
+  // removed by the ONNX graph's baked-in Slice (drop_extra_pre_encoded=2).
+  int64_t time_steps = std::min(enc_shape[2], encoded_len);
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   auto run_options = OrtRunOptions::Create();
-
-  // ── Debug: dump decoder LSTM states at start of this chunk ──
-  {
-    auto s1_shape = decoder_state_.state_1->GetTensorTypeAndShapeInfo()->GetShape();
-    SaveNpy("/tmp/mel_dumps/decoder_state1_" + std::to_string(chunk_index_) + ".npy",
-            decoder_state_.state_1->GetTensorData<float>(),
-            {s1_shape.begin(), s1_shape.end()});
-    auto s2_shape = decoder_state_.state_2->GetTensorTypeAndShapeInfo()->GetShape();
-    SaveNpy("/tmp/mel_dumps/decoder_state2_" + std::to_string(chunk_index_) + ".npy",
-            decoder_state_.state_2->GetTensorData<float>(),
-            {s2_shape.begin(), s2_shape.end()});
-  }
-
-  // Collect token IDs for this chunk (for debug dump)
-  std::vector<int> chunk_tokens;
-  // Collect per-step joiner logits info
-  std::ofstream step_log("/tmp/mel_dumps/decoder_steps_" + std::to_string(chunk_index_) + ".txt");
-  step_log << "# t sym last_token best_token best_score blank_score total_logits\n";
 
   for (int64_t t = 0; t < time_steps; ++t) {
     // Extract single encoder frame: [1, hidden_dim, 1]
@@ -531,20 +471,6 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
         }
       }
 
-      // ── Debug: log this step and dump joiner logits for first chunks ──
-      {
-        float blank_score = (cache_config_.blank_id < total_logits) ? logits_data[cache_config_.blank_id] : -999.0f;
-        step_log << t << " " << sym << " " << decoder_state_.last_token << " "
-                 << best_token << " " << best_score << " " << blank_score << " " << total_logits << "\n";
-
-        // Dump full joiner logits for first 5 chunks
-        if (chunk_index_ < 5) {
-          std::string logit_path = "/tmp/mel_dumps/joiner_logits_" + std::to_string(chunk_index_)
-                                   + "_t" + std::to_string(t) + "_s" + std::to_string(sym) + ".npy";
-          SaveNpy(logit_path, logits_data, {static_cast<int64_t>(total_logits)});
-        }
-      }
-
       // Blank => next time step
       if (best_token == cache_config_.blank_id || best_token >= cache_config_.vocab_size) {
         break;
@@ -554,7 +480,6 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
       decoder_state_.last_token = best_token;
       decoder_state_.state_1 = std::move(dec_outputs[2]);
       decoder_state_.state_2 = std::move(dec_outputs[3]);
-      chunk_tokens.push_back(best_token);
 
       if (best_token < static_cast<int>(vocab_.size())) {
         std::string token_str = vocab_[best_token];
@@ -567,16 +492,6 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
         result += token_str;
       }
     }
-  }
-
-  // ── Debug: dump emitted token IDs for this chunk ──
-  {
-    std::ofstream tf("/tmp/mel_dumps/decoder_tokens_" + std::to_string(chunk_index_) + ".txt");
-    for (size_t i = 0; i < chunk_tokens.size(); ++i) {
-      tf << chunk_tokens[i];
-      if (i + 1 < chunk_tokens.size()) tf << " ";
-    }
-    tf << "\n";
   }
 
   return result;

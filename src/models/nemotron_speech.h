@@ -20,18 +20,17 @@ struct NemotronCacheConfig {
   int decoder_lstm_layers{2};
   int vocab_size{1024};
   int blank_id{1024};      // CTC blank / RNNT blank token
-  int chunk_frames{56};    // Number of mel frames per chunk (560ms @ 16kHz with 10ms hop)
+  int chunk_frames{56};    // Number of NEW mel frames per chunk (560ms @ 16kHz with 10ms hop)
   int sample_rate{16000};
   int chunk_samples{8960}; // 560ms * 16000 = 8960 samples per chunk
 
-  // Overlap-and-drop streaming config (O8b strategy).
-  // overlap_mel_frames: consecutive encoder windows share this many mel frames.
-  // drop_last_encoder_frames: discard last N encoder frames per chunk (boundary artifacts).
-  // stride_samples = chunk_samples - overlap_mel_frames * hop_length.
-  int overlap_mel_frames{8};         // 8 mel frames = 1280 samples overlap
-  int drop_last_encoder_frames{1};   // Drop last 1 encoder frame per chunk
+  // Pre-encode cache config (matches NeMo's CacheAwareStreamingAudioBuffer).
+  // The conv subsampling layer needs left context from the previous chunk's mel tail.
+  // pre_encode_cache_size: mel frames from prev chunk to prepend (9 for subsampling_factor=8).
+  // Total mel per encoder call = pre_encode_cache_size + chunk_frames.
+  // drop_extra_pre_encoded is baked into the ONNX graph (Slice node), not needed here.
+  int pre_encode_cache_size{9};    // 9 mel frames of left context for conv subsampling
   static constexpr int kHopLength = 160;
-  int stride_samples() const { return chunk_samples - overlap_mel_frames * kHopLength; }
 };
 
 /// Holds the rolling encoder cache state between streaming chunks.
