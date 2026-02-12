@@ -130,9 +130,8 @@ struct NemotronState : State {
   int emit_index_{0};   // Index into decoded_tokens_ for step-by-step emission
   bool rnnt_done_{false};
 
-  // Logits output tensor exposed to the framework
-  std::unique_ptr<OrtValue> logits_tensor_;              // [1, vocab_size]
-  DeviceSpan<float> logits_span_;                        // Wrapped view of logits_tensor_
+  // Logits output (allocated on device for CUDA compatibility)
+  DeviceSpan<float> logits_span_;                        // Device-allocated logits buffer
 
   // Track the last decoder token for RNNT continuity across chunks
   int64_t last_decoder_token_{0};  // Carries across chunks in streaming mode
