@@ -614,31 +614,28 @@ DeviceSpan<float> NemotronState::Run(int current_length, DeviceSpan<int32_t>& ne
     }
   }
 
-  // Create logits tensor if not yet allocated
-  if (!logits_tensor_) {
-    auto logits_shape = std::array<int64_t, 2>{1, static_cast<int64_t>(model_.vocab_size_)};
-    logits_tensor_ = OrtValue::CreateTensor<float>(
-        model_.allocator_cpu_, logits_shape);
+  // Create logits device span if not yet allocated
+  // Allocate on device (GPU if CUDA) so the search layer's topk can access it
+  if (logits_span_.empty()) {
+    logits_span_ = model_.p_device_inputs_->Allocate<float>(model_.vocab_size_);
   }
 
-  float* logits_data = logits_tensor_->GetTensorMutableData<float>();
-
-  // Fill logits: make the target token have the highest score
-  std::fill(logits_data, logits_data + model_.vocab_size_, -100.0f);
+  // Fill logits on CPU side, then copy to device
+  auto logits_cpu = logits_span_.CpuSpan();
+  std::fill(logits_cpu.begin(), logits_cpu.end(), -100.0f);
 
   if (emit_index_ < static_cast<int>(decoded_tokens_.size())) {
     // Emit the next decoded token
     int32_t token = decoded_tokens_[emit_index_];
-    logits_data[token] = 10.0f;  // High score for the decoded token
+    logits_cpu[token] = 10.0f;  // High score for the decoded token
     emit_index_++;
   } else {
     // All tokens emitted — signal EOS via eos_token_id (blank=1024)
-    logits_data[model_.blank_id_] = 10.0f;
+    logits_cpu[model_.blank_id_] = 10.0f;
     rnnt_done_ = true;
   }
 
-  // Wrap the logits tensor as a DeviceSpan for the framework
-  logits_span_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_tensor_);
+  logits_span_.CopyCpuToDevice();
   return logits_span_;
 }
 
@@ -661,8 +658,6 @@ OrtValue* NemotronState::GetOutput(const char* name) {
     return encoder_output_raw_.get();
   if (encoded_lengths_ && std::strcmp(name, "encoded_lengths") == 0)
     return encoded_lengths_.get();
-  if (logits_tensor_ && std::strcmp(name, "logits") == 0)
-    return logits_tensor_.get();
   return nullptr;
 }
 
