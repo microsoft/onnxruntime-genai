@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <fstream>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -14,10 +14,10 @@
 namespace test_utils {
 
 // Helper function to get the appropriate PHI2 model path based on available models
-inline const char* GetPhi2Path() {
+inline const std::string& GetPhi2Path() {
   static std::string phi2_path;
   if (!phi2_path.empty()) {
-    return phi2_path.c_str();
+    return phi2_path;
   }
 
   std::vector<std::string> candidate_paths = {
@@ -27,16 +27,16 @@ inline const char* GetPhi2Path() {
       MODEL_PATH "phi-2/int4/cpu"};
 
   for (const auto& path : candidate_paths) {
-    std::ifstream test_file(path + std::string("/genai_config.json"));
-    if (test_file.good()) {
+    std::filesystem::path model_path(path);
+    if (std::filesystem::exists(model_path / "genai_config.json")) {
       phi2_path = path;
-      return phi2_path.c_str();
+      return phi2_path;
     }
   }
 
   // Fallback to CPU path
   phi2_path = MODEL_PATH "phi-2/int4/cpu";
-  return phi2_path.c_str();
+  return phi2_path;
 }
 
 // Helper to detect if we're using WebGPU or DML EP based on the model path

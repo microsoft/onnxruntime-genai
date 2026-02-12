@@ -21,7 +21,7 @@
 #include "test_utils.h"
 
 #ifndef PHI2_PATH
-#define PHI2_PATH test_utils::GetPhi2Path()
+#define PHI2_PATH test_utils::GetPhi2Path().c_str()
 #endif
 
 TEST(CAPITests, Config) {

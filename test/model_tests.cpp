@@ -19,7 +19,7 @@
 extern std::string g_custom_model_path;
 
 #ifndef PHI2_PATH
-#define PHI2_PATH test_utils::GetPhi2Path()
+#define PHI2_PATH test_utils::GetPhi2Path().c_str()
 #endif
 
 // To generate this file:

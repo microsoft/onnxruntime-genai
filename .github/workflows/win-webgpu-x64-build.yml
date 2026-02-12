@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           # Use Foundry package which includes WebGPU DLLs (dxil.dll, dxcompiler.dll)
-          $FOUNDRY_VERSION = "1.24.1.1"
+          $FOUNDRY_VERSION = "1.25.0-dev-20260210-0905-b214734cba"
           Write-Host "Downloading OnnxRuntime.Foundry version: $FOUNDRY_VERSION"
           nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
 
