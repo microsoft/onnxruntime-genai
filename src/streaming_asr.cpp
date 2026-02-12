@@ -75,10 +75,10 @@ void StreamingASR::InitMelFilterbank() {
     }
   }
 
-  // Build Hann window (periodic, matching torch.hann_window(periodic=True))
+  // Build Hann window (symmetric, matching torch.hann_window(periodic=False))
   hann_window_.resize(kWinLength);
   for (int i = 0; i < kWinLength; ++i) {
-    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / kWinLength));
+    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / (kWinLength)));
   }
 }
 
@@ -112,21 +112,26 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
     audio_overlap_ = std::move(new_overlap);
   }
 
-  if (static_cast<int>(padded.size()) < kWinLength) {
-    padded.resize(kWinLength, 0.0f);
+  // Window centering offset: torch.stft centers win_length window within n_fft frame.
+  // This shifts the effective analysis position by (n_fft - win_length) / 2 samples.
+  constexpr int kWinOffset = (kFFTSize - kWinLength) / 2;  // 56
+
+  // Right-pad to accommodate the window offset for the last frame
+  padded.resize(padded.size() + kWinOffset, 0.0f);
+
+  if (static_cast<int>(padded.size()) < kWinOffset + kWinLength) {
+    padded.resize(kWinOffset + kWinLength, 0.0f);
   }
 
-  // Frame count: use win_length for frame boundaries.
-  // DFT with win_length loop is mathematically identical to zero-padded n_fft DFT
-  // for power spectrum computation (|F|² is time-shift invariant).
-  int num_frames = static_cast<int>((padded.size() - kWinLength) / kHopLength) + 1;
+  // Frame count: accounts for window centering offset
+  int num_frames = static_cast<int>((padded.size() - kWinOffset - kWinLength) / kHopLength) + 1;
   int num_bins = kFFTSize / 2 + 1;
 
   std::vector<float> mel_spec(kNumMels * num_frames);
 
   for (int t = 0; t < num_frames; ++t) {
     std::vector<float> magnitudes(num_bins);
-    const float* frame = padded.data() + t * kHopLength;
+    const float* frame = padded.data() + t * kHopLength + kWinOffset;
 
     for (int k = 0; k < num_bins; ++k) {
       float real_sum = 0.0f, imag_sum = 0.0f;
