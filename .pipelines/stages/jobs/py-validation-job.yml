@@ -43,6 +43,8 @@ jobs:
         pool: 'onnxruntime-Win-CPU-2022'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
+      demands:
+        - Agent.Version -equals 4.264.2
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx') }}:
@@ -152,10 +154,6 @@ jobs:
       DIR "C:\Python"
     displayName: Copy python 3.11.0 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.11'))
-
-  - task: NodeTool@0
-    inputs:
-      versionSpec: '22.x'
 
   - task: UsePythonVersion@0
     inputs:
