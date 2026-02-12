@@ -39,7 +39,8 @@ def main(args):
     # Create system message
     message = [{"role": "system", "content": args.system_prompt}]
 
-    # Get and set guidance info if requested
+    # Get guidance info if requested
+    guidance_type, guidance_data, tools = "", "", ""
     if args.response_format != "":
         print("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json")
         guidance_type, guidance_data, tools = get_guidance(
@@ -67,7 +68,9 @@ def main(args):
     # Apply chat template
     try:
         system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
-    except:
+    except Exception as e:
+        if args.verbose:
+            print(f"Exception in apply_chat_template for system_prompt: {e}")
         system_prompt = args.system_prompt
     if args.verbose:
         print(f"System prompt: {system_prompt}")
@@ -100,7 +103,9 @@ def main(args):
         # Apply chat template
         try:
             user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
-        except:
+        except Exception as e:
+            if args.verbose:
+                print(f"Exception in apply_chat_template for user_prompt: {e}")
             user_prompt = text
         if args.verbose:
             print(f"User prompt: {user_prompt}")

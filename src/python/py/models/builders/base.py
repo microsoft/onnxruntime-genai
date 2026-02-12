@@ -3,7 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 #
-# Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 from __future__ import annotations
 
@@ -671,6 +671,9 @@ class Model:
         tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
         )
+        # Overwrite model_max_length with the model's context_length so it is a normal integer
+        # (HF often uses 1e30 for "no limit", which can serialize to a huge decimal in JSON)
+        tokenizer.model_max_length = self.context_length
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
