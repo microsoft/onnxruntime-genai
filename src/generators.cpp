@@ -547,8 +547,10 @@ void Generator::GenerateNextToken() {
   // at this stage which is achieved by rewinding to zero and appending the current sequence
   // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
   // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
+  // Skip this logic for WebGPU EP as it already uses long RoPE scaling graph for all sequence lengths
   if (search_->params_->BatchBeamSize() == 1 && !epUsesSingleRopeFactor) {
-    if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8193) && (model_->config_->model.type == "phi3small"))) {
+    if (model_->p_device_->GetType() != DeviceType::WEBGPU &&
+      (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8193) && (model_->config_->model.type == "phi3small")))) {
       auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
       RewindToLength(0);
       AppendTokens(current_seq);

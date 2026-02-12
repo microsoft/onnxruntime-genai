@@ -1935,8 +1935,6 @@ class Model:
 
         # Determine which EPs don't support the If operator
         self.eps_without_if_support = ["dml"]
-        if self.extra_options.get("enable_webgpu_graph", False):
-            self.eps_without_if_support.append("webgpu")
 
         if self.ep in self.eps_without_if_support:
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
@@ -1945,6 +1943,16 @@ class Model:
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
             # Do NOT make the subgraph with the If node for DML EP.
+            return
+        
+        # WebGPU: Always use large caches to avoid the short to long factor switch
+        # if there is no correctness issue for all lengths of tokens
+        if self.ep == "webgpu":
+            cos_cache = cos_cache_large
+            sin_cache = sin_cache_large
+            # Save cos/sin caches to disk
+            self.make_initializer(cos_cache, cos_cache_name)
+            self.make_initializer(sin_cache, sin_cache_name)
             return
 
         # TRT-RTX: Apply padding and create split If nodes with early return
