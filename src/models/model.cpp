@@ -16,6 +16,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
@@ -1274,6 +1275,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if (ModelType::IsStreamingASR(config->model.type))
+    return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -1364,6 +1367,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"nemotron_speech", Processor::Create<NemotronSpeechProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
