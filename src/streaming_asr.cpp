@@ -387,7 +387,11 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
   int64_t hidden_dim = enc_shape[1];
-  int64_t time_steps = std::min(enc_shape[2], encoded_len);
+  int64_t total_frames = std::min(enc_shape[2], encoded_len);
+  // Drop the last encoder frame per chunk — it has subsampling boundary artifacts
+  // (no right context for the conv subsampling layer at the chunk edge).
+  // This improves word accuracy (e.g. captures "career path, actually" vs just "career.").
+  int64_t time_steps = (total_frames > 1) ? total_frames - 1 : total_frames;
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   auto run_options = OrtRunOptions::Create();
