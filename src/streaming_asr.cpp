@@ -75,14 +75,16 @@ void StreamingASR::InitMelFilterbank() {
     }
   }
 
-  // Build Hann window (periodic, matching torch.hann_window(periodic=True))
+  // Build Hann window (symmetric, matching torch.hann_window(periodic=False))
   hann_window_.resize(kWinLength);
   for (int i = 0; i < kWinLength; ++i) {
-    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / kWinLength));
+    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / (kWinLength - 1)));
   }
 }
 
-std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audio, size_t num_samples) {
+std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
+    const float* audio, size_t num_samples,
+    const float* right_ctx, size_t right_ctx_len) {
   // Apply pre-emphasis filter: y[n] = x[n] - 0.97 * x[n-1]
   std::vector<float> preemphasized(num_samples);
   if (num_samples > 0) {
@@ -93,15 +95,32 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
     preemph_last_sample_ = audio[num_samples - 1];
   }
 
+  // Pre-emphasize right context audio (from start of next chunk).
+  // This provides real data for the last mel frame's window instead of zeros.
+  // NOTE: preemph_last_sample_ is NOT updated from right context — it stays
+  // set from the main audio so the next chunk's pre-emphasis is correct.
+  std::vector<float> preemph_right;
+  if (right_ctx && right_ctx_len > 0 && num_samples > 0) {
+    preemph_right.resize(right_ctx_len);
+    preemph_right[0] = right_ctx[0] - kPreemph * audio[num_samples - 1];
+    for (size_t i = 1; i < right_ctx_len; ++i) {
+      preemph_right[i] = right_ctx[i] - kPreemph * right_ctx[i - 1];
+    }
+  }
+
   // Left-only center pad for streaming: prepend overlap from previous chunk.
   // For the first chunk this is zeros (matching center=True left edge).
-  // Right-side context comes naturally from the next chunk's overlap.
   int pad = kFFTSize / 2;  // 256 samples
-  std::vector<float> padded(pad + num_samples);
+  size_t total_signal = num_samples + preemph_right.size();
+  std::vector<float> padded(pad + total_signal);
   std::memcpy(padded.data(), audio_overlap_.data(), pad * sizeof(float));
   std::memcpy(padded.data() + pad, preemphasized.data(), num_samples * sizeof(float));
+  if (!preemph_right.empty()) {
+    std::memcpy(padded.data() + pad + num_samples, preemph_right.data(),
+                preemph_right.size() * sizeof(float));
+  }
 
-  // Update overlap buffer with tail of current pre-emphasized chunk for next call
+  // Update overlap buffer from main audio only (not right context)
   if (num_samples >= static_cast<size_t>(pad)) {
     audio_overlap_.assign(preemphasized.data() + num_samples - pad, preemphasized.data() + num_samples);
   } else {
@@ -112,21 +131,33 @@ std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(const float* audi
     audio_overlap_ = std::move(new_overlap);
   }
 
-  if (static_cast<int>(padded.size()) < kWinLength) {
-    padded.resize(kWinLength, 0.0f);
+  // Window centering offset: torch.stft centers win_length window within n_fft frame.
+  // This shifts the effective analysis position by (n_fft - win_length) / 2 samples.
+  constexpr int kWinOffset = (kFFTSize - kWinLength) / 2;  // 56
+
+  // Right-pad to accommodate the window offset for the last frame
+  padded.resize(padded.size() + kWinOffset, 0.0f);
+
+  if (static_cast<int>(padded.size()) < kWinOffset + kWinLength) {
+    padded.resize(kWinOffset + kWinLength, 0.0f);
   }
 
-  // Frame count: use win_length for frame boundaries.
-  // DFT with win_length loop is mathematically identical to zero-padded n_fft DFT
-  // for power spectrum computation (|F|² is time-shift invariant).
-  int num_frames = static_cast<int>((padded.size() - kWinLength) / kHopLength) + 1;
+  // Frame count from full padded array
+  int num_frames = static_cast<int>((padded.size() - kWinOffset - kWinLength) / kHopLength) + 1;
+
+  // Cap frame count: right context provides real data for boundary frames
+  // but should not create additional frames beyond what main audio produces.
+  int expected_main_padded = pad + static_cast<int>(num_samples) + kWinOffset;
+  int expected_frames = (expected_main_padded - kWinOffset - kWinLength) / kHopLength + 1;
+  num_frames = std::min(num_frames, expected_frames);
+
   int num_bins = kFFTSize / 2 + 1;
 
   std::vector<float> mel_spec(kNumMels * num_frames);
 
   for (int t = 0; t < num_frames; ++t) {
     std::vector<float> magnitudes(num_bins);
-    const float* frame = padded.data() + t * kHopLength;
+    const float* frame = padded.data() + t * kHopLength + kWinOffset;
 
     for (int k = 0; k < num_bins; ++k) {
       float real_sum = 0.0f, imag_sum = 0.0f;
@@ -239,15 +270,49 @@ void StreamingASR::Reset() {
   full_transcript_.clear();
   audio_overlap_.assign(kFFTSize / 2, 0.0f);
   preemph_last_sample_ = 0.0f;
+  pending_audio_.clear();
+  has_pending_ = false;
+  chunk_index_ = 0;
 }
 
 std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
   LoadVocab();
 
-  // Compute log-mel spectrogram
-  auto [mel_data, num_frames] = ComputeLogMel(audio_data, num_samples);
+  std::string result;
+
+  if (has_pending_) {
+    // Process the pending (previous) chunk, using the start of the current
+    // chunk as right context.  This gives the last mel frame of the pending
+    // chunk real audio data instead of zeros, matching NeMo's full-audio mel.
+    size_t right_ctx_len = std::min(num_samples, static_cast<size_t>(kWinLength));
+    result = ProcessPendingChunk(audio_data, right_ctx_len);
+  }
+
+  // Buffer the current chunk — it will be processed when the next chunk arrives
+  pending_audio_.assign(audio_data, audio_data + num_samples);
+  has_pending_ = true;
+
+  return result;
+}
+
+std::string StreamingASR::ProcessPendingChunk(const float* right_ctx_audio, size_t right_ctx_len) {
+  // Compute log-mel spectrogram for the pending audio with right context
+  auto [mel_data, num_frames] = ComputeLogMel(pending_audio_.data(), pending_audio_.size(),
+                                               right_ctx_audio, right_ctx_len);
 
   auto& allocator = model_.allocator_cpu_;
+
+  // ── Debug: dump mel and raw audio to /tmp/mel_dumps/ ──
+  {
+    if (chunk_index_ == 0) {
+      std::system("mkdir -p /tmp/mel_dumps");
+    }
+    std::string mel_path = "/tmp/mel_dumps/mel_chunk_" + std::to_string(chunk_index_) + ".npy";
+    SaveNpy(mel_path, mel_data.data(), {static_cast<int64_t>(kNumMels), static_cast<int64_t>(num_frames)});
+
+    std::string audio_path = "/tmp/mel_dumps/audio_chunk_" + std::to_string(chunk_index_) + ".npy";
+    SaveNpy(audio_path, pending_audio_.data(), {static_cast<int64_t>(pending_audio_.size())});
+  }
 
   // Create processed_signal: [1, num_mels, num_frames]
   auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
@@ -285,6 +350,23 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
   auto* encoded = enc_outputs[0].get();
   int64_t encoded_len = *enc_outputs[1]->GetTensorData<int64_t>();
 
+  // ── Debug: dump encoder output ──
+  {
+    auto enc_info2 = encoded->GetTensorTypeAndShapeInfo();
+    auto enc_shape2 = enc_info2->GetShape();
+    // Shape is [1, hidden_dim, time_steps]
+    int64_t total_enc = 1;
+    for (auto d : enc_shape2) total_enc *= d;
+    std::string enc_path = "/tmp/mel_dumps/encoder_out_" + std::to_string(chunk_index_) + ".npy";
+    SaveNpy(enc_path, encoded->GetTensorData<float>(),
+            {enc_shape2.begin(), enc_shape2.end()});
+
+    std::string len_path = "/tmp/mel_dumps/encoder_len_" + std::to_string(chunk_index_) + ".txt";
+    std::ofstream(len_path) << encoded_len << " shape:";
+    for (auto d : enc_shape2) std::ofstream(len_path, std::ios::app) << " " << d;
+    std::ofstream(len_path, std::ios::app) << "\n";
+  }
+
   // Update cache
   encoder_cache_.cache_last_channel = std::move(enc_outputs[2]);
   encoder_cache_.cache_last_time = std::move(enc_outputs[3]);
@@ -293,6 +375,7 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
   // Run RNNT decoder
   std::string chunk_text = RunRNNTDecoder(encoded, encoded_len);
   full_transcript_ += chunk_text;
+  chunk_index_++;
 
   return chunk_text;
 }
@@ -308,6 +391,24 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   auto run_options = OrtRunOptions::Create();
+
+  // ── Debug: dump decoder LSTM states at start of this chunk ──
+  {
+    auto s1_shape = decoder_state_.state_1->GetTensorTypeAndShapeInfo()->GetShape();
+    SaveNpy("/tmp/mel_dumps/decoder_state1_" + std::to_string(chunk_index_) + ".npy",
+            decoder_state_.state_1->GetTensorData<float>(),
+            {s1_shape.begin(), s1_shape.end()});
+    auto s2_shape = decoder_state_.state_2->GetTensorTypeAndShapeInfo()->GetShape();
+    SaveNpy("/tmp/mel_dumps/decoder_state2_" + std::to_string(chunk_index_) + ".npy",
+            decoder_state_.state_2->GetTensorData<float>(),
+            {s2_shape.begin(), s2_shape.end()});
+  }
+
+  // Collect token IDs for this chunk (for debug dump)
+  std::vector<int> chunk_tokens;
+  // Collect per-step joiner logits info
+  std::ofstream step_log("/tmp/mel_dumps/decoder_steps_" + std::to_string(chunk_index_) + ".txt");
+  step_log << "# t sym last_token best_token best_score blank_score total_logits\n";
 
   for (int64_t t = 0; t < time_steps; ++t) {
     // Extract single encoder frame: [1, hidden_dim, 1]
@@ -377,6 +478,20 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
         }
       }
 
+      // ── Debug: log this step and dump joiner logits for first chunks ──
+      {
+        float blank_score = (cache_config_.blank_id < total_logits) ? logits_data[cache_config_.blank_id] : -999.0f;
+        step_log << t << " " << sym << " " << decoder_state_.last_token << " "
+                 << best_token << " " << best_score << " " << blank_score << " " << total_logits << "\n";
+
+        // Dump full joiner logits for first 5 chunks
+        if (chunk_index_ < 5) {
+          std::string logit_path = "/tmp/mel_dumps/joiner_logits_" + std::to_string(chunk_index_)
+                                   + "_t" + std::to_string(t) + "_s" + std::to_string(sym) + ".npy";
+          SaveNpy(logit_path, logits_data, {static_cast<int64_t>(total_logits)});
+        }
+      }
+
       // Blank => next time step
       if (best_token == cache_config_.blank_id || best_token >= cache_config_.vocab_size) {
         break;
@@ -386,6 +501,7 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
       decoder_state_.last_token = best_token;
       decoder_state_.state_1 = std::move(dec_outputs[2]);
       decoder_state_.state_2 = std::move(dec_outputs[3]);
+      chunk_tokens.push_back(best_token);
 
       if (best_token < static_cast<int>(vocab_.size())) {
         std::string token_str = vocab_[best_token];
@@ -400,10 +516,59 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
     }
   }
 
+  // ── Debug: dump emitted token IDs for this chunk ──
+  {
+    std::ofstream tf("/tmp/mel_dumps/decoder_tokens_" + std::to_string(chunk_index_) + ".txt");
+    for (size_t i = 0; i < chunk_tokens.size(); ++i) {
+      tf << chunk_tokens[i];
+      if (i + 1 < chunk_tokens.size()) tf << " ";
+    }
+    tf << "\n";
+  }
+
   return result;
 }
 
-std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
+void StreamingASR::SaveNpy(const std::string& path, const float* data,
+                               const std::vector<int64_t>& shape) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return;
+
+    // Build header string: "{'descr': '<f4', 'fortran_order': False, 'shape': (D0, D1, ...), }\n"
+    std::string shape_str = "(";
+    for (size_t i = 0; i < shape.size(); ++i) {
+      shape_str += std::to_string(shape[i]);
+      if (i + 1 < shape.size()) shape_str += ", ";
+      else if (shape.size() == 1) shape_str += ",";
+    }
+    shape_str += ")";
+    std::string header = "{'descr': '<f4', 'fortran_order': False, 'shape': " + shape_str + ", }";
+
+    // Pad header to 64-byte alignment (magic=6 + version=2 + header_len=2 + header + '\n')
+    size_t prefix_len = 6 + 2 + 2;  // magic + version + header_len
+    size_t total = prefix_len + header.size() + 1;  // +1 for trailing '\n'
+    size_t pad = (64 - (total % 64)) % 64;
+    header.append(pad, ' ');
+    header += '\n';
+
+    uint16_t header_len = static_cast<uint16_t>(header.size());
+
+    // Write magic
+    f.write("\x93NUMPY", 6);
+    // Write version 1.0
+    char ver[] = {1, 0};
+    f.write(ver, 2);
+    // Write header length (little-endian)
+    f.write(reinterpret_cast<const char*>(&header_len), 2);
+    // Write header
+    f.write(header.data(), header.size());
+    // Write data
+    size_t num_elements = 1;
+    for (auto d : shape) num_elements *= static_cast<size_t>(d);
+    f.write(reinterpret_cast<const char*>(data), num_elements * sizeof(float));
+  }
+
+  std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
   return std::make_unique<StreamingASR>(model);
 }
 

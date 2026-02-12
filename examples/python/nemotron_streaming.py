@@ -125,7 +125,8 @@ def transcribe_file(model_path, audio_path, execution_provider="cpu"):
             print(raw_text, end="", flush=True)
 
     # Flush with silence to get remaining tokens
-    for _ in range(3):
+    # (4 chunks: 1 extra to flush the one-chunk right-context buffer)
+    for _ in range(4):
         silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
         raw_text = asr.transcribe_chunk(silence)
         if raw_text:

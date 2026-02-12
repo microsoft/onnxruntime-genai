@@ -58,7 +58,9 @@ struct StreamingASR : LeakChecked<StreamingASR> {
 
   // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 samples)
   std::vector<float> audio_overlap_;
-
+    // Pending audio buffer: one-chunk delay so we can provide right context
+    std::vector<float> pending_audio_;
+    bool has_pending_{false};
   // Pre-emphasis state (last sample from previous chunk)
   float preemph_last_sample_{0.0f};
   static constexpr float kPreemph = 0.97f;
@@ -69,10 +71,19 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   static constexpr int kFFTSize = 512;
   static constexpr int kSampleRate = 16000;
 
-  void LoadVocab();
-  void InitMelFilterbank();
-  std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples);
-  std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
+// Debug: chunk counter for mel dump files
+    int chunk_index_{0};
+
+    void LoadVocab();
+    void InitMelFilterbank();
+    std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples,
+                                                      const float* right_ctx = nullptr, size_t right_ctx_len = 0);
+    std::string ProcessPendingChunk(const float* right_ctx_audio, size_t right_ctx_len);
+    std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
+
+    // Save a float tensor as .npy file (row-major)
+    static void SaveNpy(const std::string& path, const float* data,
+                        const std::vector<int64_t>& shape);
 };
 
 std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model);
