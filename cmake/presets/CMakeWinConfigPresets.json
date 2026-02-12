@@ -24,7 +24,7 @@
       "inherits": "windows_cpu_default",
       "cacheVariables": {
         "USE_CUDA": "ON",
-        "CMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86",
+        "CMAKE_CUDA_ARCHITECTURES": "60-real;70-real;75-real;80-real;86-real;90-real;100-real;120-real",
         "CMAKE_CUDA_FLAGS_INIT": "/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler"
       }
     },
