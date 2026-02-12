@@ -87,6 +87,10 @@ jobs:
     displayName: Copy python 3.11.0 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: 3.11

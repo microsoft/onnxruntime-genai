@@ -302,6 +302,10 @@ jobs:
     displayName: 'Extract Artifacts & Prepare Native Libraries'
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: 3.11
