@@ -23,6 +23,15 @@ struct NemotronCacheConfig {
   int chunk_frames{56};    // Number of mel frames per chunk (560ms @ 16kHz with 10ms hop)
   int sample_rate{16000};
   int chunk_samples{8960}; // 560ms * 16000 = 8960 samples per chunk
+
+  // Overlap-and-drop streaming config (O8b strategy).
+  // overlap_mel_frames: consecutive encoder windows share this many mel frames.
+  // drop_last_encoder_frames: discard last N encoder frames per chunk (boundary artifacts).
+  // stride_samples = chunk_samples - overlap_mel_frames * hop_length.
+  int overlap_mel_frames{8};         // 8 mel frames = 1280 samples overlap
+  int drop_last_encoder_frames{1};   // Drop last 1 encoder frame per chunk
+  static constexpr int kHopLength = 160;
+  int stride_samples() const { return chunk_samples - overlap_mel_frames * kHopLength; }
 };
 
 /// Holds the rolling encoder cache state between streaming chunks.

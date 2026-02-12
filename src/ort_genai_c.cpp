@@ -1116,6 +1116,14 @@ OgaResult* OGA_API_CALL OgaStreamingASRReset(OgaStreamingASR* asr) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, const char** text) {
+  OGA_TRY
+  std::string result = asr->Flush();
+  *text = AllocOgaString(result);
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* p) { delete p; }
 
 }  // extern "C"

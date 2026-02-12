@@ -255,6 +255,10 @@ StreamingASR::StreamingASR(Model& model)
   // Initialize audio overlap buffer for center-padded STFT
   audio_overlap_.assign(kFFTSize / 2, 0.0f);
 
+  // Overlap stride config from model (O8b strategy by default)
+  stride_samples_ = cache_config_.stride_samples();
+  drop_last_frames_ = cache_config_.drop_last_encoder_frames;
+
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
   encoder_cache_.Initialize(cache_config_, allocator);
@@ -272,25 +276,69 @@ void StreamingASR::Reset() {
   preemph_last_sample_ = 0.0f;
   pending_audio_.clear();
   has_pending_ = false;
+  audio_buffer_.clear();
   chunk_index_ = 0;
 }
 
 std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
   LoadVocab();
 
-  std::string result;
+  // Append incoming audio to accumulation buffer
+  audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
-  if (has_pending_) {
-    // Process the pending (previous) chunk, using the start of the current
-    // chunk as right context.  This gives the last mel frame of the pending
-    // chunk real audio data instead of zeros, matching NeMo's full-audio mel.
-    size_t right_ctx_len = std::min(num_samples, static_cast<size_t>(kWinLength));
-    result = ProcessPendingChunk(audio_data, right_ctx_len);
+  std::string result;
+  const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
+
+  // Process as many overlapping encoder windows as possible.
+  // Each window is chunk_sz samples of audio (56 mel frames → 6 encoder frames).
+  // We advance by stride_samples_ (< chunk_sz), so consecutive windows share
+  // (chunk_sz - stride_samples_) samples of audio (= overlap_mel_frames mel frames).
+  while (audio_buffer_.size() >= chunk_sz) {
+    if (has_pending_) {
+      // Use start of current window as right context for pending chunk's mel
+      size_t right_ctx_len = std::min(static_cast<size_t>(kWinLength), audio_buffer_.size());
+      result += ProcessPendingChunk(audio_buffer_.data(), right_ctx_len);
+    }
+
+    // Buffer current window as pending (processed when next window provides right ctx)
+    pending_audio_.assign(audio_buffer_.data(), audio_buffer_.data() + chunk_sz);
+    has_pending_ = true;
+
+    // Advance by stride (< chunk_sz = overlap)
+    audio_buffer_.erase(audio_buffer_.begin(),
+                        audio_buffer_.begin() + static_cast<ptrdiff_t>(stride_samples_));
   }
 
-  // Buffer the current chunk — it will be processed when the next chunk arrives
-  pending_audio_.assign(audio_data, audio_data + num_samples);
-  has_pending_ = true;
+  return result;
+}
+
+std::string StreamingASR::Flush() {
+  LoadVocab();
+
+  std::string result;
+  const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
+
+  // If there's remaining audio in the buffer, pad it to a full window and process
+  if (!audio_buffer_.empty()) {
+    audio_buffer_.resize(chunk_sz, 0.0f);
+
+    if (has_pending_) {
+      size_t right_ctx_len = std::min(static_cast<size_t>(kWinLength), audio_buffer_.size());
+      result += ProcessPendingChunk(audio_buffer_.data(), right_ctx_len);
+    }
+
+    pending_audio_ = std::move(audio_buffer_);
+    audio_buffer_.clear();
+    has_pending_ = true;
+  }
+
+  // Process the final pending chunk with silence as right context
+  if (has_pending_) {
+    std::vector<float> silence(kWinLength, 0.0f);
+    result += ProcessPendingChunk(silence.data(), silence.size());
+    has_pending_ = false;
+    pending_audio_.clear();
+  }
 
   return result;
 }
@@ -388,10 +436,11 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
   auto enc_shape = enc_info->GetShape();
   int64_t hidden_dim = enc_shape[1];
   int64_t total_frames = std::min(enc_shape[2], encoded_len);
-  // Drop the last encoder frame per chunk — it has subsampling boundary artifacts
-  // (no right context for the conv subsampling layer at the chunk edge).
-  // This improves word accuracy (e.g. captures "career path, actually" vs just "career.").
-  int64_t time_steps = (total_frames > 1) ? total_frames - 1 : total_frames;
+  // Drop last N encoder frames per chunk — they have subsampling boundary
+  // artifacts (no right context for the conv subsampling layer at chunk edge).
+  // With overlapping windows, these frames are re-encoded with proper context
+  // in the next window.
+  int64_t time_steps = std::max(int64_t{0}, total_frames - static_cast<int64_t>(drop_last_frames_));
   const float* enc_data = encoder_output->GetTensorData<float>();
 
   auto run_options = OrtRunOptions::Create();

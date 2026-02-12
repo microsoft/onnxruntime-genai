@@ -1181,6 +1181,15 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRGetTranscript(const OgaStreami
 OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRReset(OgaStreamingASR* asr);
 
 /**
+ * \brief Flush remaining buffered audio. Call after the last TranscribeChunk.
+ * Processes any pending/buffered audio with silence as right context.
+ * \param[in] asr The StreamingASR instance.
+ * \param[out] text Pointer to store the final transcribed text. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, const char** text);
+
+/**
  * \brief Destroy a StreamingASR instance.
  * \param[in] asr The StreamingASR instance to destroy.
  */

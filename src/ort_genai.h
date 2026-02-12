@@ -910,5 +910,11 @@ struct OgaStreamingASR : OgaAbstract {
     OgaCheckResult(OgaStreamingASRReset(this));
   }
 
+  OgaString Flush() {
+    const char* text;
+    OgaCheckResult(OgaStreamingASRFlush(this, &text));
+    return text;
+  }
+
   static void operator delete(void* p) { OgaDestroyStreamingASR(reinterpret_cast<OgaStreamingASR*>(p)); }
 };

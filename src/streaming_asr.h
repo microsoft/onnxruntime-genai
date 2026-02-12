@@ -25,8 +25,15 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   ~StreamingASR();
 
   /// Feed a chunk of raw PCM audio (mono, 16kHz, float32).
-  /// Returns newly transcribed text from this chunk.
+  /// Audio is accumulated internally and processed in overlapping encoder
+  /// windows (stride < chunk_size) for improved boundary quality.
+  /// Returns newly transcribed text from this call.
   std::string TranscribeChunk(const float* audio_data, size_t num_samples);
+
+  /// Flush remaining buffered audio (call after last TranscribeChunk).
+  /// Processes any pending/buffered audio with silence as right context.
+  /// Returns final transcribed text.
+  std::string Flush();
 
   /// Get the full transcript accumulated so far.
   const std::string& GetTranscript() const { return full_transcript_; }
@@ -58,9 +65,14 @@ struct StreamingASR : LeakChecked<StreamingASR> {
 
   // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 samples)
   std::vector<float> audio_overlap_;
-    // Pending audio buffer: one-chunk delay so we can provide right context
-    std::vector<float> pending_audio_;
-    bool has_pending_{false};
+  // Pending audio buffer: one-chunk delay so we can provide right context
+  std::vector<float> pending_audio_;
+  bool has_pending_{false};
+  // Audio accumulation buffer for overlapping-window processing
+  std::vector<float> audio_buffer_;
+  // Overlap stride config (from NemotronCacheConfig)
+  int stride_samples_{7680};       // Audio advance per encoder window
+  int drop_last_frames_{1};        // Encoder frames to drop at chunk end
   // Pre-emphasis state (last sample from previous chunk)
   float preemph_last_sample_{0.0f};
   static constexpr float kPreemph = 0.97f;
