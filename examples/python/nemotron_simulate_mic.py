@@ -94,7 +94,6 @@ def simulate_microphone(model_path, audio_path):
     print("-" * 60)
     print()
 
-    all_token_ids = []
     stream_start = time.time()
 
     for i in range(0, len(audio), CHUNK_SAMPLES):
@@ -114,31 +113,24 @@ def simulate_microphone(model_path, audio_path):
         raw_text = asr.transcribe_chunk(chunk)
 
         if raw_text:
-            token_ids = parse_token_ids(raw_text)
-            if token_ids:
-                all_token_ids.extend(token_ids)
-                if sp:
-                    print(sp.Decode(token_ids), end="", flush=True)
-                else:
-                    print(raw_text, end="", flush=True)
+            print(raw_text, end="", flush=True)
 
-    # ── Flush remaining ──
-    for _ in range(3):
+    # ── Flush remaining (4 chunks to clear right-context buffer) ──
+    for _ in range(4):
         silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
         raw_text = asr.transcribe_chunk(silence)
         if raw_text:
-            token_ids = parse_token_ids(raw_text)
-            if token_ids:
-                all_token_ids.extend(token_ids)
-                if sp:
-                    print(sp.Decode(token_ids), end="", flush=True)
+            print(raw_text, end="", flush=True)
 
     total_wall = time.time() - stream_start
 
-    if sp and all_token_ids:
-        final_text = sp.Decode(all_token_ids)
+    # Final full transcript from internal accumulation
+    full_raw = asr.get_transcript()
+    if sp:
+        all_ids = parse_token_ids(full_raw)
+        final_text = sp.Decode(all_ids) if all_ids else full_raw
     else:
-        final_text = asr.get_transcript()
+        final_text = full_raw
 
     print(f"\n\n{'=' * 60}")
     print(f"FINAL TRANSCRIPT:")
@@ -147,7 +139,6 @@ def simulate_microphone(model_path, audio_path):
     print(f"  Audio duration : {duration:.2f}s")
     print(f"  Wall clock     : {total_wall:.2f}s")
     print(f"  RTF            : {duration / total_wall:.2f}x realtime")
-    print(f"  Tokens emitted : {len(all_token_ids)}")
     print(f"  Execution      : CPU")
 
 
