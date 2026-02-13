@@ -5,7 +5,7 @@
 // (Nemotron Speech Streaming, etc.)
 #pragma once
 
-#include "mel_spectrogram.h"
+#include "nemo_mel_spectrogram.h"  // from onnxruntime-extensions/shared/api
 #include "models/model.h"
 #include "models/nemotron_speech.h"
 
@@ -61,8 +61,10 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   std::vector<std::string> vocab_;
   bool vocab_loaded_{false};
 
-  // Log-mel feature extraction (delegated to standalone mel::StreamingMelExtractor)
-  mel::StreamingMelExtractor mel_extractor_;
+  // Log-mel feature extraction (delegated to standalone nemo_mel::NemoStreamingMelExtractor)
+  // Config values: Nemotron Speech defaults (128 mels, 512 FFT, 160 hop, 400 win, 16kHz, 0.97 preemph)
+  nemo_mel::NemoStreamingMelExtractor mel_extractor_{
+      nemo_mel::NemoMelConfig{128, 512, 160, 400, 16000, 0.97f, 5.96046448e-08f}};
 
   // Mel pre-encode cache: last pre_encode_cache_size mel frames from previous chunk.
   // Prepended to the current chunk's mel before feeding the encoder.

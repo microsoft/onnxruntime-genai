@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "../generators.h"
-#include "../mel_spectrogram.h"
+#include "nemo_mel_spectrogram.h"  // from onnxruntime-extensions/shared/api
 #include "nemotron_speech.h"
 
 namespace Generators {
@@ -188,14 +188,16 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
   const auto& cfg = model_.cache_config_;
 
   // Compute log-mel spectrogram using standalone mel extractor
-  mel::MelConfig mel_cfg;
-  mel_cfg.num_mels = kNumMels;
-  mel_cfg.fft_size = kFFTSize;
-  mel_cfg.hop_length = kHopLength;
-  mel_cfg.win_length = kWinLength;
-  mel_cfg.sample_rate = cfg.sample_rate;
+  nemo_mel::NemoMelConfig mel_cfg{
+      /*num_mels=*/kNumMels,
+      /*fft_size=*/kFFTSize,
+      /*hop_length=*/kHopLength,
+      /*win_length=*/kWinLength,
+      /*sample_rate=*/cfg.sample_rate,
+      /*preemph=*/0.97f,
+      /*log_eps=*/5.96046448e-08f};
   int num_frames = 0;
-  auto mel_data = mel::ComputeLogMelBatch(audio_data, num_samples, mel_cfg, num_frames);
+  auto mel_data = nemo_mel::NemoComputeLogMelBatch(audio_data, num_samples, mel_cfg, num_frames);
 
   // Create processed_signal tensor: [1, num_mels, num_frames]
   auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};

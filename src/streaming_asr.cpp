@@ -82,7 +82,7 @@ StreamingASR::StreamingASR(Model& model)
   cache_config_ = nemotron_model->cache_config_;
 
   // Initialize mel extractor (standalone, no ORT dependencies)
-  // mel_extractor_ is already constructed with default MelConfig via member init
+  // mel_extractor_ is constructed via NemoMelConfigDefault() in member initializer
 
   // Initialize mel pre-encode cache (zeros for first chunk)
   mel_pre_encode_cache_.assign(
