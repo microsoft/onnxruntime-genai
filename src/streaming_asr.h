@@ -5,6 +5,7 @@
 // (Nemotron Speech Streaming, etc.)
 #pragma once
 
+#include "mel_spectrogram.h"
 #include "models/model.h"
 #include "models/nemotron_speech.h"
 
@@ -60,12 +61,8 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   std::vector<std::string> vocab_;
   bool vocab_loaded_{false};
 
-  // Log-mel feature extraction
-  std::vector<std::vector<float>> mel_filters_;
-  std::vector<float> hann_window_;
-
-  // Audio overlap buffer for center-padded STFT (stores last kFFTSize/2 pre-emphasized samples)
-  std::vector<float> audio_overlap_;
+  // Log-mel feature extraction (delegated to standalone mel::StreamingMelExtractor)
+  mel::StreamingMelExtractor mel_extractor_;
 
   // Mel pre-encode cache: last pre_encode_cache_size mel frames from previous chunk.
   // Prepended to the current chunk's mel before feeding the encoder.
@@ -76,22 +73,12 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
 
-  // Pre-emphasis state (last sample from previous chunk)
-  float preemph_last_sample_{0.0f};
-  static constexpr float kPreemph = 0.97f;
-
   static constexpr int kNumMels = 128;
-  static constexpr int kHopLength = 160;
-  static constexpr int kWinLength = 400;
-  static constexpr int kFFTSize = 512;
-  static constexpr int kSampleRate = 16000;
 
 // Debug: chunk counter for mel dump files
     int chunk_index_{0};
 
     void LoadVocab();
-    void InitMelFilterbank();
-    std::pair<std::vector<float>, int> ComputeLogMel(const float* audio, size_t num_samples);
     std::string ProcessMelChunk(const std::vector<float>& mel_data, int num_frames);
     std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
 

@@ -13,149 +13,7 @@
 #include "generators.h"
 #include "streaming_asr.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
 namespace Generators {
-
-// ─── Mel spectrogram utilities (Slaney scale, matching librosa/NeMo) ────────
-
-// Slaney mel scale: linear below 1000 Hz, logarithmic above
-static constexpr float kMinLogHz = 1000.0f;
-static constexpr float kMinLogMel = 15.0f;              // 1000 / (200/3)
-static constexpr float kLinScale = 200.0f / 3.0f;       // Hz per mel (linear region)
-static constexpr float kLogStep = 0.06875177742094912f;  // log(6.4) / 27
-
-static float HzToMel(float hz) {
-  if (hz < kMinLogHz) return hz / kLinScale;
-  return kMinLogMel + std::log(hz / kMinLogHz) / kLogStep;
-}
-static float MelToHz(float mel) {
-  if (mel < kMinLogMel) return mel * kLinScale;
-  return kMinLogHz * std::exp((mel - kMinLogMel) * kLogStep);
-}
-
-void StreamingASR::InitMelFilterbank() {
-  int num_bins = kFFTSize / 2 + 1;
-  float mel_low = HzToMel(0.0f);
-  float mel_high = HzToMel(static_cast<float>(kSampleRate) / 2.0f);
-
-  // Compute mel center frequencies in Hz (num_mels + 2 points)
-  std::vector<float> mel_f(kNumMels + 2);
-  for (int i = 0; i < kNumMels + 2; ++i) {
-    float mel = mel_low + (mel_high - mel_low) * i / (kNumMels + 1);
-    mel_f[i] = MelToHz(mel);
-  }
-
-  // Differences between consecutive mel center frequencies (Hz)
-  std::vector<float> fdiff(kNumMels + 1);
-  for (int i = 0; i < kNumMels + 1; ++i) {
-    fdiff[i] = mel_f[i + 1] - mel_f[i];
-  }
-
-  // FFT bin center frequencies in Hz
-  std::vector<float> fft_freqs(num_bins);
-  for (int k = 0; k < num_bins; ++k) {
-    fft_freqs[k] = static_cast<float>(k) * kSampleRate / kFFTSize;
-  }
-
-  // Build triangular filterbank with Slaney normalization (matches librosa exactly)
-  mel_filters_.resize(kNumMels, std::vector<float>(num_bins, 0.0f));
-  for (int m = 0; m < kNumMels; ++m) {
-    for (int k = 0; k < num_bins; ++k) {
-      float lower = (fft_freqs[k] - mel_f[m]) / (fdiff[m] + 1e-10f);
-      float upper = (mel_f[m + 2] - fft_freqs[k]) / (fdiff[m + 1] + 1e-10f);
-      mel_filters_[m][k] = std::max(0.0f, std::min(lower, upper));
-    }
-    // Slaney area normalization: 2 / bandwidth
-    float enorm = 2.0f / (mel_f[m + 2] - mel_f[m] + 1e-10f);
-    for (int k = 0; k < num_bins; ++k) {
-      mel_filters_[m][k] *= enorm;
-    }
-  }
-
-  // Build Hann window (symmetric, matching torch.hann_window(periodic=False))
-  hann_window_.resize(kWinLength);
-  for (int i = 0; i < kWinLength; ++i) {
-    hann_window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / (kWinLength - 1)));
-  }
-}
-
-std::pair<std::vector<float>, int> StreamingASR::ComputeLogMel(
-    const float* audio, size_t num_samples) {
-  // Apply pre-emphasis filter: y[n] = x[n] - 0.97 * x[n-1]
-  std::vector<float> preemphasized(num_samples);
-  if (num_samples > 0) {
-    preemphasized[0] = audio[0] - kPreemph * preemph_last_sample_;
-    for (size_t i = 1; i < num_samples; ++i) {
-      preemphasized[i] = audio[i] - kPreemph * audio[i - 1];
-    }
-    preemph_last_sample_ = audio[num_samples - 1];
-  }
-
-  // Left-only center pad for streaming: prepend overlap from previous chunk.
-  // For the first chunk this is zeros (matching center=True left edge).
-  int pad = kFFTSize / 2;  // 256 samples
-  std::vector<float> padded(pad + num_samples);
-  std::memcpy(padded.data(), audio_overlap_.data(), pad * sizeof(float));
-  std::memcpy(padded.data() + pad, preemphasized.data(), num_samples * sizeof(float));
-
-  // Update overlap buffer for next chunk
-  if (num_samples >= static_cast<size_t>(pad)) {
-    audio_overlap_.assign(preemphasized.data() + num_samples - pad, preemphasized.data() + num_samples);
-  } else {
-    size_t keep = pad - num_samples;
-    std::vector<float> new_overlap(pad, 0.0f);
-    std::memcpy(new_overlap.data(), audio_overlap_.data() + num_samples, keep * sizeof(float));
-    std::memcpy(new_overlap.data() + keep, preemphasized.data(), num_samples * sizeof(float));
-    audio_overlap_ = std::move(new_overlap);
-  }
-
-  // Window centering offset
-  constexpr int kWinOffset = (kFFTSize - kWinLength) / 2;  // 56
-
-  // Right-pad to accommodate the window offset for the last frame
-  padded.resize(padded.size() + kWinOffset, 0.0f);
-
-  if (static_cast<int>(padded.size()) < kWinOffset + kWinLength) {
-    padded.resize(kWinOffset + kWinLength, 0.0f);
-  }
-
-  // Frame count
-  int num_frames = static_cast<int>((padded.size() - kWinOffset - kWinLength) / kHopLength) + 1;
-
-  int num_bins = kFFTSize / 2 + 1;
-
-  std::vector<float> mel_spec(kNumMels * num_frames);
-
-  for (int t = 0; t < num_frames; ++t) {
-    std::vector<float> magnitudes(num_bins);
-    const float* frame = padded.data() + t * kHopLength + kWinOffset;
-
-    for (int k = 0; k < num_bins; ++k) {
-      float real_sum = 0.0f, imag_sum = 0.0f;
-      for (int n = 0; n < kWinLength; ++n) {
-        float val = frame[n] * hann_window_[n];
-        float angle = 2.0f * static_cast<float>(M_PI) * k * n / kFFTSize;
-        real_sum += val * std::cos(angle);
-        imag_sum -= val * std::sin(angle);
-      }
-      magnitudes[k] = real_sum * real_sum + imag_sum * imag_sum;
-    }
-
-    // Apply mel filterbank
-    for (int m = 0; m < kNumMels; ++m) {
-      float val = 0.0f;
-      for (int k = 0; k < num_bins; ++k) {
-        val += mel_filters_[m][k] * magnitudes[k];
-      }
-      mel_spec[m * num_frames + t] = std::log(val + 5.96046448e-08f);  // log(mel + eps), NeMo default
-    }
-  }
-
-  return {mel_spec, num_frames};
-}
 
 // ─── Vocabulary loading ─────────────────────────────────────────────────────
 
@@ -223,11 +81,8 @@ StreamingASR::StreamingASR(Model& model)
   joiner_session_ = nemotron_model->session_joiner_.get();
   cache_config_ = nemotron_model->cache_config_;
 
-  // Initialize mel filterbank
-  InitMelFilterbank();
-
-  // Initialize audio overlap buffer for center-padded STFT
-  audio_overlap_.assign(kFFTSize / 2, 0.0f);
+  // Initialize mel extractor (standalone, no ORT dependencies)
+  // mel_extractor_ is already constructed with default MelConfig via member init
 
   // Initialize mel pre-encode cache (zeros for first chunk)
   mel_pre_encode_cache_.assign(
@@ -247,8 +102,7 @@ void StreamingASR::Reset() {
   encoder_cache_.Reset(cache_config_, allocator);
   decoder_state_.Reset(cache_config_, allocator);
   full_transcript_.clear();
-  audio_overlap_.assign(kFFTSize / 2, 0.0f);
-  preemph_last_sample_ = 0.0f;
+  mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(kNumMels) * cache_config_.pre_encode_cache_size, 0.0f);
   is_first_chunk_ = true;
@@ -268,7 +122,7 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
   // Process complete chunks of audio (each = chunk_samples = 8960 samples = 56 mel frames)
   while (audio_buffer_.size() >= chunk_sz) {
     // Compute mel for this chunk
-    auto [mel_data, num_frames] = ComputeLogMel(audio_buffer_.data(), chunk_sz);
+    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
 
     // Prepend pre-encode cache → feed [cache | new_mel] to encoder
     result += ProcessMelChunk(mel_data, num_frames);
@@ -291,7 +145,7 @@ std::string StreamingASR::Flush() {
   if (!audio_buffer_.empty()) {
     audio_buffer_.resize(chunk_sz, 0.0f);
 
-    auto [mel_data, num_frames] = ComputeLogMel(audio_buffer_.data(), chunk_sz);
+    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
     result += ProcessMelChunk(mel_data, num_frames);
 
     audio_buffer_.clear();

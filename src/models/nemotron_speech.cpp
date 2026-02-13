@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../generators.h"
+#include "../mel_spectrogram.h"
 #include "nemotron_speech.h"
 
 namespace Generators {
@@ -60,153 +61,6 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocat
 void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
   Initialize(cfg, allocator);
 }
-
-// ─── Simple log-mel spectrogram (CPU) ───────────────────────────────────────
-
-namespace {
-
-// Hann window centered in n_fft frame (matching torch.stft)
-// Window of win_length is placed at offset (fft_size - win_length) / 2
-std::vector<float> HannWindow(int fft_size, int win_length) {
-  std::vector<float> window(fft_size, 0.0f);
-  int offset = (fft_size - win_length) / 2;
-  for (int i = 0; i < win_length; ++i) {
-    window[offset + i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / win_length));
-  }
-  return window;
-}
-
-// Simple DFT-based STFT for a single frame (n_fft samples, centered window)
-void ComputeSTFTFrame(const float* frame, int fft_size, const float* window,
-                      std::vector<float>& magnitudes) {
-  int num_bins = fft_size / 2 + 1;
-  magnitudes.resize(num_bins);
-
-  for (int k = 0; k < num_bins; ++k) {
-    float real_sum = 0.0f, imag_sum = 0.0f;
-    for (int n = 0; n < fft_size; ++n) {
-      float val = frame[n] * window[n];
-      float angle = 2.0f * static_cast<float>(M_PI) * k * n / fft_size;
-      real_sum += val * std::cos(angle);
-      imag_sum -= val * std::sin(angle);
-    }
-    magnitudes[k] = real_sum * real_sum + imag_sum * imag_sum;
-  }
-}
-
-// Mel filter bank (Slaney scale, matching librosa/NeMo)
-// Slaney mel scale: linear below 1000 Hz, logarithmic above
-static constexpr float kMinLogHz = 1000.0f;
-static constexpr float kMinLogMel = 15.0f;              // 1000 / (200/3)
-static constexpr float kLinScale = 200.0f / 3.0f;       // Hz per mel (linear region)
-static constexpr float kLogStep = 0.06875177742094912f;  // log(6.4) / 27
-
-float HzToMel(float hz) {
-  if (hz < kMinLogHz) return hz / kLinScale;
-  return kMinLogMel + std::log(hz / kMinLogHz) / kLogStep;
-}
-float MelToHz(float mel) {
-  if (mel < kMinLogMel) return mel * kLinScale;
-  return kMinLogHz * std::exp((mel - kMinLogMel) * kLogStep);
-}
-
-std::vector<std::vector<float>> CreateMelFilterbank(int num_mels, int fft_size, int sample_rate) {
-  int num_bins = fft_size / 2 + 1;
-  float mel_low = HzToMel(0.0f);
-  float mel_high = HzToMel(static_cast<float>(sample_rate) / 2.0f);
-
-  // Compute mel center frequencies in Hz (num_mels + 2 points)
-  std::vector<float> mel_f(num_mels + 2);
-  for (int i = 0; i < num_mels + 2; ++i) {
-    float mel = mel_low + (mel_high - mel_low) * i / (num_mels + 1);
-    mel_f[i] = MelToHz(mel);
-  }
-
-  // Differences between consecutive mel center frequencies (Hz)
-  std::vector<float> fdiff(num_mels + 1);
-  for (int i = 0; i < num_mels + 1; ++i) {
-    fdiff[i] = mel_f[i + 1] - mel_f[i];
-  }
-
-  // FFT bin center frequencies in Hz
-  std::vector<float> fft_freqs(num_bins);
-  for (int k = 0; k < num_bins; ++k) {
-    fft_freqs[k] = static_cast<float>(k) * sample_rate / fft_size;
-  }
-
-  // Build triangular filterbank with Slaney normalization (matches librosa exactly)
-  std::vector<std::vector<float>> filterbank(num_mels, std::vector<float>(num_bins, 0.0f));
-  for (int m = 0; m < num_mels; ++m) {
-    for (int k = 0; k < num_bins; ++k) {
-      float lower = (fft_freqs[k] - mel_f[m]) / (fdiff[m] + 1e-10f);
-      float upper = (mel_f[m + 2] - fft_freqs[k]) / (fdiff[m + 1] + 1e-10f);
-      filterbank[m][k] = std::max(0.0f, std::min(lower, upper));
-    }
-    // Slaney area normalization: 2 / bandwidth
-    float enorm = 2.0f / (mel_f[m + 2] - mel_f[m] + 1e-10f);
-    for (int k = 0; k < num_bins; ++k) {
-      filterbank[m][k] *= enorm;
-    }
-  }
-  return filterbank;
-}
-
-// Compute log-mel spectrogram for an audio chunk
-// Output shape: [1, num_mels, num_frames]
-std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
-                                 int num_mels, int fft_size, int hop_length, int win_length,
-                                 int sample_rate, int& out_num_frames) {
-  static auto mel_filters = CreateMelFilterbank(num_mels, fft_size, sample_rate);
-  static auto window = HannWindow(fft_size, win_length);
-
-  // Apply pre-emphasis: y[n] = x[n] - 0.97 * x[n-1]
-  constexpr float preemph = 0.97f;
-  int n = static_cast<int>(num_samples);
-  std::vector<float> preemphasized(n);
-  if (n > 0) {
-    preemphasized[0] = audio[0];  // No previous sample for first sample
-    for (int i = 1; i < n; ++i) {
-      preemphasized[i] = audio[i] - preemph * audio[i - 1];
-    }
-  }
-
-  // Center-pad both sides: fft_size/2 zeros on each side (matching torch.stft center=True)
-  int pad = fft_size / 2;
-  std::vector<float> padded(pad + n + pad, 0.0f);
-  if (n > 0) {
-    std::memcpy(padded.data() + pad, preemphasized.data(), n * sizeof(float));
-  }
-
-  if (static_cast<int>(padded.size()) < fft_size) {
-    padded.resize(fft_size, 0.0f);
-  }
-
-  // Frame count using n_fft as frame size (matching torch.stft)
-  int num_frames = static_cast<int>((padded.size() - fft_size) / hop_length) + 1;
-  out_num_frames = num_frames;
-
-  std::vector<float> magnitudes;
-  std::vector<float> mel_spec(num_mels * num_frames);
-
-  for (int t = 0; t < num_frames; ++t) {
-    const float* frame = padded.data() + t * hop_length;
-    ComputeSTFTFrame(frame, fft_size, window.data(), magnitudes);
-
-    for (int m = 0; m < num_mels; ++m) {
-      float val = 0.0f;
-      int num_bins = fft_size / 2 + 1;
-      for (int k = 0; k < num_bins; ++k) {
-        val += mel_filters[m][k] * magnitudes[k];
-      }
-      // Log-mel: log(mel + eps), NeMo default (log_zero_guard_type=add)
-      mel_spec[m * num_frames + t] = std::log(val + 5.96046448e-08f);
-    }
-  }
-
-  return mel_spec;
-}
-
-}  // anonymous namespace
 
 // ─── NemotronSpeechModel ────────────────────────────────────────────────────
 
@@ -333,11 +187,15 @@ void NemotronSpeechState::ResetStreaming() {
 void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples) {
   const auto& cfg = model_.cache_config_;
 
-  // Compute log-mel spectrogram
+  // Compute log-mel spectrogram using standalone mel extractor
+  mel::MelConfig mel_cfg;
+  mel_cfg.num_mels = kNumMels;
+  mel_cfg.fft_size = kFFTSize;
+  mel_cfg.hop_length = kHopLength;
+  mel_cfg.win_length = kWinLength;
+  mel_cfg.sample_rate = cfg.sample_rate;
   int num_frames = 0;
-  auto mel_data = ComputeLogMel(audio_data, num_samples,
-                                kNumMels, kFFTSize, kHopLength, kWinLength,
-                                cfg.sample_rate, num_frames);
+  auto mel_data = mel::ComputeLogMelBatch(audio_data, num_samples, mel_cfg, num_frames);
 
   // Create processed_signal tensor: [1, num_mels, num_frames]
   auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
