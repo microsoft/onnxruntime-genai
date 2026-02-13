@@ -133,12 +133,22 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        std::string encoder_input_lengths;  // Nemotron ASR: input length for variable-length audio
+        // Nemotron ASR streaming encoder cache inputs
+        std::string cache_last_channel;
+        std::string cache_last_time;
+        std::string cache_last_channel_len;
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
         std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        std::string encoder_output_lengths;  // Nemotron ASR: output length after subsampling
+        // Nemotron ASR streaming encoder cache outputs
+        std::string cache_last_channel_next;
+        std::string cache_last_time_next;
+        std::string cache_last_channel_len_next;
       } outputs;
     } encoder;
 
@@ -202,6 +212,12 @@ struct Config {
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
+      // Nemotron ASR specific audio parameters
+      std::optional<int> sample_rate;       // Audio sample rate (default 16000)
+      std::optional<int> mel_bins;          // Number of mel filterbank bins (default 80)
+      std::optional<int> frame_length_ms;   // Frame length in milliseconds
+      std::optional<int> frame_shift_ms;    // Frame shift (hop length) in milliseconds
+
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
@@ -255,6 +271,7 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string input_ids_length;  // Nemotron ASR RNNT: target sequence length
       } inputs;
 
       struct Outputs {

@@ -32,8 +32,13 @@ struct ModelType {
 
   inline static bool IsALM(const std::string& model_type) {
     // Audio-language model (ALM)
-    static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
+    static constexpr std::array<std::string_view, 2> ALM = {"nemotron_asr", "whisper"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
+  }
+
+  inline static bool IsNemotronASR(const std::string& model_type) {
+    // Nemotron ASR (FastConformer-CacheAware-RNNT) specific check
+    return model_type == "nemotron_asr";
   }
 
   inline static bool IsMMM(const std::string& model_type) {
