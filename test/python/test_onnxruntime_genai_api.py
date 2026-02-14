@@ -34,6 +34,9 @@ if og.is_rocm_available():
 if og.is_openvino_available():
     devices.append("openvino")
 
+if og.is_webgpu_available():
+    devices.append("webgpu")
+
 
 def test_config(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
@@ -171,6 +174,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     for i in range(batch_size):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
     assert int(generator.token_count()) == len(generator.get_sequence(0))
+
 
 @pytest.mark.parametrize(
     "relative_model_path",

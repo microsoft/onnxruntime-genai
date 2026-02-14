@@ -1,0 +1,1 @@
+onnxruntime-webgpu==1.25.0.dev20260210001

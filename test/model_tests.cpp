@@ -13,20 +13,13 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
+#include "test_utils.h"
+
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
 
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
 #ifndef PHI2_PATH
-#if USE_CUDA
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
-#elif USE_DML
-#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
-#else
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
-#endif
+#define PHI2_PATH test_utils::GetPhi2Path().c_str()
 #endif
 
 // To generate this file:
