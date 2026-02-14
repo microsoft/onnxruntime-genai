@@ -70,6 +70,7 @@ def parse_arguments():
         "--eps",
         nargs="+",
         choices=["cpu", "cuda", "dml", "webgpu"],
+        default=[],
         help="List of execution providers to build models for. If not specified, auto-detects available EPs.",
     )
     return parser.parse_args()
