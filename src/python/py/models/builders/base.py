@@ -3850,6 +3850,7 @@ class Model:
         # hf_final_layernorm:             for Phi-2
         # hf_transformer_final_layernorm: for ChatGLM-3
         # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
+        # hf_embedding_norm:              for LFM-2
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = (
             hasattr(model, "model")
@@ -3868,11 +3869,16 @@ class Model:
             and hasattr(model.model.language_model, "norm")
             and module == model.model.language_model.norm
         )
+        hf_embedding_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "embedding_norm")
+            and module == model.model.embedding_norm
+        )
 
         # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm, hf_embedding_norm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 

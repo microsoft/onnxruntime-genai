@@ -12,6 +12,7 @@ from .gemma import Gemma2Model, Gemma3Model, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel
 from .internlm import InternLM2Model
+from .lfm2 import Lfm2Model
 from .llama import LlamaModel
 from .mistral import MistralModel
 from .nemotron import NemotronModel
@@ -38,6 +39,7 @@ __all__ = [
     "GemmaModel",
     "GraniteModel",
     "InternLM2Model",
+    "Lfm2Model",
     "LlamaModel",
     "MistralModel",
     "Model",
