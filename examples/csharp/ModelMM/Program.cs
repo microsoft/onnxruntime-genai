@@ -389,7 +389,7 @@ void main(string[] args) {
 
     // Enable debugging if requested
     if (debug) Common.SetLogger();
-    RegisterEP(executionProvider, epPath);
+    Common.RegisterEP(executionProvider, epPath);
 
     // Create model
     if (verbose) Console.WriteLine("Loading model...");
