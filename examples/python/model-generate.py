@@ -82,7 +82,7 @@ def main(args):
 
     print()
     total_tokens = sum(len(generator.get_sequence(i)) for i in range(len(prompts)))
-    print(f"Tokens: {total_tokens} Time: {run_time:.2f} Tokens per second: {total_tokens / run_time:.2f}")
+    print(f"Tokens: {total_tokens}, Time: {run_time:.2f}, Tokens per second: {total_tokens / run_time:.2f}")
     print()
 
 
