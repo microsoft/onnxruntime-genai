@@ -79,7 +79,7 @@ void ModelGenerate(
         // Display output and timings
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
-        var totalTokens = generator.TokenCount();
+        var totalTokens = (int)generator.TokenCount();
         Console.WriteLine($"Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
 
@@ -218,7 +218,7 @@ void ModelQA(
         input_list.RemoveAt(input_list.Count - 1);
 
         // Display output and timings
-        var totalTokens = generator.TokenCount();
+        var totalTokens = (int)generator.TokenCount();
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
@@ -315,7 +315,7 @@ void ModelChat(
     // Encode system prompt and append tokens to model
     var sequences = tokenizer.Encode(prompt);
     generator.AppendTokenSequences(sequences);
-    var system_prompt_length = generator.TokenCount();
+    var system_prompt_length = (int)generator.TokenCount();
 
     // Streaming Chat
     var prevTotalTokens = 0;
@@ -369,7 +369,7 @@ void ModelChat(
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
 
         // Display output and timings
-        var totalNewTokens = generator.TokenCount() - prevTotalTokens;
+        var totalNewTokens = (int)generator.TokenCount() - prevTotalTokens;
         prevTotalTokens = totalNewTokens;
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalNewTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
@@ -581,7 +581,7 @@ void main(string[] args) {
 
     // Enable debugging if requested
     if (debug) Common.SetLogger();
-    RegisterEP(executionProvider, epPath);
+    Common.RegisterEP(executionProvider, epPath);
 
     // Create model
     if (verbose) Console.WriteLine("Loading model...");

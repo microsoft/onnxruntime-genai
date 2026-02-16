@@ -157,7 +157,7 @@ void ModelMM(
         input_list.RemoveAt(input_list.Count - 1);
 
         // Display output and timings
-        var totalTokens = generator.TokenCount();
+        var totalTokens = (int)generator.TokenCount();
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
