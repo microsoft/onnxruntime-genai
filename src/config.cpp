@@ -241,8 +241,6 @@ struct EncoderInputs_Element : JSON::Element {
       v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
-    } else if (name == "audio_features_length") {
-      v_.audio_features_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -260,8 +258,6 @@ struct EncoderOutputs_Element : JSON::Element {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_outputs") {
       v_.encoder_outputs = JSON::Get<std::string_view>(value);
-    } else if (name == "encoder_output_length") {
-      v_.encoder_output_length = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_key_names") {
       v_.cross_present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_value_names") {
@@ -508,6 +504,16 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_size") {
+      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_attention_heads") {
+      v_.num_attention_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "head_size") {
+      v_.head_size = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
