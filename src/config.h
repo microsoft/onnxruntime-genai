@@ -202,6 +202,32 @@ struct Config {
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
+      // Mel spectrogram / streaming ASR parameters (Nemotron Speech defaults)
+      int num_mels{128};
+      int fft_size{512};
+      int hop_length{160};
+      int win_length{400};
+      float preemph{0.97f};
+      float log_eps{5.96046448e-08f};
+      int subsampling_factor{8};
+      int left_context{70};
+      int conv_context{8};
+      int pre_encode_cache_size{9};
+      int chunk_samples{8960};
+      int blank_id{1024};
+      int max_symbols_per_step{10};
+
+      // Cache-aware streaming encoder I/O names
+      // These are the ONNX node names for encoder cache inputs/outputs.
+      std::string enc_in_length{"length"};
+      std::string enc_in_cache_channel{"cache_last_channel"};
+      std::string enc_in_cache_time{"cache_last_time"};
+      std::string enc_in_cache_channel_len{"cache_last_channel_len"};
+      std::string enc_out_length{"encoded_lengths"};
+      std::string enc_out_cache_channel{"cache_last_channel_next"};
+      std::string enc_out_cache_time{"cache_last_time_next"};
+      std::string enc_out_cache_channel_len{"cache_last_channel_next_len"};
+
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
@@ -218,6 +244,15 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string encoder_outputs{"encoder_outputs"};
+        std::string decoder_outputs{"decoder_outputs"};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{"outputs"};
+      } outputs;
     } joiner;
 
     struct Decoder {
@@ -261,6 +296,12 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+
+        // RNNT decoder (prediction network) inputs
+        std::string targets;          // "targets"
+        std::string target_length;    // "target_length"
+        std::string states_1;         // "states.1"
+        std::string states_2;         // "onnx::Slice_3"
       } inputs;
 
       struct Outputs {
@@ -270,6 +311,12 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+
+        // RNNT decoder (prediction network) outputs
+        std::string outputs;            // "outputs"
+        std::string prednet_lengths;    // "prednet_lengths"
+        std::string states_1;           // "states"
+        std::string states_2;           // "162"
       } outputs;
 
       struct PipelineModel {

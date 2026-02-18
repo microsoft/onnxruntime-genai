@@ -81,12 +81,17 @@ StreamingASR::StreamingASR(Model& model)
   joiner_session_ = nemotron_model->session_joiner_.get();
   cache_config_ = nemotron_model->cache_config_;
 
-  // Initialize mel extractor (standalone, no ORT dependencies)
-  // mel_extractor_ is constructed via NemoMelConfigDefault() in member initializer
+  // Initialize mel extractor from config
+  nemo_mel::NemoMelConfig mel_cfg{
+      cache_config_.num_mels, cache_config_.fft_size,
+      cache_config_.hop_length, cache_config_.win_length,
+      cache_config_.sample_rate,
+      cache_config_.preemph, cache_config_.log_eps};
+  mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
 
   // Initialize mel pre-encode cache (zeros for first chunk)
   mel_pre_encode_cache_.assign(
-      static_cast<size_t>(kNumMels) * cache_config_.pre_encode_cache_size, 0.0f);
+      static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
   is_first_chunk_ = true;
 
   // Initialize streaming state
@@ -104,7 +109,7 @@ void StreamingASR::Reset() {
   full_transcript_.clear();
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
-      static_cast<size_t>(kNumMels) * cache_config_.pre_encode_cache_size, 0.0f);
+      static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
   is_first_chunk_ = true;
   audio_buffer_.clear();
   chunk_index_ = 0;
@@ -157,17 +162,18 @@ std::string StreamingASR::Flush() {
 std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
   int cache_size = cache_config_.pre_encode_cache_size;  // 9
+  const int num_mels = cache_config_.num_mels;
 
   // Build encoder input: [pre_encode_cache (9 mel) | new_mel (num_frames mel)]
   int total_mel_frames = cache_size + num_frames;  // e.g. 9 + 56 = 65
 
   // Create processed_signal: [1, num_mels, total_mel_frames]
-  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, total_mel_frames};
+  auto signal_shape = std::array<int64_t, 3>{1, num_mels, total_mel_frames};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
-  // Fill row by row: mel is [kNumMels, time] in row-major layout
-  for (int m = 0; m < kNumMels; ++m) {
+  // Fill row by row: mel is [num_mels, time] in row-major layout
+  for (int m = 0; m < num_mels; ++m) {
     // Pre-encode cache columns for this mel bin
     std::memcpy(signal_data + m * total_mel_frames,
                 mel_pre_encode_cache_.data() + m * cache_size,
@@ -181,7 +187,7 @@ std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, in
   // Update pre-encode cache: save last cache_size mel frames from current chunk
   // (these will be prepended to the next chunk)
   if (num_frames >= cache_size) {
-    for (int m = 0; m < kNumMels; ++m) {
+    for (int m = 0; m < num_mels; ++m) {
       std::memcpy(mel_pre_encode_cache_.data() + m * cache_size,
                   mel_data.data() + m * num_frames + (num_frames - cache_size),
                   cache_size * sizeof(float));
@@ -189,7 +195,7 @@ std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, in
   } else {
     // Short chunk: shift existing cache left, append new frames
     int keep = cache_size - num_frames;
-    for (int m = 0; m < kNumMels; ++m) {
+    for (int m = 0; m < num_mels; ++m) {
       std::memmove(mel_pre_encode_cache_.data() + m * cache_size,
                    mel_pre_encode_cache_.data() + m * cache_size + num_frames,
                    keep * sizeof(float));
@@ -207,8 +213,9 @@ std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, in
 
   // Encoder inputs
   const char* enc_input_names[] = {
-      "audio_signal", "length",
-      "cache_last_channel", "cache_last_time", "cache_last_channel_len"};
+      cache_config_.enc_in_audio.c_str(), cache_config_.enc_in_length.c_str(),
+      cache_config_.enc_in_cache_channel.c_str(), cache_config_.enc_in_cache_time.c_str(),
+      cache_config_.enc_in_cache_channel_len.c_str()};
   OrtValue* enc_inputs[] = {
       processed_signal.get(), signal_length.get(),
       encoder_cache_.cache_last_channel.get(),
@@ -216,8 +223,9 @@ std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, in
       encoder_cache_.cache_last_channel_len.get()};
 
   const char* enc_output_names[] = {
-      "outputs", "encoded_lengths",
-      "cache_last_channel_next", "cache_last_time_next", "cache_last_channel_next_len"};
+      cache_config_.enc_out_encoded.c_str(), cache_config_.enc_out_length.c_str(),
+      cache_config_.enc_out_cache_channel.c_str(), cache_config_.enc_out_cache_time.c_str(),
+      cache_config_.enc_out_cache_channel_len.c_str()};
 
   // Run encoder
   auto run_options = OrtRunOptions::Create();
@@ -266,8 +274,8 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
       frame_data[d] = enc_data[d * enc_shape[2] + t];
     }
 
-    constexpr int kMaxSymbolsPerStep = 10;
-    for (int sym = 0; sym < kMaxSymbolsPerStep; ++sym) {
+    const int max_sym = cache_config_.max_symbols_per_step;
+    for (int sym = 0; sym < max_sym; ++sym) {
       // ── Step 1: Run decoder (prediction network) ──
       auto targets_shape = std::array<int64_t, 2>{1, 1};
       auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
@@ -278,14 +286,15 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
       *target_length->GetTensorMutableData<int32_t>() = 1;
 
       const char* dec_input_names[] = {
-          "targets", "target_length",
-          "states.1", "onnx::Slice_3"};
+          cache_config_.dec_in_targets.c_str(), cache_config_.dec_in_target_length.c_str(),
+          cache_config_.dec_in_states_1.c_str(), cache_config_.dec_in_states_2.c_str()};
       OrtValue* dec_inputs[] = {
           targets.get(), target_length.get(),
           decoder_state_.state_1.get(), decoder_state_.state_2.get()};
 
       const char* dec_output_names[] = {
-          "outputs", "prednet_lengths", "states", "162"};
+          cache_config_.dec_out_outputs.c_str(), cache_config_.dec_out_prednet_lengths.c_str(),
+          cache_config_.dec_out_states_1.c_str(), cache_config_.dec_out_states_2.c_str()};
 
       auto dec_outputs = decoder_session_->Run(
           run_options.get(),
@@ -299,11 +308,11 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
 
       // ── Step 2: Run joiner (joint network) ──
       const char* join_input_names[] = {
-          "encoder_outputs", "decoder_outputs"};
+          cache_config_.join_in_encoder.c_str(), cache_config_.join_in_decoder.c_str()};
       OrtValue* join_inputs[] = {
           encoder_frame.get(), dec_outputs[0].get()};
 
-      const char* join_output_names[] = {"outputs"};
+      const char* join_output_names[] = {cache_config_.join_out_logits.c_str()};
 
       auto join_outputs = joiner_session_->Run(
           run_options.get(),

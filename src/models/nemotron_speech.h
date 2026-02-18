@@ -11,26 +11,70 @@
 namespace Generators {
 
 /// Configuration for Nemotron streaming encoder cache dimensions.
+/// Populated from Config::Model at model load time via PopulateFromConfig().
 struct NemotronCacheConfig {
-  int num_encoder_layers{24};
-  int hidden_dim{1024};
-  int left_context{70};   // Frame look-back for cache_last_channel
-  int conv_context{8};    // Convolution context for cache_last_time
-  int decoder_lstm_dim{640};
-  int decoder_lstm_layers{2};
-  int vocab_size{1024};
-  int blank_id{1024};      // CTC blank / RNNT blank token
-  int chunk_frames{56};    // Number of NEW mel frames per chunk (560ms @ 16kHz with 10ms hop)
-  int sample_rate{16000};
-  int chunk_samples{8960}; // 560ms * 16000 = 8960 samples per chunk
+  // All values populated from genai_config.json via PopulateFromConfig().
+  // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
+  int num_encoder_layers{};
+  int hidden_dim{};
+  int left_context{};
+  int conv_context{};
 
-  // Pre-encode cache config (matches NeMo's CacheAwareStreamingAudioBuffer).
-  // The conv subsampling layer needs left context from the previous chunk's mel tail.
-  // pre_encode_cache_size: mel frames from prev chunk to prepend (9 for subsampling_factor=8).
-  // Total mel per encoder call = pre_encode_cache_size + chunk_frames.
-  // drop_extra_pre_encoded is baked into the ONNX graph (Slice node), not needed here.
-  int pre_encode_cache_size{9};    // 9 mel frames of left context for conv subsampling
-  static constexpr int kHopLength = 160;
+  // Decoder LSTM dimensions (from decoder.hidden_size / num_hidden_layers)
+  int decoder_lstm_dim{};
+  int decoder_lstm_layers{};
+
+  // Vocabulary
+  int vocab_size{};
+  int blank_id{};
+
+  // Streaming chunk config
+  int chunk_frames{};
+  int sample_rate{16000};
+  int chunk_samples{};
+  int subsampling_factor{};
+  int max_symbols_per_step{};
+
+  // Mel spectrogram parameters (from speech.*)
+  int num_mels{};
+  int fft_size{};
+  int hop_length{};
+  int win_length{};
+  float preemph{};
+  float log_eps{};
+
+  // Pre-encode cache
+  int pre_encode_cache_size{};
+
+  // Encoder I/O names (populated from genai_config.json)
+  std::string enc_in_audio;
+  std::string enc_in_length;
+  std::string enc_in_cache_channel;
+  std::string enc_in_cache_time;
+  std::string enc_in_cache_channel_len;
+  std::string enc_out_encoded;
+  std::string enc_out_length;
+  std::string enc_out_cache_channel;
+  std::string enc_out_cache_time;
+  std::string enc_out_cache_channel_len;
+
+  // Decoder (prediction network) I/O names
+  std::string dec_in_targets;
+  std::string dec_in_target_length;
+  std::string dec_in_states_1;
+  std::string dec_in_states_2;
+  std::string dec_out_outputs;
+  std::string dec_out_prednet_lengths;
+  std::string dec_out_states_1;
+  std::string dec_out_states_2;
+
+  // Joiner I/O names
+  std::string join_in_encoder;
+  std::string join_in_decoder;
+  std::string join_out_logits;
+
+  /// Populate from a Config object (reads encoder/decoder/joiner/speech sections).
+  void PopulateFromConfig(const Config& config);
 };
 
 /// Holds the rolling encoder cache state between streaming chunks.
@@ -132,14 +176,6 @@ struct NemotronSpeechState : State {
   // Tensor holding last encoder output for GetOutput
   std::unique_ptr<OrtValue> last_encoder_output_;
   std::unique_ptr<OrtValue> last_encoded_len_;
-
-  // Mel feature extractor (log-mel spectrogram)
-  // We use ORT extensions if available, otherwise a simple built-in extraction
-  // For nemotron: 80-dim mel, 10ms hop, 25ms window
-  static constexpr int kNumMels = 128;
-  static constexpr int kHopLength = 160;    // 10ms * 16kHz
-  static constexpr int kWinLength = 400;    // 25ms * 16kHz
-  static constexpr int kFFTSize = 512;
 };
 
 }  // namespace Generators

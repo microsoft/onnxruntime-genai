@@ -17,6 +17,70 @@
 
 namespace Generators {
 
+// ─── NemotronCacheConfig ────────────────────────────────────────────────────
+
+void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
+  const auto& enc = config.model.encoder;
+  const auto& dec = config.model.decoder;
+  const auto& sp = config.model.speech;
+  const auto& jo = config.model.joiner;
+
+  // Encoder dimensions
+  hidden_dim = enc.hidden_size;
+  num_encoder_layers = enc.num_hidden_layers;
+
+  // Decoder dimensions (LSTM)
+  decoder_lstm_dim = dec.hidden_size;
+  decoder_lstm_layers = dec.num_hidden_layers;
+
+  // Speech / mel feature config (defaults live in Config::Model::Speech)
+  num_mels = sp.num_mels;
+  fft_size = sp.fft_size;
+  hop_length = sp.hop_length;
+  win_length = sp.win_length;
+  preemph = sp.preemph;
+  log_eps = sp.log_eps;
+  subsampling_factor = sp.subsampling_factor;
+  left_context = sp.left_context;
+  conv_context = sp.conv_context;
+  pre_encode_cache_size = sp.pre_encode_cache_size;
+  chunk_samples = sp.chunk_samples;
+  blank_id = sp.blank_id;
+  max_symbols_per_step = sp.max_symbols_per_step;
+
+  // Vocab size from top-level config (includes blank)
+  vocab_size = config.model.vocab_size - 1;
+
+  // Encoder I/O names
+  enc_in_audio = enc.inputs.audio_features;
+  enc_out_encoded = enc.outputs.encoder_outputs;
+
+  // Encoder cache I/O names (from speech section)
+  enc_in_length = sp.enc_in_length;
+  enc_in_cache_channel = sp.enc_in_cache_channel;
+  enc_in_cache_time = sp.enc_in_cache_time;
+  enc_in_cache_channel_len = sp.enc_in_cache_channel_len;
+  enc_out_length = sp.enc_out_length;
+  enc_out_cache_channel = sp.enc_out_cache_channel;
+  enc_out_cache_time = sp.enc_out_cache_time;
+  enc_out_cache_channel_len = sp.enc_out_cache_channel_len;
+
+  // Joiner I/O names
+  join_in_encoder = jo.inputs.encoder_outputs;
+  join_in_decoder = jo.inputs.decoder_outputs;
+  join_out_logits = jo.outputs.logits;
+
+  // Decoder I/O names (RNNT prediction network)
+  dec_in_targets = dec.inputs.targets;
+  dec_in_target_length = dec.inputs.target_length;
+  dec_in_states_1 = dec.inputs.states_1;
+  dec_in_states_2 = dec.inputs.states_2;
+  dec_out_outputs = dec.outputs.outputs;
+  dec_out_prednet_lengths = dec.outputs.prednet_lengths;
+  dec_out_states_1 = dec.outputs.states_1;
+  dec_out_states_2 = dec.outputs.states_2;
+}
+
 // ─── NemotronEncoderCache ───────────────────────────────────────────────────
 
 void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
@@ -66,9 +130,9 @@ void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& a
 
 NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  // Parse Nemotron-specific config from genai_config.json if provided
-  // Defaults match the 0.6B streaming model
+  // Populate from genai_config.json; defaults match the 0.6B streaming model
   cache_config_ = NemotronCacheConfig{};
+  cache_config_.PopulateFromConfig(*config_);
 
   // Create session options
   encoder_session_options_ = OrtSessionOptions::Create();
@@ -189,18 +253,18 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
 
   // Compute log-mel spectrogram using standalone mel extractor
   nemo_mel::NemoMelConfig mel_cfg{
-      /*num_mels=*/kNumMels,
-      /*fft_size=*/kFFTSize,
-      /*hop_length=*/kHopLength,
-      /*win_length=*/kWinLength,
+      /*num_mels=*/cfg.num_mels,
+      /*fft_size=*/cfg.fft_size,
+      /*hop_length=*/cfg.hop_length,
+      /*win_length=*/cfg.win_length,
       /*sample_rate=*/cfg.sample_rate,
-      /*preemph=*/0.97f,
-      /*log_eps=*/5.96046448e-08f};
+      /*preemph=*/cfg.preemph,
+      /*log_eps=*/cfg.log_eps};
   int num_frames = 0;
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(audio_data, num_samples, mel_cfg, num_frames);
 
   // Create processed_signal tensor: [1, num_mels, num_frames]
-  auto signal_shape = std::array<int64_t, 3>{1, kNumMels, num_frames};
+  auto signal_shape = std::array<int64_t, 3>{1, cfg.num_mels, num_frames};
   auto& allocator = model_.p_device_inputs_->GetAllocator();
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape,
                                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -215,11 +279,11 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
 
   // Set up encoder inputs
   std::vector<const char*> input_names = {
-      "audio_signal",
-      "length",
-      "cache_last_channel",
-      "cache_last_time",
-      "cache_last_channel_len"};
+      cfg.enc_in_audio.c_str(),
+      cfg.enc_in_length.c_str(),
+      cfg.enc_in_cache_channel.c_str(),
+      cfg.enc_in_cache_time.c_str(),
+      cfg.enc_in_cache_channel_len.c_str()};
 
   std::vector<OrtValue*> inputs = {
       processed_signal.get(),
@@ -230,16 +294,16 @@ void NemotronSpeechState::RunEncoder(const float* audio_data, size_t num_samples
 
   // Set up encoder outputs
   std::vector<const char*> output_names = {
-      "outputs",
-      "encoded_lengths",
-      "cache_last_channel_next",
-      "cache_last_time_next",
-      "cache_last_channel_next_len"};
+      cfg.enc_out_encoded.c_str(),
+      cfg.enc_out_length.c_str(),
+      cfg.enc_out_cache_channel.c_str(),
+      cfg.enc_out_cache_time.c_str(),
+      cfg.enc_out_cache_channel_len.c_str()};
 
   // Create output tensors (sizes determined by the model)
   // encoded: [1, hidden_dim, time_out]
   // For streaming, time_out is typically num_frames / subsampling_factor
-  int time_out = std::max(1, num_frames / 8);  // Approximate: FastConformer uses 8x subsampling
+  int time_out = std::max(1, num_frames / cfg.subsampling_factor);  // FastConformer subsampling
   auto encoded_shape = std::array<int64_t, 3>{1, cfg.hidden_dim, time_out};
   last_encoder_output_ = OrtValue::CreateTensor(allocator, encoded_shape,
                                                  ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -320,8 +384,8 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
     }
 
     // Greedy RNNT decoding loop for this time step
-    constexpr int kMaxSymbolsPerStep = 10;  // Safety limit
-    for (int sym = 0; sym < kMaxSymbolsPerStep; ++sym) {
+    const int max_sym = cfg.max_symbols_per_step;  // Safety limit
+    for (int sym = 0; sym < max_sym; ++sym) {
       // ── Step 1: Run decoder (prediction network) ──
       // targets: [1, 1] - last emitted token
       auto targets_shape = std::array<int64_t, 2>{1, 1};
@@ -355,13 +419,15 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
 
       // Decoder I/O names (matching the ONNX graph)
       std::vector<const char*> dec_input_names = {
-          "targets", "target_length", "states.1", "onnx::Slice_3"};
+          cfg.dec_in_targets.c_str(), cfg.dec_in_target_length.c_str(),
+          cfg.dec_in_states_1.c_str(), cfg.dec_in_states_2.c_str()};
       std::vector<OrtValue*> dec_inputs = {
           targets.get(), target_length.get(),
           decoder_state_.state_1.get(), decoder_state_.state_2.get()};
 
       std::vector<const char*> dec_output_names = {
-          "outputs", "prednet_lengths", "states", "162"};
+          cfg.dec_out_outputs.c_str(), cfg.dec_out_prednet_lengths.c_str(),
+          cfg.dec_out_states_1.c_str(), cfg.dec_out_states_2.c_str()};
       std::vector<OrtValue*> dec_outputs = {
           decoder_output.get(), prednet_lengths.get(),
           new_state_1.get(), new_state_2.get()};
@@ -392,11 +458,11 @@ std::string NemotronSpeechState::RunRNNTDecoder(OrtValue* encoder_output, int64_
                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
       std::vector<const char*> join_input_names = {
-          "encoder_outputs", "decoder_outputs"};
+          cfg.join_in_encoder.c_str(), cfg.join_in_decoder.c_str()};
       std::vector<OrtValue*> join_inputs = {
           encoder_frame.get(), decoder_output.get()};
 
-      std::vector<const char*> join_output_names = {"outputs"};
+      std::vector<const char*> join_output_names = {cfg.join_out_logits.c_str()};
       std::vector<OrtValue*> join_outputs = {logits.get()};
 
       input_names_.clear();

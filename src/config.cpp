@@ -315,6 +315,14 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "targets") {
+      v_.targets = JSON::Get<std::string_view>(value);
+    } else if (name == "target_length") {
+      v_.target_length = JSON::Get<std::string_view>(value);
+    } else if (name == "states_1") {
+      v_.states_1 = JSON::Get<std::string_view>(value);
+    } else if (name == "states_2") {
+      v_.states_2 = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -340,6 +348,14 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
       v_.rnn_states = JSON::Get<std::string_view>(value);
+    } else if (name == "outputs") {
+      v_.outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "prednet_lengths") {
+      v_.prednet_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "states_1") {
+      v_.states_1 = JSON::Get<std::string_view>(value);
+    } else if (name == "states_2") {
+      v_.states_2 = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -827,6 +843,48 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_mels") {
+      v_.num_mels = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "fft_size") {
+      v_.fft_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "hop_length") {
+      v_.hop_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "win_length") {
+      v_.win_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "preemph") {
+      v_.preemph = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "log_eps") {
+      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "subsampling_factor") {
+      v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context") {
+      v_.left_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv_context") {
+      v_.conv_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "pre_encode_cache_size") {
+      v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "chunk_samples") {
+      v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "blank_id") {
+      v_.blank_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_symbols_per_step") {
+      v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "enc_in_length") {
+      v_.enc_in_length = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_in_cache_channel") {
+      v_.enc_in_cache_channel = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_in_cache_time") {
+      v_.enc_in_cache_time = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_in_cache_channel_len") {
+      v_.enc_in_cache_channel_len = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_out_length") {
+      v_.enc_out_length = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_out_cache_channel") {
+      v_.enc_out_cache_channel = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_out_cache_time") {
+      v_.enc_out_cache_time = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_out_cache_channel_len") {
+      v_.enc_out_cache_channel_len = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -860,6 +918,38 @@ struct Speech_Element : JSON::Element {
   SpeechOutputs_Element outputs_{v_.outputs};
 };
 
+struct JoinerInputs_Element : JSON::Element {
+  explicit JoinerInputs_Element(Config::Model::Joiner::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoder_outputs") {
+      v_.encoder_outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "decoder_outputs") {
+      v_.decoder_outputs = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Joiner::Inputs& v_;
+};
+
+struct JoinerOutputs_Element : JSON::Element {
+  explicit JoinerOutputs_Element(Config::Model::Joiner::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Joiner::Outputs& v_;
+};
+
 struct Joiner_Element : JSON::Element {
   explicit Joiner_Element(Config::Model::Joiner& v) : v_{v} {}
 
@@ -882,6 +972,12 @@ struct Joiner_Element : JSON::Element {
       run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
       return *run_options_;
     }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -889,6 +985,8 @@ struct Joiner_Element : JSON::Element {
   Config::Model::Joiner& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  JoinerInputs_Element inputs_{v_.inputs};
+  JoinerOutputs_Element outputs_{v_.outputs};
 };
 
 struct EmbeddingInputs_Element : JSON::Element {
