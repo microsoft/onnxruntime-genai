@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// StreamingASR implementation — high-level streaming speech recognition.
+// NemoStreamingASR — streaming ASR for NeMo FastConformer + RNNT models.
 
 #include <algorithm>
 #include <cmath>
@@ -10,13 +10,13 @@
 #include <numeric>
 
 #include "generators.h"
-#include "streaming_asr.h"
+#include "nemo_streaming_asr.h"
 
 namespace Generators {
 
 // ─── Vocabulary loading ─────────────────────────────────────────────────────
 
-void StreamingASR::LoadVocab() {
+void NemoStreamingASR::LoadVocab() {
   if (vocab_loaded_) return;
 
   auto tokenizer = model_.CreateTokenizer();
@@ -32,14 +32,14 @@ void StreamingASR::LoadVocab() {
   vocab_loaded_ = true;
 }
 
-// ─── StreamingASR ───────────────────────────────────────────────────────────
+// ─── NemoStreamingASR ────────────────────────────────────────────────────────
 
-StreamingASR::StreamingASR(Model& model)
+NemoStreamingASR::NemoStreamingASR(Model& model)
     : model_{model} {
   // Get the NemotronSpeechModel to access its sessions
   auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
   if (!nemotron_model) {
-    throw std::runtime_error("StreamingASR requires a nemotron_speech model type. Got: " + model.config_->model.type);
+    throw std::runtime_error("NemoStreamingASR requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
   encoder_session_ = nemotron_model->session_encoder_.get();
@@ -66,9 +66,9 @@ StreamingASR::StreamingASR(Model& model)
   decoder_state_.Initialize(cache_config_, allocator);
 }
 
-StreamingASR::~StreamingASR() = default;
+NemoStreamingASR::~NemoStreamingASR() = default;
 
-void StreamingASR::Reset() {
+void NemoStreamingASR::Reset() {
   auto& allocator = model_.allocator_cpu_;
   encoder_cache_.Reset(cache_config_, allocator);
   decoder_state_.Reset(cache_config_, allocator);
@@ -81,7 +81,7 @@ void StreamingASR::Reset() {
   chunk_index_ = 0;
 }
 
-std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
+std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
   LoadVocab();
 
   // Append incoming audio to accumulation buffer
@@ -98,7 +98,7 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
     // Prepend pre-encode cache → feed [cache | new_mel] to encoder
     result += ProcessMelChunk(mel_data, num_frames);
 
-    // Advance by full chunk (no overlap — NeMo native: shift == chunk)
+    // Advance by full chunk, Nemo models do not require overlapping audio between chunks since the encoder cache provides left context
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_sz));
   }
@@ -106,7 +106,7 @@ std::string StreamingASR::TranscribeChunk(const float* audio_data, size_t num_sa
   return result;
 }
 
-std::string StreamingASR::Flush() {
+std::string NemoStreamingASR::Flush() {
   LoadVocab();
 
   std::string result;
@@ -125,7 +125,7 @@ std::string StreamingASR::Flush() {
   return result;
 }
 
-std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, int num_frames) {
+std::string NemoStreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
   int cache_size = cache_config_.pre_encode_cache_size;  // 9
   const int num_mels = cache_config_.num_mels;
@@ -217,7 +217,7 @@ std::string StreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, in
   return chunk_text;
 }
 
-std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len) {
+std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len) {
   auto& allocator = model_.allocator_cpu_;
   std::string result;
 
@@ -326,7 +326,7 @@ std::string StreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t encod
   return result;
 }
 
-void StreamingASR::SaveNpy(const std::string& path, const float* data,
+void NemoStreamingASR::SaveNpy(const std::string& path, const float* data,
                                const std::vector<int64_t>& shape) {
     std::ofstream f(path, std::ios::binary);
     if (!f) return;
@@ -366,7 +366,7 @@ void StreamingASR::SaveNpy(const std::string& path, const float* data,
   }
 
   std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
-  return std::make_unique<StreamingASR>(model);
+  return std::make_unique<NemoStreamingASR>(model);
 }
 
 }  // namespace Generators

@@ -1,91 +1,45 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// StreamingASR — high-level streaming speech recognition API for RNNT models
-// (Nemotron Speech Streaming, etc.)
+// StreamingASR — abstract interface for streaming speech recognition.
+// Concrete implementations live in model-specific headers (e.g. nemo_streaming_asr.h).
 #pragma once
 
-#include "nemo_mel_spectrogram.h"  // from onnxruntime-extensions/shared/api
 #include "models/model.h"
-#include "models/nemotron_speech.h"
 
 namespace Generators {
 
-/// High-level streaming ASR interface.
-/// Manages encoder cache and RNNT decoder state across audio chunks.
+/// Abstract base class for streaming ASR.
+///
+/// Concrete implementations (e.g. NemoStreamingASR for FastConformer + RNNT)
+/// handle model-specific encoder caching, mel extraction, and decoder logic.
 ///
 /// Usage:
 ///   auto model = CreateModel(env, "path/to/model");
-///   auto asr = std::make_unique<StreamingASR>(*model);
+///   auto asr = CreateStreamingASR(*model);
 ///   std::string text = asr->TranscribeChunk(audio_data, num_samples);
 ///   std::string full = asr->GetTranscript();
 ///   asr->Reset();
 ///
 struct StreamingASR : LeakChecked<StreamingASR> {
-  StreamingASR(Model& model);
-  ~StreamingASR();
+  virtual ~StreamingASR() = default;
 
-  /// Feed a chunk of raw PCM audio (mono, 16kHz, float32).
-  /// Each chunk is converted to mel, prepended with a 9-frame pre-encode cache
-  /// (last 9 mel frames from the previous chunk), then fed to the encoder.
-  /// This matches NeMo's CacheAwareStreamingAudioBuffer behavior.
+  /// Feed a chunk of raw PCM audio (mono, float32, sample rate depends on model).
   /// Returns newly transcribed text from this call.
-  std::string TranscribeChunk(const float* audio_data, size_t num_samples);
+  virtual std::string TranscribeChunk(const float* audio_data, size_t num_samples) = 0;
 
   /// Flush remaining buffered audio (call after last TranscribeChunk).
-  /// Processes any pending/buffered audio with silence padding.
   /// Returns final transcribed text.
-  std::string Flush();
+  virtual std::string Flush() = 0;
 
   /// Get the full transcript accumulated so far.
-  const std::string& GetTranscript() const { return full_transcript_; }
+  virtual const std::string& GetTranscript() const = 0;
 
   /// Reset all streaming state for a new utterance.
-  void Reset();
-
- private:
-  Model& model_;
-  NemotronCacheConfig cache_config_;
-
-  // Encoder ONNX session (borrowed from model)
-  OrtSession* encoder_session_{};
-  OrtSession* decoder_session_{};
-  OrtSession* joiner_session_{};
-
-  // Streaming state
-  NemotronEncoderCache encoder_cache_;
-  NemotronDecoderState decoder_state_;
-  std::string full_transcript_;
-
-  // Vocabulary
-  std::vector<std::string> vocab_;
-  bool vocab_loaded_{false};
-
-  // Log-mel feature extraction (delegated to standalone nemo_mel::NemoStreamingMelExtractor)
-  // Config values populated from genai_config.json via cache_config_
-  nemo_mel::NemoStreamingMelExtractor mel_extractor_;
-
-  // Mel pre-encode cache: last pre_encode_cache_size mel frames from previous chunk.
-  // Prepended to the current chunk's mel before feeding the encoder.
-  // Size: num_mels * pre_encode_cache_size floats (row-major: [num_mels, cache_size]).
-  std::vector<float> mel_pre_encode_cache_;
-  bool is_first_chunk_{true};
-
-  // Audio accumulation buffer for incoming PCM samples
-  std::vector<float> audio_buffer_;
-
-// Debug: chunk counter for mel dump files
-    int chunk_index_{0};
-
-    void LoadVocab();
-    std::string ProcessMelChunk(const std::vector<float>& mel_data, int num_frames);
-    std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
-
-    // Save a float tensor as .npy file (row-major)
-    static void SaveNpy(const std::string& path, const float* data,
-                        const std::vector<int64_t>& shape);
+  virtual void Reset() = 0;
 };
 
+/// Factory: creates the appropriate StreamingASR implementation based on model type.
 std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model);
 
 }  // namespace Generators
