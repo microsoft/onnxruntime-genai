@@ -636,6 +636,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return std::string(result.p_);
       }, pybind11::arg("audio_chunk"),
          "Feed a chunk of float32 PCM audio (mono, 16kHz) and get newly transcribed text.")
+      .def("flush", [](OgaStreamingASR& asr) -> std::string {
+        auto result = asr.Flush();
+        return std::string(result.p_);
+      }, "Flush remaining buffered audio. Call after the last transcribe_chunk.")
       .def("get_transcript", [](const OgaStreamingASR& asr) -> std::string {
         auto result = asr.GetTranscript();
         return std::string(result.p_);

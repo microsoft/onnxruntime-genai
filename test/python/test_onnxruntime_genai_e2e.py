@@ -158,6 +158,48 @@ def run_tool_calling():
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_nemotron_speech():
+    """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_batch.py example."""
+    log.debug("Running Nemotron Speech Python E2E Test")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    ci_data_path = get_ci_data_path()
+
+    # Check environment variable first, then CI paths
+    model_path = os.environ.get("NEMOTRON_SPEECH_MODEL_PATH", "")
+    if not model_path or not os.path.exists(model_path):
+        candidates = [
+            os.path.join(ci_data_path, "onnx", "nemotron-speech-streaming"),
+            os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming"),
+            os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming-en-0.6b"),
+        ]
+        model_path = ""
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                model_path = candidate
+                break
+
+    if not model_path:
+        log.info("Nemotron speech model not found, skipping E2E test.")
+        return
+
+    # Look for a test audio file
+    audio_path = os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3")
+    if not os.path.exists(audio_path):
+        log.info(f"Test audio file not found at {audio_path}, skipping E2E test.")
+        return
+
+    command = [
+        sys.executable,
+        os.path.join(cwd, "..", "..", "examples", "python", "nemotron_batch.py"),
+        "--model_path",
+        model_path,
+        "--audio_file",
+        audio_path,
+    ]
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -186,6 +228,9 @@ if __name__ == "__main__":
 
     # Run Whisper E2E tests
     run_whisper()
+
+    # Run Nemotron Speech E2E tests
+    run_nemotron_speech()
 
     # Run tool calling E2E tests
     run_tool_calling()
