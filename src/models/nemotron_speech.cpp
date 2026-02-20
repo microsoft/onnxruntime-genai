@@ -44,6 +44,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   left_context = sp.left_context;
   conv_context = sp.conv_context;
   pre_encode_cache_size = sp.pre_encode_cache_size;
+  sample_rate = sp.sample_rate;
   chunk_samples = sp.chunk_samples;
   blank_id = sp.blank_id;
   max_symbols_per_step = sp.max_symbols_per_step;

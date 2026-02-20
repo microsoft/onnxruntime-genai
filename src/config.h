@@ -202,20 +202,21 @@ struct Config {
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
-      // Mel spectrogram / streaming ASR parameters (Nemotron Speech defaults)
-      int num_mels{128};
-      int fft_size{512};
-      int hop_length{160};
-      int win_length{400};
-      float preemph{0.97f};
-      float log_eps{5.96046448e-08f};
-      int subsampling_factor{8};
-      int left_context{70};
-      int conv_context{8};
-      int pre_encode_cache_size{9};
-      int chunk_samples{8960};
-      int blank_id{1024};
-      int max_symbols_per_step{10};
+      // Mel spectrogram / streaming ASR parameters (populated from genai_config.json)
+      int num_mels{};
+      int fft_size{};
+      int hop_length{};
+      int win_length{};
+      float preemph{};
+      float log_eps{};
+      int subsampling_factor{};
+      int left_context{};
+      int conv_context{};
+      int pre_encode_cache_size{};
+      int sample_rate{};
+      int chunk_samples{};
+      int blank_id{};
+      int max_symbols_per_step{};
 
       // Cache-aware streaming encoder I/O names
       // These are the ONNX node names for encoder cache inputs/outputs.

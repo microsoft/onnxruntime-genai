@@ -863,6 +863,8 @@ struct Speech_Element : JSON::Element {
       v_.conv_context = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "pre_encode_cache_size") {
       v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sample_rate") {
+      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "chunk_samples") {
       v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "blank_id") {

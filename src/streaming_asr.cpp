@@ -8,7 +8,6 @@
 #include <cstring>
 #include <fstream>
 #include <numeric>
-#include <sstream>
 
 #include "generators.h"
 #include "streaming_asr.h"
@@ -20,48 +19,15 @@ namespace Generators {
 void StreamingASR::LoadVocab() {
   if (vocab_loaded_) return;
 
-  auto config_path = model_.config_->config_path;
-
-  // Try tokens.txt
-  auto tokens_path = config_path / "tokens.txt";
-  std::ifstream tokens_file(tokens_path.string());
-  if (tokens_file.is_open()) {
-    std::string line;
-    while (std::getline(tokens_file, line)) {
-      // Format: "token_text index" (space-separated) or "token_text\tindex" (tab-separated)
-      auto sep_pos = line.rfind(' ');
-      if (sep_pos == std::string::npos) sep_pos = line.rfind('\t');
-      if (sep_pos != std::string::npos) {
-        vocab_.push_back(line.substr(0, sep_pos));
-      } else {
-        vocab_.push_back(line);
-      }
-    }
-    vocab_loaded_ = true;
-    return;
-  }
-
-  // Fallback: use tokenizer
-  try {
-    auto tokenizer = model_.CreateTokenizer();
-    vocab_.resize(cache_config_.vocab_size);
-    for (int i = 0; i < cache_config_.vocab_size; ++i) {
-      try {
-        std::vector<int32_t> ids = {static_cast<int32_t>(i)};
-        vocab_[i] = tokenizer->Decode(ids);
-      } catch (...) {
-        vocab_[i] = "";
-      }
-    }
-    vocab_loaded_ = true;
-    return;
-  } catch (...) {
-  }
-
-  // Last resort
+  auto tokenizer = model_.CreateTokenizer();
   vocab_.resize(cache_config_.vocab_size);
   for (int i = 0; i < cache_config_.vocab_size; ++i) {
-    vocab_[i] = "<" + std::to_string(i) + ">";
+    try {
+      std::vector<int32_t> ids = {static_cast<int32_t>(i)};
+      vocab_[i] = tokenizer->Decode(ids);
+    } catch (...) {
+      vocab_[i] = "";
+    }
   }
   vocab_loaded_ = true;
 }
