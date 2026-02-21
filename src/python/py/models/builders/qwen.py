@@ -670,7 +670,7 @@ class Qwen25VLTextModel(Model):
 
     def load_weights(self, input_path):
         # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
-        # which loads weights directly from safetensors via QuantModel
+        # which loads weights directly via QuantModel
         if self.quant_type is not None or input_path.endswith(".gguf"):
             return super().load_weights(input_path)
 
