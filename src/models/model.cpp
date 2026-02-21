@@ -1356,7 +1356,6 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
-          {"nemotron_speech", Processor::Create<NemotronSpeechProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
