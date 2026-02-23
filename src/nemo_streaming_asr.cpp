@@ -365,8 +365,4 @@ void NemoStreamingASR::SaveNpy(const std::string& path, const float* data,
     f.write(reinterpret_cast<const char*>(data), num_elements * sizeof(float));
   }
 
-  std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
-  return std::make_unique<NemoStreamingASR>(model);
-}
-
 }  // namespace Generators

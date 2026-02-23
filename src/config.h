@@ -218,6 +218,10 @@ struct Config {
       int blank_id{};
       int max_symbols_per_step{};
 
+      // TDT (Token-and-Duration Transducer) parameters
+      std::vector<int> tdt_durations;       // e.g., {0, 1, 2, 3, 4}
+      int tdt_num_extra_outputs{};          // Number of extra joiner outputs for durations
+
       // Cache-aware streaming encoder I/O names
       // These are the ONNX node names for encoder cache inputs/outputs.
       std::string enc_in_length{"length"};

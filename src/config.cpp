@@ -871,6 +871,8 @@ struct Speech_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tdt_num_extra_outputs") {
+      v_.tdt_num_extra_outputs = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "enc_in_length") {
       v_.enc_in_length = JSON::Get<std::string_view>(value);
     } else if (name == "enc_in_cache_channel") {
@@ -912,10 +914,19 @@ struct Speech_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "tdt_durations") {
+      tdt_durations_ = std::make_unique<IntArray_Element>(v_.tdt_durations);
+      return *tdt_durations_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Speech& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<IntArray_Element> tdt_durations_;
   SpeechInputs_Element inputs_{v_.inputs};
   SpeechOutputs_Element outputs_{v_.outputs};
 };
