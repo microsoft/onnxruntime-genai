@@ -75,7 +75,6 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
 )
-@pytest.mark.skip(reason="Multiple images not fully supported in dummy model - image_grid_thw shape issue")
 def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, relative_image_paths):
     """Test processing multiple images with Qwen/Fara models."""
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
@@ -97,6 +96,45 @@ def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, r
 
     assert inputs is not None
     assert "pixel_values" in inputs
+    assert "image_grid_thw" in inputs
+
+    # Verify pixel_values is 2D [total_patches, patch_dim] (concatenated, not batched)
+    pixel_values = inputs["pixel_values"]
+    if hasattr(pixel_values, "as_numpy"):
+        pv_array = pixel_values.as_numpy()
+    elif hasattr(pixel_values, "numpy"):
+        pv_array = pixel_values.numpy()
+    else:
+        pv_array = np.array(pixel_values)
+
+    assert len(pv_array.shape) == 2, \
+        f"Expected 2D pixel_values [total_patches, patch_dim], got shape {pv_array.shape}"
+
+    # Verify image_grid_thw has the right number of images
+    if "image_grid_thw" in inputs:
+        grid_thw = inputs["image_grid_thw"]
+        if hasattr(grid_thw, "as_numpy"):
+            grid_array = grid_thw.as_numpy()
+        elif hasattr(grid_thw, "numpy"):
+            grid_array = grid_thw.numpy()
+        else:
+            grid_array = np.array(grid_thw)
+
+        # Should have shape [num_images, 3]
+        assert len(grid_array.shape) == 2, \
+            f"Expected 2D grid_thw [num_images, 3], got shape {grid_array.shape}"
+        assert grid_array.shape[0] == len(relative_image_paths), \
+            f"Expected {len(relative_image_paths)} images in grid_thw, got {grid_array.shape[0]}"
+        assert grid_array.shape[1] == 3, \
+            f"Expected 3 values (t,h,w) per image, got {grid_array.shape[1]}"
+
+        # Verify total patches in pixel_values matches grid_thw
+        total_patches_from_grid = sum(
+            int(grid_array[i, 0]) * int(grid_array[i, 1]) * int(grid_array[i, 2])
+            for i in range(grid_array.shape[0])
+        )
+        assert pv_array.shape[0] == total_patches_from_grid, \
+            f"pixel_values patches ({pv_array.shape[0]}) should match grid_thw total ({total_patches_from_grid})"
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])

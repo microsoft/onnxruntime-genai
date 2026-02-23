@@ -219,67 +219,75 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   const int64_t* computed_grid_data = nullptr;
   int64_t computed_grid_num_images = 0;
 
-  // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
-  if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
+  // Check if pixel_values needs patching (shape should be [batch, height, width, channels] in HWC format)
+  if (pixel_values_num_dims == 4) {
     constexpr int64_t kPatchSize = 14;
     constexpr int64_t kTemporalPatchSize = 2;
 
-    int64_t height = pixel_values_shape[1];  // HWC: [batch, height, width, channels]
+    int64_t num_imgs = pixel_values_shape[0];  // HWC: [batch, height, width, channels]
+    int64_t height = pixel_values_shape[1];
     int64_t width = pixel_values_shape[2];
     int64_t channels = pixel_values_shape[3];
 
     int64_t height_patches = height / kPatchSize;
     int64_t width_patches = width / kPatchSize;
-    int64_t total_patches = height_patches * width_patches;
+    int64_t patches_per_image = height_patches * width_patches;
+    int64_t total_patches = num_imgs * patches_per_image;
     int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
+    int64_t image_pixel_count = height * width * channels;
 
-    // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
-    // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
+    // Create patched pixel_values: [total_patches, patch_dim]
+    // Concatenate patches from all images along the first dimension
     patched_pixel_values = OrtValue::CreateTensor<float>(
-        allocator, std::vector<int64_t>{1, total_patches, patch_dim});
+        allocator, std::vector<int64_t>{total_patches, patch_dim});
     auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
 
-    // Extract patches from single image in HWC format
+    // Extract patches from each image in HWC format
     // Each spatial patch is replicated kTemporalPatchSize times
-    int64_t patch_idx = 0;
-    for (int64_t ph = 0; ph < height_patches; ++ph) {
-      for (int64_t pw = 0; pw < width_patches; ++pw) {
-        int64_t h_start = ph * kPatchSize;
-        int64_t w_start = pw * kPatchSize;
+    int64_t global_patch_idx = 0;
+    for (int64_t img = 0; img < num_imgs; ++img) {
+      const float* img_data = pixel_values_data + img * image_pixel_count;
+      for (int64_t ph = 0; ph < height_patches; ++ph) {
+        for (int64_t pw = 0; pw < width_patches; ++pw) {
+          int64_t h_start = ph * kPatchSize;
+          int64_t w_start = pw * kPatchSize;
 
-        int64_t write_idx = patch_idx * patch_dim;
+          int64_t write_idx = global_patch_idx * patch_dim;
 
-        // Repeat the same spatial patch kTemporalPatchSize times
-        // Output: [temporal, channels, patch_h, patch_w]
-        for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
-          for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t h = 0; h < kPatchSize; ++h) {
-              for (int64_t w = 0; w < kPatchSize; ++w) {
-                // HWC format: pixel_values[height][width][channels]
-                int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
-                patched_data[write_idx++] = pixel_values_data[src_idx];
+          // Repeat the same spatial patch kTemporalPatchSize times
+          // Output: [temporal, channels, patch_h, patch_w]
+          for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
+            for (int64_t c = 0; c < channels; ++c) {
+              for (int64_t h = 0; h < kPatchSize; ++h) {
+                for (int64_t w = 0; w < kPatchSize; ++w) {
+                  // HWC format: img_data[height][width][channels]
+                  int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
+                  patched_data[write_idx++] = img_data[src_idx];
+                }
               }
             }
           }
+          global_patch_idx++;
         }
-        patch_idx++;
       }
     }
 
-    // Create image_grid_thw: [1, 3] for single image
+    // Create image_grid_thw: [num_imgs, 3] for all images
     if (status != kOrtxOK || !image_grid_thw) {
       computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
-          allocator, std::vector<int64_t>{1, 3});
+          allocator, std::vector<int64_t>{num_imgs, 3});
       auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
 
-      // For a single image: T=1 (one frame), H=height_patches, W=width_patches
+      // For each image: T=1 (one frame), H=height_patches, W=width_patches
       // The kTemporalPatchSize is embedded in the patch dimension
-      grid_data[0] = 1;  // Single temporal frame for images
-      grid_data[1] = height_patches;
-      grid_data[2] = width_patches;
+      for (int64_t img = 0; img < num_imgs; ++img) {
+        grid_data[img * 3 + 0] = 1;  // Single temporal frame for images
+        grid_data[img * 3 + 1] = height_patches;
+        grid_data[img * 3 + 2] = width_patches;
+      }
 
       computed_grid_data = grid_data;
-      computed_grid_num_images = 1;
+      computed_grid_num_images = num_imgs;
     }
   }
 
@@ -293,36 +301,85 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
-    // For non-patched pixel_values, we need to handle potential batch dimension from PatchImage extension
-    // Model expects [num_patches, 1176] but extension might return [batch, num_patches, 1176]
+    // For non-patched pixel_values from PatchImage extension
     const void* pixel_data{};
     const int64_t* pixel_shape{};
     size_t pixel_num_dims;
     CheckResult(OrtxGetTensorData(pixel_values, &pixel_data, &pixel_shape, &pixel_num_dims));
 
-    // Squeeze out leading dimension of size 1 if present
+    const float* src_float = static_cast<const float*>(pixel_data);
     std::vector<int64_t> pixel_target_shape;
-    size_t squeeze_offset = 0;
-    if (pixel_num_dims >= 3 && pixel_shape[0] == 1) {
-      // Skip the batch dimension
-      squeeze_offset = 1;
+
+    if (pixel_num_dims == 3 && images->num_images_ > 1) {
+      // Multi-image from PatchImage extension: StackTensors produced [N, max_patches, patch_dim]
+      // Images with fewer patches are zero-padded to max_patches.
+      // Concatenate actual (non-padded) patches to [total_patches, patch_dim] using grid_thw info.
+      int64_t num_imgs = pixel_shape[0];
+      int64_t max_patches_per_img = pixel_shape[1];
+      int64_t patch_dim = pixel_shape[2];
+
+      // Get per-image patch counts from grid_thw
+      const int64_t* grid_data_ptr = nullptr;
+      if (image_grid_thw) {
+        const int64_t* gshape{};
+        size_t gdims;
+        CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_data_ptr),
+                                      &gshape, &gdims));
+      } else if (computed_grid_data) {
+        grid_data_ptr = computed_grid_data;
+      }
+
+      if (grid_data_ptr) {
+        int64_t total_actual_patches = 0;
+        std::vector<int64_t> per_img_patches(num_imgs);
+        for (int64_t i = 0; i < num_imgs; ++i) {
+          per_img_patches[i] = grid_data_ptr[i * 3] * grid_data_ptr[i * 3 + 1] * grid_data_ptr[i * 3 + 2];
+          total_actual_patches += per_img_patches[i];
+        }
+
+        pixel_target_shape = {total_actual_patches, patch_dim};
+        auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
+        float* dst = float_tensor->GetTensorMutableData<float>();
+        int64_t dst_offset = 0;
+        for (int64_t i = 0; i < num_imgs; ++i) {
+          const float* img_src = src_float + i * max_patches_per_img * patch_dim;
+          int64_t copy_count = per_img_patches[i] * patch_dim;
+          std::copy(img_src, img_src + copy_count, dst + dst_offset);
+          dst_offset += copy_count;
+        }
+
+        auto converted_tensor = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(converted_tensor)));
+      } else {
+        // Fallback: reshape [N, patches, dim] -> [N*patches, dim]
+        pixel_target_shape = {num_imgs * max_patches_per_img, patch_dim};
+        int64_t num_pixel_elements = num_imgs * max_patches_per_img * patch_dim;
+        auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
+        std::copy(src_float, src_float + num_pixel_elements, float_tensor->GetTensorMutableData<float>());
+
+        auto converted_tensor = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(converted_tensor)));
+      }
+    } else {
+      // Single image: squeeze leading batch dim if [1, patches, patch_dim]
+      size_t squeeze_offset = 0;
+      if (pixel_num_dims >= 3 && pixel_shape[0] == 1 && images->num_images_ == 1) {
+        squeeze_offset = 1;
+      }
+      for (size_t i = squeeze_offset; i < pixel_num_dims; ++i) {
+        pixel_target_shape.push_back(pixel_shape[i]);
+      }
+
+      int64_t num_pixel_elements = std::accumulate(pixel_target_shape.begin(), pixel_target_shape.end(), 1LL, std::multiplies<int64_t>());
+      auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
+      std::copy(src_float, src_float + num_pixel_elements, float_tensor->GetTensorMutableData<float>());
+
+      auto converted_tensor = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(converted_tensor)));
     }
-    for (size_t i = squeeze_offset; i < pixel_num_dims; ++i) {
-      pixel_target_shape.push_back(pixel_shape[i]);
-    }
-
-    int64_t num_pixel_elements = std::accumulate(pixel_target_shape.begin(), pixel_target_shape.end(), 1LL, std::multiplies<int64_t>());
-
-    // Create temporary float tensor from processor output
-    auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
-    std::copy(static_cast<const float*>(pixel_data),
-              static_cast<const float*>(pixel_data) + num_pixel_elements,
-              float_tensor->GetTensorMutableData<float>());
-
-    // Convert to target type
-    auto converted_tensor = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(std::move(converted_tensor)));
   }
 
   // Add image_grid_thw tensor (either from processor or computed)
@@ -334,16 +391,22 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_data),
                                   &grid_shape, &grid_num_dims));
 
-    // The vision model expects shape [num_images, 3], but PatchImage might return [batch, num_images, 3]
-    // Squeeze out leading dimension of size 1
+    // The vision model expects shape [num_images, 3].
+    // PatchImage may output [3] per image, stacked to [N, 3] — or [1, 3] stacked to [N, 1, 3].
+    // Squeeze leading batch dim of 1 for single image, and middle dim of 1 for multi-image.
     std::vector<int64_t> grid_target_shape;
     size_t grid_squeeze_offset = 0;
-    if (grid_num_dims >= 3 && grid_shape[0] == 1) {
-      // Skip the batch dimension
+    if (grid_num_dims >= 3 && grid_shape[0] == 1 && images->num_images_ == 1) {
+      // Skip the batch dimension only for single image
       grid_squeeze_offset = 1;
     }
     for (size_t i = grid_squeeze_offset; i < grid_num_dims; ++i) {
       grid_target_shape.push_back(grid_shape[i]);
+    }
+
+    // Handle [N, 1, 3] -> [N, 3] (from PatchImage that outputs [1, 3] per image)
+    if (grid_target_shape.size() == 3 && grid_target_shape[1] == 1 && grid_target_shape[2] == 3) {
+      grid_target_shape = {grid_target_shape[0], grid_target_shape[2]};
     }
 
     // Ensure we have rank 2 [num_images, 3]

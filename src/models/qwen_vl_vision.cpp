@@ -120,7 +120,10 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* pe_input_names[] = {pe_in_name.c_str()};
   OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
-  const int64_t num_patches = pixel_shape[1];
+  // Handle both 2D [patches, dim] and 3D [batch, patches, dim]
+  const int64_t num_patches = (pixel_shape.size() >= 3)
+                                  ? pixel_shape[pixel_shape.size() - 2]
+                                  : pixel_shape[0];
   const int64_t hidden_dim = 1280;
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim};
   pe_out_buf_.resize(num_patches * hidden_dim);

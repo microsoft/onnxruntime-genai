@@ -94,44 +94,94 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
     throw std::runtime_error("Vision pipeline: failed to access pixel_values tensor data");
   }
 
-  // Extract grid_thw if provided
-  std::vector<int64_t> grid_thw;
+  // Extract grid_thw if provided - handle multiple images
+  std::vector<std::vector<int64_t>> all_grid_thws;
   if (image_grid_thw_val) {
     auto grid_shape = image_grid_thw_val->GetTensorTypeAndShapeInfo()->GetShape();
     auto element_type = image_grid_thw_val->GetTensorTypeAndShapeInfo()->GetElementType();
 
+    // grid_thw shape is [num_images, 3] where each row is [t, h, w]
+    int64_t num_grid_images = 1;
+    if (grid_shape.size() == 2) {
+      num_grid_images = grid_shape[0];
+    }
+
     if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       const int64_t* grid_data = image_grid_thw_val->GetTensorData<int64_t>();
-      size_t grid_count = 1;
-      for (auto dim : grid_shape) grid_count *= dim;
-
-      // Expect [batch, 3] or [3] shape - take last 3 values as [t, h, w]
-      if (grid_count >= 3) {
-        grid_thw = {grid_data[grid_count - 3], grid_data[grid_count - 2], grid_data[grid_count - 1]};
+      for (int64_t i = 0; i < num_grid_images; ++i) {
+        all_grid_thws.push_back({grid_data[i * 3], grid_data[i * 3 + 1], grid_data[i * 3 + 2]});
       }
     } else if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       const int32_t* grid_data = image_grid_thw_val->GetTensorData<int32_t>();
-      size_t grid_count = 1;
-      for (auto dim : grid_shape) grid_count *= dim;
-
-      if (grid_count >= 3) {
-        grid_thw = {static_cast<int64_t>(grid_data[grid_count - 3]),
-                    static_cast<int64_t>(grid_data[grid_count - 2]),
-                    static_cast<int64_t>(grid_data[grid_count - 1])};
+      for (int64_t i = 0; i < num_grid_images; ++i) {
+        all_grid_thws.push_back({static_cast<int64_t>(grid_data[i * 3]),
+                                 static_cast<int64_t>(grid_data[i * 3 + 1]),
+                                 static_cast<int64_t>(grid_data[i * 3 + 2])});
       }
     }
   }
 
   try {
-    image_features_buffer_ = vl_model_.vision_pipeline_->Run(pixel_data, pixel_shape_vec, grid_thw);
+    if (all_grid_thws.size() <= 1) {
+      // Single image (or no grid info) - run vision pipeline once
+      std::vector<int64_t> grid_thw;
+      if (!all_grid_thws.empty()) {
+        grid_thw = all_grid_thws[0];
+      }
+      image_features_buffer_ = vl_model_.vision_pipeline_->Run(pixel_data, pixel_shape_vec, grid_thw);
+    } else {
+      // Multiple images - run vision pipeline for each image and concatenate features
+      image_features_buffer_.clear();
+      int64_t total_merged_tokens = 0;
+      int64_t merged_hidden = 0;
+      size_t pixel_offset = 0;
+
+      for (size_t img_idx = 0; img_idx < all_grid_thws.size(); ++img_idx) {
+        const auto& grid_thw = all_grid_thws[img_idx];
+        int64_t t = grid_thw[0];
+        int64_t h = grid_thw[1];
+        int64_t w = grid_thw[2];
+        int64_t num_patches = t * h * w;
+
+        // Extract this image's pixel data slice
+        // pixel_values shape: [total_patches, patch_dim] or [1, total_patches, patch_dim]
+        int64_t patch_dim = pixel_shape_vec.back();
+        std::vector<int64_t> img_pixel_shape;
+        if (pixel_shape_vec.size() == 3) {
+          img_pixel_shape = {1, num_patches, patch_dim};
+        } else {
+          img_pixel_shape = {num_patches, patch_dim};
+        }
+
+        const float* img_pixel_data = pixel_data + pixel_offset;
+        pixel_offset += num_patches * patch_dim;
+
+        auto img_features = vl_model_.vision_pipeline_->Run(img_pixel_data, img_pixel_shape, grid_thw);
+        auto img_out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
+
+        if (img_out_shape.size() == 2) {
+          total_merged_tokens += img_out_shape[0];
+          merged_hidden = img_out_shape[1];
+        }
+
+        image_features_buffer_.insert(image_features_buffer_.end(), img_features.begin(), img_features.end());
+      }
+    }
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string("Vision pipeline failed: ") + e.what());
   }
 
-  auto out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
-  if (out_shape.size() != 2) {
-    throw std::runtime_error("Vision pipeline: expected output shape rank 2, got " + std::to_string(out_shape.size()));
+  // Compute overall output shape
+  // For single image: use GetLastOutputShape directly
+  // For multi-image: total_features = sum of per-image seq_lens, hidden_size stays the same
+  int64_t total_features_tokens = static_cast<int64_t>(image_features_buffer_.size());
+  auto last_out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
+  if (last_out_shape.size() != 2) {
+    throw std::runtime_error("Vision pipeline: expected output shape rank 2, got " + std::to_string(last_out_shape.size()));
   }
+  int64_t hidden_size = last_out_shape[1];
+  int64_t total_seq_len = total_features_tokens / hidden_size;
+  std::vector<int64_t> out_shape = {total_seq_len, hidden_size};
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   std::span<float> data_span(image_features_buffer_.data(), image_features_buffer_.size());
