@@ -66,7 +66,7 @@ class DirGuard {
   }
 
   ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0) {
+    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
       Log("warning", "Failed to change back to original directory: " + original_dir_.string());
     }
   }
