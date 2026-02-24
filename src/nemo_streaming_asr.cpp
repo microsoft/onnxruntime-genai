@@ -366,6 +366,13 @@ void NemoStreamingASR::SaveNpy(const std::string& path, const float* data,
   }
 
   std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
+  if (model.config_->model.type == "parakeet_tdt") {
+    // Lazy include — ParakeetStreamingASR is defined in parakeet_streaming_asr.h
+    // but we avoid circular includes by using forward declaration pattern.
+    // The actual factory dispatch is handled here.
+    extern std::unique_ptr<StreamingASR> CreateParakeetStreamingASR(Model& model);
+    return CreateParakeetStreamingASR(model);
+  }
   return std::make_unique<NemoStreamingASR>(model);
 }
 

@@ -34,8 +34,8 @@ struct ModelType {
   }
 
   inline static bool IsStreamingASR(const std::string& model_type) {
-    // Streaming ASR model (cache-aware encoder + RNNT decoder)
-    static constexpr std::array<std::string_view, 1> StreamingASR = {"nemotron_speech"};
+    // Streaming ASR model (cache-aware encoder + RNNT/TDT decoder)
+    static constexpr std::array<std::string_view, 2> StreamingASR = {"nemotron_speech", "parakeet_tdt"};
     return std::find(StreamingASR.begin(), StreamingASR.end(), model_type) != StreamingASR.end();
   }
 

@@ -217,6 +217,12 @@ struct Config {
       int chunk_samples{};
       int blank_id{};
       int max_symbols_per_step{};
+      int left_context_samples{};   // Parakeet TDT: left context in PCM samples (e.g., 143360 for 9.0s)
+      int right_context_samples{};  // Parakeet TDT: right context in PCM samples (e.g., 25600 for 1.6s)
+
+      // TDT (Token-and-Duration Transducer) parameters
+      std::vector<int> tdt_durations;    // e.g., {0, 1, 2, 3, 4}
+      int tdt_num_extra_outputs{};       // Number of duration logit outputs (e.g., 5)
 
       // Cache-aware streaming encoder I/O names
       // These are the ONNX node names for encoder cache inputs/outputs.
