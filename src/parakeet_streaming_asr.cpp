@@ -1,18 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// ParakeetStreamingASR — streaming ASR for Parakeet FastConformer + TDT models.
-//
-// The encoder is non-cache-aware. We accumulate all mel features across chunks,
-// re-normalize and re-encode the full mel each time, but only TDT-decode the
-// NEW encoder frames (those beyond what we decoded last time).
-// The decoder LSTM state is maintained across chunks for continuity.
+// ParakeetStreamingASR — matches sherpa-onnx's DecodeOneTDT exactly.
+// Sliding window: encode last 8s of audio, TDT greedy decode,
+// commit stable tokens (>2s old) with timestamp-based stitching.
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
-#include <numeric>
 
 #include "generators.h"
 #include "parakeet_streaming_asr.h"
@@ -24,7 +20,6 @@ namespace Generators {
 void ParakeetStreamingASR::LoadVocab() {
   if (vocab_loaded_) return;
 
-  // Load vocab directly from vocab.txt to preserve ▁ (sentencepiece space marker)
   auto vocab_path = model_.config_->config_path / "vocab.txt";
   std::ifstream vocab_file(vocab_path.string());
   if (vocab_file.is_open()) {
@@ -36,7 +31,6 @@ void ParakeetStreamingASR::LoadVocab() {
       vocab_.push_back("");
     }
   } else {
-    // Fallback: use tokenizer
     auto tokenizer = model_.CreateTokenizer();
     vocab_.resize(config_.vocab_size);
     for (int i = 0; i < config_.vocab_size; ++i) {
@@ -51,13 +45,35 @@ void ParakeetStreamingASR::LoadVocab() {
   vocab_loaded_ = true;
 }
 
-// ─── ParakeetStreamingASR ────────────────────────────────────────────────────
+// ─── Per-feature normalization ──────────────────────────────────────────────
+
+void ParakeetStreamingASR::NormalizePerFeature(float* data, int num_mels, int num_frames) {
+  // Matches sherpa's NemoNormalizePerFeature exactly:
+  // For each mel bin: mean = mean(x), var = mean(x^2) - mean(x)^2, normalize
+  for (int m = 0; m < num_mels; ++m) {
+    float* row = data + m * num_frames;
+    float sum = 0.0f, sq_sum = 0.0f;
+    for (int t = 0; t < num_frames; ++t) {
+      sum += row[t];
+      sq_sum += row[t] * row[t];
+    }
+    float mean = sum / static_cast<float>(num_frames);
+    float var = sq_sum / static_cast<float>(num_frames) - mean * mean;
+    if (var < 0.0f) var = 0.0f;
+    float inv_std = 1.0f / (std::sqrt(var) + 1e-5f);
+    for (int t = 0; t < num_frames; ++t) {
+      row[t] = (row[t] - mean) * inv_std;
+    }
+  }
+}
+
+// ─── Constructor / Reset ────────────────────────────────────────────────────
 
 ParakeetStreamingASR::ParakeetStreamingASR(Model& model)
     : model_{model} {
   auto* parakeet_model = dynamic_cast<ParakeetSpeechModel*>(&model);
   if (!parakeet_model) {
-    throw std::runtime_error("ParakeetStreamingASR requires a parakeet_tdt model type. Got: " + model.config_->model.type);
+    throw std::runtime_error("ParakeetStreamingASR requires a parakeet_tdt model type.");
   }
 
   encoder_session_ = parakeet_model->session_encoder_.get();
@@ -65,303 +81,367 @@ ParakeetStreamingASR::ParakeetStreamingASR(Model& model)
   joiner_session_ = parakeet_model->session_joiner_.get();
   config_ = parakeet_model->parakeet_config_;
 
-  // Initialize mel extractor from config
-  nemo_mel::NemoMelConfig mel_cfg{
-      config_.num_mels, config_.fft_size,
-      config_.hop_length, config_.win_length,
-      config_.sample_rate,
-      config_.preemph, config_.log_eps};
-  mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
-
-  // Initialize accumulated mel storage (one vector per mel bin)
-  accumulated_mel_.resize(config_.num_mels);
-
-  // Initialize decoder state
-  auto& allocator = model_.allocator_cpu_;
-  decoder_state_.Initialize(config_, allocator);
+  // Detect decoder integer input dtype from ONNX model metadata.
+  // FP32 NeMo exports use int64 for targets/target_length; sherpa int8 models use int32.
+  {
+    auto type_info = decoder_session_->GetInputTypeInfo(0);  // first input = targets
+    decoder_int_dtype_ = type_info->GetTensorTypeAndShapeInfo().GetElementType();
+  }
 }
 
 ParakeetStreamingASR::~ParakeetStreamingASR() = default;
 
 void ParakeetStreamingASR::Reset() {
-  auto& allocator = model_.allocator_cpu_;
-  decoder_state_.Reset(config_, allocator);
   full_transcript_.clear();
-  mel_extractor_.Reset();
   audio_buffer_.clear();
-  accumulated_mel_.clear();
-  accumulated_mel_.resize(config_.num_mels);
-  total_mel_frames_ = 0;
-  prev_decoded_frames_ = 0;
+  committed_tokens_.clear();
+  total_audio_sec_ = 0.0f;
   chunk_index_ = 0;
 }
 
-std::string ParakeetStreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
-  LoadVocab();
+// ─── TDT Greedy Decode (matches sherpa's DecodeOneTDT) ──────────────────────
 
-  // Append incoming audio to accumulation buffer
-  audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
-
-  std::string result;
-  const size_t chunk_sz = static_cast<size_t>(config_.chunk_samples);
-
-  // Process complete chunks of audio
-  while (audio_buffer_.size() >= chunk_sz) {
-    // Compute mel for this chunk (streaming mel extractor handles overlap)
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
-
-    // Append new mel frames to accumulated buffer
-    // mel_data is [num_mels, num_frames] row-major
-    for (int m = 0; m < config_.num_mels; ++m) {
-      const float* row = mel_data.data() + m * num_frames;
-      accumulated_mel_[m].insert(accumulated_mel_[m].end(), row, row + num_frames);
-    }
-    total_mel_frames_ += num_frames;
-
-    // Advance past processed audio samples
-    audio_buffer_.erase(audio_buffer_.begin(),
-                        audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_sz));
-
-    // Re-encode ALL accumulated mel and decode only NEW frames
-    result += EncodeAndDecode();
-  }
-
-  return result;
-}
-
-std::string ParakeetStreamingASR::Flush() {
-  LoadVocab();
-
-  std::string result;
-  const size_t chunk_sz = static_cast<size_t>(config_.chunk_samples);
-
-  // Process any remaining audio (pad to full chunk with silence)
-  if (!audio_buffer_.empty()) {
-    audio_buffer_.resize(chunk_sz, 0.0f);
-
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
-
-    for (int m = 0; m < config_.num_mels; ++m) {
-      const float* row = mel_data.data() + m * num_frames;
-      accumulated_mel_[m].insert(accumulated_mel_[m].end(), row, row + num_frames);
-    }
-    total_mel_frames_ += num_frames;
-
-    audio_buffer_.clear();
-    result += EncodeAndDecode();
-  }
-
-  return result;
-}
-
-std::string ParakeetStreamingASR::EncodeAndDecode() {
+std::vector<ParakeetStreamingASR::TimestampedToken>
+ParakeetStreamingASR::EncodeAndDecodeTDT(
+    const float* audio, size_t num_samples, float window_start_sec) {
   auto& allocator = model_.allocator_cpu_;
   const int num_mels = config_.num_mels;
-  const int T = total_mel_frames_;
 
-  if (T == 0) return "";
+  // Compute mel features using kaldi-native-fbank (exact same config as sherpa-onnx)
+  knf::FbankOptions fbank_opts;
+  fbank_opts.frame_opts.dither = 0.0f;
+  fbank_opts.frame_opts.snip_edges = false;
+  fbank_opts.frame_opts.samp_freq = static_cast<float>(config_.sample_rate);
+  fbank_opts.frame_opts.frame_shift_ms = 10.0f;
+  fbank_opts.frame_opts.frame_length_ms = 25.0f;
+  fbank_opts.frame_opts.remove_dc_offset = false;
+  fbank_opts.frame_opts.window_type = "hanning";
+  fbank_opts.mel_opts.num_bins = num_mels;
+  fbank_opts.mel_opts.low_freq = 0;
+  fbank_opts.mel_opts.is_librosa = true;
 
-  // Build mel tensor [1, num_mels, T] with per-feature normalization
-  auto signal_shape = std::array<int64_t, 3>{1, num_mels, T};
-  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  knf::OnlineFbank fbank(fbank_opts);
+  fbank.AcceptWaveform(static_cast<float>(config_.sample_rate), audio, static_cast<int32_t>(num_samples));
+  fbank.InputFinished();
+
+  int mel_frames = fbank.NumFramesReady();
+  if (mel_frames == 0) return {};
+
+  // kaldi outputs [mel_frames, num_mels] row-major; we need [1, num_mels, mel_frames]
+  auto signal_shape = std::array<int64_t, 3>{1, num_mels, mel_frames};
+  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
-  for (int m = 0; m < num_mels; ++m) {
-    float* row = signal_data + m * T;
-    // Copy accumulated mel for this bin
-    std::memcpy(row, accumulated_mel_[m].data(), T * sizeof(float));
-
-    // Per-feature normalization: zero-mean, unit-variance per mel bin
-    float mean = 0.0f;
-    for (int t = 0; t < T; ++t) mean += row[t];
-    mean /= static_cast<float>(T);
-
-    float var = 0.0f;
-    for (int t = 0; t < T; ++t) {
-      float d = row[t] - mean;
-      var += d * d;
-    }
-    float inv_std = 1.0f / (std::sqrt(var / static_cast<float>(T)) + 1e-5f);
-    for (int t = 0; t < T; ++t) {
-      row[t] = (row[t] - mean) * inv_std;
+  // Transpose from [mel_frames, num_mels] to [num_mels, mel_frames]
+  for (int t = 0; t < mel_frames; ++t) {
+    const float* frame = fbank.GetFrame(t);
+    for (int m = 0; m < num_mels; ++m) {
+      signal_data[m * mel_frames + t] = frame[m];
     }
   }
 
-  // Create length tensor
-  auto len_shape = std::array<int64_t, 1>{1};
-  auto signal_length = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(T);
+  // Per-feature normalization (matches sherpa's NemoNormalizePerFeature)
+  NormalizePerFeature(signal_data, num_mels, mel_frames);
 
-  // Run encoder on full accumulated mel
+  // Length tensor
+  auto len_shape = std::array<int64_t, 1>{1};
+  auto signal_length = OrtValue::CreateTensor(allocator, len_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *signal_length->GetTensorMutableData<int64_t>() = mel_frames;
+
+  // Run encoder
   const char* enc_input_names[] = {
       config_.enc_in_audio.c_str(), config_.enc_in_length.c_str()};
-  OrtValue* enc_inputs[] = {
-      processed_signal.get(), signal_length.get()};
+  OrtValue* enc_inputs[] = {processed_signal.get(), signal_length.get()};
   const char* enc_output_names[] = {
       config_.enc_out_encoded.c_str(), config_.enc_out_length.c_str()};
 
   auto run_options = OrtRunOptions::Create();
   auto enc_outputs = encoder_session_->Run(
-      run_options.get(),
-      enc_input_names, enc_inputs, 2,
-      enc_output_names, 2);
+      run_options.get(), enc_input_names, enc_inputs, 2, enc_output_names, 2);
 
   auto* encoded = enc_outputs[0].get();
-  int64_t encoded_len = *enc_outputs[1]->GetTensorData<int64_t>();
+  int64_t enc_len = *enc_outputs[1]->GetTensorData<int64_t>();
+  auto enc_shape = encoded->GetTensorTypeAndShapeInfo()->GetShape();
+  int64_t hidden_dim = enc_shape[1];
+  const float* enc_data = encoded->GetTensorData<float>();
 
-  // Only decode frames beyond what we already decoded
-  int64_t start_frame = prev_decoded_frames_;
-  std::string chunk_text = RunTDTDecoder(encoded, encoded_len, start_frame);
-  prev_decoded_frames_ = encoded_len;
+  // ── TDT Greedy Decode (exact match to sherpa's DecodeOneTDT) ──
+  std::vector<TimestampedToken> result;
 
-  full_transcript_ += chunk_text;
-  chunk_index_++;
+  // Initial decoder input: blank_id (same as sherpa)
+  // dtype detected at construction: int32 for int8 models, int64 for FP32 models
+  const bool use_int64 = (decoder_int_dtype_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto targets_shape = std::array<int64_t, 2>{1, 1};
+  auto targets = OrtValue::CreateTensor(allocator, targets_shape, decoder_int_dtype_);
+  if (use_int64)
+    *targets->GetTensorMutableData<int64_t>() = static_cast<int64_t>(config_.blank_id);
+  else
+    *targets->GetTensorMutableData<int32_t>() = static_cast<int32_t>(config_.blank_id);
 
-  return chunk_text;
-}
+  auto tgt_len_shape = std::array<int64_t, 1>{1};
+  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, decoder_int_dtype_);
+  if (use_int64)
+    *target_length->GetTensorMutableData<int64_t>() = 1;
+  else
+    *target_length->GetTensorMutableData<int32_t>() = 1;
 
-std::string ParakeetStreamingASR::RunTDTDecoder(OrtValue* encoder_output,
-                                                 int64_t encoded_len,
-                                                 int64_t start_frame) {
-  auto& allocator = model_.allocator_cpu_;
-  std::string result;
+  // Initialize decoder state
+  auto state_shape = std::array<int64_t, 3>{
+      config_.decoder_lstm_layers, 1, config_.decoder_lstm_dim};
+  auto state_h = OrtValue::CreateTensor(allocator, state_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(state_h->GetTensorMutableRawData(), 0,
+      config_.decoder_lstm_layers * config_.decoder_lstm_dim * sizeof(float));
+  auto state_c = OrtValue::CreateTensor(allocator, state_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(state_c->GetTensorMutableRawData(), 0,
+      config_.decoder_lstm_layers * config_.decoder_lstm_dim * sizeof(float));
 
-  auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
-  auto enc_shape = enc_info->GetShape();
-  const float* enc_data = encoder_output->GetTensorData<float>();
+  // Run decoder once with blank_id
+  const char* dec_input_names[] = {
+      config_.dec_in_targets.c_str(), config_.dec_in_target_length.c_str(),
+      config_.dec_in_states_1.c_str(), config_.dec_in_states_2.c_str()};
+  OrtValue* dec_inputs[] = {
+      targets.get(), target_length.get(), state_h.get(), state_c.get()};
+  const char* dec_output_names[] = {
+      config_.dec_out_outputs.c_str(), config_.dec_out_prednet_lengths.c_str(),
+      config_.dec_out_states_1.c_str(), config_.dec_out_states_2.c_str()};
 
-  int64_t total_time, hidden_dim;
-  bool is_hidden_first;
+  auto dec_outputs = decoder_session_->Run(run_options.get(),
+      dec_input_names, dec_inputs, 4, dec_output_names, 4);
 
-  if (enc_shape[2] == encoded_len || (enc_shape[1] > enc_shape[2] && enc_shape[2] <= encoded_len)) {
-    hidden_dim = enc_shape[1];
-    total_time = std::min(enc_shape[2], encoded_len);
-    is_hidden_first = true;
-  } else {
-    total_time = std::min(enc_shape[1], encoded_len);
-    hidden_dim = enc_shape[2];
-    is_hidden_first = false;
+  // dec_out = decoder output [1, 640, target_len]
+  auto dec_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+  int64_t dec_dim = dec_shape[1];
+
+  // Extract decoder output for joiner: [1, 1, dec_dim] (channels-last for FP32 joiner)
+  auto dec_frame_shape = std::array<int64_t, 3>{1, 1, dec_dim};
+  auto dec_out = OrtValue::CreateTensor(allocator, dec_frame_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  // Copy last frame from decoder output [1, 640, T] -> take last time step for each channel
+  const float* dec_raw = dec_outputs[0]->GetTensorData<float>();
+  int64_t dec_T = dec_shape[2];
+  float* dec_out_data = dec_out->GetTensorMutableData<float>();
+  for (int64_t d = 0; d < dec_dim; ++d) {
+    dec_out_data[d] = dec_raw[d * dec_T + (dec_T - 1)];
   }
 
-  // Only decode from start_frame to total_time
-  if (start_frame >= total_time) return result;
+  state_h = std::move(dec_outputs[2]);
+  state_c = std::move(dec_outputs[3]);
+
+  const int max_tokens_per_frame = 5;
+  int tokens_this_frame = 0;
+  int skip = 0;
+  int64_t t = 0;
 
   const auto& durations = config_.tdt_durations;
-  const int num_extra = config_.tdt_num_extra_outputs;
   const int token_vocab = config_.vocab_size;
+  const int num_extra = config_.tdt_num_extra_outputs;
 
-  auto run_options = OrtRunOptions::Create();
-
-  int64_t t = start_frame;
-  while (t < total_time) {
+  while (t < enc_len) {
+    // Extract encoder frame: [1, 1, hidden_dim] (channels-last for FP32 joiner)
     auto enc_frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
-    auto encoder_frame = OrtValue::CreateTensor(allocator, enc_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    auto encoder_frame = OrtValue::CreateTensor(allocator, enc_frame_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     float* frame_data = encoder_frame->GetTensorMutableData<float>();
-
-    if (is_hidden_first) {
-      for (int64_t d = 0; d < hidden_dim; ++d) {
-        frame_data[d] = enc_data[d * total_time + t];
-      }
-    } else {
-      std::memcpy(frame_data, enc_data + t * hidden_dim, hidden_dim * sizeof(float));
+    // Encoder output is [1, hidden_dim, time], extract column t
+    for (int64_t d = 0; d < hidden_dim; ++d) {
+      frame_data[d] = enc_data[d * enc_len + t];
     }
 
-    const int max_sym = config_.max_symbols_per_step;
-    for (int sym = 0; sym < max_sym; ++sym) {
-      auto targets_shape = std::array<int64_t, 2>{1, 1};
-      auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-      *targets->GetTensorMutableData<int64_t>() = decoder_state_.last_token;
+    // Run joiner
+    const char* join_input_names[] = {
+        config_.join_in_encoder.c_str(), config_.join_in_decoder.c_str()};
+    OrtValue* join_inputs[] = {encoder_frame.get(), dec_out.get()};
+    const char* join_output_names[] = {config_.join_out_logits.c_str()};
 
-      auto tgt_len_shape = std::array<int64_t, 1>{1};
-      auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-      *target_length->GetTensorMutableData<int64_t>() = 1;
+    auto join_outputs = joiner_session_->Run(run_options.get(),
+        join_input_names, join_inputs, 2, join_output_names, 1);
 
-      const char* dec_input_names[] = {
-          config_.dec_in_targets.c_str(), config_.dec_in_target_length.c_str(),
-          config_.dec_in_states_1.c_str(), config_.dec_in_states_2.c_str()};
-      OrtValue* dec_inputs[] = {
-          targets.get(), target_length.get(),
-          decoder_state_.state_h.get(), decoder_state_.state_c.get()};
+    const float* logits = join_outputs[0]->GetTensorData<float>();
+    auto logits_shape = join_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+    int total_logits = 1;
+    for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
-      const char* dec_output_names[] = {
-          config_.dec_out_outputs.c_str(), config_.dec_out_prednet_lengths.c_str(),
-          config_.dec_out_states_1.c_str(), config_.dec_out_states_2.c_str()};
+    // Argmax over token logits
+    int best_token = 0;
+    float best_score = logits[0];
+    for (int i = 1; i < token_vocab; ++i) {
+      if (logits[i] > best_score) {
+        best_score = logits[i];
+        best_token = i;
+      }
+    }
 
-      auto dec_outputs = decoder_session_->Run(
-          run_options.get(),
-          dec_input_names, dec_inputs, 4,
-          dec_output_names, 4);
-
-      auto dec_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
-      int64_t dec_dim = dec_shape[1];
-      auto dec_frame_shape = std::array<int64_t, 3>{1, 1, dec_dim};
-      auto decoder_frame = OrtValue::CreateTensor(allocator, dec_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-      std::memcpy(decoder_frame->GetTensorMutableData<float>(),
-                  dec_outputs[0]->GetTensorData<float>(),
-                  dec_dim * sizeof(float));
-
-      const char* join_input_names[] = {
-          config_.join_in_encoder.c_str(), config_.join_in_decoder.c_str()};
-      OrtValue* join_inputs[] = {
-          encoder_frame.get(), decoder_frame.get()};
-      const char* join_output_names[] = {config_.join_out_logits.c_str()};
-
-      auto join_outputs = joiner_session_->Run(
-          run_options.get(),
-          join_input_names, join_inputs, 2,
-          join_output_names, 1);
-
-      const float* logits_data = join_outputs[0]->GetTensorData<float>();
-
-      int best_token = 0;
-      float best_score = logits_data[0];
-      for (int i = 1; i < token_vocab; ++i) {
-        if (logits_data[i] > best_score) {
-          best_score = logits_data[i];
-          best_token = i;
+    // Argmax over duration logits (skip = duration index)
+    skip = 0;
+    if (num_extra > 0) {
+      float best_dur_score = logits[token_vocab];
+      for (int i = 1; i < num_extra; ++i) {
+        if (logits[token_vocab + i] > best_dur_score) {
+          best_dur_score = logits[token_vocab + i];
+          skip = i;
         }
       }
+    }
 
-      int best_dur_idx = 0;
-      if (num_extra > 0 && !durations.empty()) {
-        float best_dur_score = logits_data[token_vocab];
-        for (int i = 1; i < num_extra; ++i) {
-          if (logits_data[token_vocab + i] > best_dur_score) {
-            best_dur_score = logits_data[token_vocab + i];
-            best_dur_idx = i;
+    if (best_token != config_.blank_id) {
+      float abs_time = window_start_sec + t * kFrameSec;
+      result.push_back({best_token, abs_time});
+      tokens_this_frame++;
+
+      // Run decoder with new token
+      auto new_targets = OrtValue::CreateTensor(allocator, targets_shape, decoder_int_dtype_);
+      if (use_int64)
+        *new_targets->GetTensorMutableData<int64_t>() = static_cast<int64_t>(best_token);
+      else
+        *new_targets->GetTensorMutableData<int32_t>() = static_cast<int32_t>(best_token);
+
+      auto new_tgt_len = OrtValue::CreateTensor(allocator, tgt_len_shape, decoder_int_dtype_);
+      if (use_int64)
+        *new_tgt_len->GetTensorMutableData<int64_t>() = 1;
+      else
+        *new_tgt_len->GetTensorMutableData<int32_t>() = 1;
+
+      OrtValue* new_dec_inputs[] = {
+          new_targets.get(), new_tgt_len.get(), state_h.get(), state_c.get()};
+      auto new_dec_outputs = decoder_session_->Run(run_options.get(),
+          dec_input_names, new_dec_inputs, 4, dec_output_names, 4);
+
+      // Update decoder output for joiner [1, 1, dec_dim]
+      const float* new_dec_raw = new_dec_outputs[0]->GetTensorData<float>();
+      auto new_dec_shape = new_dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+      int64_t new_dec_T = new_dec_shape[2];
+      float* upd_data = dec_out->GetTensorMutableData<float>();
+      for (int64_t d = 0; d < new_dec_shape[1]; ++d) {
+        upd_data[d] = new_dec_raw[d * new_dec_T + (new_dec_T - 1)];
+      }
+
+      state_h = std::move(new_dec_outputs[2]);
+      state_c = std::move(new_dec_outputs[3]);
+    }
+
+    // TDT advance logic (exact match to sherpa)
+    if (skip > 0) tokens_this_frame = 0;
+    if (tokens_this_frame >= max_tokens_per_frame) { tokens_this_frame = 0; skip = 1; }
+    if (best_token == config_.blank_id && skip == 0) { tokens_this_frame = 0; skip = 1; }
+    t += skip;
+  }
+
+  return result;
+}
+
+// ─── TranscribeChunk ────────────────────────────────────────────────────────
+
+std::string ParakeetStreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
+  LoadVocab();
+
+  // Append to audio buffer
+  audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
+  total_audio_sec_ = static_cast<float>(audio_buffer_.size()) / config_.sample_rate;
+
+  // Cap audio buffer at max window
+  size_t max_samples = static_cast<size_t>(kMaxWindowSec * config_.sample_rate);
+  float window_start_sec = 0.0f;
+  const float* segment = audio_buffer_.data();
+  size_t segment_len = audio_buffer_.size();
+  if (audio_buffer_.size() > max_samples) {
+    segment = audio_buffer_.data() + audio_buffer_.size() - max_samples;
+    segment_len = max_samples;
+    window_start_sec = total_audio_sec_ - kMaxWindowSec;
+  }
+
+  // Encode and decode
+  auto hyp = EncodeAndDecodeTDT(segment, segment_len, window_start_sec);
+
+  if (hyp.empty()) return "";
+
+  // Split into stable (old enough) and unstable (recent)
+  float stable_cutoff = total_audio_sec_ - kStableDelaySec;
+  float last_committed_time = committed_tokens_.empty() ? -1.0f
+      : committed_tokens_.back().abs_time;
+
+  std::string new_text;
+  for (auto& tok : hyp) {
+    if (tok.abs_time <= stable_cutoff && tok.abs_time > last_committed_time) {
+      // Check for token-level dedup
+      bool is_dup = false;
+      if (!committed_tokens_.empty()) {
+        size_t n = committed_tokens_.size();
+        for (size_t k = 1; k <= std::min(n, size_t(5)); ++k) {
+          // This simple check just skips exact timestamp matches
+          if (committed_tokens_[n - 1].token_id == tok.token_id &&
+              std::abs(committed_tokens_[n - 1].abs_time - tok.abs_time) < 0.16f) {
+            is_dup = true;
+            break;
           }
         }
       }
-
-      if (best_token == config_.blank_id) {
-        t += 1;
-        break;
+      if (!is_dup) {
+        committed_tokens_.push_back(tok);
+        // Convert token to text
+        if (tok.token_id < static_cast<int>(vocab_.size())) {
+          std::string token_str = vocab_[tok.token_id];
+          size_t pos = 0;
+          while ((pos = token_str.find("\xe2\x96\x81", pos)) != std::string::npos) {
+            token_str.replace(pos, 3, " ");
+            pos += 1;
+          }
+          new_text += token_str;
+        }
       }
+    }
+  }
 
-      decoder_state_.last_token = best_token;
-      decoder_state_.state_h = std::move(dec_outputs[2]);
-      decoder_state_.state_c = std::move(dec_outputs[3]);
+  full_transcript_ += new_text;
+  chunk_index_++;
+  return new_text;
+}
 
-      if (best_token < static_cast<int>(vocab_.size())) {
-        std::string token_str = vocab_[best_token];
+// ─── Flush ──────────────────────────────────────────────────────────────────
+
+std::string ParakeetStreamingASR::Flush() {
+  LoadVocab();
+
+  if (audio_buffer_.empty()) return "";
+
+  // Final decode on remaining audio
+  float window_start_sec = 0.0f;
+  size_t max_samples = static_cast<size_t>(kMaxWindowSec * config_.sample_rate);
+  const float* segment = audio_buffer_.data();
+  size_t segment_len = audio_buffer_.size();
+  if (audio_buffer_.size() > max_samples) {
+    segment = audio_buffer_.data() + audio_buffer_.size() - max_samples;
+    segment_len = max_samples;
+    window_start_sec = total_audio_sec_ - kMaxWindowSec;
+  }
+
+  auto hyp = EncodeAndDecodeTDT(segment, segment_len, window_start_sec);
+
+  // Commit ALL remaining tokens (no stable delay check)
+  float last_committed_time = committed_tokens_.empty() ? -1.0f
+      : committed_tokens_.back().abs_time;
+
+  std::string new_text;
+  for (auto& tok : hyp) {
+    if (tok.abs_time > last_committed_time) {
+      committed_tokens_.push_back(tok);
+      if (tok.token_id < static_cast<int>(vocab_.size())) {
+        std::string token_str = vocab_[tok.token_id];
         size_t pos = 0;
         while ((pos = token_str.find("\xe2\x96\x81", pos)) != std::string::npos) {
           token_str.replace(pos, 3, " ");
           pos += 1;
         }
-        result += token_str;
+        new_text += token_str;
       }
-
-      int predicted_duration = (best_dur_idx < static_cast<int>(durations.size()))
-                                   ? durations[best_dur_idx]
-                                   : 1;
-      int advance = std::max(1, predicted_duration);
-      t += advance;
-      break;
     }
   }
 
-  return result;
+  full_transcript_ += new_text;
+  return new_text;
 }
 
 }  // namespace Generators

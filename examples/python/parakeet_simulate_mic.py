@@ -18,8 +18,20 @@ import numpy as np
 import onnxruntime_genai as og
 
 SAMPLE_RATE = 16000
-CHUNK_SAMPLES = 32000  # 2 seconds at 16kHz (larger chunks since encoder has no cache)
+CHUNK_SAMPLES = 38400  # 2.4 seconds at 16kHz
 CHUNK_DURATION = CHUNK_SAMPLES / SAMPLE_RATE
+
+
+def get_execution_provider():
+    """Detect whether CUDA or CPU is being used."""
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+        if "CUDAExecutionProvider" in available:
+            return "CUDA (encoder) + CPU (decoder/joiner)"
+        return "CPU"
+    except ImportError:
+        return "Unknown"
 
 
 def load_audio(audio_path):
@@ -61,11 +73,26 @@ def simulate_microphone(model_path, audio_path):
     print(f"  Duration: {duration:.1f}s  |  Chunks: {num_chunks} x {CHUNK_DURATION*1000:.0f}ms")
 
     # Load model
-    print(f"\nLoading model: {model_path}")
+    provider = get_execution_provider()
+    print(f"\nLoading model: {model_path}  [Execution: {provider}]")
     config = og.Config(model_path)
     model = og.Model(config)
     asr = og.StreamingASR(model)
-    print("  Model ready.\n")
+    print("  Model ready.")
+
+    # Verify actual execution providers on each ONNX session
+    try:
+        import onnxruntime as ort
+        for name in ["encoder", "decoder", "joint"]:
+            onnx_files = [f for f in os.listdir(model_path) if f.startswith(name) and f.endswith(".onnx")]
+            if onnx_files:
+                sess = ort.InferenceSession(os.path.join(model_path, onnx_files[0]), providers=["CPUExecutionProvider"])
+                eps = sess.get_providers()
+                print(f"  {name}: {', '.join(eps)}")
+                del sess
+    except Exception:
+        pass
+    print()
 
     # Simulate
     print("-" * 60)
@@ -76,13 +103,6 @@ def simulate_microphone(model_path, audio_path):
     stream_start = time.time()
 
     for i in range(0, len(audio), CHUNK_SAMPLES):
-        # Wait for real-time moment
-        audio_time = i / SAMPLE_RATE
-        target_time = stream_start + audio_time
-        now = time.time()
-        if now < target_time:
-            time.sleep(target_time - now)
-
         # Feed chunk
         chunk = audio[i:i + CHUNK_SAMPLES]
         if len(chunk) < CHUNK_SAMPLES:
@@ -120,7 +140,8 @@ def batch_transcribe(model_path, audio_path):
     duration = len(audio) / SAMPLE_RATE
 
     # Load model
-    print(f"\nLoading model: {model_path}")
+    provider = get_execution_provider()
+    print(f"\nLoading model: {model_path}  [Execution: {provider}]")
     config = og.Config(model_path)
     model = og.Model(config)
     asr = og.StreamingASR(model)

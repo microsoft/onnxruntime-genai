@@ -2,21 +2,17 @@
 // Licensed under the MIT License.
 //
 // ParakeetStreamingASR — streaming ASR for Parakeet FastConformer + TDT models.
+// Sliding window approach: every interval, encode last MAX_WINDOW of audio,
+// decode with TDT greedy search, commit stable tokens based on timestamps.
 #pragma once
 
 #include "streaming_asr.h"
-#include "nemo_mel_spectrogram.h"  // from onnxruntime-extensions/shared/api
+#include "kaldi-native-fbank/csrc/online-feature.h"
+#include "kaldi-native-fbank/csrc/feature-fbank.h"
 #include "models/parakeet_speech.h"
 
 namespace Generators {
 
-/// Streaming ASR implementation for Parakeet FastConformer encoder (non-cache-aware)
-/// with TDT (Token-and-Duration Transducer) greedy decoding.
-///
-/// Unlike RNNT which always advances by 1 encoder frame on blank, TDT predicts
-/// a duration that controls how many encoder frames to advance after emitting a token.
-///
-/// Manages mel extraction, decoder LSTM state, and vocabulary lookup across audio chunks.
 struct ParakeetStreamingASR : StreamingASR {
   explicit ParakeetStreamingASR(Model& model);
   ~ParakeetStreamingASR() override;
@@ -30,39 +26,46 @@ struct ParakeetStreamingASR : StreamingASR {
   Model& model_;
   ParakeetConfig config_;
 
-  // ONNX sessions (borrowed from ParakeetSpeechModel)
   OrtSession* encoder_session_{};
   OrtSession* decoder_session_{};
   OrtSession* joiner_session_{};
 
-  // Streaming decoder state (LSTM h/c maintained across chunks)
-  ParakeetDecoderState decoder_state_;
+  // Decoder integer input dtype: int32 for sherpa int8 models, int64 for FP32 NeMo exports
+  ONNXTensorElementDataType decoder_int_dtype_{ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32};
+
   std::string full_transcript_;
 
   // Vocabulary
   std::vector<std::string> vocab_;
   bool vocab_loaded_{false};
 
-  // Log-mel feature extraction (same as NeMo)
-  nemo_mel::NemoStreamingMelExtractor mel_extractor_;
+  // Log-mel feature extraction via kaldi-native-fbank (same as sherpa-onnx)
+  // knf::OnlineFbank created fresh each call for per-segment normalization
 
-  // Audio accumulation buffer for incoming PCM samples
+  // Audio sliding window buffer (last MAX_WINDOW seconds)
   std::vector<float> audio_buffer_;
+  static constexpr float kMaxWindowSec = 12.0f;  // look-back window for encoder (matches PyTorch reference)
+  static constexpr float kStableDelaySec = 2.0f;
+  static constexpr float kFrameSec = 0.08f; // encoder frame = 80ms
 
-  // Accumulated mel features across all chunks: [num_mels][frames...]
-  // Stored per-mel-bin for easy normalization.
-  std::vector<std::vector<float>> accumulated_mel_;
-  int total_mel_frames_{0};
-
-  // How many encoder output frames we have already decoded
-  int64_t prev_decoded_frames_{0};
+  // Committed tokens with timestamps
+  struct TimestampedToken {
+    int token_id;
+    float abs_time;
+  };
+  std::vector<TimestampedToken> committed_tokens_;
+  float total_audio_sec_{0.0f};
 
   int chunk_index_{0};
 
   void LoadVocab();
-  std::string EncodeAndDecode();
-  std::string RunTDTDecoder(OrtValue* encoder_output, int64_t encoded_len,
-                            int64_t start_frame);
+
+  // Run full encode + TDT decode on a segment, return tokens with abs timestamps
+  std::vector<TimestampedToken> EncodeAndDecodeTDT(
+      const float* audio, size_t num_samples, float window_start_sec);
+
+  // Per-feature normalize mel in-place: [num_mels, num_frames]
+  static void NormalizePerFeature(float* data, int num_mels, int num_frames);
 };
 
 }  // namespace Generators

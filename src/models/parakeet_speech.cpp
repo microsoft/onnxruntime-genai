@@ -101,7 +101,9 @@ ParakeetSpeechModel::ParakeetSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   parakeet_config_ = ParakeetConfig{};
   parakeet_config_.PopulateFromConfig(*config_);
 
-  // Create session options
+  // Create session options from config.
+  // Each section uses its own session_options if present, otherwise falls back
+  // to the decoder's session_options. EP selection is driven by genai_config.json.
   encoder_session_options_ = OrtSessionOptions::Create();
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
