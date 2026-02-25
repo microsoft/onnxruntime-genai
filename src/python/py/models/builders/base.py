@@ -127,8 +127,10 @@ class Model:
                 "enable_skip_layer_norm_strict_mode": "1",
             },
             "dml": {},
-            # TODO: Enable graph capture for webgpu once supported both in onnxruntime-genai and onnxruntime.
-            "webgpu": {},
+            "webgpu": {
+                "enableGraphCapture": "1" if extra_options.get("enable_webgpu_graph", False) else "0",
+                "validationMode": "disabled" if extra_options.get("enable_webgpu_graph", False) else "basic",
+            },
             "trt-rtx": {"enable_cuda_graph": "1"},
         }
 
@@ -1944,6 +1946,9 @@ class Model:
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
+            # Set multiRotaryCacheConcatOffset for WebGPU EP
+            if self.ep == "webgpu":
+                self.ep_attrs["webgpu"]["multiRotaryCacheConcatOffset"] = str(self.original_context_length)
             # Do NOT make the subgraph with the If node for DML EP.
             return
 
