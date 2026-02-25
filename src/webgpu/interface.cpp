@@ -10,6 +10,7 @@ namespace Generators {
 namespace WebGPU {
 
 static Ort::Allocator* ort_allocator_{};
+static const OrtMemoryInfo* ort_memory_info_{};
 const char* device_label = "WebGPU";
 
 struct WebGPUMemory final : DeviceBuffer {
@@ -44,14 +45,10 @@ struct WebGPUMemory final : DeviceBuffer {
 
     AllocateCpu();
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
     // Create source tensor (WebGPU device memory) - treat as 1D uint8 array
     int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
     std::span<const int64_t> shape{&shape_val, 1};
-    auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto src_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     // Create CPU memory info and destination tensor
     auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
@@ -69,10 +66,6 @@ struct WebGPUMemory final : DeviceBuffer {
     }
     assert(p_cpu_);
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
     // Create source tensor (CPU memory) - treat as 1D uint8 array
     int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
     std::span<const int64_t> shape{&shape_val, 1};
@@ -80,7 +73,7 @@ struct WebGPUMemory final : DeviceBuffer {
     auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, p_cpu_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     // Create destination tensor (WebGPU device memory)
-    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     // Use ORT C API's CopyTensors (synchronous copy, stream = nullptr)
     OrtValue* src_ptrs[] = {src_tensor.get()};
@@ -98,15 +91,11 @@ struct WebGPUMemory final : DeviceBuffer {
     // We cannot use pointer arithmetic (p_device_ + offset) to create sub-buffer views.
     // OrtValue::CreateTensor expects the actual buffer handle, not an offset pointer.
     if (source.GetType() == device_label && begin_source == 0 && begin_dest == 0) {
-      // Get WebGPU allocator's memory info
-      const OrtMemoryInfo* webgpu_mem_info = nullptr;
-      Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
       // Full buffer copy using CopyTensors (no offsets)
       int64_t shape_val = static_cast<int64_t>(size_in_bytes);
       std::span<const int64_t> shape{&shape_val, 1};
-      auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto src_tensor = OrtValue::CreateTensor(*ort_memory_info_, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
       // Use ORT C API's CopyTensors for GPU-to-GPU copy
       OrtValue* src_ptrs[] = {src_tensor.get()};
@@ -114,16 +103,12 @@ struct WebGPUMemory final : DeviceBuffer {
       Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
     } else if (source.GetType() != device_label && begin_source == 0 && begin_dest == 0) {
       // Fast path: CPU-to-WebGPU copy with zero offsets
-      // Get WebGPU allocator's memory info
-      const OrtMemoryInfo* webgpu_mem_info = nullptr;
-      Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
       // Full buffer copy using CopyTensors (no offsets)
       int64_t shape_val = static_cast<int64_t>(size_in_bytes);
       std::span<const int64_t> shape{&shape_val, 1};
       auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
       auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
       // Use ORT C API's CopyTensors for CPU-to-GPU copy
       OrtValue* src_ptrs[] = {src_tensor.get()};
@@ -145,10 +130,6 @@ struct WebGPUMemory final : DeviceBuffer {
     // Allocate zeroed CPU memory
     std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
     // Create source tensor (CPU memory with zeros) - treat as 1D uint8 array
     int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
     std::span<const int64_t> shape{&shape_val, 1};
@@ -156,7 +137,7 @@ struct WebGPUMemory final : DeviceBuffer {
     auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, zero_buffer.data(), size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     // Create destination tensor (WebGPU device memory)
-    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     // Use ORT C API's CopyTensors to copy zeros to GPU (synchronous copy, stream = nullptr)
     OrtValue* src_ptrs[] = {src_tensor.get()};
@@ -176,6 +157,8 @@ struct InterfaceImpl : DeviceInterface {
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
+    // Cache the memory info to avoid repeated AllocatorGetInfo calls
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &ort_memory_info_));
   }
 
   Ort::Allocator& GetAllocator() override {
@@ -200,10 +183,6 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
-
     // WebGPU-specific session configuration
     static const char* webgpu_config_key = "ep.webgpuexecutionprovider.enableInt64";
     static const char* webgpu_config_value = "1";
@@ -218,7 +197,7 @@ struct InterfaceImpl : DeviceInterface {
         output_type,
         element_count,
         "WebGPU",
-        webgpu_mem_info,
+        ort_memory_info_,
         session_config_keys,
         session_config_values);
 
