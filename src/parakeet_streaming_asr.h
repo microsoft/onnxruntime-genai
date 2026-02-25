@@ -7,8 +7,7 @@
 #pragma once
 
 #include "streaming_asr.h"
-#include "kaldi-native-fbank/csrc/online-feature.h"
-#include "kaldi-native-fbank/csrc/feature-fbank.h"
+#include "nemo_mel.h"
 #include "models/parakeet_speech.h"
 
 namespace Generators {
@@ -33,18 +32,20 @@ struct ParakeetStreamingASR : StreamingASR {
   // Decoder integer input dtype: int32 for sherpa int8 models, int64 for FP32 NeMo exports
   ONNXTensorElementDataType decoder_int_dtype_{ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32};
 
+  // Joiner layout: true if joiner expects [B, dim, T] (sherpa int8), false for [B, T, dim] (FP32)
+  bool joiner_channel_first_{false};
+
   std::string full_transcript_;
 
   // Vocabulary
   std::vector<std::string> vocab_;
   bool vocab_loaded_{false};
 
-  // Log-mel feature extraction via kaldi-native-fbank (same as sherpa-onnx)
-  // knf::OnlineFbank created fresh each call for per-segment normalization
+  // Log-mel feature extraction via nemo_mel (NeMo-compatible, no kaldi dependency)
 
   // Audio sliding window buffer (last MAX_WINDOW seconds)
   std::vector<float> audio_buffer_;
-  static constexpr float kMaxWindowSec = 12.0f;  // look-back window for encoder (matches PyTorch reference)
+  static constexpr float kMaxWindowSec = 8.0f;  // look-back window for encoder
   static constexpr float kStableDelaySec = 2.0f;
   static constexpr float kFrameSec = 0.08f; // encoder frame = 80ms
 

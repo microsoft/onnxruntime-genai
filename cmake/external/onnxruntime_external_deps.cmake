@@ -88,21 +88,10 @@ FetchContent_Declare(
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
-# kaldi-native-fbank for Parakeet TDT mel spectrogram (matches sherpa-onnx)
-FetchContent_Declare(
-  kaldi_native_fbank
-  GIT_REPOSITORY ${DEP_URL_kaldi_native_fbank}
-  GIT_TAG ${DEP_SHA1_kaldi_native_fbank}
-)
-set(KALDI_NATIVE_FBANK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(KALDI_NATIVE_FBANK_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
-onnxruntime_fetchcontent_makeavailable(kaldi_native_fbank)
-
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions
   ocos_operators
   noexcep_operators
-  kaldi-native-fbank-core
 )
 
 if(USE_GUIDANCE)

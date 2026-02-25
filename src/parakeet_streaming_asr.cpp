@@ -87,6 +87,15 @@ ParakeetStreamingASR::ParakeetStreamingASR(Model& model)
     auto type_info = decoder_session_->GetInputTypeInfo(0);  // first input = targets
     decoder_int_dtype_ = type_info->GetTensorTypeAndShapeInfo().GetElementType();
   }
+
+  // Detect joiner input layout from ONNX metadata.
+  // Channel-first [B, dim, T]: sherpa int8 models have dim[1] == hidden_dim (1024)
+  // Channel-last  [B, T, dim]: FP32 NeMo exports have dim[1] == dynamic/-1
+  {
+    auto type_info = joiner_session_->GetInputTypeInfo(0);
+    auto shape = type_info->GetTensorTypeAndShapeInfo().GetShape();
+    joiner_channel_first_ = (shape.size() >= 3 && shape[1] == config_.hidden_dim);
+  }
 }
 
 ParakeetStreamingASR::~ParakeetStreamingASR() = default;
@@ -107,39 +116,27 @@ ParakeetStreamingASR::EncodeAndDecodeTDT(
   auto& allocator = model_.allocator_cpu_;
   const int num_mels = config_.num_mels;
 
-  // Compute mel features using kaldi-native-fbank (exact same config as sherpa-onnx)
-  knf::FbankOptions fbank_opts;
-  fbank_opts.frame_opts.dither = 0.0f;
-  fbank_opts.frame_opts.snip_edges = false;
-  fbank_opts.frame_opts.samp_freq = static_cast<float>(config_.sample_rate);
-  fbank_opts.frame_opts.frame_shift_ms = 10.0f;
-  fbank_opts.frame_opts.frame_length_ms = 25.0f;
-  fbank_opts.frame_opts.remove_dc_offset = false;
-  fbank_opts.frame_opts.window_type = "hanning";
-  fbank_opts.mel_opts.num_bins = num_mels;
-  fbank_opts.mel_opts.low_freq = 0;
-  fbank_opts.mel_opts.is_librosa = true;
+  // Compute mel features using NeMo-compatible mel spectrogram
+  parakeet_mel::MelConfig mel_cfg;
+  mel_cfg.num_mels = num_mels;
+  mel_cfg.fft_size = config_.fft_size;
+  mel_cfg.hop_length = config_.hop_length;
+  mel_cfg.win_length = config_.win_length;
+  mel_cfg.sample_rate = config_.sample_rate;
+  mel_cfg.preemph = config_.preemph;
 
-  knf::OnlineFbank fbank(fbank_opts);
-  fbank.AcceptWaveform(static_cast<float>(config_.sample_rate), audio, static_cast<int32_t>(num_samples));
-  fbank.InputFinished();
+  int mel_frames = 0;
+  auto raw_mel = parakeet_mel::ComputeLogMel(audio, num_samples, mel_cfg, mel_frames);
+  // raw_mel is [num_mels, mel_frames] row-major
 
-  int mel_frames = fbank.NumFramesReady();
   if (mel_frames == 0) return {};
 
-  // kaldi outputs [mel_frames, num_mels] row-major; we need [1, num_mels, mel_frames]
+  // Copy into ORT tensor [1, num_mels, mel_frames]
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, mel_frames};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape,
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
-
-  // Transpose from [mel_frames, num_mels] to [num_mels, mel_frames]
-  for (int t = 0; t < mel_frames; ++t) {
-    const float* frame = fbank.GetFrame(t);
-    for (int m = 0; m < num_mels; ++m) {
-      signal_data[m * mel_frames + t] = frame[m];
-    }
-  }
+  std::memcpy(signal_data, raw_mel.data(), num_mels * mel_frames * sizeof(float));
 
   // Per-feature normalization (matches sherpa's NemoNormalizePerFeature)
   NormalizePerFeature(signal_data, num_mels, mel_frames);
@@ -216,8 +213,11 @@ ParakeetStreamingASR::EncodeAndDecodeTDT(
   auto dec_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
   int64_t dec_dim = dec_shape[1];
 
-  // Extract decoder output for joiner: [1, 1, dec_dim] (channels-last for FP32 joiner)
-  auto dec_frame_shape = std::array<int64_t, 3>{1, 1, dec_dim};
+  // Extract decoder output for joiner
+  // Channel-first: [1, dec_dim, 1], Channel-last: [1, 1, dec_dim]
+  auto dec_frame_shape = joiner_channel_first_
+      ? std::array<int64_t, 3>{1, dec_dim, 1}
+      : std::array<int64_t, 3>{1, 1, dec_dim};
   auto dec_out = OrtValue::CreateTensor(allocator, dec_frame_shape,
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   // Copy last frame from decoder output [1, 640, T] -> take last time step for each channel
@@ -241,8 +241,11 @@ ParakeetStreamingASR::EncodeAndDecodeTDT(
   const int num_extra = config_.tdt_num_extra_outputs;
 
   while (t < enc_len) {
-    // Extract encoder frame: [1, 1, hidden_dim] (channels-last for FP32 joiner)
-    auto enc_frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
+    // Extract encoder frame for joiner
+    // Channel-first: [1, hidden_dim, 1], Channel-last: [1, 1, hidden_dim]
+    auto enc_frame_shape = joiner_channel_first_
+        ? std::array<int64_t, 3>{1, hidden_dim, 1}
+        : std::array<int64_t, 3>{1, 1, hidden_dim};
     auto encoder_frame = OrtValue::CreateTensor(allocator, enc_frame_shape,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     float* frame_data = encoder_frame->GetTensorMutableData<float>();
@@ -310,7 +313,7 @@ ParakeetStreamingASR::EncodeAndDecodeTDT(
       auto new_dec_outputs = decoder_session_->Run(run_options.get(),
           dec_input_names, new_dec_inputs, 4, dec_output_names, 4);
 
-      // Update decoder output for joiner [1, 1, dec_dim]
+      // Update decoder output for joiner (reuses existing dec_out shape)
       const float* new_dec_raw = new_dec_outputs[0]->GetTensorData<float>();
       auto new_dec_shape = new_dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       int64_t new_dec_T = new_dec_shape[2];
