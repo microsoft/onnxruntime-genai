@@ -40,7 +40,20 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  
+  OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(config, error);
+
+  ret = [config clearProvidersWithError:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+
+  ret = [config appendProvider:@"cpu" error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+
+  ret = [config overlay:@"{'num_beams': 1}" error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+
+  OGAModel* model = [[OGAModel alloc] initWithConfig:config error:&error];
   ORTAssertNullableResultSuccessful(model, error);
 
   OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
@@ -65,6 +78,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
+  
   OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(model, error);
 

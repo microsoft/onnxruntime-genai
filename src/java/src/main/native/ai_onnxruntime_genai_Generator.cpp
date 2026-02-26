@@ -67,6 +67,13 @@ Java_ai_onnxruntime_genai_Generator_appendTokens(JNIEnv* env, jobject thiz, jlon
   env->ReleaseIntArrayElements(token_ids, tokens, JNI_ABORT);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Generator_tokenCount(JNIEnv* env, jobject thiz, jlong native_handle) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  size_t count = OgaGenerator_TokenCount(generator);
+  return static_cast<jlong>(count);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong native_handle) {
   return OgaGenerator_IsDone(reinterpret_cast<OgaGenerator*>(native_handle));

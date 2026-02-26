@@ -28,7 +28,6 @@ else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()
 
-
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -46,7 +45,7 @@ set_target_properties(unit_tests PROPERTIES
 )
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)

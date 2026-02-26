@@ -102,12 +102,16 @@ jobs:
           cmake --build --preset windows_x64_cpu_release --parallel
           cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
 
-      - name: Install the python wheel and test dependencies
+      - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test\python\requirements.txt --user
           python3 -m pip install -r test\python\cpu\torch\requirements.txt --user
           python3 -m pip install -r test\python\cpu\ort\requirements.txt --user
           python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python3 build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
 
       - name: Run the Python Tests
         run: |
@@ -118,9 +122,17 @@ jobs:
           cd test\csharp
           dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" --verbosity normal
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Build the C# Examples
         run: |
-          python3 build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+          cd examples\csharp\ModelChat
+          dotnet build -c Release
+          cd ..\ModelMM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+        run: |
+          python3 test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\test_models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\test_models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Verify Build Artifacts
         if: always()

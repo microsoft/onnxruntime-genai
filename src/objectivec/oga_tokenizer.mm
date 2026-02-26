@@ -21,6 +21,35 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+- (int32_t)getBosTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetBosTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
+- (nullable NSArray<NSNumber*>*)getEosTokenIds:(NSError**)error {
+  try {
+    std::vector<int32_t> eos_ids = _tokenizer->GetEosTokenIds();
+    NSMutableArray<NSNumber*>* result = [NSMutableArray arrayWithCapacity:eos_ids.size()];
+    if (!result) {
+      return nil;
+    }
+    for (int32_t eos_id : eos_ids) {
+      [result addObject:@(eos_id)];
+    }
+    return result;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (int32_t)getPadTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetPadTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
 - (nullable OGASequences*)encode:(NSString*)str error:(NSError**)error {
   OGASequences* sequences = [[OGASequences alloc] initWithError:error];
   if (!sequences) {

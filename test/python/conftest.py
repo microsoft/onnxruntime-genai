@@ -44,6 +44,16 @@ def phi3_for(request):
 
 
 @pytest.fixture
+def phi4_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "phi-4-mini",
+        "int4",
+    )
+
+
+@pytest.fixture
 def gemma_for(request):
     return functools.partial(
         get_path_for_model,
@@ -68,7 +78,7 @@ def qwen_for(request):
     return functools.partial(
         get_path_for_model,
         request.config.getoption("--test_models"),
-        "qwen-2.5",
+        "qwen-2.5-0.5b",
         "int4",
     )
 

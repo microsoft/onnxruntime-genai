@@ -785,8 +785,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     samples_to_build = [
         "-DMODEL_QA=ON",
         "-DMODEL_CHAT=ON",
-        "-DMODEL_VISION=ON",
-        "-DPHI4-MM=ON",
+        "-DMODEL_MM=ON",
         "-DWHISPER=ON",
     ]
 
@@ -805,6 +804,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         + samples_to_build
         + [
         	"-DCMAKE_PREFIX_PATH=" + str(args.build_dir),
+            "-DUSE_GUIDANCE=" + 'ON' if args.use_guidance else 'OFF',
         ]
     )
 

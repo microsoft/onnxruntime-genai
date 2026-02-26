@@ -3,6 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
 """
@@ -22,6 +24,7 @@ from builders import (
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
+    InternLM2Model,
     LlamaModel,
     MistralModel,
     Model,
@@ -135,7 +138,7 @@ def parse_hf_token(hf_token):
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     int4_cpu = precision == "int4" and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider == "cuda" and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
     if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
         # FP32 precision
@@ -239,10 +242,13 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
-        delattr(config, "quantization_config")
+        if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
+            delattr(config, "quantization_config")
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "InternLM2ForCausalLM":
+        onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -402,8 +408,10 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization.
+                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
+                qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
+                    Default is 128 for trt-rtx, 32 for others. Supported EPs: cpu, webgpu, trt-rtx.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -468,7 +476,7 @@ def get_args():
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
     )
     return args
 

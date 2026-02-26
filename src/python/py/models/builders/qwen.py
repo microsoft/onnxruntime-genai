@@ -669,7 +669,12 @@ class Qwen25VLTextModel(Model):
         )
 
     def load_weights(self, input_path):
-        # Load the Hugging Face model
+        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
+        # which loads weights directly via QuantModel
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
+        # For non-quantized models, load the Hugging Face model
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,

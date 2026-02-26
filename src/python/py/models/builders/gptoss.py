@@ -70,7 +70,7 @@ class GPTOSSModel(Model):
         self.window_size = original_window_size
 
     def make_moe(self, layer_id, mlp, root_input):
-        if self.ep in {"cpu", "cuda"}:
+        if self.ep in {"cpu", "cuda", "trt-rtx"}:
             self.make_moe_fused(layer_id, mlp, root_input)
         else:
             self.make_moe_decomposed(layer_id, mlp, root_input)
@@ -552,6 +552,8 @@ class GPTOSSModel(Model):
         op_type = self.moe_attrs["op_type"]
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
 
+        has_quark_experts = self.has_quark_experts(mlp.experts)
+
         # Make router nodes
         router_basename = f"{basename}/router/MatMul"
         router_matmul_name = self.make_matmul(mlp.router, router_basename, root_input)
@@ -572,22 +574,25 @@ class GPTOSSModel(Model):
         gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
         gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
+        gate_up_proj_zero_points = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+        down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
-        # Apply transpose depending on EP/op requirements
+        # Apply transpose depending on EP/op requirements and Quark expert presence
         # For quantized QMoE on CUDA, kernels expect scales along the hidden_size axis,
         # so we keep original orientation (last axis = hidden_size) when quantizing.
         # For non-quantized MoE or non-CUDA EPs, transpose to align MatMul layout.
-        if op_type == "QMoE" and self.ep == "cuda":
-            gate_up_proj_layout = mlp.experts.gate_up_proj
-            down_proj_layout = mlp.experts.down_proj
-        else:
-            gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
-            down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
+        if not has_quark_experts:
+            if op_type == "QMoE" and self.ep == "cuda":
+                gate_up_proj_layout = mlp.experts.gate_up_proj
+                down_proj_layout = mlp.experts.down_proj
+            else:
+                gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
+                down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
-        if op_type == "MoE":
+        if op_type == "MoE" and not has_quark_experts:
             # Save non-quantized MoE weights as initializers
             self.make_initializer(
                 gate_up_proj_layout.view(self.moe_attrs["num_experts"], -1, self.hidden_size),
@@ -600,45 +605,81 @@ class GPTOSSModel(Model):
                 to=self.io_dtype,
             )
         else:
-            # Create and save quantized MoE weights as initializers
-            gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
-            down_proj_qweight_list, down_proj_scales_list = [], []
+            if has_quark_experts:
+                # Use pre-quantized Quark experts
+                gate_up_proj_qweight_tensor, gate_up_proj_scales_tensor, gate_up_proj_zero_points_tensor = (
+                    mlp.experts.fc1_weights,
+                    mlp.experts.fc1_scales,
+                    mlp.experts.fc1_zero_points,
+                )
+                down_proj_qweight_tensor, down_proj_scales_tensor, down_proj_zero_points_tensor = (
+                    mlp.experts.fc2_weights,
+                    mlp.experts.fc2_scales,
+                    mlp.experts.fc2_zero_points,
+                )
 
-            for i in range(self.moe_attrs["num_experts"]):
-                qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
-                gate_up_proj_qweight_list.append(qweight1)
-                gate_up_proj_scales_list.append(scales1)
-                qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
-                down_proj_qweight_list.append(qweight2)
-                down_proj_scales_list.append(scales2)
+                # Save zero point as initializers
+                self.make_initializer(gate_up_proj_zero_points_tensor, gate_up_proj_zero_points)
+                self.make_initializer(down_proj_zero_points_tensor, down_proj_zero_points)
+            else:
+                # Create and save quantized MoE weights as initializers
+                gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
+                down_proj_qweight_list, down_proj_scales_list = [], []
 
-            gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
-            gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
-            down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
-            down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
+                for i in range(self.moe_attrs["num_experts"]):
+                    qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
+                    gate_up_proj_qweight_list.append(qweight1)
+                    gate_up_proj_scales_list.append(scales1)
+                    qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
+                    down_proj_qweight_list.append(qweight2)
+                    down_proj_scales_list.append(scales2)
 
-            # qweight tensors always use the same shape regardless of quantization method
+                gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
+                gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
+                down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
+                down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
+
+            # Determine shape based on Quark vs non-Quark
             pack_size = 8 // self.moe_attrs["expert_weight_bits"]
+            if has_quark_experts:
+                hidden_size_padded = self.hidden_size
+                intermediate_size_padded = self.intermediate_size
+            else:
+                hidden_size_padded = gate_up_proj_qweight_list[0].shape[-1] * pack_size
+                intermediate_size_padded = down_proj_qweight_list[0].shape[-1] * pack_size
+
+            # Save qweight tensors
             self.make_initializer(
-                gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size),
+                gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
                 gate_up_proj_weight,
             )
             self.make_initializer(
                 down_proj_qweight_tensor.view(
-                    self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size
+                    self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
                 ),
                 down_proj_weight,
             )
 
-            # scales tensors have different shapes depending on quantization method
+            # Save scales tensors
             self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
             self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
-        # Save MoE biases as initializers
-        self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
-        self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
+        # Save biases (shared for all paths)
+        if has_quark_experts:
+            gate_up_bias = self.combine_quark_gate_up_biases_from_experts(mlp.experts)
+            down_bias = self.combine_quark_down_biases_from_experts(mlp.experts)
+        else:
+            gate_up_bias = mlp.experts.gate_up_proj_bias
+            down_bias = mlp.experts.down_proj_bias
 
+        self.make_initializer(gate_up_bias, gate_up_proj_bias, to=self.io_dtype)
+        self.make_initializer(down_bias, down_proj_bias, to=self.io_dtype)
+
+        # Single make_moe_op call with EP-based zero_points
+        # TRT-RTX doesn't support zero_points inputs
         moe_name = f"{basename}/{op_type}"
+        use_zero_points = has_quark_experts and self.ep != "trt-rtx"
+
         self.make_moe_op(
             moe_name,
             root_input=root_input,
@@ -649,7 +690,53 @@ class GPTOSSModel(Model):
             weight2=down_proj_weight,
             scales2=down_proj_scales,
             bias2=down_proj_bias,
+            zero_points1=gate_up_proj_zero_points if use_zero_points else "",
+            zero_points2=down_proj_zero_points if use_zero_points else "",
         )
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
+
+    def has_quark_experts(self, experts):
+        return hasattr(experts, "fc1_weights") and hasattr(experts, "fc2_weights")
+
+    def combine_quark_gate_up_biases_from_experts(self, experts):
+        """Combine Quark gate_proj and up_proj biases from individual experts"""
+        assert(self.has_quark_experts(experts))
+        combined_biases = []
+
+        for expert_id in sorted(experts.keys()):
+            expert = experts[expert_id]
+
+            if expert.gate_up_proj.qweight is not None:
+                # Fused gate_up projection
+                gate_up_proj = expert.gate_up_proj.bias if hasattr(expert.gate_up_proj, 'bias') and expert.gate_up_proj.bias is not None else torch.zeros(expert.gate_up_proj.qweight.shape[0])
+                combined_biases.append(gate_up_proj)
+            else:
+                # Get biases from individual projections
+                gate_bias = expert.gate_proj.bias if hasattr(expert.gate_proj, 'bias') and expert.gate_proj.bias is not None else torch.zeros(expert.gate_proj.qweight.shape[0])
+                up_bias = expert.up_proj.bias if hasattr(expert.up_proj, 'bias') and expert.up_proj.bias is not None else torch.zeros(expert.up_proj.qweight.shape[0])
+
+                # Combine gate and up biases (interleaved pattern: even=gate, odd=up)
+                gate_out_dim = gate_bias.shape[0]
+                up_out_dim = up_bias.shape[0]
+
+                combined_bias = torch.zeros(gate_out_dim + up_out_dim, dtype=gate_bias.dtype, device="cpu")
+                combined_bias[::2] = gate_bias   # Even indices = gate
+                combined_bias[1::2] = up_bias    # Odd indices = up
+
+                combined_biases.append(combined_bias)
+
+        return torch.stack(combined_biases, dim=0)
+
+    def combine_quark_down_biases_from_experts(self, experts):
+        """Combine Quark down_proj biases from individual experts"""
+        assert(self.has_quark_experts(experts))
+        combined_biases = []
+
+        for expert_id in sorted(experts.keys()):
+            expert = experts[expert_id]
+            down_bias = expert.down_proj.bias if hasattr(expert.down_proj, 'bias') and expert.down_proj.bias is not None else torch.zeros(expert.down_proj.qweight.shape[0])
+            combined_biases.append(down_bias)
+
+        return torch.stack(combined_biases, dim=0)

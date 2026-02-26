@@ -19,6 +19,7 @@ struct Search_Cuda : Search {
     cudaStreamSynchronize(GetStream());
     return *done_cpu_;
   }  // TODO: Use an event
+  void ResetDone();
 
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;

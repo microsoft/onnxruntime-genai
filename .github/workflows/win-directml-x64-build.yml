@@ -55,7 +55,7 @@ jobs:
         run: |
           $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
           # $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          $ORT_NIGHTLY_VERSION = "1.23.0"
+          $ORT_NIGHTLY_VERSION = "1.25.0-dev-20260125-0556-727db0d3dc"
 
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -113,6 +113,10 @@ jobs:
           python -m pip install -r test\python\directml\torch\requirements.txt
           python -m pip install -r test\python\directml\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel --use_guidance
 
       - name: Run the Python Tests
         run: |

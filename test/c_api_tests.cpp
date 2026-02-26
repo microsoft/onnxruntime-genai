@@ -5,6 +5,7 @@
 #include <fstream>
 #include <numeric>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 #include <regex>
@@ -17,21 +18,10 @@
 
 #include <gtest/gtest.h>
 
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
-#ifndef PHI2_PATH
-#if USE_CUDA
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
-#elif USE_DML
-#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
-#else
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
-#endif
-#endif
+#include "test_utils.h"
 
-#ifndef ENABLE_ENGINE_TESTS
-#define ENABLE_ENGINE_TESTS TEST_PHI2 && !USE_DML
+#ifndef PHI2_PATH
+#define PHI2_PATH test_utils::GetPhi2Path().c_str()
 #endif
 
 TEST(CAPITests, Config) {
@@ -105,12 +95,12 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -167,12 +157,12 @@ TEST(CAPITests, TokenizerUpdateOptions) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -316,8 +306,12 @@ TEST(CAPIEngineTests, MaxLength) {
 #endif
 
 // DML doesn't support batch_size > 1
+// TODO: WebGPU should support batch_size > 1, investigate why it's failing
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2 && !USE_DML
+#if TEST_PHI2
+  if (!test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping batch test for DML/WebGPU";
+  }
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -338,11 +332,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -384,7 +375,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -397,7 +388,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
 
     engine->Add(*requests.back());
   }
@@ -447,7 +438,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -460,7 +451,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
   }
 
   // Add the first request to the engine
@@ -519,11 +510,8 @@ TEST(CAPITests, EndToEndPhi) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -561,11 +549,12 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  ASSERT_EQ(static_cast<int>(params->GetSearchNumber("max_length")), 40);
+  ASSERT_EQ(params->GetSearchBool("early_stopping"), true);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
+
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -582,6 +571,7 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   const auto* sequence_data = generator->GetSequenceData(0);
 
   ASSERT_LE(sequence_length, 40);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
 
   const auto* expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
@@ -634,7 +624,7 @@ TEST(CAPIEngineTests, EndToEndPhi) {
 TEST(CAPITests, LoadModelFromMemory) {
 #if TEST_PHI2
 
-  const char* model_path = PHI2_PATH "/model.onnx";
+  std::string model_path = std::string(PHI2_PATH) + "/model.onnx";
   std::ifstream model_file(model_path, std::ios::binary | std::ios::ate);
   ASSERT_TRUE(model_file.is_open()) << "Failed to open model file: " << model_path;
   std::streamsize size = model_file.tellg();
@@ -658,11 +648,8 @@ TEST(CAPITests, LoadModelFromMemory) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -738,11 +725,8 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -901,19 +885,16 @@ TEST(CAPITests, SetTerminate) {
     generator->SetRuntimeOption("terminate_session", "1");
   };
 
-  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> stream) {
     EXPECT_THROW({
-      while (true) {
+      while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->IsDone()) {
-          break;
-        }
       } }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   const char* input_string = "She sells sea shells by the sea shore.";
   auto input_sequences = OgaSequences::Create();
@@ -925,7 +906,7 @@ TEST(CAPITests, SetTerminate) {
   generator->AppendTokenSequences(*input_sequences);
   EXPECT_EQ(generator->IsSessionTerminated(), false);
   std::vector<std::thread> threads;
-  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(stream)));
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
@@ -938,7 +919,7 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-// DML Doesn't support batch_size > 1
+// DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
 struct Phi2Test {
@@ -968,11 +949,8 @@ struct Phi2Test {
       auto generator = OgaGenerator::Create(*model_, *params_);
       generator->AppendTokenSequences(*input_sequences_);
 
-      while (true) {
+      while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->IsDone()) {
-          break;
-        }
       }
 
       // Decode One at a time
@@ -1033,6 +1011,10 @@ class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1054,6 +1036,10 @@ class ParametrizedTopPCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1075,6 +1061,10 @@ class ParametrizedTopKTopPCAPITestsTests : public ::testing::TestWithParam<bool>
 };
 
 TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1130,11 +1120,8 @@ TEST(CAPITests, AdaptersTest) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1156,11 +1143,8 @@ TEST(CAPITests, AdaptersTest) {
     generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1210,11 +1194,8 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
     generator->SetActiveAdapter(*adapters, "adapter_b");
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
   }
 
@@ -1256,11 +1237,8 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1278,11 +1256,8 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   generator->RewindTo(0);
 
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1316,11 +1291,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1334,11 +1306,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   // Rewind to length 5 and verify same output
   generator->RewindTo(5);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1353,11 +1322,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 
   std::vector<int32_t> next_ids{731, 731};
   generator->AppendTokens(next_ids.data(), next_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1375,7 +1341,7 @@ TEST(CAPITests, SetGuidance) {
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   const char* input_string = "who are you?";
   auto input_sequences = OgaSequences::Create();
@@ -1386,11 +1352,8 @@ TEST(CAPITests, SetGuidance) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
   auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());

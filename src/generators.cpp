@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
 #include "sequences.h"
@@ -15,6 +17,7 @@
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
+#include "ryzenai/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -94,6 +97,8 @@ void Shutdown() {
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
+
+  RyzenAIInterface::Shutdown();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -224,6 +229,8 @@ std::string to_string(DeviceType device_type) {
       return "OpenVINO";
     case DeviceType::NvTensorRtRtx:
       return "NvTensorRtRtx";
+    case DeviceType::RyzenAI:
+      return "RyzenAI";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -247,6 +254,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetQNNInterface();
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
+    case DeviceType::RyzenAI:
+      return GetRyzenAIInterface();
   }
 }
 
@@ -277,6 +286,52 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
   // 2. Either num_beams == 1 OR the model is Whisper
   return search.past_present_share_buffer &&
          (search.num_beams == 1 || model_type == "whisper");
+}
+
+double GeneratorParams::GetSearchNumber(std::string_view name) const {
+  if (name == "batch_size") {
+    return static_cast<double>(search.batch_size);
+  } else if (name == "chunk_size") {
+    return static_cast<double>(search.chunk_size.value_or(0));
+  } else if (name == "diversity_penalty") {
+    return search.diversity_penalty;
+  } else if (name == "length_penalty") {
+    return search.length_penalty;
+  } else if (name == "max_length") {
+    return static_cast<double>(search.max_length);
+  } else if (name == "min_length") {
+    return static_cast<double>(search.min_length);
+  } else if (name == "no_repeat_ngram_size") {
+    return static_cast<double>(search.no_repeat_ngram_size);
+  } else if (name == "num_beams") {
+    return static_cast<double>(search.num_beams);
+  } else if (name == "num_return_sequences") {
+    return static_cast<double>(search.num_return_sequences);
+  } else if (name == "random_seed") {
+    return static_cast<double>(search.random_seed);
+  } else if (name == "repetition_penalty") {
+    return search.repetition_penalty;
+  } else if (name == "temperature") {
+    return search.temperature;
+  } else if (name == "top_k") {
+    return static_cast<double>(search.top_k);
+  } else if (name == "top_p") {
+    return search.top_p;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
+  }
+}
+
+bool GeneratorParams::GetSearchBool(std::string_view name) const {
+  if (name == "do_sample") {
+    return search.do_sample;
+  } else if (name == "early_stopping") {
+    return search.early_stopping;
+  } else if (name == "past_present_share_buffer") {
+    return search.past_present_share_buffer;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
+  }
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -318,24 +373,14 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-
-  // Handle padding based on alignment setting for sliding window models
-  if (padded_input_ids_size > input_ids.size()) {
-    const bool left_align = model_->config_->model.decoder.sliding_window.has_value() &&
-                            model_->config_->model.decoder.sliding_window->alignment == "left";
-
-    if (left_align) {
-      // Left alignment: padding first, then data
-      std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + (padded_input_ids_size - input_ids.size()));
-    } else {
-      // Right alignment (default): data first, then padding
-      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
-      std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
-    }
-  } else {
-    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  auto padding_begin = cpu_span.begin();
+  auto data_end = cpu_span.end();
+  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
+    padding_begin = cpu_span.begin() + input_ids.size();
+    data_end = padding_begin;
   }
+  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
@@ -358,7 +403,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       DeviceType::CUDA,
       DeviceType::WEBGPU,
       DeviceType::OpenVINO,
-      DeviceType::NvTensorRtRtx};
+      DeviceType::NvTensorRtRtx,
+      DeviceType::RyzenAI};
 
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
@@ -413,7 +459,10 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  // search_->GetSequenceLength() != next_tokens.size() implies that this is not the first time ComputeLogits
+  // is being called (i.e. we're not computing logits for the initial input tokens), so we need to commit
+  // tokens to the guidance logits processor before running the model.
+  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -426,7 +475,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   }
   SetLogits(logits);
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
@@ -454,6 +503,10 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
+size_t Generator::TokenCount() const {
+  return static_cast<size_t>(search_->GetSequenceLength());
+}
+
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
@@ -464,7 +517,7 @@ bool Generator::IsDone() {
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
-      guidance_logits_processor_->Reset();
+      guidance_logits_processor_->ResetWithoutCompute();
       last_action_ = Action::standard;
     }
   }
@@ -569,7 +622,7 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
-    guidance_logits_processor_->Reset();
+    guidance_logits_processor_->ResetWithoutCompute();
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;

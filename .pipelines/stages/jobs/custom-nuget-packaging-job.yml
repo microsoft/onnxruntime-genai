@@ -28,14 +28,14 @@ jobs:
 
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
-      StepName: 'Download osx-x64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
+      StepName: 'Download osx-arm64 capi Artifacts'
+      ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
       TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
-      StepName: 'Download osx-arm64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
+      StepName: 'Download linux-x64 capi Artifacts'
+      ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
       TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - checkout: self
@@ -65,10 +65,10 @@ jobs:
           $rid = "win-x64"
         } elseif ($a -like "*win-arm64*") {
           $rid = "win-arm64"
-        } elseif ($a -like "*osx-x64*") {
-          $rid = "osx-x64"
         } elseif ($a -like "*osx-arm64*") {
           $rid = "osx-arm64"
+        } elseif ($a -like "*linux-x64*") {
+          $rid = "linux-x64"
         } else {
           Write-Host "Unknown artifact name" $a
           return
@@ -89,7 +89,7 @@ jobs:
 
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: 3.10
+      versionSpec: 3.11
       addToPath: true
 
   - powershell: |
@@ -111,14 +111,13 @@ jobs:
 
       $win_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-x64/')[0].FullName
       $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-arm64/')[0].FullName
-      $osx_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/osx-x64/')[0].FullName
       $osx_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/osx-arm64/')[0].FullName
+      $linux_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/linux-x64/')[0].FullName
 
       Write-Host "Win x64 artifact path " $win_x64_artifact_path
       Write-Host "Win arm64 artifact path " $win_arm64_artifact_path
-      Write-Host "OSX x64 artifact path " $osx_x64_artifact_path
       Write-Host "OSX arm64 artifact path " $osx_arm64_artifact_path
-
+      Write-Host "Linux x64 artifact path " $linux_x64_artifact_path
       $ort_package_version = $versioned_name.Substring($ort_nuget_package_name.Length + 1, $versioned_name.Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
         --package_name $genai_nuget_package_name `
@@ -129,8 +128,8 @@ jobs:
         --nuspec_path $(Build.Repository.LocalPath)/nuget/$genai_nuget_package_name.nuspec `
         --win_x64 $win_x64_artifact_path `
         --win_arm64 $win_arm64_artifact_path `
-        --osx_x64 $osx_x64_artifact_path `
         --osx_arm64 $osx_arm64_artifact_path `
+        --linux_x64 $linux_x64_artifact_path `
         --commit_id $(Build.SourceVersion)
 
       cat $(Build.Repository.LocalPath)\nuget\$genai_nuget_package_name.nuspec
@@ -157,4 +156,3 @@ jobs:
     inputs:
       targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
       artifactName: $(genai_nuget_package_name)
-      

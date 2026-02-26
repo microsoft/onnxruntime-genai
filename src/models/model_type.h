@@ -1,5 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved.
+// --------------------------------------------------------------------------
+
 #pragma once
 
 #include <algorithm>
@@ -12,7 +15,7 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 20> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gpt2", "gptoss", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3", "smollm3"};
+    static constexpr std::array<std::string_view, 21> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gpt2", "gptoss", "granite", "internlm2", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
@@ -20,6 +23,11 @@ struct ModelType {
     // Vision-language model (VLM)
     static constexpr std::array<std::string_view, 4> VLM = {"fara", "gemma3", "phi3v", "qwen2_5_vl"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
+  }
+
+  inline static bool IsQwen25VL(const std::string& model_type) {
+    // Qwen25-VL specific check for 3D position IDs
+    return model_type == "fara" || model_type == "qwen2_5_vl";
   }
 
   inline static bool IsALM(const std::string& model_type) {
