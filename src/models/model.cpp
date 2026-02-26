@@ -66,7 +66,7 @@ class DirGuard {
   }
 
   ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0) {
+    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
       Log("warning", "Failed to change back to original directory: " + original_dir_.string());
     }
   }
@@ -846,6 +846,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+#endif
 #if defined(_WIN32)
       if (provider_options.name == "VitisAI") {
         if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
@@ -864,7 +865,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         }
       }
 #endif  // WIN32
-#endif
     }  // end if (provider not cuda/rocm/DML)
   }
   return p_device;

@@ -459,7 +459,10 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  // search_->GetSequenceLength() != next_tokens.size() implies that this is not the first time ComputeLogits
+  // is being called (i.e. we're not computing logits for the initial input tokens), so we need to commit
+  // tokens to the guidance logits processor before running the model.
+  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -472,7 +475,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   }
   SetLogits(logits);
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
@@ -514,7 +517,7 @@ bool Generator::IsDone() {
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
-      guidance_logits_processor_->Reset();
+      guidance_logits_processor_->ResetWithoutCompute();
       last_action_ = Action::standard;
     }
   }
@@ -619,7 +622,7 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
-    guidance_logits_processor_->Reset();
+    guidance_logits_processor_->ResetWithoutCompute();
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
