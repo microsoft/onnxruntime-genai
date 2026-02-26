@@ -9,9 +9,12 @@
 namespace Generators {
 namespace WebGPU {
 
-static Ort::Allocator* ort_allocator_{};
-static const OrtMemoryInfo* ort_memory_info_{};
+namespace {
+Ort::Allocator* ort_allocator_{};
+const OrtMemoryInfo* ort_memory_info_{};
 const char* device_label = "WebGPU";
+const char* label_cpu = "cpu";
+}  // namespace
 
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size) : owned_{true} {
@@ -54,10 +57,10 @@ struct WebGPUMemory final : DeviceBuffer {
     auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     auto dst_tensor = OrtValue::CreateTensor(*cpu_mem_info, p_cpu_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
-    // Use ORT C API's CopyTensors (synchronous copy, stream = nullptr)
-    OrtValue* src_ptrs[] = {src_tensor.get()};
-    OrtValue* dst_ptrs[] = {dst_tensor.get()};
-    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    // Use ORT C++ wrapper for CopyTensors (synchronous copy, stream = nullptr)
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 
   void CopyCpuToDevice() override {
@@ -75,10 +78,10 @@ struct WebGPUMemory final : DeviceBuffer {
     // Create destination tensor (WebGPU device memory)
     auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
-    // Use ORT C API's CopyTensors (synchronous copy, stream = nullptr)
-    OrtValue* src_ptrs[] = {src_tensor.get()};
-    OrtValue* dst_ptrs[] = {dst_tensor.get()};
-    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    // Use ORT C++ wrapper for CopyTensors (synchronous copy, stream = nullptr)
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
@@ -97,12 +100,14 @@ struct WebGPUMemory final : DeviceBuffer {
       auto src_tensor = OrtValue::CreateTensor(*ort_memory_info_, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
       auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
-      // Use ORT C API's CopyTensors for GPU-to-GPU copy
-      OrtValue* src_ptrs[] = {src_tensor.get()};
-      OrtValue* dst_ptrs[] = {dst_tensor.get()};
-      Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
-    } else if (source.GetType() != device_label && begin_source == 0 && begin_dest == 0) {
+      // Use ORT C++ wrapper for CopyTensors for GPU-to-GPU copy
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    } else if (strcmp(source.GetType(), label_cpu) == 0 && begin_source == 0 && begin_dest == 0) {
       // Fast path: CPU-to-WebGPU copy with zero offsets
+      // IMPORTANT: Only use this path for actual CPU buffers. For other device types
+      // (CUDA/DML/QNN), source.p_device_ is a device handle, not a CPU pointer.
       // Full buffer copy using CopyTensors (no offsets)
       int64_t shape_val = static_cast<int64_t>(size_in_bytes);
       std::span<const int64_t> shape{&shape_val, 1};
@@ -110,10 +115,10 @@ struct WebGPUMemory final : DeviceBuffer {
       auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
       auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
-      // Use ORT C API's CopyTensors for CPU-to-GPU copy
-      OrtValue* src_ptrs[] = {src_tensor.get()};
-      OrtValue* dst_ptrs[] = {dst_tensor.get()};
-      Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+      // Use ORT C++ wrapper for CopyTensors for CPU-to-GPU copy
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
     } else {
       // Fallback: Copy through CPU for:
       // - WebGPU-to-WebGPU copies with non-zero offsets (buffer handles don't support offset arithmetic)
@@ -139,10 +144,10 @@ struct WebGPUMemory final : DeviceBuffer {
     // Create destination tensor (WebGPU device memory)
     auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
-    // Use ORT C API's CopyTensors to copy zeros to GPU (synchronous copy, stream = nullptr)
-    OrtValue* src_ptrs[] = {src_tensor.get()};
-    OrtValue* dst_ptrs[] = {dst_tensor.get()};
-    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    // Use ORT C++ wrapper for CopyTensors to copy zeros to GPU (synchronous copy, stream = nullptr)
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 
   bool owned_;
@@ -157,8 +162,8 @@ struct InterfaceImpl : DeviceInterface {
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
-    // Cache the memory info to avoid repeated AllocatorGetInfo calls
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &ort_memory_info_));
+    // Cache the memory info to avoid repeated GetInfo calls
+    ort_memory_info_ = &ort_allocator_->GetInfo();
   }
 
   Ort::Allocator& GetAllocator() override {
