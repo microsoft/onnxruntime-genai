@@ -102,6 +102,12 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
                                            int vocab_size,
                                            int batch_size,
                                            int k) {
+  // Clear any stale CUDA errors from previous operations to prevent false failures.
+  // Successful CUDA API calls do NOT clear the thread-local error state, so a stale
+  // error (e.g., from TopkData construction or prior inference) can persist and be
+  // falsely detected by CUDA_CHECK_LAUNCH() inside the benchmark kernels.
+  cudaGetLastError();
+
   float min_latency = std::numeric_limits<float>::max();
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
