@@ -129,6 +129,19 @@ class CudaError : public std::runtime_error {
     }                                                            \
   } while (0)
 
+#ifdef NDEBUG
+#define CUDA_CHECK_LAUNCH()                                      \
+  do {                                                           \
+    cudaError_t err = cudaPeekAtLastError();                     \
+    if (err != cudaSuccess) {                                    \
+      std::stringstream ss;                                      \
+      ss << "CUDA launch error in " << __func__ << " at "        \
+         << __FILE__ << ":" << __LINE__ << " - "                 \
+         << cudaGetErrorString(err);                             \
+      throw Generators::CudaError(ss.str(), cudaGetLastError()); \
+    }                                                            \
+  } while (0)
+#else
 #define CUDA_CHECK_LAUNCH()                               \
   do {                                                    \
     cudaError_t err = cudaGetLastError();                 \
@@ -140,5 +153,6 @@ class CudaError : public std::runtime_error {
       throw Generators::CudaError(ss.str(), err);         \
     }                                                     \
   } while (0)
+#endif
 
 }  // namespace Generators
