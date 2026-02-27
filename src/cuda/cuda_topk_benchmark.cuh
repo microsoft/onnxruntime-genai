@@ -157,7 +157,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   // kernels are not supported, if their benchmarks all failed at runtime (best_algo is still
   // UNKNOWN despite IsSupported returning true), or if the vocab size is small, where hybrid
   // can sometimes be faster.
-  if (best_algo == TopkAlgo::UNKNOWN || vocab_size <= 4096) {
+  if (best_algo == TopkAlgo::UNKNOWN || (!use_iterative_sort && !use_cascaded_sort && !use_flash_convergent) || vocab_size <= 4096) {
     if (hybrid_sort::IsSupported(batch_size, vocab_size, k)) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);

@@ -307,7 +307,6 @@ void BeamSearchTopK(
                         num_beams,
                         k,
                         stream);
-  CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace cuda
