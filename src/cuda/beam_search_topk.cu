@@ -165,8 +165,8 @@ void TopKLauncherMaxK(
   dim3 grid(batch_beam_size, voc_parts);
 
   CUDA_CHECK(cudaFuncSetAttribute(BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>,
-                       cudaFuncAttributePreferredSharedMemoryCarveout,
-                       cudaSharedmemCarveoutMaxL1));
+                                  cudaFuncAttributePreferredSharedMemoryCarveout,
+                                  cudaSharedmemCarveoutMaxL1));
 
   BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>
       <<<grid, kThreadBlockSize, 0, stream>>>(input, K, vocab_size, (vocab_size + voc_parts - 1) / voc_parts, output_values_tmp, output_indices_tmp);
