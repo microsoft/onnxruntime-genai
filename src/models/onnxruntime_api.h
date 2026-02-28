@@ -934,6 +934,32 @@ struct OrtValue {
   static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
                                                 ONNXTensorElementDataType type);
 
+  /** \brief Creates a tensor that views a sub-region of an existing raw buffer at an element offset.
+   *         Wraps OrtApi::CreateTensorWithDataAsOrtValueWithByteOffset.
+   * \tparam T The numeric datatype. This API is not suitable for strings.
+   * \param info Memory description of where the p_data buffer resides (CPU vs GPU etc).
+   * \param p_data Pointer to the start of the underlying data buffer.
+   * \param p_data_element_count The number of elements available in the tensor view.
+   * \param p_data_element_offset The number of elements to skip from p_data before creating the view.
+   * \param shape Tensor shape dimensions.
+   */
+  template <typename T>
+  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, T* p_data, size_t p_data_element_count,
+                                                size_t p_data_element_offset, std::span<const int64_t> shape);
+
+  /** \brief Creates a tensor that views a sub-region of an existing raw buffer at a byte offset.
+   *         Wraps OrtApi::CreateTensorWithDataAsOrtValueWithByteOffset.
+   * \param info Memory description of where the p_data buffer resides (CPU vs GPU etc).
+   * \param p_data Pointer to the start of the underlying data buffer.
+   * \param p_data_byte_count The number of bytes available in the tensor view.
+   * \param p_data_byte_offset The byte offset from p_data at which the tensor view starts.
+   * \param shape Tensor shape dimensions.
+   * \param type The data type.
+   */
+  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count,
+                                                size_t p_data_byte_offset, std::span<const int64_t> shape,
+                                                ONNXTensorElementDataType type);
+
   /** \brief Creates a tensor using a supplied OrtAllocator. Wraps OrtApi::CreateTensorAsOrtValue.
    * \tparam T The numeric datatype. This API is not suitable for strings.
    * \param allocator The allocator to use.

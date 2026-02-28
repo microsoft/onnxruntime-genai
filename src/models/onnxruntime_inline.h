@@ -1249,6 +1249,23 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& inf
 }
 
 template <typename T>
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, T* p_data, size_t p_data_element_count,
+                                                        size_t p_data_element_offset, std::span<const int64_t> shape) {
+  return CreateTensor(info, p_data, p_data_element_count * sizeof(T), p_data_element_offset * sizeof(T),
+                     shape, Ort::TypeToTensorType<T>);
+}
+
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count,
+                                                        size_t p_data_byte_offset, std::span<const int64_t> shape,
+                                                        ONNXTensorElementDataType type) {
+  OrtValue* out;
+  Ort::ThrowOnError(Ort::api->CreateTensorWithDataAsOrtValueWithByteOffset(&info, p_data, p_data_byte_count,
+                                                                           p_data_byte_offset, shape.data(), shape.size(),
+                                                                           type, &out));
+  return std::unique_ptr<OrtValue>{out};
+}
+
+template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape) {
   return CreateTensor(allocator, shape, Ort::TypeToTensorType<T>);
 }
