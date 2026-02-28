@@ -66,6 +66,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "shared_embeddings",
         "hf_remote",
         "disable_qkv_fusion",
+        "prune_lm_head",
     ]
     for key in bools:
         if key in kv_pairs:
