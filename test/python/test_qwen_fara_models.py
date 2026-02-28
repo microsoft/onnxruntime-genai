@@ -2,7 +2,7 @@
 # Licensed under the MIT License
 
 """
-Unit tests for Qwen2.5-VL and Fara vision-language models.
+Unit tests for Qwen2.5-VL, Qwen3-VL, and Fara vision-language models.
 Tests cover model loading, text generation, image understanding, and multimodal processing.
 
 This file can be used in two ways:
@@ -27,7 +27,7 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("qwen-fara-vision-tests")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_fara_vision_basic(test_data_path, relative_model_path, relative_image_path):
     """Test basic vision preprocessing for Qwen/Fara-style models."""
@@ -48,7 +48,7 @@ def test_qwen_fara_vision_basic(test_data_path, relative_model_path, relative_im
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "landscape.jpg"])
 def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, relative_image_path):
     """Test loading images from bytes for Qwen/Fara models."""
@@ -70,7 +70,7 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
@@ -99,7 +99,7 @@ def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, r
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 def test_qwen_fara_text_only_generation(test_data_path, relative_model_path):
     """Test text-only generation without images."""
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
@@ -116,7 +116,7 @@ def test_qwen_fara_text_only_generation(test_data_path, relative_model_path):
     assert "input_ids" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
 def test_qwen_fara_vision_with_special_tokens(test_data_path, relative_model_path, relative_image_path):
     """Test vision processing with special tokens in prompt."""
@@ -137,7 +137,7 @@ def test_qwen_fara_vision_with_special_tokens(test_data_path, relative_model_pat
     assert "input_ids" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "10809054.jpg"])
 def test_qwen_fara_vision_different_image_formats(test_data_path, relative_model_path, relative_image_path):
     """Test processing different image formats."""
@@ -156,7 +156,7 @@ def test_qwen_fara_vision_different_image_formats(test_data_path, relative_model
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, relative_image_path):
     """
@@ -218,7 +218,7 @@ def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, rela
     log.debug(f"ONNX pixel_values range: [{pixel_min:.4f}, {pixel_max:.4f}]")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
 def test_qwen_fara_preprocessing_consistency(test_data_path, relative_model_path, relative_image_path):
     """
@@ -295,6 +295,105 @@ def test_qwen_fara_preprocessing_consistency(test_data_path, relative_model_path
             array2 = np.array(ids2)
 
         np.testing.assert_array_equal(array1, array2, err_msg="Input IDs should be identical")
+
+
+def test_qwen3_vl_model_type(test_data_path):
+    """
+    Test that the Qwen3-VL model loads with the correct model type (qwen3_vl).
+    Validates that the model type routing in model.cpp correctly handles the new type.
+    """
+    model_path = os.fspath(Path(test_data_path) / "qwen3-vl-vision-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen3-vl-vision-preprocessing test model not found")
+
+    model = og.Model(model_path)
+    assert model is not None
+
+    # Verify the model can create a multimodal processor (validates model type routing)
+    processor = model.create_multimodal_processor()
+    assert processor is not None
+
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen3_vl_pixel_values_shape(test_data_path, relative_image_path):
+    """
+    Test that Qwen3-VL preprocesses images with patch_size=16 (not 14 like Qwen2.5-VL).
+    The patch_size difference affects the number of patches extracted from each image.
+    """
+    model_path = os.fspath(Path(test_data_path) / "qwen3-vl-vision-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen3-vl-vision-preprocessing test model not found")
+
+    model = og.Model(model_path)
+    processor = model.create_multimodal_processor()
+
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    images = og.Images.open(image_path)
+
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
+    inputs = processor(prompt, images=images)
+
+    assert "pixel_values" in inputs
+
+    # Get pixel_values as numpy array
+    pv = inputs["pixel_values"]
+    if hasattr(pv, "as_numpy"):
+        pixel_array = pv.as_numpy()
+    elif hasattr(pv, "numpy"):
+        pixel_array = pv.numpy()
+    else:
+        pixel_array = np.array(pv)
+
+    # For Qwen3-VL with patch_size=16, each patch has 16*16*3 = 768 pixels
+    # flattened into the temporal_patch_size dimension: 768 * 2 = 1536
+    # Shape should be [num_patches, 1176] for patch_size=14 (Qwen2.5-VL)
+    # or [num_patches, 1536] for patch_size=16 (Qwen3-VL)
+    assert pixel_array.shape[-1] == 1536, (
+        f"Expected last dim 1536 for Qwen3-VL (patch_size=16), got {pixel_array.shape[-1]}"
+    )
+    log.debug(f"Qwen3-VL pixel_values shape: {pixel_array.shape}")
+
+
+@pytest.mark.parametrize(
+    "model_name,expected_patch_dim",
+    [
+        ("qwen-vision-preprocessing", 1176),       # Qwen2.5-VL: patch_size=14, 14*14*3*2=1176
+        ("qwen3-vl-vision-preprocessing", 1536),    # Qwen3-VL:   patch_size=16, 16*16*3*2=1536
+    ],
+)
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen_vl_family_patch_size_difference(test_data_path, model_name, expected_patch_dim, relative_image_path):
+    """
+    Test that the QwenVL family models produce different patch dimensions
+    due to different patch_size configurations (14 vs 16).
+    """
+    model_path = os.fspath(Path(test_data_path) / model_name)
+    if not os.path.exists(model_path):
+        pytest.skip(f"{model_name} test model not found")
+
+    model = og.Model(model_path)
+    processor = model.create_multimodal_processor()
+
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    images = og.Images.open(image_path)
+
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
+    inputs = processor(prompt, images=images)
+
+    assert "pixel_values" in inputs
+
+    pv = inputs["pixel_values"]
+    if hasattr(pv, "as_numpy"):
+        pixel_array = pv.as_numpy()
+    elif hasattr(pv, "numpy"):
+        pixel_array = pv.numpy()
+    else:
+        pixel_array = np.array(pv)
+
+    assert pixel_array.shape[-1] == expected_patch_dim, (
+        f"For {model_name}: expected last dim {expected_patch_dim}, got {pixel_array.shape[-1]}"
+    )
+    log.debug(f"{model_name} pixel_values shape: {pixel_array.shape}")
 
 
 # Standalone runner functionality
