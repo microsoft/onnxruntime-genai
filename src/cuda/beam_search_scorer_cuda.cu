@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <algorithm>
 #include "span.h"
+#include "cuda_common.h"
 #include "beam_search_scorer_cuda.cuh"
 
 namespace Generators {
@@ -49,6 +50,7 @@ void LaunchInitializeBeamHypotheses(std::span<BeamHypotheses> beam_hyps,
                                                                              length_penalty,
                                                                              beams.data(),
                                                                              num_beams);
+  CUDA_CHECK_LAUNCH();
 }
 
 __device__ void BeamHypotheses::Add(const int32_t* hypothesis, int hypothesis_length, float sum_logprobs) {
@@ -187,6 +189,7 @@ void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                                                     next_scores.data(),
                                                                     next_tokens.data(),
                                                                     next_indices.data());
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void BeamSearchScorer_AppendNextTokenToSequences1(BeamScorerState& state,
@@ -254,6 +257,7 @@ void LaunchBeamSearchScorer_AppendNextTokenToSequences(BeamScorerState& state_cp
                                                                                   next_sequences.data(),
                                                                                   sequence_length,
                                                                                   next_beam_tokens.data());
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
@@ -298,6 +302,7 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
                                                           beam_hyps.data(),
                                                           hypothesis_buffer.data(),
                                                           final_beam_scores.data());
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void BeamSearchScorer_GetHypothesisPtr(size_t batch_id,
@@ -326,6 +331,7 @@ void LaunchBeamSearchScorer_GetHypothesisPtr(size_t batch_id,
                                                          hypothesis_ptr,
                                                          hypothesis_length,
                                                          hypothesis_score);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void InitScoresKernel(float* beam_scores,
@@ -347,6 +353,7 @@ void LaunchInitScoresKernel(
   constexpr int blockSize = 256;
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
   InitScoresKernel<<<gridSize, blockSize, 0, stream>>>(beam_scores, num_beams, total_elements);
+  CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace cuda
