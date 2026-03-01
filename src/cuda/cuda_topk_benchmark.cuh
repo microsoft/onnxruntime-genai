@@ -101,6 +101,12 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
                                            int vocab_size,
                                            int batch_size,
                                            int k) {
+  // Clear any stale CUDA errors from previous operations to prevent false failures.
+  // Successful CUDA API calls do NOT clear the thread-local error state, so a stale
+  // error (e.g., from TopkData construction or prior inference) can persist and be
+  // falsely detected by CUDA_CHECK_LAUNCH() inside the benchmark kernels.
+  cudaGetLastError();
+
   float min_latency = std::numeric_limits<float>::max();
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
@@ -147,9 +153,11 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  // Candidate: Hybrid Sort. This is a robust fallback. We benchmark it if either the cooperative
-  // kernels are not supported, or if the vocab size is small, where hybrid can sometimes be faster.
-  if (!use_iterative_sort && !use_cascaded_sort && !use_flash_convergent || vocab_size <= 4096) {
+  // Candidate: Hybrid Sort. This is a robust fallback. We benchmark it if the cooperative
+  // kernels are not supported, if their benchmarks all failed at runtime (best_algo is still
+  // UNKNOWN despite IsSupported returning true), or if the vocab size is small, where hybrid
+  // can sometimes be faster.
+  if (best_algo == TopkAlgo::UNKNOWN || (!use_iterative_sort && !use_cascaded_sort && !use_flash_convergent) || vocab_size <= 4096) {
     if (hybrid_sort::IsSupported(batch_size, vocab_size, k)) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
