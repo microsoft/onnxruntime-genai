@@ -48,21 +48,14 @@ void DefaultInputIDs::Add() {
 }
 
 void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
-  auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
-
-  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
-    for (int32_t i = 0; i < input_ids.size(); i++) {
-      if (input_ids[i] == pad_token_id)
-        return i;
-    }
-    return static_cast<int32_t>(input_ids.size());
-  };
-
+  // Only copy to CPU when needed for sequence length tracking inputs.
+  // Avoids a redundant GPU->CPU round-trip for prefill when these optional inputs are absent.
   if (current_sequence_length_ && past_sequence_length_) {
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
+    // batch_size == 1 is enforced above, so there is no padding and the full token count is the sequence length.
+    auto new_sequence_length = static_cast<int32_t>(new_tokens.size());
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
   }
