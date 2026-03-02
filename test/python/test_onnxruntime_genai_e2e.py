@@ -162,12 +162,11 @@ def run_nemotron_speech():
     """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_batch.py example."""
     log.debug("Running Nemotron Speech Python E2E Test")
 
+    # Look for nemotron speech model in test_models directory
     cwd = os.path.dirname(os.path.abspath(__file__))
-
-    # Require explicit model path via environment variable
-    model_path = os.environ.get("NEMOTRON_SPEECH_MODEL_PATH", "")
-    if not model_path or not os.path.exists(model_path):
-        log.info("NEMOTRON_SPEECH_MODEL_PATH not set or path does not exist, skipping E2E test.")
+    model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    if not os.path.exists(model_path):
+        log.info(f"Nemotron speech model not found at {model_path}, skipping E2E test.")
         return
 
     # Look for a test audio file

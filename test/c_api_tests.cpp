@@ -1366,31 +1366,21 @@ TEST(CAPITests, SetGuidance) {
 }
 #endif
 
-// Path to the nemotron speech test model. Set via environment variable or CI data path.
-static std::string GetNemotronSpeechModelPath() {
-  const char* env = std::getenv("NEMOTRON_SPEECH_MODEL_PATH");
-  if (env && std::filesystem::exists(env))
-    return env;
-  // CI default paths
-  for (const char* candidate : {
-           "/data/ortgenai/onnx/nemotron-speech-streaming",
-           MODEL_PATH "nemotron-speech-streaming"}) {
-    if (std::filesystem::exists(candidate))
-      return candidate;
-  }
-  return "";
-}
+#if TEST_STREAMING_ASR
+#ifndef STREAMING_ASR_PATH
+#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+#endif
 
 // Test creating a StreamingASR instance from a nemotron_speech model
 TEST(CAPITests, StreamingASRCreate) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
   ASSERT_NE(asr, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test that creating StreamingASR from a non-speech model throws
@@ -1406,12 +1396,8 @@ TEST(CAPITests, StreamingASRCreateInvalidModel) {
 
 // Test transcribing silence (all zeros) produces empty or blank output
 TEST(CAPITests, StreamingASRTranscribeSilence) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
 
   // Feed one chunk of silence (8960 samples = 560ms at 16kHz)
@@ -1424,16 +1410,15 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
   // We don't assert exact content since blank handling varies,
   // but the call should succeed without crashing
   SUCCEED();
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test basic streaming: feed multiple chunks and get a transcript
 TEST(CAPITests, StreamingASRMultipleChunks) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
 
   constexpr size_t chunk_samples = 8960;
@@ -1449,16 +1434,15 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
   auto transcript = asr->GetTranscript();
   // Transcript should be valid (possibly empty for silence)
   ASSERT_NE(transcript.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test reset: after reset, transcript should be empty
 TEST(CAPITests, StreamingASRReset) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
 
   constexpr size_t chunk_samples = 8960;
@@ -1472,16 +1456,15 @@ TEST(CAPITests, StreamingASRReset) {
   auto transcript = asr->GetTranscript();
   std::string result(transcript.p_);
   EXPECT_TRUE(result.empty()) << "Transcript after reset should be empty, got: " << result;
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test flush: flush should return remaining text without crashing
 TEST(CAPITests, StreamingASRFlush) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
 
   constexpr size_t chunk_samples = 8960;
@@ -1491,16 +1474,15 @@ TEST(CAPITests, StreamingASRFlush) {
   // Flush should complete without error
   auto flush_text = asr->Flush();
   ASSERT_NE(flush_text.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test transcribing a synthetic sine wave (produces non-trivial mel features)
 TEST(CAPITests, StreamingASRSineWave) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
-  auto model = OgaModel::Create(model_path.c_str());
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto asr = OgaStreamingASR::Create(*model);
 
   constexpr size_t chunk_samples = 8960;
@@ -1525,18 +1507,17 @@ TEST(CAPITests, StreamingASRSineWave) {
 
   auto transcript = asr->GetTranscript();
   ASSERT_NE(transcript.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
 
 // Test C API directly (not the C++ wrapper)
 TEST(CAPITests, StreamingASRRawCAPI) {
-  auto model_path = GetNemotronSpeechModelPath();
-  if (model_path.empty()) {
-    GTEST_SKIP() << "Nemotron speech model not available. Set NEMOTRON_SPEECH_MODEL_PATH.";
-  }
-
+#if TEST_STREAMING_ASR
   // Use the raw C API functions
   OgaModel* model = nullptr;
-  ASSERT_EQ(OgaCreateModel(model_path.c_str(), &model), nullptr);
+  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
   ASSERT_NE(model, nullptr);
 
   OgaStreamingASR* asr = nullptr;
@@ -1565,4 +1546,7 @@ TEST(CAPITests, StreamingASRRawCAPI) {
 
   OgaDestroyStreamingASR(asr);
   OgaDestroyModel(model);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
 }
