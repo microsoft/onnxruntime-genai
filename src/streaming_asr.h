@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// StreamingASR — abstract interface for streaming speech recognition.
+// StreamingASR - abstract interface for streaming speech recognition.
 #pragma once
 
 #include "models/model.h"
@@ -36,7 +36,5 @@ struct StreamingASR : LeakChecked<StreamingASR> {
   virtual void Reset() = 0;
 };
 
-/// Factory: creates the appropriate StreamingASR implementation based on model type.
 std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model);
-
 }  // namespace Generators

@@ -83,7 +83,6 @@ void NemoStreamingASR::Reset() {
       static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
   is_first_chunk_ = true;
   audio_buffer_.clear();
-  chunk_index_ = 0;
 }
 
 std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t num_samples) {
@@ -220,7 +219,6 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   // Run RNNT decoder on ALL encoder output frames (no drop_last needed)
   std::string chunk_text = RunRNNTDecoder(encoded, encoded_len);
   full_transcript_ += chunk_text;
-  chunk_index_++;
 
   return chunk_text;
 }

@@ -163,24 +163,11 @@ def run_nemotron_speech():
     log.debug("Running Nemotron Speech Python E2E Test")
 
     cwd = os.path.dirname(os.path.abspath(__file__))
-    ci_data_path = get_ci_data_path()
 
-    # Check environment variable first, then CI paths
+    # Require explicit model path via environment variable
     model_path = os.environ.get("NEMOTRON_SPEECH_MODEL_PATH", "")
     if not model_path or not os.path.exists(model_path):
-        candidates = [
-            os.path.join(ci_data_path, "onnx", "nemotron-speech-streaming"),
-            os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming"),
-            os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming-en-0.6b"),
-        ]
-        model_path = ""
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                model_path = candidate
-                break
-
-    if not model_path:
-        log.info("Nemotron speech model not found, skipping E2E test.")
+        log.info("NEMOTRON_SPEECH_MODEL_PATH not set or path does not exist, skipping E2E test.")
         return
 
     # Look for a test audio file

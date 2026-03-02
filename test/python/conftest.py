@@ -91,28 +91,10 @@ def path_for_model(request):
 @pytest.fixture
 def nemotron_speech_model_path(request):
     """Return the path to a nemotron_speech model directory, or skip if not available."""
-    # Check environment variable first
-    env_path = os.environ.get("NEMOTRON_SPEECH_MODEL_PATH")
-    if env_path and os.path.exists(env_path):
-        return env_path
-
-    # Check test_models directory
-    test_data = request.config.getoption("--test_models")
-    candidates = [
-        os.path.join(test_data, "nemotron-speech-streaming"),
-        os.path.join(test_data, "nemotron-speech-streaming-en-0.6b"),
-    ]
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
-
-    # Check CI data path
-    ci_data = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "onnx")
-    ci_candidate = os.path.join(ci_data, "nemotron-speech-streaming")
-    if os.path.isdir(ci_candidate):
-        return ci_candidate
-
-    pytest.skip("Nemotron speech model not found. Set NEMOTRON_SPEECH_MODEL_PATH env var.")
+    model_path = os.environ.get("NEMOTRON_SPEECH_MODEL_PATH", "")
+    if not model_path or not os.path.exists(model_path):
+        pytest.skip("NEMOTRON_SPEECH_MODEL_PATH not set or path does not exist.")
+    return model_path
 
 
 @pytest.fixture
