@@ -39,6 +39,11 @@ jobs:
         with:
           gradle-version: '8.6'
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11.x'
+          architecture: 'x64'
+
       - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
         with:
           vcpkg-version: '2025.03.19'

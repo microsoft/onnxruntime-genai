@@ -66,7 +66,7 @@ class DirGuard {
   }
 
   ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0) {
+    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
       Log("warning", "Failed to change back to original directory: " + original_dir_.string());
     }
   }
@@ -171,6 +171,17 @@ void State::SetRunOption(const char* key, const char* value) {
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
+    }
+    return;
+  } else if (strcmp(key, "enable_profiling") == 0) {
+    if (strcmp(value, "0") == 0) {
+      run_options_->DisableProfiling();
+    } else {
+      // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
+      // Value "1" uses the default prefix; any other value is treated as a custom prefix.
+      constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
+      const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
+      run_options_->EnableProfiling(fs::path(prefix).c_str());
     }
     return;
   }
@@ -835,6 +846,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+#endif
 #if defined(_WIN32)
       if (provider_options.name == "VitisAI") {
         if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
@@ -853,7 +865,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         }
       }
 #endif  // WIN32
-#endif
     }  // end if (provider not cuda/rocm/DML)
   }
   return p_device;
@@ -910,7 +921,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')

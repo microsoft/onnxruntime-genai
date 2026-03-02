@@ -1,4 +1,4 @@
-ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20251008.2
+ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1
 
 FROM $BASEIMAGE
 ADD scripts /tmp/scripts
@@ -13,5 +13,5 @@ RUN adduser --uid $BUILD_UID $BUILD_USER
 WORKDIR /home/$BUILD_USER
 USER $BUILD_USER
 ENV PATH /usr/local/dotnet:$PATH
-ENV CUDAHOSTCXX /opt/rh/gcc-toolset-12/root/usr/bin/g++
+ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-14/root/usr/bin/g++
 ENV CUDA_MODULE_LOADING "LAZY"

@@ -79,7 +79,7 @@ void ModelGenerate(
         // Display output and timings
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
-        var totalTokens = outputSequence.Length;
+        var totalTokens = (int)generator.TokenCount();
         Console.WriteLine($"Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
 
@@ -218,8 +218,7 @@ void ModelQA(
         input_list.RemoveAt(input_list.Count - 1);
 
         // Display output and timings
-        var outputSequence = generator.GetSequence(0);
-        var totalTokens = outputSequence.Length;
+        var totalTokens = (int)generator.TokenCount();
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         Console.WriteLine();
@@ -315,8 +314,8 @@ void ModelChat(
 
     // Encode system prompt and append tokens to model
     var sequences = tokenizer.Encode(prompt);
-    var system_prompt_length = sequences[0].Length;
     generator.AppendTokenSequences(sequences);
+    var system_prompt_length = (int)generator.TokenCount();
 
     // Streaming Chat
     var prevTotalTokens = 0;
@@ -370,8 +369,7 @@ void ModelChat(
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
 
         // Display output and timings
-        var outputSequence = generator.GetSequence(0);
-        var totalNewTokens = outputSequence.Length - prevTotalTokens;
+        var totalNewTokens = (int)generator.TokenCount() - prevTotalTokens;
         prevTotalTokens = totalNewTokens;
         Console.WriteLine();
         Console.WriteLine($"Streaming Tokens: {totalNewTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
@@ -583,11 +581,7 @@ void main(string[] args) {
 
     // Enable debugging if requested
     if (debug) Common.SetLogger();
-    /**
-     * TODO: Uncomment the below snippet to use Utils.RegisterEPLibrary once
-     * the C# binding to Utils.RegisterEPLibrary is in a stable package release.
-     */
-    // RegisterEP(executionProvider, epPath);
+    Common.RegisterEP(executionProvider, epPath);
 
     // Create model
     if (verbose) Console.WriteLine("Loading model...");

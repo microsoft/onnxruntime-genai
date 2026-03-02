@@ -28,6 +28,10 @@ def _download_ort(use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir
         else:
             raise NotImplementedError(f"Unsupported machine architecture: {platform.machine()}")
 
+        # macOS ort packages no longer contain x64 binaries. In case we are running on x64 macOS, we need to download arm64 binaries.
+        if plat == "osx":
+            mach = "arm64"
+
         return destination_dir / "ort" / "runtimes" / (plat + "-" + mach) / "native"
 
     package_name = None
