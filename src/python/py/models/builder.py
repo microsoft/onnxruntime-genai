@@ -472,6 +472,9 @@ def get_args():
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
+                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
+                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
             """),
     )
 
