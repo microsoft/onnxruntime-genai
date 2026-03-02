@@ -27,6 +27,15 @@ void NemoStreamingASR::LoadVocab() {
       vocab_[i] = "";
     }
   }
+
+  // Pre-process sentencepiece space markers
+  for (auto& tok : vocab_) {
+    size_t pos = 0;
+    while ((pos = tok.find("\xe2\x96\x81", pos)) != std::string::npos) {
+      tok.replace(pos, 3, " ");
+      pos += 1;
+    }
+  }
   vocab_loaded_ = true;
 }
 
@@ -86,16 +95,21 @@ std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t nu
   std::string result;
   const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
 
-  // Only once we get enough in the buffer, we start processing, depending on the models params.
-  while (audio_buffer_.size() >= chunk_sz) {
+  // Process chunks as soon as you get it full chunk size.
+  size_t offset = 0;
+  while (audio_buffer_.size() - offset >= chunk_sz) {
     // Compute mel for this chunk
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
+    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data() + offset, chunk_sz);
 
     result += TranscribeMelChunk(mel_data, num_frames);
 
-    // Advance by full chunk, Nemo models do not require overlapping audio between chunks since the encoder cache provides left context
+    // Advance by full chunk, Nemo models do not require overlapping audio
+    offset += chunk_sz;
+  }
+
+  if (offset > 0) {
     audio_buffer_.erase(audio_buffer_.begin(),
-                        audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_sz));
+                        audio_buffer_.begin() + static_cast<ptrdiff_t>(offset));
   }
 
   return result;
@@ -225,24 +239,29 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
   auto run_options = OrtRunOptions::Create();
 
+  // Pre-allocate reusable tensors
+  auto frame_shape = std::array<int64_t, 3>{1, hidden_dim, 1};
+  auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  float* frame_data = encoder_frame->GetTensorMutableData<float>();
+
+  auto targets_shape = std::array<int64_t, 2>{1, 1};
+  auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  int32_t* targets_data = targets->GetTensorMutableData<int32_t>();
+
+  auto tgt_len_shape = std::array<int64_t, 1>{1};
+  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  *target_length->GetTensorMutableData<int32_t>() = 1;
+
+  const int max_sym = cache_config_.max_symbols_per_step;
+
   for (int64_t t = 0; t < time_steps; ++t) {
-    // Extract single encoder frame: [1, hidden_dim, 1]
-    auto frame_shape = std::array<int64_t, 3>{1, hidden_dim, 1};
-    auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    float* frame_data = encoder_frame->GetTensorMutableData<float>();
+    // Fill encoder frame data (reusing pre-allocated tensor)
     for (int64_t d = 0; d < hidden_dim; ++d) {
       frame_data[d] = enc_data[d * enc_shape[2] + t];
     }
 
-    const int max_sym = cache_config_.max_symbols_per_step;
     for (int sym = 0; sym < max_sym; ++sym) {
-      auto targets_shape = std::array<int64_t, 2>{1, 1};
-      auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-      *targets->GetTensorMutableData<int32_t>() = decoder_state_.last_token;
-
-      auto tgt_len_shape = std::array<int64_t, 1>{1};
-      auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-      *target_length->GetTensorMutableData<int32_t>() = 1;
+      *targets_data = decoder_state_.last_token;
 
       const char* dec_input_names[] = {
           cache_config_.dec_in_targets.c_str(), cache_config_.dec_in_target_length.c_str(),
@@ -299,14 +318,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
       decoder_state_.state_2 = std::move(dec_outputs[3]);
 
       if (best_token < static_cast<int>(vocab_.size())) {
-        std::string token_str = vocab_[best_token];
-        // Replace sentencepiece space marker with space
-        size_t pos = 0;
-        while ((pos = token_str.find("\xe2\x96\x81", pos)) != std::string::npos) {
-          token_str.replace(pos, 3, " ");
-          pos += 1;
-        }
-        result += token_str;
+        result += vocab_[best_token];
       }
     }
   }
