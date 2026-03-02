@@ -1,0 +1,107 @@
+name: "Windows WebGPU x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  binaryDir: 'build/cpu/win-x64'
+  TEST_WEBGPU: 'true'
+
+jobs:
+  windows-webgpu-x64-build:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10"]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.x'
+          architecture: 'x64'
+
+      - name: Setup VCPKG
+        uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+        with:
+          vcpkg-version: '2025.03.19'
+          vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
+          cmake-version: '3.31.6'
+          cmake-hash: '0f1584e8666cf4a65ec514bd02afe281caabf1d45d2c963f3151c41484f457386aa03273ab25776a670be02725354ce0b46f3a5121857416da37366342a833a0'
+          add-cmake-to-path: 'true'
+          disable-terrapin: 'false'
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download OnnxRuntime Foundry Package (includes WebGPU support)
+        shell: pwsh
+        run: |
+          # Use Foundry package which includes WebGPU DLLs (dxil.dll, dxcompiler.dll)
+          $FOUNDRY_VERSION = "1.25.0-dev-20260210-0905-b214734cba"
+          Write-Host "Downloading OnnxRuntime.Foundry version: $FOUNDRY_VERSION"
+          nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+
+      - run: Get-ChildItem Microsoft.ML.OnnxRuntime.Foundry -Recurse
+        continue-on-error: true
+
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          mkdir ort/lib
+          move Microsoft.ML.OnnxRuntime.Foundry/build/native/include ort/
+          move Microsoft.ML.OnnxRuntime.Foundry/runtimes/win-x64/native/* ort/lib/
+
+      - name: Install Rust Toolchain
+        run: |
+          $exePath = "$env:TEMP\rustup-init.exe"
+          (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+          & $exePath -y --default-toolchain=1.86.0
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
+      - name: Configure CMake
+        run: |
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True
+
+      - name: Build with CMake
+        run: |
+          cmake --build --preset windows_x64_cpu_release --parallel
+          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+
+      - name: Install Python dependencies and Wheel
+        run: |
+          python -m pip install -r test\python\requirements.txt
+          python -m pip install -r test\python\webgpu\torch\requirements.txt
+          python -m pip install -r test\python\webgpu\ort\requirements.txt
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+
+      - name: Run the Python Tests
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+      - name: Run C++ Unit Tests
+        run: |-
+          copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+          & .\$env:binaryDir\Release\unit_tests.exe

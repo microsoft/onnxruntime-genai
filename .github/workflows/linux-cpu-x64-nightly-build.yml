@@ -12,15 +12,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-x64-1.18.0"
-  ort_zip: "onnxruntime-linux-x64-1.18.0.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-1.18.0.tgz"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   job:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11.x'
+          architecture: 'x64'
 
       - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
         with:
@@ -30,6 +52,7 @@ jobs:
           cmake-hash: '42395e20b10a8e9ef3e33014f9a4eed08d46ab952e02d2c1bbc8f6133eca0d7719fb75680f9bbff6552f20fcd1b73d86860f7f39388d631f98fb6f622b37cf04'
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
+
       - name: Install Rust with rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -40,11 +63,41 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
+      - name: Get the Latest OnnxRuntime Nightly Version
+        shell: pwsh
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download OnnxRuntime Nightly
+        run: |
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+        continue-on-error: true
+
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
+        continue-on-error: true
+
+# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          set -e -x
+          mkdir -p ort/lib
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
+
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
 
-      - name: Build with CMake and clang
+      - name: Build with CMake and GCC
         run: |
           set -e -x
           rm -rf build
@@ -52,20 +105,51 @@ jobs:
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
-      - name: Install the python wheel and test dependencies
+      - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
 
-      - name: Run the python tests
+      - name: Verify Build Artifacts
+        if: always()
         run: |
+          ls -l ${{ github.workspace }}/build
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          set -e -x
+          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja" --use_guidance
+
+      - name: Run the Python tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e
+
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd test/csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+
+      - name: Build the C# Examples
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd examples/csharp/ModelChat
+          dotnet build -c Release
+          cd ../ModelMM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Run Q&A Example
         run: |
-          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
+          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -o ./example-models/qwen2.5-0.5b-instruct -p int4 -e cpu
           python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --user_prompt "what is 10+4?" --non_interactive > output.log 2>&1
           if cat output.log | grep -Eq "14|fourteen"; then
             echo "Result seems correct"
@@ -73,11 +157,6 @@ jobs:
             echo "Result seems incorrect!"
             exit 1
           fi
-
-      - name: Verify Build Artifacts
-        if: always()
-        run: |
-          ls -l ${{ github.workspace }}/build
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4

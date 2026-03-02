@@ -42,6 +42,8 @@ jobs:
         pool: 'onnxruntime-Win-CPU-2022'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
+      demands:
+        - Agent.Version -equals 4.264.2
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx') }}:

@@ -96,7 +96,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
-          python -m pip install onnxruntime-qnn
+          python -m pip install onnxruntime-qnn -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Build the Java API and Run the Java Tests

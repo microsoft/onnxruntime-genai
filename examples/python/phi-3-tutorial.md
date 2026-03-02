@@ -69,6 +69,7 @@ Are you on a Windows machine with GPU?
    Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/common.py -o common.py
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
    python model-qa.py -m directml\directml-int4-awq-block-128 -e dml
    ```
@@ -108,6 +109,7 @@ Are you on a Windows machine with GPU?
    Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/common.py -o common.py
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
    python model-qa.py -m cuda/cuda-int4-rtn-block-32 -e cuda
    ```
@@ -141,6 +143,7 @@ Are you on a Windows machine with GPU?
    Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/common.py -o common.py
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
    python model-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4 -e cpu
    ```

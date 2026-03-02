@@ -238,10 +238,10 @@ class QuantizedModel:
                     elif name == "lm_head.qweight" or name == "transformer.output_layer.qweight":
                         self._initialize_quantized_lm_head(local_bits, local_group_size)
                         self.lm_head.qweight = tensor
-                    elif name in {"lm_head.qzeros", "lm_head.weight_zero_point", "transformer.output_layer.qzeros"}:
+                    elif name in {"lm_head.qzeros", "lm_head.weight_zero_point", "transformer.output_layer.qzeros", "transformer.output_layer.weight_zero_point"}:
                         self._initialize_quantized_lm_head(local_bits, local_group_size)
                         self.lm_head.qzeros = tensor
-                    elif name in {"lm_head.scales", "lm_head.weight_scale", "transformer.output_layer.scales"}:
+                    elif name in {"lm_head.scales", "lm_head.weight_scale", "transformer.output_layer.scales", "transformer.output_layer.weight_scale"}:
                         self._initialize_quantized_lm_head(local_bits, local_group_size)
                         self.lm_head.scales = tensor
                     elif name == "lm_head.g_idx" or name == "transformer.output_layer.g_idx":

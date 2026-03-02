@@ -1,1 +1,2 @@
-onnxruntime-gpu==1.23.0
+-i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+onnxruntime-gpu==1.25.0.dev20260123001
