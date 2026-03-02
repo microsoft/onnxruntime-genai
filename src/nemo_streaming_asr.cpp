@@ -1,7 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-//
-// NemoStreamingASR — streaming ASR for NeMo FastConformer + RNNT models.
 
 #include <algorithm>
 #include <cmath>
@@ -315,9 +313,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
       decoder_state_.state_1 = std::move(dec_outputs[2]);
       decoder_state_.state_2 = std::move(dec_outputs[3]);
 
-      if (best_token < static_cast<int>(vocab_.size())) {
-        result += vocab_[best_token];
-      }
+      result += vocab_[best_token];
     }
   }
 

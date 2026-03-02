@@ -1056,6 +1056,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         import soundfile as sf
     except ImportError:
         pytest.skip("soundfile not installed")
+        return  # unreachable, but satisfies static analysis
 
     audio_path = os.path.join(test_data_path, "audios", "1272-141231-0002.mp3")
     if not os.path.exists(audio_path):
