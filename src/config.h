@@ -202,7 +202,7 @@ struct Config {
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
-      // Mel spectrogram / streaming ASR parameters (populated from genai_config.json)
+      // Mel spectrogram / streaming ASR parameters
       int num_mels{};
       int fft_size{};
       int hop_length{};
@@ -219,7 +219,6 @@ struct Config {
       int max_symbols_per_step{};
 
       // Cache-aware streaming encoder I/O names
-      // These are the ONNX node names for encoder cache inputs/outputs.
       std::string enc_in_length{"length"};
       std::string enc_in_cache_channel{"cache_last_channel"};
       std::string enc_in_cache_time{"cache_last_time"};
@@ -298,11 +297,11 @@ struct Config {
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
 
-        // RNNT decoder (prediction network) inputs
-        std::string targets;          // "targets"
-        std::string target_length;    // "target_length"
-        std::string states_1;         // "states.1"
-        std::string states_2;         // "onnx::Slice_3"
+        // RNNT decoder inputs
+        std::string targets;
+        std::string target_length; 
+        std::string states_1;
+        std::string states_2;
       } inputs;
 
       struct Outputs {
@@ -313,11 +312,11 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
 
-        // RNNT decoder (prediction network) outputs
-        std::string outputs;            // "outputs"
-        std::string prednet_lengths;    // "prednet_lengths"
-        std::string states_1;           // "states"
-        std::string states_2;           // "162"
+        // RNNT decoder outputs
+        std::string outputs;
+        std::string prednet_lengths;
+        std::string states_1;
+        std::string states_2;
       } outputs;
 
       struct PipelineModel {

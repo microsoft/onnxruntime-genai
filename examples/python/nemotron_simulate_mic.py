@@ -69,10 +69,6 @@ def parse_token_ids(raw_text):
 def simulate_microphone(model_path, audio_path):
     """Simulate real-time microphone streaming with wall-clock delays."""
 
-    print("=" * 60)
-    print("  🎤 NEMOTRON SPEECH — SIMULATED REAL-TIME MICROPHONE")
-    print("=" * 60)
-
     # Load audio
     print(f"\nLoading audio: {audio_path}")
     audio = load_audio(audio_path)
@@ -101,8 +97,8 @@ def simulate_microphone(model_path, audio_path):
         audio_time = i / SAMPLE_RATE
         target_time = stream_start + audio_time
         now = time.time()
-        if now < target_time:
-            time.sleep(target_time - now)
+        #if now < target_time:
+        #    time.sleep(target_time - now)
 
         # ── Feed chunk ──
         chunk = audio[i:i + CHUNK_SAMPLES]
@@ -115,7 +111,6 @@ def simulate_microphone(model_path, audio_path):
         if raw_text:
             print(raw_text, end="", flush=True)
 
-    # ── Flush remaining (4 chunks to clear right-context buffer) ──
     for _ in range(4):
         silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
         raw_text = asr.transcribe_chunk(silence)
@@ -124,7 +119,6 @@ def simulate_microphone(model_path, audio_path):
 
     total_wall = time.time() - stream_start
 
-    # Final full transcript from internal accumulation
     full_raw = asr.get_transcript()
     if sp:
         all_ids = parse_token_ids(full_raw)

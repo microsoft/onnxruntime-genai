@@ -5,7 +5,7 @@
 #pragma once
 
 #include "streaming_asr.h"
-#include "nemo_mel_spectrogram.h"  // from onnxruntime-extensions/shared/api
+#include "nemo_mel_spectrogram.h"
 #include "models/nemotron_speech.h"
 
 namespace Generators {
@@ -28,7 +28,6 @@ struct NemoStreamingASR : StreamingASR {
   Model& model_;
   NemotronCacheConfig cache_config_;
 
-  // ONNX sessions (borrowed from NemotronSpeechModel)
   OrtSession* encoder_session_{};
   OrtSession* decoder_session_{};
   OrtSession* joiner_session_{};
@@ -57,12 +56,8 @@ struct NemoStreamingASR : StreamingASR {
   int chunk_index_{0};
 
   void LoadVocab();
-  std::string ProcessMelChunk(const std::vector<float>& mel_data, int num_frames);
+  std::string TranscribeMelChunk(const std::vector<float>& mel_data, int num_frames);
   std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
-
-  // Save a float tensor as .npy file (row-major)
-  static void SaveNpy(const std::string& path, const float* data,
-                      const std::vector<int64_t>& shape);
 };
 
 }  // namespace Generators

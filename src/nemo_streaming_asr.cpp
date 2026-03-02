@@ -14,8 +14,6 @@
 
 namespace Generators {
 
-// ─── Vocabulary loading ─────────────────────────────────────────────────────
-
 void NemoStreamingASR::LoadVocab() {
   if (vocab_loaded_) return;
 
@@ -31,8 +29,6 @@ void NemoStreamingASR::LoadVocab() {
   }
   vocab_loaded_ = true;
 }
-
-// ─── NemoStreamingASR ────────────────────────────────────────────────────────
 
 NemoStreamingASR::NemoStreamingASR(Model& model)
     : model_{model} {
@@ -90,13 +86,12 @@ std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t nu
   std::string result;
   const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
 
-  // Process complete chunks of audio (each = chunk_samples = 8960 samples = 56 mel frames)
+  // Only once we get enough in the buffer, we start processing, depending on the models params.
   while (audio_buffer_.size() >= chunk_sz) {
     // Compute mel for this chunk
     auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
 
-    // Prepend pre-encode cache → feed [cache | new_mel] to encoder
-    result += ProcessMelChunk(mel_data, num_frames);
+    result += TranscribeMelChunk(mel_data, num_frames);
 
     // Advance by full chunk, Nemo models do not require overlapping audio between chunks since the encoder cache provides left context
     audio_buffer_.erase(audio_buffer_.begin(),
@@ -117,7 +112,7 @@ std::string NemoStreamingASR::Flush() {
     audio_buffer_.resize(chunk_sz, 0.0f);
 
     auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
-    result += ProcessMelChunk(mel_data, num_frames);
+    result += TranscribeMelChunk(mel_data, num_frames);
 
     audio_buffer_.clear();
   }
@@ -125,13 +120,12 @@ std::string NemoStreamingASR::Flush() {
   return result;
 }
 
-std::string NemoStreamingASR::ProcessMelChunk(const std::vector<float>& mel_data, int num_frames) {
+std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
-  int cache_size = cache_config_.pre_encode_cache_size;  // 9
+  int cache_size = cache_config_.pre_encode_cache_size; 
   const int num_mels = cache_config_.num_mels;
 
-  // Build encoder input: [pre_encode_cache (9 mel) | new_mel (num_frames mel)]
-  int total_mel_frames = cache_size + num_frames;  // e.g. 9 + 56 = 65
+  int total_mel_frames = cache_size + num_frames;
 
   // Create processed_signal: [1, num_mels, total_mel_frames]
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, total_mel_frames};
@@ -224,8 +218,8 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
   int64_t hidden_dim = enc_shape[1];
-  // Decode ALL encoder output frames — pre-encode cache artifacts are already
-  // removed by the ONNX graph's baked-in Slice (drop_extra_pre_encoded=2).
+  
+  // Decode ALL encoder output frames, pre-encode cache is already removed by the ONNX graph.
   int64_t time_steps = std::min(enc_shape[2], encoded_len);
   const float* enc_data = encoder_output->GetTensorData<float>();
 
@@ -242,7 +236,6 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
     const int max_sym = cache_config_.max_symbols_per_step;
     for (int sym = 0; sym < max_sym; ++sym) {
-      // ── Step 1: Run decoder (prediction network) ──
       auto targets_shape = std::array<int64_t, 2>{1, 1};
       auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
       *targets->GetTensorMutableData<int32_t>() = decoder_state_.last_token;
@@ -267,12 +260,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
           dec_input_names, dec_inputs, 4,
           dec_output_names, 4);
 
-      // dec_outputs[0] = decoder hidden [1, 640, 1]
-      // dec_outputs[1] = prednet_lengths [1]
-      // dec_outputs[2] = new states h [2, ?, 640]
-      // dec_outputs[3] = new states c [2, ?, 640]
-
-      // ── Step 2: Run joiner (joint network) ──
+      // Run joiner
       const char* join_input_names[] = {
           cache_config_.join_in_encoder.c_str(), cache_config_.join_in_decoder.c_str()};
       OrtValue* join_inputs[] = {
@@ -300,7 +288,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
         }
       }
 
-      // Blank => next time step
+      // Blank means current frame is done, move to the next frame.
       if (best_token == cache_config_.blank_id || best_token >= cache_config_.vocab_size) {
         break;
       }
@@ -312,7 +300,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
       if (best_token < static_cast<int>(vocab_.size())) {
         std::string token_str = vocab_[best_token];
-        // Replace sentencepiece space marker "▁" with space
+        // Replace sentencepiece space marker with space
         size_t pos = 0;
         while ((pos = token_str.find("\xe2\x96\x81", pos)) != std::string::npos) {
           token_str.replace(pos, 3, " ");
@@ -325,45 +313,6 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
   return result;
 }
-
-void NemoStreamingASR::SaveNpy(const std::string& path, const float* data,
-                               const std::vector<int64_t>& shape) {
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return;
-
-    // Build header string: "{'descr': '<f4', 'fortran_order': False, 'shape': (D0, D1, ...), }\n"
-    std::string shape_str = "(";
-    for (size_t i = 0; i < shape.size(); ++i) {
-      shape_str += std::to_string(shape[i]);
-      if (i + 1 < shape.size()) shape_str += ", ";
-      else if (shape.size() == 1) shape_str += ",";
-    }
-    shape_str += ")";
-    std::string header = "{'descr': '<f4', 'fortran_order': False, 'shape': " + shape_str + ", }";
-
-    // Pad header to 64-byte alignment (magic=6 + version=2 + header_len=2 + header + '\n')
-    size_t prefix_len = 6 + 2 + 2;  // magic + version + header_len
-    size_t total = prefix_len + header.size() + 1;  // +1 for trailing '\n'
-    size_t pad = (64 - (total % 64)) % 64;
-    header.append(pad, ' ');
-    header += '\n';
-
-    uint16_t header_len = static_cast<uint16_t>(header.size());
-
-    // Write magic
-    f.write("\x93NUMPY", 6);
-    // Write version 1.0
-    char ver[] = {1, 0};
-    f.write(ver, 2);
-    // Write header length (little-endian)
-    f.write(reinterpret_cast<const char*>(&header_len), 2);
-    // Write header
-    f.write(header.data(), header.size());
-    // Write data
-    size_t num_elements = 1;
-    for (auto d : shape) num_elements *= static_cast<size_t>(d);
-    f.write(reinterpret_cast<const char*>(data), num_elements * sizeof(float));
-  }
 
   std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
   return std::make_unique<NemoStreamingASR>(model);

@@ -963,11 +963,6 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     _ = processor(prompts, audios=audios)
 
 
-# ===========================================================================
-# StreamingASR / Nemotron Speech tests
-# ===========================================================================
-
-
 def test_streaming_asr_create(nemotron_speech_model_path):
     """Test that a StreamingASR instance can be created from a nemotron_speech model."""
     model = og.Model(nemotron_speech_model_path)

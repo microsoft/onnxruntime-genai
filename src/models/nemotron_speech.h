@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 //
 // Nemotron Speech Streaming ASR model support.
-// Cache-aware streaming encoder + RNNT decoder_joint for real-time transcription.
 #pragma once
 
 #include "model.h"
@@ -10,10 +9,7 @@
 
 namespace Generators {
 
-/// Configuration for Nemotron streaming encoder cache dimensions.
-/// Populated from Config::Model at model load time via PopulateFromConfig().
 struct NemotronCacheConfig {
-  // All values populated from genai_config.json via PopulateFromConfig().
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
   int num_encoder_layers{};
   int hidden_dim{};
@@ -30,12 +26,12 @@ struct NemotronCacheConfig {
 
   // Streaming chunk config
   int chunk_frames{};
-  int sample_rate{16000};
+  int sample_rate{};
   int chunk_samples{};
   int subsampling_factor{};
   int max_symbols_per_step{};
 
-  // Mel spectrogram parameters (from speech.*)
+  // Mel spectrogram parameters
   int num_mels{};
   int fft_size{};
   int hop_length{};
@@ -46,7 +42,7 @@ struct NemotronCacheConfig {
   // Pre-encode cache
   int pre_encode_cache_size{};
 
-  // Encoder I/O names (populated from genai_config.json)
+  // Encoder I/O names
   std::string enc_in_audio;
   std::string enc_in_length;
   std::string enc_in_cache_channel;
@@ -73,7 +69,6 @@ struct NemotronCacheConfig {
   std::string join_in_decoder;
   std::string join_out_logits;
 
-  /// Populate from a Config object (reads encoder/decoder/joiner/speech sections).
   void PopulateFromConfig(const Config& config);
 };
 
@@ -92,7 +87,6 @@ struct NemotronEncoderCache {
 
 /// Holds the RNNT decoder LSTM hidden states between decoding steps.
 struct NemotronDecoderState {
-  // input_states_1 / input_states_2: [lstm_layers, 1, lstm_dim]
   std::unique_ptr<OrtValue> state_1;
   std::unique_ptr<OrtValue> state_2;
   int last_token{0};  // Last emitted non-blank token (for autoregressive feedback)
@@ -100,8 +94,6 @@ struct NemotronDecoderState {
   void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
   void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
 };
-
-// ─── Model ──────────────────────────────────────────────────────────────────
 
 struct NemotronSpeechModel : Model {
   NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env);

@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 //
 // StreamingASR — abstract interface for streaming speech recognition.
-// Concrete implementations live in model-specific headers (e.g. nemo_streaming_asr.h).
 #pragma once
 
 #include "models/model.h"
@@ -11,8 +10,6 @@ namespace Generators {
 
 /// Abstract base class for streaming ASR.
 ///
-/// Concrete implementations (e.g. NemoStreamingASR for FastConformer + RNNT)
-/// handle model-specific encoder caching, mel extraction, and decoder logic.
 ///
 /// Usage:
 ///   auto model = CreateModel(env, "path/to/model");

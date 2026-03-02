@@ -1366,10 +1366,6 @@ TEST(CAPITests, SetGuidance) {
 }
 #endif
 
-// ============================================================================
-// StreamingASR / Nemotron Speech tests
-// ============================================================================
-
 // Path to the nemotron speech test model. Set via environment variable or CI data path.
 static std::string GetNemotronSpeechModelPath() {
   const char* env = std::getenv("NEMOTRON_SPEECH_MODEL_PATH");

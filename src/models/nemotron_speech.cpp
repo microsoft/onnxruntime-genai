@@ -13,8 +13,6 @@
 
 namespace Generators {
 
-// ─── NemotronCacheConfig ────────────────────────────────────────────────────
-
 void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
   const auto& dec = config.model.decoder;
@@ -29,7 +27,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   decoder_lstm_dim = dec.hidden_size;
   decoder_lstm_layers = dec.num_hidden_layers;
 
-  // Speech / mel feature config (defaults live in Config::Model::Speech)
+  // Speech / mel feature config
   num_mels = sp.num_mels;
   fft_size = sp.fft_size;
   hop_length = sp.hop_length;
@@ -78,8 +76,6 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   dec_out_states_2 = dec.outputs.states_2;
 }
 
-// ─── NemotronEncoderCache ───────────────────────────────────────────────────
-
 void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
   // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
@@ -103,8 +99,6 @@ void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, OrtAllocator& a
   Initialize(cfg, allocator);
 }
 
-// ─── NemotronDecoderState ───────────────────────────────────────────────────
-
 void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
   // LSTM states: [lstm_layers, 1, lstm_dim]
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
@@ -116,18 +110,15 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocat
   std::memset(state_2->GetTensorMutableRawData(), 0,
               cfg.decoder_lstm_layers * 1 * cfg.decoder_lstm_dim * sizeof(float));
 
-  last_token = cfg.blank_id;  // Start with blank/SOS token (not token 0)
+  last_token = cfg.blank_id;  // Start with blank/SOS token
 }
 
 void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
   Initialize(cfg, allocator);
 }
 
-// ─── NemotronSpeechModel ────────────────────────────────────────────────────
-
 NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  // Populate from genai_config.json; defaults match the 0.6B streaming model
   cache_config_ = NemotronCacheConfig{};
   cache_config_.PopulateFromConfig(*config_);
 
@@ -154,15 +145,12 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   }
 
   // Load the three ONNX models
-  // encoder.onnx - cache-aware streaming encoder
   std::string encoder_filename = config_->model.encoder.filename;
   if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
 
-  // decoder.onnx - RNNT prediction network
   std::string decoder_filename = config_->model.decoder.filename;
   if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
 
-  // joiner.onnx - RNNT joint network
   std::string joiner_filename = config_->model.joiner.filename;
   if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
 
