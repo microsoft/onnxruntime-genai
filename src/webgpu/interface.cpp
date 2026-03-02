@@ -97,42 +97,22 @@ struct WebGPUMemory final : DeviceBuffer {
     const OrtMemoryInfo* webgpu_mem_info = nullptr;
     Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
 
-    // Create destination tensor - full destination buffer
-    int64_t dst_shape_val = static_cast<int64_t>(size_in_bytes_);
-    std::span<const int64_t> dst_shape{&dst_shape_val, 1};
-    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, dst_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    // Create tensors with explicit byte offsets into each buffer, then use CopyTensors.
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, begin_dest, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     std::unique_ptr<OrtValue> src_tensor;
-
     if (source.GetType() == device_label) {
-      // WebGPU-to-WebGPU copy
-      // NOTE: p_device_ is a WGPUBuffer handle (cast to uint8_t*), not a memory pointer.
-      // We cannot use pointer arithmetic (p_device_ + offset) to create sub-buffer views.
-      // Instead, we use CopyTensorsEx which handles offsets at the buffer level.
-
-      // Create source tensor - full source buffer
-      int64_t src_shape_val = static_cast<int64_t>(source.size_in_bytes_);
-      std::span<const int64_t> src_shape{&src_shape_val, 1};
-      src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_, source.size_in_bytes_, src_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_, source.size_in_bytes_, begin_source, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     } else {
-      // CPU-to-WebGPU copy
-      // Source is on CPU, p_cpu_ should already be available
       auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-
-      // Create source tensor - full source buffer
-      int64_t src_shape_val = static_cast<int64_t>(source.size_in_bytes_);
-      std::span<const int64_t> src_shape{&src_shape_val, 1};
-      src_tensor = OrtValue::CreateTensor(*cpu_mem_info, source.p_cpu_, source.size_in_bytes_, src_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      src_tensor = OrtValue::CreateTensor(*cpu_mem_info, source.p_cpu_, source.size_in_bytes_, begin_source, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     }
 
-    // Use CopyTensorsEx with offset-based copying for both cases
-    std::vector<size_t> src_offsets = {begin_source};
-    std::vector<size_t> dst_offsets = {begin_dest};
-    std::vector<size_t> sizes = {size_in_bytes};
-
-    std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
     std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-    GetOrtEnv().CopyTensorsEx(src_ptrs, dst_ptrs, &src_offsets, &dst_offsets, &sizes, nullptr);
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 
   void Zero() override {
@@ -234,53 +214,29 @@ struct InterfaceImpl : DeviceInterface {
     }
 
     if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-      // For static mask handling: Only update the new portion with offset-based copying
       std::vector<int32_t> cpu_data(new_kv_length, 1);  // Fill new portion with 1s
 
-      // Create source tensor (CPU memory) - only the new data
-      std::array<int64_t, 2> src_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int32_t), src_shape, type);
+      std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int32_t), shape, type);
 
-      // Create destination tensor (WebGPU device memory) - full buffer
-      std::array<int64_t, 2> dst_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(max_length)};
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int32_t), dst_shape, type);
-
-      // Calculate offset for where to write the new data
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int32_t);
-      size_t copy_size = new_kv_length * sizeof(int32_t);
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int32_t), destination_offset, shape, type);
 
-      // Use CopyTensorsEx with offset-based copying
-      std::vector<size_t> src_offsets = {0};
-      std::vector<size_t> dst_offsets = {destination_offset};
-      std::vector<size_t> sizes = {copy_size};
-
-      std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
       std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-      GetOrtEnv().CopyTensorsEx(src_ptrs, dst_ptrs, &src_offsets, &dst_offsets, &sizes, nullptr);
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
     } else {
-      // For static mask handling: Only update the new portion with offset-based copying
       std::vector<int64_t> cpu_data(new_kv_length, 1);  // Fill new portion with 1s
 
-      // Create source tensor (CPU memory) - only the new data
-      std::array<int64_t, 2> src_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int64_t), src_shape, type);
+      std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int64_t), shape, type);
 
-      // Create destination tensor (WebGPU device memory) - full buffer
-      std::array<int64_t, 2> dst_shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(max_length)};
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int64_t), dst_shape, type);
-
-      // Calculate offset for where to write the new data
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int64_t);
-      size_t copy_size = new_kv_length * sizeof(int64_t);
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int64_t), destination_offset, shape, type);
 
-      // Use CopyTensorsEx with offset-based copying
-      std::vector<size_t> src_offsets = {0};
-      std::vector<size_t> dst_offsets = {destination_offset};
-      std::vector<size_t> sizes = {copy_size};
-
-      std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
       std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-      GetOrtEnv().CopyTensorsEx(src_ptrs, dst_ptrs, &src_offsets, &dst_offsets, &sizes, nullptr);
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
     }
 
     return true;
