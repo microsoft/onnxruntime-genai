@@ -476,7 +476,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
-      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); });
+      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
+      .def("create_streaming_asr", [](OgaModel& model) { return OgaStreamingASR::Create(model); },
+           "Create a StreamingASR instance for real-time streaming speech recognition.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())

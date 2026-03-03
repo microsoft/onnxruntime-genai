@@ -159,7 +159,7 @@ def run_tool_calling():
 
 
 def run_nemotron_speech():
-    """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_batch.py example."""
+    """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_streaming.py example."""
     log.debug("Running Nemotron Speech Python E2E Test")
 
     # Look for nemotron speech model in test_models directory
@@ -177,7 +177,7 @@ def run_nemotron_speech():
 
     command = [
         sys.executable,
-        os.path.join(cwd, "..", "..", "examples", "python", "nemotron_batch.py"),
+        os.path.join(cwd, "..", "..", "examples", "python", "nemotron_streaming.py"),
         "--model_path",
         model_path,
         "--audio_file",

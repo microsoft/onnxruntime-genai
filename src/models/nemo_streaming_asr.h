@@ -44,7 +44,6 @@ struct NemoStreamingASR : StreamingASR {
   // E.g. 0.56s of audio with 10ms hop results in 56 frames, and we can based on the convolution settings apply 9 frames in front, giving total of 65 frames.
   // 65 frames will be enough to precisely encode the chunk including transitions between chunks.
   std::vector<float> mel_pre_encode_cache_;
-  bool is_first_chunk_{true};
 
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;

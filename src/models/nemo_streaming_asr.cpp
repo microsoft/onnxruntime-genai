@@ -61,7 +61,6 @@ NemoStreamingASR::NemoStreamingASR(Model& model)
   // Initialize mel pre-encode cache (zeros for first chunk)
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
-  is_first_chunk_ = true;
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
@@ -79,7 +78,6 @@ void NemoStreamingASR::Reset() {
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
-  is_first_chunk_ = true;
   audio_buffer_.clear();
 }
 
@@ -175,7 +173,6 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
                   num_frames * sizeof(float));
     }
   }
-  is_first_chunk_ = false;
 
   // Create processed_signal_length: [1]
   auto len_shape = std::array<int64_t, 1>{1};
