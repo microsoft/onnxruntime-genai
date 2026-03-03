@@ -9,4 +9,3 @@ onnx
 onnx_ir>=0.1.3
 transformers<5.0.0
 huggingface_hub[cli]
-soundfile
