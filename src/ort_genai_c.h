@@ -80,6 +80,7 @@ typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
 typedef struct OgaStreamingASR OgaStreamingASR;
+typedef struct OgaBatchASR OgaBatchASR;
 
 //! @}
 
@@ -1194,6 +1195,30 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, co
  * \param[in] asr The StreamingASR instance to destroy.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* asr);
+
+/**
+ * \brief Creates a BatchASR instance for offline (non-streaming) speech recognition.
+ * \param[in] model The model to use for batch ASR (must be nemotron_speech type).
+ * \param[out] out Pointer to store the created BatchASR instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateBatchASR(OgaModel* model, OgaBatchASR** out);
+
+/**
+ * \brief Transcribe a complete audio buffer. Returns the full transcript.
+ * \param[in] asr The BatchASR instance.
+ * \param[in] audio_data Pointer to float32 PCM audio samples (mono, 16kHz).
+ * \param[in] num_samples Number of audio samples.
+ * \param[out] text Pointer to store the transcribed text. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaBatchASRTranscribe(OgaBatchASR* asr, const float* audio_data, size_t num_samples, const char** text);
+
+/**
+ * \brief Destroy a BatchASR instance.
+ * \param[in] asr The BatchASR instance to destroy.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyBatchASR(OgaBatchASR* asr);
 
 #ifdef __cplusplus
 }

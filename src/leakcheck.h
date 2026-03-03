@@ -8,6 +8,7 @@
 // On process exit, ValidateShutdown() will call LeakTypeList::Dump() and print out any types that have leaked.
 
 namespace Generators {
+struct BatchASR;
 struct Engine;
 struct GeneratorParams;
 struct Generator;
@@ -26,7 +27,7 @@ struct LeakTypeList {
   static bool Dump();
 };
 
-using LeakTypes = LeakTypeList<Engine, GeneratorParams, Generator, Model, Request, Search, StreamingASR, Tensor, Tokenizer, TokenizerStream>;
+using LeakTypes = LeakTypeList<BatchASR, Engine, GeneratorParams, Generator, Model, Request, Search, StreamingASR, Tensor, Tokenizer, TokenizerStream>;
 
 template <typename T>
 struct LeakChecked {

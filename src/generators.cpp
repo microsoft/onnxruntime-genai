@@ -5,6 +5,7 @@
 
 #include "generators.h"
 #include "streaming_asr.h"
+#include "batch_asr.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"

@@ -652,6 +652,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("reset", [](OgaStreamingASR& asr) { asr.Reset(); },
            "Reset streaming state for a new utterance.");
 
+  pybind11::class_<OgaBatchASR>(m, "BatchASR")
+      .def(pybind11::init([](OgaModel& model) { return OgaBatchASR::Create(model); }),
+           "Create a BatchASR instance for offline (non-streaming) speech recognition.\n"
+           "The model must be of type 'nemotron_speech'.")
+      .def("transcribe", [](OgaBatchASR& asr, pybind11::array_t<float> audio) -> std::string {
+        auto buf = audio.request();
+        auto result = asr.Transcribe(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
+        return std::string(result.p_);
+      }, pybind11::arg("audio"),
+         "Transcribe a complete float32 PCM audio buffer (mono, 16kHz).\n"
+         "Returns the full transcript. Each call is independent.");
+
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
 

@@ -918,3 +918,19 @@ struct OgaStreamingASR : OgaAbstract {
 
   static void operator delete(void* p) { OgaDestroyStreamingASR(reinterpret_cast<OgaStreamingASR*>(p)); }
 };
+
+struct OgaBatchASR : OgaAbstract {
+  static std::unique_ptr<OgaBatchASR> Create(OgaModel& model) {
+    OgaBatchASR* p;
+    OgaCheckResult(OgaCreateBatchASR(&model, &p));
+    return std::unique_ptr<OgaBatchASR>(p);
+  }
+
+  OgaString Transcribe(const float* audio_data, size_t num_samples) {
+    const char* text;
+    OgaCheckResult(OgaBatchASRTranscribe(this, audio_data, num_samples, &text));
+    return text;
+  }
+
+  static void operator delete(void* p) { OgaDestroyBatchASR(reinterpret_cast<OgaBatchASR*>(p)); }
+};
