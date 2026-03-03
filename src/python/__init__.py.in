@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-import onnxruntime as _ort  # noqa: F401
-
 from onnxruntime_genai import _dll_directory
 
 __version__ = "@VERSION_INFO@"
