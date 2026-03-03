@@ -1,4 +1,4 @@
-© 2026 Advanced Micro Devices, Inc. All rights reserved. 
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved. 
 
 # Build your Qwen3-VL ONNX models for ONNX Runtime GenAI
 
