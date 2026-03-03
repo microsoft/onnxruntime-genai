@@ -127,8 +127,10 @@ class Model:
                 "enable_skip_layer_norm_strict_mode": "1",
             },
             "dml": {},
-            # TODO: Enable graph capture for webgpu once supported both in onnxruntime-genai and onnxruntime.
-            "webgpu": {},
+            "webgpu": {
+                "enableGraphCapture": "1" if extra_options.get("enable_webgpu_graph", False) else "0",
+                "validationMode": "disabled" if extra_options.get("enable_webgpu_graph", False) else "basic",
+            },
             "trt-rtx": {"enable_cuda_graph": "1"},
         }
 
@@ -435,6 +437,11 @@ class Model:
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+        self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
+
+        if self.prune_lm_head and self.exclude_lm_head:
+            print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
+            self.prune_lm_head = False
 
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
@@ -1070,9 +1077,10 @@ class Model:
         self.make_initializer(matmul.weight.T, weight, to=self.io_dtype)
 
         last_dim = matmul.weight.shape[0]
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", last_dim])
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, last_dim])
 
         return name
 
@@ -1104,6 +1112,7 @@ class Model:
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
         self.make_node(
             "MatMulNBits",
             inputs=inputs,
@@ -1116,7 +1125,7 @@ class Model:
             K=matmul.in_features,
             N=matmul.out_features,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", matmul.out_features])
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, matmul.out_features])
 
         return name
 
@@ -1191,11 +1200,12 @@ class Model:
         transpose_name = f"{matmul_name}/Transpose"
         self.make_transpose(transpose_name, dequantize_output, self.io_dtype, transposed_shape, [1, 0])
 
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
         matmul_output = "logits" if kwargs.get("logits", False) else f"{matmul_name}/output_0"
         self.make_node(
             "MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name
         )
-        self.make_value(matmul_output, self.io_dtype, shape=["batch_size", "sequence_length", matmul.out_features])
+        self.make_value(matmul_output, self.io_dtype, shape=["batch_size", seq_dim, matmul.out_features])
 
         return matmul_name
 
@@ -1215,16 +1225,17 @@ class Model:
         #           Add_LoRA_Add
 
         basename_parts = basename.split("/")
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
 
         # Make LoRA MatMul path
         matmul_A_basename = "/".join(basename_parts[:-1] + ["lora_A"] + basename_parts[-1:])
-        matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
+        matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input, seq_dim=seq_dim)
         lora_A = f"{matmul_A_name}/output_0"
 
         matmul.lora_B.default.weight.requires_grad = False  # since a leaf variable is updated in-place
         matmul.lora_B.default.weight *= matmul.scaling["default"]
         matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
-        matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
+        matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A, seq_dim=seq_dim)
         lora_B = f"{matmul_B_name}/output_0"
 
         # Make regular MatMul path
@@ -1234,7 +1245,7 @@ class Model:
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
         add_inputs = [f"{matmul_name}/output_0", lora_B]
-        add_shape = ["batch_size", "sequence_length", last_dim]
+        add_shape = ["batch_size", seq_dim, last_dim]
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
 
         return add_name
@@ -1301,7 +1312,8 @@ class Model:
         self.make_initializer(add, bias, to=self.io_dtype)
 
         add_bias_inputs = [root_input, bias]
-        shape = ["batch_size", "sequence_length", add.shape[0]]
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
+        shape = ["batch_size", seq_dim, add.shape[0]]
 
         if kwargs.get("logits", False):
             output = "logits"
@@ -1944,6 +1956,9 @@ class Model:
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
+            # Set multiRotaryCacheConcatOffset for WebGPU EP
+            if self.ep == "webgpu":
+                self.ep_attrs["webgpu"]["multiRotaryCacheConcatOffset"] = str(self.original_context_length)
             # Do NOT make the subgraph with the If node for DML EP.
             return
 
@@ -3621,13 +3636,47 @@ class Model:
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not any(exists_checks))
+
+        # Sequence dimension for shape annotations ("sequence_length" normally, 1 when pruned)
+        seq_dim = "sequence_length"
+
+        if self.prune_lm_head:
+            # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
+            # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
+            # during prefill, reducing compute by ~S×.
+            seq_dim = 1
+
+            # Gather: [B, S, H] + scalar(-1) -> [B, H]
+            gather_name = "/lm_head/GatherLastToken"
+            self.make_gather(
+                gather_name,
+                inputs=[root_input, "/model/constants/INT64/-1"],
+                dtype=self.io_dtype,
+                shape=["batch_size", self.hidden_size],
+                axis=1,
+            )
+
+            # Unsqueeze: [B, H] -> [B, 1, H]
+            unsqueeze_name = "/lm_head/UnsqueezeLastToken"
+            self.make_unsqueeze(
+                unsqueeze_name,
+                inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"],
+                dtype=self.io_dtype,
+                shape=["batch_size", 1, self.hidden_size],
+            )
+
+            root_input = f"{unsqueeze_name}/output_0"
+
+            # Update logits output shape
+            self.output_shapes["logits"] = ["batch_size", 1, self.vocab_size]
+
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not any(exists_checks), seq_dim=seq_dim)
         lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
             self.make_add_bias(
-                lm_head.bias, add_name, root_input=f"{lm_name}/output_0", logits=not any(exists_checks[1:])
+                lm_head.bias, add_name, root_input=f"{lm_name}/output_0", logits=not any(exists_checks[1:]), seq_dim=seq_dim
             )
             lm_name = add_name
 
@@ -3639,7 +3688,7 @@ class Model:
             ]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
             lm_name = mul_name
 
         if mask_exists:
@@ -3655,7 +3704,7 @@ class Model:
             ]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node("Where", inputs=where_inputs, outputs=[where_output], name=where_name)
-            self.make_value(where_output, self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
+            self.make_value(where_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
             lm_name = where_name
 
         if softcap_exists:
@@ -3666,7 +3715,7 @@ class Model:
                 f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}",
             ]
             self.make_div(
-                div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size]
+                div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size]
             )
 
             tanh_name = "/lm_head/softcap/Tanh"
@@ -3674,7 +3723,7 @@ class Model:
                 tanh_name,
                 f"{div_name}/output_0",
                 dtype=self.io_dtype,
-                shape=["batch_size", "sequence_length", self.vocab_size],
+                shape=["batch_size", seq_dim, self.vocab_size],
             )
 
             mul_name = "/lm_head/softcap/Mul"
@@ -3684,7 +3733,7 @@ class Model:
             ]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
             lm_name = mul_name
 
         if cast_exists:
@@ -3699,7 +3748,7 @@ class Model:
                 to=self.output_types["logits"],
             )
             self.make_value(
-                cast_output, self.output_types["logits"], shape=["batch_size", "sequence_length", self.vocab_size]
+                cast_output, self.output_types["logits"], shape=["batch_size", seq_dim, self.vocab_size]
             )
 
     def make_layer(self, layer_id, layer):
