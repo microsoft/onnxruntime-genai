@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-# Force-load the active environment's onnxruntime package first on Windows.
-# This prevents accidentally binding to an older onnxruntime.dll from PATH.
 import onnxruntime as _ort  # noqa: F401
 
 from onnxruntime_genai import _dll_directory
