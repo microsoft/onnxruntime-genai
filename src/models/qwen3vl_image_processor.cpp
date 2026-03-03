@@ -15,23 +15,23 @@ namespace {
 // For Qwen3-VL: patch_size=16, temporal_patch_size=2
 // patch_features = channels * temporal_patch_size * patch_size * patch_size = 3 * 2 * 16 * 16 = 1536
 std::unique_ptr<OrtValue> ConvertToPatch(const float* image_data,
-                                          int64_t channels, int64_t height, int64_t width,
-                                          int64_t patch_size, int64_t temporal_patch_size,
-                                          Ort::Allocator& allocator) {
+                                         int64_t channels, int64_t height, int64_t width,
+                                         int64_t patch_size, int64_t temporal_patch_size,
+                                         Ort::Allocator& allocator) {
   int64_t patches_h = height / patch_size;
   int64_t patches_w = width / patch_size;
   int64_t num_patches = patches_h * patches_w;
   int64_t patch_features = channels * temporal_patch_size * patch_size * patch_size;
-  
+
   auto patch_tensor = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_patches, patch_features});
   float* patch_data = patch_tensor->GetTensorMutableData<float>();
-  
+
   // Extract patches
   for (int64_t ph = 0; ph < patches_h; ++ph) {
     for (int64_t pw = 0; pw < patches_w; ++pw) {
       int64_t patch_idx = ph * patches_w + pw;
       float* patch_ptr = patch_data + patch_idx * patch_features;
-      
+
       // For each channel
       for (int64_t c = 0; c < channels; ++c) {
         // Duplicate for temporal dimension (temporal_patch_size times)
@@ -49,7 +49,7 @@ std::unique_ptr<OrtValue> ConvertToPatch(const float* image_data,
       }
     }
   }
-  
+
   return patch_tensor;
 }
 
@@ -243,7 +243,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
 Qwen3VLImageProcessor::Qwen3VLImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
-      spatial_merge_size_{2} {  // Qwen3-VL uses merge_size=2
+      spatial_merge_size_{2} {                                  // Qwen3-VL uses merge_size=2
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -300,7 +300,7 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
 
   // Accept CHW ([3, H, W]) and HWC ([H, W, 3]) from different ort-extensions pipelines.
   if (pixel_target_shape.size() != 3) {
-    throw std::runtime_error("Expected pixel_values in CHW format [C, H, W], got rank " + 
+    throw std::runtime_error("Expected pixel_values in CHW format [C, H, W], got rank " +
                              std::to_string(pixel_target_shape.size()));
   }
 
@@ -339,9 +339,11 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
   const int64_t height_patches = raw_height_patches - (raw_height_patches % spatial_merge_size_);
   const int64_t width_patches = raw_width_patches - (raw_width_patches % spatial_merge_size_);
   if (height_patches <= 0 || width_patches <= 0) {
-    throw std::runtime_error("Qwen3-VL requires at least one spatial-merge compatible patch region. "
-                             "Got grid " + std::to_string(raw_height_patches) + "x" + std::to_string(raw_width_patches) +
-                             " with merge size " + std::to_string(spatial_merge_size_) + ".");
+    throw std::runtime_error(
+        "Qwen3-VL requires at least one spatial-merge compatible patch region. "
+        "Got grid " +
+        std::to_string(raw_height_patches) + "x" + std::to_string(raw_width_patches) +
+        " with merge size " + std::to_string(spatial_merge_size_) + ".");
   }
   const int64_t effective_height = height_patches * patch_size;
   const int64_t effective_width = width_patches * patch_size;
