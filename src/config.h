@@ -299,7 +299,7 @@ struct Config {
 
         // RNNT decoder inputs
         std::string targets;
-        std::string target_length; 
+        std::string target_length;
         std::string states_1;
         std::string states_2;
       } inputs;

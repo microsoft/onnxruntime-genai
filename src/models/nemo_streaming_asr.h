@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "streaming_asr.h"
+#include "../streaming_asr.h"
 #include "nemo_mel_spectrogram.h"
-#include "models/nemotron_speech.h"
+#include "nemotron_speech.h"
 
 namespace Generators {
 

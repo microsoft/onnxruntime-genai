@@ -7,7 +7,7 @@
 #include <fstream>
 #include <numeric>
 
-#include "generators.h"
+#include "../generators.h"
 #include "nemo_streaming_asr.h"
 
 namespace Generators {
@@ -133,7 +133,7 @@ std::string NemoStreamingASR::Flush() {
 
 std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
-  int cache_size = cache_config_.pre_encode_cache_size; 
+  int cache_size = cache_config_.pre_encode_cache_size;
   const int num_mels = cache_config_.num_mels;
 
   int total_mel_frames = cache_size + num_frames;
@@ -228,7 +228,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
   int64_t hidden_dim = enc_shape[1];
-  
+
   // Decode ALL encoder output frames, pre-encode cache is already removed by the ONNX graph.
   int64_t time_steps = std::min(enc_shape[2], encoded_len);
   const float* enc_data = encoder_output->GetTensorData<float>();
@@ -320,7 +320,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   return result;
 }
 
-  std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
+std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
   return std::make_unique<NemoStreamingASR>(model);
 }
 
