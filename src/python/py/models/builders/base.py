@@ -3647,7 +3647,7 @@ class Model:
             seq_dim = 1
 
             # Gather: [B, S, H] + scalar(-1) -> [B, H]
-            gather_name = "/lm_head/Gather"
+            gather_name = "/lm_head/prune/Gather"
             self.make_gather(
                 gather_name,
                 inputs=[root_input, "/model/constants/INT64/-1"],
@@ -3657,7 +3657,7 @@ class Model:
             )
 
             # Unsqueeze: [B, H] -> [B, 1, H]
-            unsqueeze_name = "/lm_head/Unsqueeze"
+            unsqueeze_name = "/lm_head/prune/Unsqueeze"
             self.make_unsqueeze(
                 unsqueeze_name,
                 inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"],
