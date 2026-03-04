@@ -235,6 +235,31 @@ if(USE_GUIDANCE)
     # bcrypt is needed for the rust std lib
     target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
   endif()
+  if(MSVC)
+    # The Rust llguidance static library is always compiled against the release MSVC CRT
+    # (Rust has no debug CRT concept). The .lib embeds /DEFAULTLIB directives for the release
+    # CRT and /NODEFAULTLIB directives that suppress the debug CRT (msvcrtd, ucrtd, vcruntimed).
+    # In Debug builds, C++ code (e.g. onnxruntime-extensions) is compiled with /MDd and references
+    # debug-only CRT functions like _CrtDbgReport (in ucrtd.lib). Because the Rust .lib suppresses
+    # ucrtd.lib via its embedded /NODEFAULTLIB, _CrtDbgReport becomes unresolved.
+    #
+    # Fix: explicitly add the debug CRT import libraries in Debug builds. Explicitly specified
+    # libraries are not affected by /NODEFAULTLIB directives (those only suppress /DEFAULTLIB
+    # auto-linking). Also suppress the conflicting release CRT to avoid LNK4098 warnings.
+    target_link_libraries(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:msvcrtd.lib>
+      $<$<CONFIG:Debug>:ucrtd.lib>
+      $<$<CONFIG:Debug>:vcruntimed.lib>
+    )
+    target_link_options(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:ucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:vcruntime.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libvcruntime.lib>
+    )
+  endif()
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
