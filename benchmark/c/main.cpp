@@ -124,25 +124,6 @@ static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::
   return params;
 }
 
-std::string GeneratePrompt(const benchmark::Options& opts, size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer, size_t batch_size) {
-  const char* const base_prompt = "A";
-  auto base_prompt_sequences = OgaSequences::Create();
-  for (size_t i = 0; i < batch_size; ++i) {
-    tokenizer.Encode(base_prompt, *base_prompt_sequences);
-  }
-
-  auto params = MakeGeneratorParams(opts, model, num_prompt_tokens);
-  auto generator = OgaGenerator::Create(model, *params);
-  generator->AppendTokenSequences(*base_prompt_sequences);
-  while (!generator->IsDone() && num_prompt_tokens-- > 0) {
-    generator->GenerateNextToken();
-  }
-
-  const auto output_sequence_length = generator->GetSequenceCount(0);
-  const auto* output_sequence_data = generator->GetSequenceData(0);
-  return std::string{tokenizer.Decode(output_sequence_data, output_sequence_length)};
-}
-
 void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
 
@@ -166,31 +147,61 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  const auto prompt = [&]() -> std::string {
-    if (const size_t* num_prompt_tokens = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
-      return GeneratePrompt(opts, *num_prompt_tokens, *model, *tokenizer, opts.batch_size);
-    }
-    return std::get<std::string>(opts.prompt_num_tokens_or_content);
-  }();
-
-  auto prompt_sequences = OgaSequences::Create();
-
   if (opts.batch_size < 1) {
     throw std::runtime_error("Batch size must be at least 1.");
   }
 
+  // Determine num_prompt_tokens early so the generator is created with the full
+  // capacity (prompt + generation tokens) and its KV cache is large enough for
+  // all subsequent iterations.
+  size_t num_prompt_tokens;
+  bool need_generate_prompt = false;
+  std::string prompt;
+
+  if (const size_t* npt = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
+    num_prompt_tokens = *npt;
+    need_generate_prompt = true;
+  } else {
+    prompt = std::get<std::string>(opts.prompt_num_tokens_or_content);
+    auto temp_sequences = OgaSequences::Create();
+    tokenizer->Encode(prompt.c_str(), *temp_sequences);
+    num_prompt_tokens = temp_sequences->SequenceCount(0);
+  }
+
+  const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
+  const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
+
+  // Create a single generator and reuse it for prompt generation, warmup, and
+  // benchmark iterations via RewindTo(0).  This guarantees the KV cache is
+  // always sized for the full workload.
+  auto generator = OgaGenerator::Create(*model, *generator_params);
+
+  if (need_generate_prompt) {
+    // Use the same generator (with full-size KV cache) to produce the prompt
+    const char* const base_prompt = "A";
+    auto base_prompt_sequences = OgaSequences::Create();
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      tokenizer->Encode(base_prompt, *base_prompt_sequences);
+    }
+    generator->AppendTokenSequences(*base_prompt_sequences);
+    auto remaining = num_prompt_tokens;
+    while (!generator->IsDone() && remaining-- > 0) {
+      generator->GenerateNextToken();
+    }
+    const auto output_sequence_length = generator->GetSequenceCount(0);
+    const auto* output_sequence_data = generator->GetSequenceData(0);
+    prompt = std::string{tokenizer->Decode(output_sequence_data, output_sequence_length)};
+  }
+
+  auto prompt_sequences = OgaSequences::Create();
   for (size_t i = 0; i < opts.batch_size; ++i) {
     tokenizer->Encode(prompt.c_str(), *prompt_sequences);
   }
 
-  const size_t num_prompt_tokens = prompt_sequences->SequenceCount(0);
-  const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
-  const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
-
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
-    auto generator = OgaGenerator::Create(*model, *generator_params);
+    generator->RewindTo(0);
     auto num_tokens_to_generate = opts.num_tokens_to_generate;
     generator->AppendTokenSequences(*prompt_sequences);
     while (!generator->IsDone() && num_tokens_to_generate-- > 0) {
@@ -216,7 +227,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_iterations; ++i) {
-    auto generator = OgaGenerator::Create(*model, *generator_params);
+    generator->RewindTo(0);
     auto num_tokens_to_generate = opts.num_tokens_to_generate;
 
     {
@@ -245,6 +256,9 @@ void RunBenchmark(const benchmark::Options& opts) {
       }
     }
   }
+
+  // Release the generator before printing results
+  generator.reset();
 
   {
     std::cout << "Batch size: " << opts.batch_size
