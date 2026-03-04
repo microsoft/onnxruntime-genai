@@ -71,7 +71,7 @@ steps:
     set -e -x
     cmake_extra_args=""
     if [ "$(ep)" = "cuda" ]; then
-      if [ "$(cuda_version)" = "13.0" ]; then
+      if [[ "$(cuda_version)" == 13.* ]]; then
         cuda_archs="75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
       else
         cuda_archs="60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120"
