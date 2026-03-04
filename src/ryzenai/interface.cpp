@@ -209,8 +209,4 @@ RyzenAIInterface* GetRyzenAIInterface() {
   return RyzenAI::interface_.get();
 }
 
-bool IsRyzenAIPrunedModel(const Model& model) {
-  return model.p_device_->GetType() == DeviceType::RyzenAI && model.IsPruned();
-}
-
 }  // namespace Generators
