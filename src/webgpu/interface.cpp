@@ -10,19 +10,19 @@ namespace Generators {
 namespace WebGPU {
 
 namespace {
-Ort::Allocator* ort_allocator_{};
-const OrtMemoryInfo* ort_memory_info_{};
 const char* device_label = "WebGPU";
 const char* label_cpu = "cpu";
 }  // namespace
 
 struct WebGPUMemory final : DeviceBuffer {
-  WebGPUMemory(size_t size) : owned_{true} {
+  WebGPUMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
+      : owned_{true}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
   }
 
-  WebGPUMemory(void* p, size_t size) : owned_{false} {
+  WebGPUMemory(void* p, size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
+      : owned_{false}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(p);
   }
@@ -151,6 +151,8 @@ struct WebGPUMemory final : DeviceBuffer {
   }
 
   bool owned_;
+  Ort::Allocator* ort_allocator_;
+  const OrtMemoryInfo* ort_memory_info_;
 };
 
 struct InterfaceImpl : DeviceInterface {
@@ -166,16 +168,21 @@ struct InterfaceImpl : DeviceInterface {
     ort_memory_info_ = &ort_allocator_->GetInfo();
   }
 
+ private:
+  Ort::Allocator* ort_allocator_{};
+  const OrtMemoryInfo* ort_memory_info_{};
+
+ public:
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    return std::make_shared<WebGPUMemory>(size);
+    return std::make_shared<WebGPUMemory>(size, ort_allocator_, ort_memory_info_);
   }
 
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
-    return std::make_shared<WebGPUMemory>(p, size);
+    return std::make_shared<WebGPUMemory>(p, size, ort_allocator_, ort_memory_info_);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
