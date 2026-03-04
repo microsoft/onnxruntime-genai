@@ -61,7 +61,7 @@ steps:
   condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if eq(parameters.ep, 'cuda') or (and(eq(parameters.ep, 'winml'), eq(parameters.arch, 'x64'))) }}:
+- ${{ if or(eq(parameters.ep, 'cuda'), and(eq(parameters.ep, 'winml'), eq(parameters.arch, 'x64'))) }}:
   - powershell: |
       if ('$(cuda_version)' -like '13.*') {
         $cuda_archs = "75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
