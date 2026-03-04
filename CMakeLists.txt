@@ -80,6 +80,10 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
 
+    # Suppress warning C4996: use of deprecated function or variable
+    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
+
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
     "$<$<COMPILE_LANGUAGE:C>:/W4>"
