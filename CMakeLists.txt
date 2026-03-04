@@ -196,7 +196,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
     $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4996>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4996>
   )
   
   if(WIN32)
