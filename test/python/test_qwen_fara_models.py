@@ -396,6 +396,153 @@ def test_qwen_vl_family_patch_size_difference(test_data_path, model_name, expect
     log.debug(f"{model_name} pixel_values shape: {pixel_array.shape}")
 
 
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_model_path, relative_image_path):
+    """
+    Test that the multimodal processor returns all expected output tensors.
+    Validates the full preprocessing pipeline produces pixel_values, input_ids,
+    image_grid_thw, and num_image_tokens with correct dimensionality.
+    """
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    if not os.path.exists(model_path):
+        pytest.skip(f"{relative_model_path} test model not found")
+
+    model = og.Model(model_path)
+    processor = model.create_multimodal_processor()
+
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    images = og.Images.open(image_path)
+
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
+    inputs = processor(prompt, images=images)
+
+    # All four keys must be present for vision inputs
+    expected_keys = {"pixel_values", "input_ids", "image_grid_thw", "num_image_tokens"}
+    actual_keys = set(inputs.keys())
+    assert expected_keys.issubset(actual_keys), (
+        f"Missing keys: {expected_keys - actual_keys}. Got: {actual_keys}"
+    )
+
+    # pixel_values: [num_patches, patch_dim]
+    pv = inputs["pixel_values"].as_numpy()
+    assert len(pv.shape) == 2, f"pixel_values should be 2D, got shape {pv.shape}"
+    assert pv.dtype == np.float32, f"pixel_values should be float32, got {pv.dtype}"
+
+    # image_grid_thw: [num_images, 3] for single image
+    grid = inputs["image_grid_thw"].as_numpy()
+    assert grid.shape == (1, 3), f"image_grid_thw should be (1, 3) for single image, got {grid.shape}"
+    assert grid.dtype == np.int64, f"image_grid_thw should be int64, got {grid.dtype}"
+
+    # num_image_tokens: [num_images]
+    nit = inputs["num_image_tokens"].as_numpy()
+    assert nit.shape == (1,), f"num_image_tokens should be (1,) for single image, got {nit.shape}"
+    assert nit.dtype == np.int64, f"num_image_tokens should be int64, got {nit.dtype}"
+
+    # input_ids: [1, seq_len]
+    ids = inputs["input_ids"].as_numpy()
+    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+
+    log.debug(f"{relative_model_path} output: pv={pv.shape}, grid={grid}, nit={nit}, ids={ids.shape}")
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen_vl_image_grid_thw_consistency(test_data_path, relative_model_path, relative_image_path):
+    """
+    Test that image_grid_thw values are consistent with pixel_values shape
+    and num_image_tokens. For a single image:
+      num_patches = T * H * W  (must match pixel_values rows)
+      num_image_tokens = T * (H / merge_size) * (W / merge_size)
+    where merge_size = spatial_merge_size from config (2 for both Qwen VL models).
+    """
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    if not os.path.exists(model_path):
+        pytest.skip(f"{relative_model_path} test model not found")
+
+    model = og.Model(model_path)
+    processor = model.create_multimodal_processor()
+
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    images = og.Images.open(image_path)
+
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
+    inputs = processor(prompt, images=images)
+
+    pv = inputs["pixel_values"].as_numpy()
+    grid = inputs["image_grid_thw"].as_numpy()
+    nit = inputs["num_image_tokens"].as_numpy()
+
+    # grid values must be positive
+    assert np.all(grid > 0), f"image_grid_thw must have positive values, got {grid}"
+
+    t, h, w = grid[0]
+    merge_size = 2  # spatial_merge_size for both Qwen VL models
+
+    # num_patches = T * H * W should match pixel_values first dim
+    expected_patches = int(t * h * w)
+    assert pv.shape[0] == expected_patches, (
+        f"pixel_values rows ({pv.shape[0]}) != T*H*W ({t}*{h}*{w}={expected_patches})"
+    )
+
+    # num_image_tokens = T * (H/merge_size) * (W/merge_size)
+    expected_tokens = int(t * (h // merge_size) * (w // merge_size))
+    assert nit[0] == expected_tokens, (
+        f"num_image_tokens ({nit[0]}) != T*(H/{merge_size})*(W/{merge_size}) = {expected_tokens}"
+    )
+
+    log.debug(f"{relative_model_path}: grid={grid}, patches={expected_patches}, tokens={expected_tokens}")
+
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen_vl_normalization_range_difference(test_data_path, relative_image_path):
+    """
+    Test that Qwen3-VL and Qwen2.5-VL produce different pixel value ranges
+    due to different normalization constants.
+    Qwen3-VL uses mean/std=[0.5, 0.5, 0.5] → pixel range [-1, 1].
+    Qwen2.5-VL uses OpenAI CLIP normalization → wider range.
+    """
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+
+    # Qwen3-VL: normalized with [0.5, 0.5, 0.5]
+    q3_model_path = os.fspath(Path(test_data_path) / "qwen3-vl-vision-preprocessing")
+    if not os.path.exists(q3_model_path):
+        pytest.skip("qwen3-vl-vision-preprocessing test model not found")
+
+    q3_model = og.Model(q3_model_path)
+    q3_proc = q3_model.create_multimodal_processor()
+    q3_imgs = og.Images.open(image_path)
+    q3_inputs = q3_proc("<|vision_start|><|image_pad|><|vision_end|>test", images=q3_imgs)
+    q3_pv = q3_inputs["pixel_values"].as_numpy()
+
+    # Qwen2.5-VL: normalized with OpenAI CLIP constants
+    q25_model_path = os.fspath(Path(test_data_path) / "qwen-vision-preprocessing")
+    if not os.path.exists(q25_model_path):
+        pytest.skip("qwen-vision-preprocessing test model not found")
+
+    q25_model = og.Model(q25_model_path)
+    q25_proc = q25_model.create_multimodal_processor()
+    q25_imgs = og.Images.open(image_path)
+    q25_inputs = q25_proc("<|vision_start|><|image_pad|><|vision_end|>test", images=q25_imgs)
+    q25_pv = q25_inputs["pixel_values"].as_numpy()
+
+    # Qwen3-VL with [0.5, 0.5, 0.5] normalization: values bounded by [-1, 1]
+    assert q3_pv.min() >= -1.0 - 1e-5, f"Qwen3-VL pixel_values min {q3_pv.min()} < -1.0"
+    assert q3_pv.max() <= 1.0 + 1e-5, f"Qwen3-VL pixel_values max {q3_pv.max()} > 1.0"
+
+    # Qwen2.5-VL with OpenAI normalization: values extend beyond [-1, 1]
+    assert q25_pv.min() < -1.0, (
+        f"Qwen2.5-VL pixel_values min ({q25_pv.min():.4f}) should be < -1.0 with OpenAI normalization"
+    )
+    assert q25_pv.max() > 1.0, (
+        f"Qwen2.5-VL pixel_values max ({q25_pv.max():.4f}) should be > 1.0 with OpenAI normalization"
+    )
+
+    log.debug(f"Qwen3-VL range: [{q3_pv.min():.4f}, {q3_pv.max():.4f}]")
+    log.debug(f"Qwen2.5-VL range: [{q25_pv.min():.4f}, {q25_pv.max():.4f}]")
+
+
 # Standalone runner functionality
 def run_qwen_fara_vision_tests(
     cwd: str | bytes | os.PathLike,
