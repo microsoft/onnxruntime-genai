@@ -209,11 +209,16 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   // Map ONNX element type to byte size.
   auto element_size = [](ONNXTensorElementDataType type) -> size_t {
     switch (type) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:    return 4;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:  return 2;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: return 2;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:   return 8;
-      default: throw std::runtime_error("Unsupported pixel_values element type in multi-image vision loop");
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return 4;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return 2;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+        return 2;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        return 8;
+      default:
+        throw std::runtime_error("Unsupported pixel_values element type in multi-image vision loop");
     }
   };
   size_t pv_element_size = element_size(pv_type);
