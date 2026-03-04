@@ -1011,8 +1011,8 @@ class Model:
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, ir.DataType.INT64, shape=["unk"])
 
-    def make_slice(self, name, inputs, dtype, shape, output=None):
-        output = output or f"{name}/output_0"
+    def make_slice(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
