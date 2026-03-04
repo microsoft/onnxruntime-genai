@@ -151,15 +151,6 @@ stages:
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
 
-  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
-    - template: jobs/py-packaging-job.yml
-      parameters:
-        arch: 'x64'
-        ep: 'cpu'
-        os: 'osx'
-        build_config: ${{ parameters.build_config }}
-        ort_version: ${{ parameters.ort_version }}
-
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'arm64'
