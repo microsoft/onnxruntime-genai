@@ -66,7 +66,7 @@ class DirGuard {
   }
 
   ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0) {
+    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
       Log("warning", "Failed to change back to original directory: " + original_dir_.string());
     }
   }
@@ -174,6 +174,7 @@ void State::SetRunOption(const char* key, const char* value) {
     }
     return;
   } else if (strcmp(key, "enable_profiling") == 0) {
+#if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
       run_options_->DisableProfiling();
     } else {
@@ -183,6 +184,9 @@ void State::SetRunOption(const char* key, const char* value) {
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
       run_options_->EnableProfiling(fs::path(prefix).c_str());
     }
+#else
+    throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
+#endif
     return;
   }
   run_options_->AddConfigEntry(key, value);
@@ -846,6 +850,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+#endif
 #if defined(_WIN32)
       if (provider_options.name == "VitisAI") {
         if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
@@ -864,7 +869,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         }
       }
 #endif  // WIN32
-#endif
     }  // end if (provider not cuda/rocm/DML)
   }
   return p_device;

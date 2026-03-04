@@ -116,7 +116,7 @@ jobs:
 
       - name: Build the Java API and Run the Java Tests
         run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel --use_guidance
 
       - name: Run the Python Tests
         run: |

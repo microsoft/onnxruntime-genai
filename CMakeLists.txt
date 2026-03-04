@@ -7,6 +7,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 else()
   cmake_minimum_required(VERSION 3.26)
 endif()
+
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -25,11 +26,6 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # DLL initialization errors due to old conda msvcp140.dll dll are a result of the new MSVC compiler
-  # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
-  # Remove this definition once the conda msvcp140.dll dll is updated.
-  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-
   # Add compiler options for security standards
   # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
 
@@ -84,6 +80,10 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
 
+    # Suppress warning C4996: use of deprecated function or variable
+    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
+
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
     "$<$<COMPILE_LANGUAGE:C>:/W4>"
@@ -133,6 +133,13 @@ if(ENABLE_TESTS)
   else()
     add_compile_definitions(TEST_PHI2=0)
   endif()
+
+  if (USE_WEBGPU)
+    add_compile_definitions(USE_WEBGPU=1)
+  else()
+    add_compile_definitions(USE_WEBGPU=0)
+  endif()
+
 endif()
 
 if(ENABLE_TRACING)
@@ -189,6 +196,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
     $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4996>
   )
   
   if(WIN32)
@@ -227,6 +235,31 @@ if(USE_GUIDANCE)
   if (WIN32)
     # bcrypt is needed for the rust std lib
     target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+  endif()
+  if(MSVC)
+    # The Rust llguidance static library is always compiled against the release MSVC CRT
+    # (Rust has no debug CRT concept). The .lib embeds /DEFAULTLIB directives for the release
+    # CRT and /NODEFAULTLIB directives that suppress the debug CRT (msvcrtd, ucrtd, vcruntimed).
+    # In Debug builds, C++ code (e.g. onnxruntime-extensions) is compiled with /MDd and references
+    # debug-only CRT functions like _CrtDbgReport (in ucrtd.lib). Because the Rust .lib suppresses
+    # ucrtd.lib via its embedded /NODEFAULTLIB, _CrtDbgReport becomes unresolved.
+    #
+    # Fix: explicitly add the debug CRT import libraries in Debug builds. Explicitly specified
+    # libraries are not affected by /NODEFAULTLIB directives (those only suppress /DEFAULTLIB
+    # auto-linking). Also suppress the conflicting release CRT to avoid LNK4098 warnings.
+    target_link_libraries(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:msvcrtd.lib>
+      $<$<CONFIG:Debug>:ucrtd.lib>
+      $<$<CONFIG:Debug>:vcruntimed.lib>
+    )
+    target_link_options(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:ucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:vcruntime.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libvcruntime.lib>
+    )
   endif()
 endif()
 

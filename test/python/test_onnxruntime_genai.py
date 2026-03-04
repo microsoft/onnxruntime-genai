@@ -6,7 +6,6 @@ import logging
 import os
 import pathlib
 import sys
-import sysconfig
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
@@ -67,6 +66,13 @@ def parse_arguments():
         help="Whether to run e2e tests. If not specified e2e tests will not run.",
         action="store_true",
     )
+    parser.add_argument(
+        "--eps",
+        nargs="+",
+        choices=["cpu", "cuda", "dml", "webgpu"],
+        default=[],
+        help="List of execution providers to build models for. If not specified, auto-detects available EPs.",
+    )
     return parser.parse_args()
 
 
@@ -75,12 +81,27 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    # Get INT4 ONNX models
-    output_paths = download_models(os.path.abspath(args.test_models), "int4", "cpu", log)
-    if og.is_cuda_available():
-        output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda", log)
-    if og.is_dml_available():
-        output_paths += download_models(os.path.abspath(args.test_models), "int4", "dml", log)
+    # Determine which EPs to build models for
+    if args.eps:
+        # User explicitly specified EPs
+        eps_to_build = args.eps
+        log.info(f"Building models for explicitly specified EPs: {eps_to_build}")
+    else:
+        # Auto-detect available EPs
+        eps_to_build = ["cpu"]  # CPU is always available
+        if og.is_cuda_available():
+            eps_to_build.append("cuda")
+        if og.is_dml_available():
+            eps_to_build.append("dml")
+        # Only build WebGPU models if TEST_WEBGPU environment variable is set
+        if og.is_webgpu_available() and os.environ.get("TEST_WEBGPU", "").lower() in ["true", "1", "yes"]:
+            eps_to_build.append("webgpu")
+        log.info(f"Auto-detected available EPs: {eps_to_build}")
+
+    # Get INT4 ONNX models for specified/detected EPs
+    output_paths = []
+    for ep in eps_to_build:
+        output_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log)
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))

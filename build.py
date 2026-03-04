@@ -803,6 +803,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
             "-DORT_LIB_DIR=" + str(ort_lib_dir),
             "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
             "-DOGA_LIB_DIR=" + str(oga_lib_dir),
+            "-DUSE_GUIDANCE=" + 'ON' if args.use_guidance else 'OFF',
         ]
     )
 
