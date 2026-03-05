@@ -88,18 +88,18 @@ std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t nu
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
   std::string result;
-  const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
+  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
 
   // Process chunks as soon as you get it full chunk size.
   size_t offset = 0;
-  while (audio_buffer_.size() - offset >= chunk_sz) {
+  while (audio_buffer_.size() - offset >= chunk_size) {
     // Compute mel for this chunk
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data() + offset, chunk_sz);
+    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data() + offset, chunk_size);
 
     result += TranscribeMelChunk(mel_data, num_frames);
 
     // Advance by full chunk, Nemo models do not require overlapping audio
-    offset += chunk_sz;
+    offset += chunk_size;
   }
 
   if (offset > 0) {
@@ -114,13 +114,13 @@ std::string NemoStreamingASR::Flush() {
   LoadVocab();
 
   std::string result;
-  const size_t chunk_sz = static_cast<size_t>(cache_config_.chunk_samples);
+  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
 
   // Process any remaining audio (pad to full chunk with silence)
   if (!audio_buffer_.empty()) {
-    audio_buffer_.resize(chunk_sz, 0.0f);
+    audio_buffer_.resize(chunk_size, 0.0f);
 
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_sz);
+    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_size);
     result += TranscribeMelChunk(mel_data, num_frames);
 
     audio_buffer_.clear();

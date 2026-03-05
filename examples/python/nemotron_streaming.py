@@ -5,7 +5,6 @@ import argparse
 import os
 import sys
 import time
-import re
 import numpy as np
 import onnxruntime_genai as og
 
@@ -26,20 +25,6 @@ def load_audio(audio_path):
     return audio
 
 
-def load_tokenizer(model_path):
-    import sentencepiece as spm
-    path = os.path.join(model_path, "tokenizer.model")
-    if not os.path.exists(path):
-        return None
-    sp = spm.SentencePieceProcessor()
-    sp.Load(path)
-    return sp
-
-
-def parse_token_ids(raw_text):
-    return [int(m.group(1)) for m in re.finditer(r'<(\d+)>', raw_text)]
-
-
 def simulate_microphone(model_path, audio_path):
     audio = load_audio(audio_path)
     duration = len(audio) / SAMPLE_RATE
@@ -48,7 +33,6 @@ def simulate_microphone(model_path, audio_path):
 
     config = og.Config(model_path)
     model = og.Model(config)
-    sp = load_tokenizer(model_path)
     asr = og.StreamingASR(model)
 
     print("-" * 60)
@@ -71,12 +55,7 @@ def simulate_microphone(model_path, audio_path):
 
     total_wall = time.time() - stream_start
 
-    full_raw = asr.get_transcript()
-    if sp:
-        all_ids = parse_token_ids(full_raw)
-        final_text = sp.Decode(all_ids) if all_ids else full_raw
-    else:
-        final_text = full_raw
+    final_text = asr.get_transcript()
 
     print(f"\n{'=' * 60}")
     print(f"  {final_text.strip()}")
