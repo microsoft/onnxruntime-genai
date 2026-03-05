@@ -58,22 +58,32 @@ NemoStreamingASR::NemoStreamingASR(Model& model)
       cache_config_.preemph, cache_config_.log_eps};
   mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
 
+  // Pre-allocate reusable mel buffer (avoids per-chunk heap allocation).
+  // Conservative upper bound for frames from one chunk:
+  //   (fft_size/2 + chunk_samples + (fft_size - win_length)/2) / hop_length + 1
+  int pad = cache_config_.fft_size / 2;
+  int win_offset = (cache_config_.fft_size - cache_config_.win_length) / 2;
+  int max_frames = (pad + cache_config_.chunk_samples + win_offset) / cache_config_.hop_length + 1;
+  mel_buffer_.resize(static_cast<size_t>(cache_config_.num_mels) * max_frames);
+
   // Initialize mel pre-encode cache (zeros for first chunk)
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
-  encoder_cache_.Initialize(cache_config_, allocator);
-  decoder_state_.Initialize(cache_config_, allocator);
+  auto& device = *model_.p_device_;
+  encoder_cache_.Initialize(cache_config_, allocator, device);
+  decoder_state_.Initialize(cache_config_, allocator, device);
 }
 
 NemoStreamingASR::~NemoStreamingASR() = default;
 
 void NemoStreamingASR::Reset() {
   auto& allocator = model_.allocator_cpu_;
-  encoder_cache_.Reset(cache_config_, allocator);
-  decoder_state_.Reset(cache_config_, allocator);
+  auto& device = *model_.p_device_;
+  encoder_cache_.Reset(cache_config_, allocator, device);
+  decoder_state_.Reset(cache_config_, allocator, device);
   full_transcript_.clear();
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
@@ -93,10 +103,11 @@ std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t nu
   // Process chunks as soon as you get it full chunk size.
   size_t offset = 0;
   while (audio_buffer_.size() - offset >= chunk_size) {
-    // Compute mel for this chunk
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data() + offset, chunk_size);
+    // Compute mel for this chunk (write into reusable buffer)
+    int num_frames = mel_extractor_.Process(audio_buffer_.data() + offset, chunk_size,
+                                            mel_buffer_.data(), mel_buffer_.size());
 
-    result += TranscribeMelChunk(mel_data, num_frames);
+    result += TranscribeMelChunk(mel_buffer_.data(), num_frames);
 
     // Advance by full chunk, Nemo models do not require overlapping audio
     offset += chunk_size;
@@ -120,8 +131,9 @@ std::string NemoStreamingASR::Flush() {
   if (!audio_buffer_.empty()) {
     audio_buffer_.resize(chunk_size, 0.0f);
 
-    auto [mel_data, num_frames] = mel_extractor_.Process(audio_buffer_.data(), chunk_size);
-    result += TranscribeMelChunk(mel_data, num_frames);
+    int num_frames = mel_extractor_.Process(audio_buffer_.data(), chunk_size,
+                                              mel_buffer_.data(), mel_buffer_.size());
+    result += TranscribeMelChunk(mel_buffer_.data(), num_frames);
 
     audio_buffer_.clear();
   }
@@ -129,7 +141,7 @@ std::string NemoStreamingASR::Flush() {
   return result;
 }
 
-std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_data, int num_frames) {
+std::string NemoStreamingASR::TranscribeMelChunk(const float* mel_data, int num_frames) {
   auto& allocator = model_.allocator_cpu_;
   int cache_size = cache_config_.pre_encode_cache_size;
   const int num_mels = cache_config_.num_mels;
@@ -139,18 +151,19 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   // Create processed_signal: [1, num_mels, total_mel_frames]
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, total_mel_frames};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  float* signal_data = processed_signal->GetTensorMutableData<float>();
+  auto& device = *model_.p_device_;
+  auto signal_span = WrapTensor<float>(device, *processed_signal);
+  auto cache_span = device.WrapMemory(std::span<const float>{mel_pre_encode_cache_.data(), mel_pre_encode_cache_.size()});
+  auto mel_span = device.WrapMemory(std::span<const float>{mel_data, static_cast<size_t>(num_mels) * num_frames});
 
   // Fill row by row: mel is [num_mels, time] in row-major layout
   for (int m = 0; m < num_mels; ++m) {
     // Pre-encode cache columns for this mel bin
-    std::memcpy(signal_data + m * total_mel_frames,
-                mel_pre_encode_cache_.data() + m * cache_size,
-                cache_size * sizeof(float));
+    signal_span.subspan(m * total_mel_frames, cache_size)
+        .CopyFrom(cache_span.subspan(m * cache_size, cache_size));
     // New mel columns for this mel bin
-    std::memcpy(signal_data + m * total_mel_frames + cache_size,
-                mel_data.data() + m * num_frames,
-                num_frames * sizeof(float));
+    signal_span.subspan(m * total_mel_frames + cache_size, num_frames)
+        .CopyFrom(mel_span.subspan(m * num_frames, num_frames));
   }
 
   // Update pre-encode cache: save last cache_size mel frames from current chunk
@@ -158,7 +171,7 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   if (num_frames >= cache_size) {
     for (int m = 0; m < num_mels; ++m) {
       std::memcpy(mel_pre_encode_cache_.data() + m * cache_size,
-                  mel_data.data() + m * num_frames + (num_frames - cache_size),
+                  mel_data + m * num_frames + (num_frames - cache_size),
                   cache_size * sizeof(float));
     }
   } else {
@@ -169,7 +182,7 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
                    mel_pre_encode_cache_.data() + m * cache_size + num_frames,
                    keep * sizeof(float));
       std::memcpy(mel_pre_encode_cache_.data() + m * cache_size + keep,
-                  mel_data.data() + m * num_frames,
+                  mel_data + m * num_frames,
                   num_frames * sizeof(float));
     }
   }
@@ -275,9 +288,9 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
       auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
       auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-      std::memcpy(decoder_frame->GetTensorMutableData<float>(),
-                  dec_outputs[0]->GetTensorData<float>(),
-                  dec_out_shape[1] * sizeof(float));
+      auto src_span = ByteWrapTensor(*model_.p_device_, *dec_outputs[0]);
+      auto dst_span = ByteWrapTensor(*model_.p_device_, *decoder_frame);
+      dst_span.CopyFrom(src_span);
 
       // Run joiner
       const char* join_input_names[] = {

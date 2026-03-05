@@ -39,6 +39,9 @@ struct NemoStreamingASR : StreamingASR {
   // Log-mel feature extraction
   nemo_mel::NemoStreamingMelExtractor mel_extractor_;
 
+  // Reusable buffer for mel output (avoids per-chunk heap allocation).
+  std::vector<float> mel_buffer_;
+
   // Mel pre-encode cache: last pre_encode_cache_size frames from previous chunk.
   // Prepended to the current chunk's mel before feeding the encoder.
   // E.g. 0.56s of audio with 10ms hop results in 56 frames, and we can based on the convolution settings apply 9 frames in front, giving total of 65 frames.
@@ -49,7 +52,7 @@ struct NemoStreamingASR : StreamingASR {
   std::vector<float> audio_buffer_;
 
   void LoadVocab();
-  std::string TranscribeMelChunk(const std::vector<float>& mel_data, int num_frames);
+  std::string TranscribeMelChunk(const float* mel_data, int num_frames);
   std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
 };
 

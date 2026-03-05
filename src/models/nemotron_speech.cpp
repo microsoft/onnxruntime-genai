@@ -74,18 +74,16 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   dec_out_lstm_cell = dec.outputs.lstm_cell_state;
 }
 
-void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
+void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
   // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
   cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(cache_last_channel->GetTensorMutableRawData(), 0,
-              1 * cfg.num_encoder_layers * cfg.left_context * cfg.hidden_dim * sizeof(float));
+  ByteWrapTensor(device, *cache_last_channel).Zero();
 
   // cache_last_time: [batch, num_layers, hidden_dim, conv_context]
   auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
   cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(cache_last_time->GetTensorMutableRawData(), 0,
-              1 * cfg.num_encoder_layers * cfg.hidden_dim * cfg.conv_context * sizeof(float));
+  ByteWrapTensor(device, *cache_last_time).Zero();
 
   // cache_last_channel_len: [1]
   auto len_shape = std::array<int64_t, 1>{1};
@@ -93,26 +91,24 @@ void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocat
   *cache_last_channel_len->GetTensorMutableData<int64_t>() = 0;
 }
 
-void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
-  Initialize(cfg, allocator);
+void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
+  Initialize(cfg, allocator, device);
 }
 
-void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
+void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
   // LSTM states: [lstm_layers, 1, lstm_dim]
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
   state_1 = OrtValue::CreateTensor(allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(state_1->GetTensorMutableRawData(), 0,
-              cfg.decoder_lstm_layers * 1 * cfg.decoder_lstm_dim * sizeof(float));
+  ByteWrapTensor(device, *state_1).Zero();
 
   state_2 = OrtValue::CreateTensor(allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(state_2->GetTensorMutableRawData(), 0,
-              cfg.decoder_lstm_layers * 1 * cfg.decoder_lstm_dim * sizeof(float));
+  ByteWrapTensor(device, *state_2).Zero();
 
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
 
-void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
-  Initialize(cfg, allocator);
+void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
+  Initialize(cfg, allocator, device);
 }
 
 NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
