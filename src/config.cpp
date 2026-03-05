@@ -241,6 +241,14 @@ struct EncoderInputs_Element : JSON::Element {
       v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
+    } else if (name == "input_lengths") {
+      v_.input_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel") {
+      v_.cache_last_channel = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time") {
+      v_.cache_last_time = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len") {
+      v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -258,6 +266,14 @@ struct EncoderOutputs_Element : JSON::Element {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_outputs") {
       v_.encoder_outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "output_lengths") {
+      v_.output_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_next") {
+      v_.cache_last_channel_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time_next") {
+      v_.cache_last_time_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len_next") {
+      v_.cache_last_channel_len_next = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_key_names") {
       v_.cross_present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_value_names") {
@@ -871,22 +887,6 @@ struct Speech_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "enc_in_length") {
-      v_.enc_in_length = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_in_cache_channel") {
-      v_.enc_in_cache_channel = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_in_cache_time") {
-      v_.enc_in_cache_time = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_in_cache_channel_len") {
-      v_.enc_in_cache_channel_len = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_length") {
-      v_.enc_out_length = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_cache_channel") {
-      v_.enc_out_cache_channel = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_cache_time") {
-      v_.enc_out_cache_time = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_cache_channel_len") {
-      v_.enc_out_cache_channel_len = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1517,10 +1517,22 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
+namespace {
+bool IsNonGenerativeModelType(std::string_view type) {
+  static constexpr std::string_view kNonGenerativeTypes[] = {
+      "nemotron_speech",
+  };
+  for (auto t : kNonGenerativeTypes) {
+    if (type == t) return true;
+  }
+  return false;
+}
+}  // namespace
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
-  if (model.context_length == 0) {
+  if (model.context_length == 0 && !IsNonGenerativeModelType(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 

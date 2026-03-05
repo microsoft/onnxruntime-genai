@@ -233,17 +233,17 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   auto run_options = OrtRunOptions::Create();
 
   // Pre-allocate reusable tensors
-  auto frame_shape = std::array<int64_t, 3>{1, hidden_dim, 1};
+  auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
   auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* frame_data = encoder_frame->GetTensorMutableData<float>();
 
   auto targets_shape = std::array<int64_t, 2>{1, 1};
-  auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-  int32_t* targets_data = targets->GetTensorMutableData<int32_t>();
+  auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  int64_t* targets_data = targets->GetTensorMutableData<int64_t>();
 
   auto tgt_len_shape = std::array<int64_t, 1>{1};
-  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-  *target_length->GetTensorMutableData<int32_t>() = 1;
+  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *target_length->GetTensorMutableData<int64_t>() = 1;
 
   const int max_sym = cache_config_.max_symbols_per_step;
 
@@ -272,11 +272,18 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
           dec_input_names, dec_inputs, 4,
           dec_output_names, 4);
 
+      auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+      auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
+      auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      std::memcpy(decoder_frame->GetTensorMutableData<float>(),
+                  dec_outputs[0]->GetTensorData<float>(),
+                  dec_out_shape[1] * sizeof(float));
+
       // Run joiner
       const char* join_input_names[] = {
           cache_config_.join_in_encoder.c_str(), cache_config_.join_in_decoder.c_str()};
       OrtValue* join_inputs[] = {
-          encoder_frame.get(), dec_outputs[0].get()};
+          encoder_frame.get(), decoder_frame.get()};
 
       const char* join_output_names[] = {cache_config_.join_out_logits.c_str()};
 

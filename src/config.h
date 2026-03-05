@@ -133,12 +133,22 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        // Cache-aware streaming encoder I/O names
+        std::string input_lengths{"length"};
+        std::string cache_last_channel{"cache_last_channel"};
+        std::string cache_last_time{"cache_last_time"};
+        std::string cache_last_channel_len{"cache_last_channel_len"};
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
         std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        // Cache-aware streaming encoder output names
+        std::string output_lengths{"encoded_lengths"};
+        std::string cache_last_channel_next{"cache_last_channel_next"};
+        std::string cache_last_time_next{"cache_last_time_next"};
+        std::string cache_last_channel_len_next{"cache_last_channel_next_len"};
       } outputs;
     } encoder;
 
@@ -217,16 +227,6 @@ struct Config {
       int chunk_samples{};
       int blank_id{};
       int max_symbols_per_step{};
-
-      // Cache-aware streaming encoder I/O names
-      std::string enc_in_length{"length"};
-      std::string enc_in_cache_channel{"cache_last_channel"};
-      std::string enc_in_cache_time{"cache_last_time"};
-      std::string enc_in_cache_channel_len{"cache_last_channel_len"};
-      std::string enc_out_length{"encoded_lengths"};
-      std::string enc_out_cache_channel{"cache_last_channel_next"};
-      std::string enc_out_cache_time{"cache_last_time_next"};
-      std::string enc_out_cache_channel_len{"cache_last_channel_next_len"};
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};

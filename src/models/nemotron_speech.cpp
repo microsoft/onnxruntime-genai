@@ -48,15 +48,15 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   enc_in_audio = enc.inputs.audio_features;
   enc_out_encoded = enc.outputs.encoder_outputs;
 
-  // Encoder cache I/O names (from speech section)
-  enc_in_length = sp.enc_in_length;
-  enc_in_cache_channel = sp.enc_in_cache_channel;
-  enc_in_cache_time = sp.enc_in_cache_time;
-  enc_in_cache_channel_len = sp.enc_in_cache_channel_len;
-  enc_out_length = sp.enc_out_length;
-  enc_out_cache_channel = sp.enc_out_cache_channel;
-  enc_out_cache_time = sp.enc_out_cache_time;
-  enc_out_cache_channel_len = sp.enc_out_cache_channel_len;
+  // Encoder cache I/O names (from encoder inputs/outputs)
+  enc_in_length = enc.inputs.input_lengths;
+  enc_in_cache_channel = enc.inputs.cache_last_channel;
+  enc_in_cache_time = enc.inputs.cache_last_time;
+  enc_in_cache_channel_len = enc.inputs.cache_last_channel_len;
+  enc_out_length = enc.outputs.output_lengths;
+  enc_out_cache_channel = enc.outputs.cache_last_channel_next;
+  enc_out_cache_time = enc.outputs.cache_last_time_next;
+  enc_out_cache_channel_len = enc.outputs.cache_last_channel_len_next;
 
   // Joiner I/O names
   join_in_encoder = jo.inputs.encoder_outputs;
