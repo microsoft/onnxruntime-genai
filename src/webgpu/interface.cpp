@@ -158,6 +158,23 @@ struct InterfaceImpl : DeviceInterface {
     // Cache memory info for reuse
     Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info_));
     cpu_mem_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+    // Pre-allocate WebGPU device buffers containing scalar value 1 for the common
+    // new_kv_length == 1 generation path. Upload once, then reuse on every token step
+    // as a GPU-to-GPU copy source (no CPU→GPU transfer per step).
+    std::array<int64_t, 2> scalar_shape = {1, 1};
+
+    cached_one_gpu_i32_ = std::make_shared<WebGPUMemory>(sizeof(int32_t));
+    cached_one_gpu_i32_->AllocateCpu();
+    *reinterpret_cast<int32_t*>(cached_one_gpu_i32_->p_cpu_) = 1;
+    cached_one_gpu_i32_->CopyCpuToDevice();
+    cached_src_tensor_i32_ = OrtValue::CreateTensor(*webgpu_mem_info_, cached_one_gpu_i32_->p_device_, sizeof(int32_t), scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+
+    cached_one_gpu_i64_ = std::make_shared<WebGPUMemory>(sizeof(int64_t));
+    cached_one_gpu_i64_->AllocateCpu();
+    *reinterpret_cast<int64_t*>(cached_one_gpu_i64_->p_cpu_) = 1;
+    cached_one_gpu_i64_->CopyCpuToDevice();
+    cached_src_tensor_i64_ = OrtValue::CreateTensor(*webgpu_mem_info_, cached_one_gpu_i64_->p_device_, sizeof(int64_t), scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   }
 
   Ort::Allocator& GetAllocator() override {
@@ -214,29 +231,39 @@ struct InterfaceImpl : DeviceInterface {
     }
 
     if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-      std::vector<int32_t> cpu_data(new_kv_length, 1);  // Fill new portion with 1s
-
       std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int32_t), shape, type);
-
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int32_t);
       auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int32_t), destination_offset, shape, type);
 
-      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
-      std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      if (new_kv_length == 1) {
+        // Hot path: reuse pre-created source tensor, no allocation needed
+        const std::vector<const OrtValue*> src_ptrs = {cached_src_tensor_i32_.get()};
+        std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+        GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      } else {
+        std::vector<int32_t> cpu_data_vec(new_kv_length, 1);
+        auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data_vec.data(), new_kv_length * sizeof(int32_t), shape, type);
+        const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+        std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+        GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      }
     } else {
-      std::vector<int64_t> cpu_data(new_kv_length, 1);  // Fill new portion with 1s
-
       std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_beam_size), static_cast<int64_t>(new_kv_length)};
-      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data.data(), new_kv_length * sizeof(int64_t), shape, type);
-
       size_t destination_offset = (total_length - new_kv_length) * sizeof(int64_t);
       auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info_, mask_data, max_length * sizeof(int64_t), destination_offset, shape, type);
 
-      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
-      std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      if (new_kv_length == 1) {
+        // Hot path: reuse pre-created source tensor, no allocation needed
+        const std::vector<const OrtValue*> src_ptrs = {cached_src_tensor_i64_.get()};
+        std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+        GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      } else {
+        std::vector<int64_t> cpu_data_vec(new_kv_length, 1);
+        auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info_, cpu_data_vec.data(), new_kv_length * sizeof(int64_t), shape, type);
+        const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+        std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+        GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+      }
     }
 
     return true;
@@ -245,6 +272,13 @@ struct InterfaceImpl : DeviceInterface {
  private:
   const OrtMemoryInfo* webgpu_mem_info_ = nullptr;
   std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;
+
+  // Cached WebGPU device buffers containing scalar value 1, pre-uploaded once.
+  // Used as GPU-to-GPU copy source in the new_kv_length == 1 hot path.
+  std::shared_ptr<WebGPUMemory> cached_one_gpu_i32_;
+  std::shared_ptr<WebGPUMemory> cached_one_gpu_i64_;
+  std::unique_ptr<OrtValue> cached_src_tensor_i32_;
+  std::unique_ptr<OrtValue> cached_src_tensor_i64_;
 };
 
 }  // namespace WebGPU
