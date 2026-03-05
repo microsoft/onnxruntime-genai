@@ -1,0 +1,7 @@
+# Generated ONNX model directories (re-created by export/optimize scripts)
+onnx_models/
+onnx_models_optimized/
+
+# Python cache
+__pycache__/
+*.pyc
