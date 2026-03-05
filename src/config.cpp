@@ -13,6 +13,14 @@
 
 namespace Generators {
 
+// SinkElement: silently consumes any JSON subtree (values, arrays, objects)
+// Used to skip over config sections that are informational but not needed at runtime.
+struct SinkElement : JSON::Element {
+  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {}
+  Element& OnArray(std::string_view /*name*/) override { return *this; }
+  Element& OnObject(std::string_view /*name*/) override { return *this; }
+};
+
 // Fix casing of certain historical names to match current Onnxruntime names
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
@@ -241,6 +249,14 @@ struct EncoderInputs_Element : JSON::Element {
       v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_input_lengths") {
+      v_.encoder_input_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel") {
+      v_.cache_last_channel = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time") {
+      v_.cache_last_time = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len") {
+      v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -254,7 +270,7 @@ struct EncoderOutputs_Element : JSON::Element {
   explicit EncoderOutputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "encoder_hidden_states") {
+    if (name == "encoder_hidden_states" || name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_outputs") {
       v_.encoder_outputs = JSON::Get<std::string_view>(value);
@@ -262,6 +278,14 @@ struct EncoderOutputs_Element : JSON::Element {
       v_.cross_present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_value_names") {
       v_.cross_present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_output_lengths") {
+      v_.encoder_output_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_next") {
+      v_.cache_last_channel_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_time_next") {
+      v_.cache_last_time_next = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_last_channel_len_next") {
+      v_.cache_last_channel_len_next = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -315,6 +339,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "input_ids_length") {
+      v_.input_ids_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -536,6 +562,9 @@ struct Encoder_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
+    if (name == "optimization") {
+      return sink_;  // Informational only — silently skip
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -545,6 +574,7 @@ struct Encoder_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
   EncoderInputs_Element inputs_{v_.inputs};
   EncoderOutputs_Element outputs_{v_.outputs};
+  SinkElement sink_;
 };
 
 struct Decoder_Element : JSON::Element {
@@ -827,6 +857,14 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_rate") {
+      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "mel_bins") {
+      v_.mel_bins = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "frame_length_ms") {
+      v_.frame_length_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "frame_shift_ms") {
+      v_.frame_shift_ms = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
