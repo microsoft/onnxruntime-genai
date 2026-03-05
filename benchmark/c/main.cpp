@@ -184,11 +184,10 @@ void RunBenchmark(const benchmark::Options& opts) {
       tokenizer->Encode(base_prompt, *base_prompt_sequences);
     }
     generator->AppendTokenSequences(*base_prompt_sequences);
-    auto remaining = num_prompt_tokens;
-    while (!generator->IsDone() && remaining-- > 0) {
+    while (!generator->IsDone() && generator->TokenCount() < num_prompt_tokens) {
       generator->GenerateNextToken();
     }
-    const auto output_sequence_length = generator->GetSequenceCount(0);
+    const auto output_sequence_length = generator->TokenCount();
     const auto* output_sequence_data = generator->GetSequenceData(0);
     prompt = std::string{tokenizer->Decode(output_sequence_data, output_sequence_length)};
   }
@@ -202,16 +201,16 @@ void RunBenchmark(const benchmark::Options& opts) {
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
     generator->RewindTo(0);
-    auto num_tokens_to_generate = opts.num_tokens_to_generate;
     generator->AppendTokenSequences(*prompt_sequences);
-    while (!generator->IsDone() && num_tokens_to_generate-- > 0) {
+    const size_t target_token_count = generator->TokenCount() + opts.num_tokens_to_generate;
+    while (!generator->IsDone() && generator->TokenCount() < target_token_count) {
       generator->GenerateNextToken();
     }
 
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
       std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
-      const auto output_sequence_length = generator->GetSequenceCount(0);
+      const auto output_sequence_length = generator->TokenCount();
       const auto* output_sequence_data = generator->GetSequenceData(0);
       const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
       std::cout << "[OUTPUT BEGIN]" << output << "[OUTPUT END]\n";
@@ -228,7 +227,6 @@ void RunBenchmark(const benchmark::Options& opts) {
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_iterations; ++i) {
     generator->RewindTo(0);
-    auto num_tokens_to_generate = opts.num_tokens_to_generate;
 
     {
       Timing e2e_gen_timing{e2e_gen_times};
@@ -238,6 +236,7 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator->AppendTokenSequences(*prompt_sequences);
       }
 
+      const size_t target_token_count = generator->TokenCount() + opts.num_tokens_to_generate;
       bool generator_done = false;
 
       {
@@ -246,7 +245,7 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator_done = generator->IsDone();
       }
 
-      while (!generator_done && num_tokens_to_generate-- > 0) {
+      while (!generator_done && generator->TokenCount() < target_token_count) {
         {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
