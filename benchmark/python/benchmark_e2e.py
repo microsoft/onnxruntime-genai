@@ -311,10 +311,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
         seed_tokens = tokenizer.encode(seed_prompt)
         generator.append_tokens(seed_tokens)
-        remaining = prompt_length
-        while not generator.is_done() and remaining > 0:
+        while not generator.is_done() and generator.token_count() < prompt_length:
             generator.generate_next_token()
-            remaining -= 1
         generated_text = tokenizer.decode(generator.get_sequence(0))
         text = [generated_text] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
@@ -327,10 +325,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     for _ in tqdm(range(args.warmup)):
         generator.rewind_to(0)
         generator.append_tokens(tokens)
-        i = 0
-        while not generator.is_done() and i < generation_length:
+        target_token_count = generator.token_count() + generation_length
+        while not generator.is_done() and generator.token_count() < target_token_count:
             generator.generate_next_token()
-            i += 1
         if args.print_model_output:
             print(tokenizer.decode(generator.get_sequence(0)))
 
@@ -362,6 +359,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
+        target_token_count = generator.token_count() + generation_length
+
         sampling_start_time = time.perf_counter()
         generator.generate_next_token()
         generator_done = generator.is_done()
@@ -369,15 +368,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        i = 1
-        while not generator_done and i < generation_length:
+        while not generator_done and generator.token_count() < target_token_count:
             # Run inference
             token_gen_start_time = time.perf_counter()
             generator.generate_next_token()
             generator_done = generator.is_done()
             token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
-            i += 1
 
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
