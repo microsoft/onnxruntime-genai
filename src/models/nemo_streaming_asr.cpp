@@ -258,14 +258,14 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
       const char* dec_input_names[] = {
           cache_config_.dec_in_targets.c_str(), cache_config_.dec_in_target_length.c_str(),
-          cache_config_.dec_in_states_1.c_str(), cache_config_.dec_in_states_2.c_str()};
+          cache_config_.dec_in_lstm_hidden.c_str(), cache_config_.dec_in_lstm_cell.c_str()};
       OrtValue* dec_inputs[] = {
           targets.get(), target_length.get(),
           decoder_state_.state_1.get(), decoder_state_.state_2.get()};
 
       const char* dec_output_names[] = {
           cache_config_.dec_out_outputs.c_str(), cache_config_.dec_out_prednet_lengths.c_str(),
-          cache_config_.dec_out_states_1.c_str(), cache_config_.dec_out_states_2.c_str()};
+          cache_config_.dec_out_lstm_hidden.c_str(), cache_config_.dec_out_lstm_cell.c_str()};
 
       auto dec_outputs = decoder_session_->Run(
           run_options.get(),

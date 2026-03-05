@@ -60,6 +60,25 @@ struct Config {
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+
+    // Cache-aware streaming encoder names
+    static constexpr std::string_view EncoderInputLengthsName = "length";
+    static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
+    static constexpr std::string_view CacheLastTimeName = "cache_last_time";
+    static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
+    static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
+    static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
+    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_next_len";
+
+    // Cross present key/value names
+    static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
+    static constexpr std::string_view CrossPresentValueName = "present_value_cross_%d";
+
+    // Joiner names
+    static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
+    static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -134,21 +153,21 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
         // Cache-aware streaming encoder I/O names
-        std::string input_lengths{"length"};
-        std::string cache_last_channel{"cache_last_channel"};
-        std::string cache_last_time{"cache_last_time"};
-        std::string cache_last_channel_len{"cache_last_channel_len"};
+        std::string input_lengths{Defaults::EncoderInputLengthsName};
+        std::string cache_last_channel{Defaults::CacheLastChannelName};
+        std::string cache_last_time{Defaults::CacheLastTimeName};
+        std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
-        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        std::string cross_present_key_names{Defaults::CrossPresentKeyName}, cross_present_value_names{Defaults::CrossPresentValueName};
         // Cache-aware streaming encoder output names
-        std::string output_lengths{"encoded_lengths"};
-        std::string cache_last_channel_next{"cache_last_channel_next"};
-        std::string cache_last_time_next{"cache_last_time_next"};
-        std::string cache_last_channel_len_next{"cache_last_channel_next_len"};
+        std::string output_lengths{Defaults::EncoderOutputLengthsName};
+        std::string cache_last_channel_next{Defaults::CacheLastChannelNextName};
+        std::string cache_last_time_next{Defaults::CacheLastTimeNextName};
+        std::string cache_last_channel_len_next{Defaults::CacheLastChannelLenNextName};
       } outputs;
     } encoder;
 
@@ -246,12 +265,12 @@ struct Config {
       std::optional<RunOptions> run_options;
 
       struct Inputs {
-        std::string encoder_outputs{"encoder_outputs"};
-        std::string decoder_outputs{"decoder_outputs"};
+        std::string encoder_outputs{Defaults::JoinerEncoderOutputsName};
+        std::string decoder_outputs{Defaults::JoinerDecoderOutputsName};
       } inputs;
 
       struct Outputs {
-        std::string logits{"outputs"};
+        std::string logits{Defaults::JoinerLogitsName};
       } outputs;
     } joiner;
 
@@ -300,8 +319,8 @@ struct Config {
         // RNNT decoder inputs
         std::string targets;
         std::string target_length;
-        std::string states_1;
-        std::string states_2;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } inputs;
 
       struct Outputs {
@@ -315,8 +334,8 @@ struct Config {
         // RNNT decoder outputs
         std::string outputs;
         std::string prednet_lengths;
-        std::string states_1;
-        std::string states_2;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } outputs;
 
       struct PipelineModel {

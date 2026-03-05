@@ -66,12 +66,12 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   // Decoder I/O names (RNNT prediction network)
   dec_in_targets = dec.inputs.targets;
   dec_in_target_length = dec.inputs.target_length;
-  dec_in_states_1 = dec.inputs.states_1;
-  dec_in_states_2 = dec.inputs.states_2;
+  dec_in_lstm_hidden = dec.inputs.lstm_hidden_state;
+  dec_in_lstm_cell = dec.inputs.lstm_cell_state;
   dec_out_outputs = dec.outputs.outputs;
   dec_out_prednet_lengths = dec.outputs.prednet_lengths;
-  dec_out_states_1 = dec.outputs.states_1;
-  dec_out_states_2 = dec.outputs.states_2;
+  dec_out_lstm_hidden = dec.outputs.lstm_hidden_state;
+  dec_out_lstm_cell = dec.outputs.lstm_cell_state;
 }
 
 void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator) {
