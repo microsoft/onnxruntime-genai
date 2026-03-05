@@ -151,6 +151,10 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
   session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
+
+  session_info_.Add(*session_encoder_);
+  session_info_.Add(*session_decoder_);
+  session_info_.Add(*session_joiner_);
 }
 
 std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,

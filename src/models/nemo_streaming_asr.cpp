@@ -45,9 +45,10 @@ NemoStreamingASR::NemoStreamingASR(Model& model)
     throw std::runtime_error("NemoStreamingASR requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
-  encoder_session_ = nemotron_model->session_encoder_.get();
-  decoder_session_ = nemotron_model->session_decoder_.get();
-  joiner_session_ = nemotron_model->session_joiner_.get();
+  encoder_session_ = std::move(nemotron_model->session_encoder_);
+  decoder_session_ = std::move(nemotron_model->session_decoder_);
+  joiner_session_ = std::move(nemotron_model->session_joiner_);
+  run_options_ = OrtRunOptions::Create();
   cache_config_ = nemotron_model->cache_config_;
 
   // Initialize mel extractor from config
@@ -94,7 +95,7 @@ std::string NemoStreamingASR::TranscribeChunk(const float* audio_data, size_t nu
   std::string result;
   const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
 
-  // Process chunks as soon as you get it full chunk size.
+  // Process chunks as soon as you get the full chunk size.
   size_t offset = 0;
   while (audio_buffer_.size() - offset >= chunk_size) {
     // Compute mel for this chunk
@@ -141,8 +142,9 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   int total_mel_frames = cache_size + num_frames;
 
   // Create processed_signal: [1, num_mels, total_mel_frames]
+  auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, total_mel_frames};
-  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
   // Materialize cache frames into processed_signal [num_mels, total_mel_frames].
@@ -173,7 +175,8 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
 
   // Create processed_signal_length: [1]
   auto len_shape = std::array<int64_t, 1>{1};
-  auto signal_length = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto len_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_length);
+  auto signal_length = OrtValue::CreateTensor(allocator, len_shape, len_type);
   *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(total_mel_frames);
 
   // Encoder inputs
@@ -193,9 +196,8 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
       cache_config_.enc_out_cache_channel_len.c_str()};
 
   // Run encoder
-  auto run_options = OrtRunOptions::Create();
   auto enc_outputs = encoder_session_->Run(
-      run_options.get(),
+      run_options_.get(),
       enc_input_names, enc_inputs, 5,
       enc_output_names, 5);
 
@@ -230,16 +232,19 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   auto run_options = OrtRunOptions::Create();
 
   // Pre-allocate reusable tensors
+  auto enc_out_type = model_.session_info_.GetOutputDataType(cache_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
-  auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, enc_out_type);
   float* frame_data = encoder_frame->GetTensorMutableData<float>();
 
   auto targets_shape = std::array<int64_t, 2>{1, 1};
-  auto targets = OrtValue::CreateTensor(allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto targets_type = model_.session_info_.GetInputDataType(cache_config_.dec_in_targets);
+  auto targets = OrtValue::CreateTensor(allocator, targets_shape, targets_type);
   int64_t* targets_data = targets->GetTensorMutableData<int64_t>();
 
   auto tgt_len_shape = std::array<int64_t, 1>{1};
-  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto tgt_len_type = model_.session_info_.GetInputDataType(cache_config_.dec_in_target_length);
+  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, tgt_len_type);
   *target_length->GetTensorMutableData<int64_t>() = 1;
 
   const int max_sym = cache_config_.max_symbols_per_step;
@@ -265,13 +270,14 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
           cache_config_.dec_out_lstm_hidden.c_str(), cache_config_.dec_out_lstm_cell.c_str()};
 
       auto dec_outputs = decoder_session_->Run(
-          run_options.get(),
+          run_options_.get(),
           dec_input_names, dec_inputs, 4,
           dec_output_names, 4);
 
       auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
-      auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      auto dec_out_type = model_.session_info_.GetOutputDataType(cache_config_.dec_out_outputs);
+      auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, dec_out_type);
       auto source_span = ByteWrapTensor(*model_.p_device_, *dec_outputs[0]);
       auto destination_span = ByteWrapTensor(*model_.p_device_, *decoder_frame);
       destination_span.CopyFrom(source_span);
@@ -285,12 +291,12 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
       const char* join_output_names[] = {cache_config_.join_out_logits.c_str()};
 
       auto join_outputs = joiner_session_->Run(
-          run_options.get(),
+          run_options_.get(),
           join_input_names, join_inputs, 2,
           join_output_names, 1);
 
       // Find argmax
-      const float* logits_data = join_outputs[0]->GetTensorData<float>();
+      const float* logits_data = join_outputs[0]->GetTensorData<float>();  // Logits are always float for argmax
       auto logits_shape = join_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       int total_logits = 1;
       for (auto d : logits_shape) total_logits *= static_cast<int>(d);
