@@ -58,26 +58,30 @@ NemoStreamingASR::NemoStreamingASR(Model& model)
       cache_config_.preemph, cache_config_.log_eps};
   mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
 
-  // Initialize mel pre-encode cache (zeros for first chunk)
+  // Initialize mel pre-encode cache (time-major ring buffer, zeros for first chunk)
   mel_pre_encode_cache_.assign(
-      static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
+      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
+  cache_pos_ = 0;
 
   // Initialize streaming state
   auto& allocator = model_.allocator_cpu_;
-  encoder_cache_.Initialize(cache_config_, allocator);
-  decoder_state_.Initialize(cache_config_, allocator);
+  auto& device = *model_.p_device_;
+  encoder_cache_.Initialize(cache_config_, allocator, device);
+  decoder_state_.Initialize(cache_config_, allocator, device);
 }
 
 NemoStreamingASR::~NemoStreamingASR() = default;
 
 void NemoStreamingASR::Reset() {
   auto& allocator = model_.allocator_cpu_;
-  encoder_cache_.Reset(cache_config_, allocator);
-  decoder_state_.Reset(cache_config_, allocator);
+  auto& device = *model_.p_device_;
+  encoder_cache_.Reset(cache_config_, allocator, device);
+  decoder_state_.Reset(cache_config_, allocator, device);
   full_transcript_.clear();
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
-      static_cast<size_t>(cache_config_.num_mels) * cache_config_.pre_encode_cache_size, 0.0f);
+      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
+  cache_pos_ = 0;
   audio_buffer_.clear();
 }
 
@@ -141,37 +145,30 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
-  // Fill row by row: mel is [num_mels, time] in row-major layout
+  // Materialize cache frames into processed_signal [num_mels, total_mel_frames].
+  // Ring buffer is time-major [cache_size, num_mels]; read oldest-first starting at cache_pos_.
+  for (int t = 0; t < cache_size; ++t) {
+    int ring_idx = (cache_pos_ + t) % cache_size;
+    const float* src = mel_pre_encode_cache_.data() + ring_idx * num_mels;
+    for (int m = 0; m < num_mels; ++m) {
+      signal_data[m * total_mel_frames + t] = src[m];
+    }
+  }
+
+  // Append new mel frames (mel_data is mel-major [num_mels, num_frames])
   for (int m = 0; m < num_mels; ++m) {
-    // Pre-encode cache columns for this mel bin
-    std::memcpy(signal_data + m * total_mel_frames,
-                mel_pre_encode_cache_.data() + m * cache_size,
-                cache_size * sizeof(float));
-    // New mel columns for this mel bin
     std::memcpy(signal_data + m * total_mel_frames + cache_size,
                 mel_data.data() + m * num_frames,
                 num_frames * sizeof(float));
   }
 
-  // Update pre-encode cache: save last cache_size mel frames from current chunk
-  // (these will be prepended to the next chunk)
-  if (num_frames >= cache_size) {
+  // Update ring buffer: write new frames into cache (no memmove needed)
+  for (int t = 0; t < num_frames; ++t) {
+    float* destination = mel_pre_encode_cache_.data() + cache_pos_ * num_mels;
     for (int m = 0; m < num_mels; ++m) {
-      std::memcpy(mel_pre_encode_cache_.data() + m * cache_size,
-                  mel_data.data() + m * num_frames + (num_frames - cache_size),
-                  cache_size * sizeof(float));
+      destination[m] = mel_data[m * num_frames + t];
     }
-  } else {
-    // Short chunk: shift existing cache left, append new frames
-    int keep = cache_size - num_frames;
-    for (int m = 0; m < num_mels; ++m) {
-      std::memmove(mel_pre_encode_cache_.data() + m * cache_size,
-                   mel_pre_encode_cache_.data() + m * cache_size + num_frames,
-                   keep * sizeof(float));
-      std::memcpy(mel_pre_encode_cache_.data() + m * cache_size + keep,
-                  mel_data.data() + m * num_frames,
-                  num_frames * sizeof(float));
-    }
+    cache_pos_ = (cache_pos_ + 1) % cache_size;
   }
 
   // Create processed_signal_length: [1]
@@ -261,7 +258,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
           cache_config_.dec_in_lstm_hidden.c_str(), cache_config_.dec_in_lstm_cell.c_str()};
       OrtValue* dec_inputs[] = {
           targets.get(), target_length.get(),
-          decoder_state_.state_1.get(), decoder_state_.state_2.get()};
+          decoder_state_.lstm_hidden_state.get(), decoder_state_.lstm_cell_state.get()};
 
       const char* dec_output_names[] = {
           cache_config_.dec_out_outputs.c_str(), cache_config_.dec_out_prednet_lengths.c_str(),
@@ -275,9 +272,9 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
       auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
       auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
       auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-      std::memcpy(decoder_frame->GetTensorMutableData<float>(),
-                  dec_outputs[0]->GetTensorData<float>(),
-                  dec_out_shape[1] * sizeof(float));
+      auto source_span = ByteWrapTensor(*model_.p_device_, *dec_outputs[0]);
+      auto destination_span = ByteWrapTensor(*model_.p_device_, *decoder_frame);
+      destination_span.CopyFrom(source_span);
 
       // Run joiner
       const char* join_input_names[] = {
@@ -314,8 +311,8 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
       // Emit token & update state
       decoder_state_.last_token = best_token;
-      decoder_state_.state_1 = std::move(dec_outputs[2]);
-      decoder_state_.state_2 = std::move(dec_outputs[3]);
+      decoder_state_.lstm_hidden_state = std::move(dec_outputs[2]);
+      decoder_state_.lstm_cell_state = std::move(dec_outputs[3]);
 
       result += vocab_[best_token];
     }

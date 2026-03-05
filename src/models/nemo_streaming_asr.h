@@ -39,11 +39,11 @@ struct NemoStreamingASR : StreamingASR {
   // Log-mel feature extraction
   nemo_mel::NemoStreamingMelExtractor mel_extractor_;
 
-  // Mel pre-encode cache: last pre_encode_cache_size frames from previous chunk.
+  // Mel pre-encode cache: ring buffer of last pre_encode_cache_size frames.
+  // Stored time-major [cache_size, num_mels] with a circular write position.
   // Prepended to the current chunk's mel before feeding the encoder.
-  // E.g. 0.56s of audio with 10ms hop results in 56 frames, and we can based on the convolution settings apply 9 frames in front, giving total of 65 frames.
-  // 65 frames will be enough to precisely encode the chunk including transitions between chunks.
   std::vector<float> mel_pre_encode_cache_;
+  int cache_pos_{0};  // next write position in ring buffer [0, cache_size)
 
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;

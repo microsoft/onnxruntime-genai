@@ -81,18 +81,18 @@ struct NemotronEncoderCache {
   // cache_last_channel_len: [1]
   std::unique_ptr<OrtValue> cache_last_channel_len;
 
-  void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
-  void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
+  void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 /// Holds the RNNT decoder LSTM hidden states between decoding steps.
 struct NemotronDecoderState {
-  std::unique_ptr<OrtValue> state_1;
-  std::unique_ptr<OrtValue> state_2;
+  std::unique_ptr<OrtValue> lstm_hidden_state;
+  std::unique_ptr<OrtValue> lstm_cell_state;
   int last_token{0};  // Last emitted non-blank token (for autoregressive feedback)
 
-  void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
-  void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator);
+  void Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 struct NemotronSpeechModel : Model {
