@@ -298,7 +298,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({"max_length": max_length, "min_length": max_length} if override_max_length else {}),
+        **({ "max_length": max_length } if override_max_length else {}),
+        min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
 
