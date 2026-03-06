@@ -173,6 +173,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   // When reuse_generator is enabled, create a single generator and reuse it for
   // prompt generation, warmup, and benchmark iterations via RewindTo(0).
+  // This avoids recreating the generator (and reallocating KV cache) each iteration.
   // Otherwise, create a fresh generator for each iteration.
   std::unique_ptr<OgaGenerator> generator;
   if (opts.reuse_generator) {

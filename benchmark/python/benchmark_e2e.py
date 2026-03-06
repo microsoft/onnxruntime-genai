@@ -264,7 +264,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             raise ValueError(
                 f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
             )
-    
+
     # When -1 is passed as max_length we should not override that search option
     override_max_length = max_length != -1
 
@@ -283,11 +283,36 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        # We will generate the prompt using the same generator below, so set
-        # a placeholder here; prompt_length is already known from the args.
+        # We will generate the prompt using a temporary generator below;
+        # prompt_length is already known from the args.
         prompt = None
         tokens = None
 
+    # If needed, generate the prompt with a temporary generator so the final
+    # prompt_length is known before creating the benchmark params/generator.
+    if prompt is None:
+        temp_params = og.GeneratorParams(model)
+        temp_params.set_search_options(
+            max_length=prompt_length + generation_length,
+            min_length=prompt_length + generation_length,
+        )
+        temp_gen = og.Generator(model, temp_params)
+        text_seed = "a"
+        seed_prompt = f"{args.chat_template.format(input=text_seed)}"
+        seed_tokens = tokenizer.encode(seed_prompt)
+        temp_gen.append_tokens(seed_tokens)
+        while not temp_gen.is_done() and temp_gen.token_count() < prompt_length:
+            temp_gen.generate_next_token()
+        generated_text = tokenizer.decode(temp_gen.get_sequence(0))
+        del temp_gen
+        text = [generated_text] * batch_size
+        prompt = f"{args.chat_template.format(input=text)}"
+        tokens = tokenizer.encode(prompt)
+        prompt_length = len(tokens)
+        max_length = prompt_length + generation_length
+
+    # Create GeneratorParams after the prompt is finalized so that max_length
+    # and min_length reflect the actual prompt length.
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
     params = og.GeneratorParams(model)
     params.set_search_options(
@@ -295,32 +320,14 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if override_max_length else {}),
-        min_length=max_length,
+        **({"max_length": max_length, "min_length": max_length} if override_max_length else {}),
         batch_size=batch_size,
     )
 
     # When reuse_generator is enabled, create a single generator and reuse it via
-    # rewind_to(0). Otherwise, create a fresh generator for each iteration.
+    # rewind_to(0). This avoids recreating the generator (and reallocating
+    # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
     generator = og.Generator(model, params) if args.reuse_generator else None
-
-    if prompt is None:
-        # Use a generator to produce the prompt
-        gen = generator if generator else og.Generator(model, params)
-        text_seed = "a"
-        seed_prompt = f"{args.chat_template.format(input=text_seed)}"
-        seed_tokens = tokenizer.encode(seed_prompt)
-        gen.append_tokens(seed_tokens)
-        while not gen.is_done() and gen.token_count() < prompt_length:
-            gen.generate_next_token()
-        generated_text = tokenizer.decode(gen.get_sequence(0))
-        text = [generated_text] * batch_size
-        prompt = f"{args.chat_template.format(input=text)}"
-        tokens = tokenizer.encode(prompt)
-        prompt_length = len(tokens)
-        max_length = prompt_length + generation_length
-        if not args.reuse_generator:
-            del gen
 
     if args.verbose:
         print("Running warmup runs...")
@@ -336,6 +343,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             gen.generate_next_token()
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
+        if not args.reuse_generator:
+            del gen
 
     tokenize_times = []
     prompt_times = []
@@ -389,6 +398,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
+        if not args.reuse_generator:
+            del gen
 
     # Release the generator before computing results
     if generator:
@@ -554,12 +565,10 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
     parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
     parser.add_argument(
-        "--reuse_generator", action="store_true", default=True,
-        help="Reuse a single generator via rewind_to(0) instead of creating a new one per iteration (default)"
-    )
-    parser.add_argument(
-        "--no_reuse_generator", dest="reuse_generator", action="store_false",
-        help="Create a new generator for each iteration instead of reusing one"
+        "--reuse_generator",
+        action="store_true",
+        default=False,
+        help="Reuse a single generator via rewind_to(0) instead of creating a new one per iteration",
     )
     parser.add_argument("-pm", "--print_memory_usage", default=False, help="Print memory footprint")
     parser.add_argument("-mn", "--model_name", type=str, default="model_name", help="Model name defined by users")
