@@ -283,37 +283,15 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        # We will generate the prompt using a temporary generator below;
+        # We will generate the prompt using a generator below;
         # prompt_length is already known from the args.
         prompt = None
         tokens = None
 
-    # If needed, generate the prompt with a temporary generator so the final
-    # prompt_length is known before creating the benchmark params/generator.
-    if prompt is None:
-        temp_params = og.GeneratorParams(model)
-        temp_params.set_search_options(
-            max_length=prompt_length + generation_length,
-            min_length=prompt_length + generation_length,
-        )
-        temp_gen = og.Generator(model, temp_params)
-        text_seed = "a"
-        seed_prompt = f"{args.chat_template.format(input=text_seed)}"
-        seed_tokens = tokenizer.encode(seed_prompt)
-        temp_gen.append_tokens(seed_tokens)
-        while not temp_gen.is_done() and temp_gen.token_count() < prompt_length:
-            temp_gen.generate_next_token()
-        generated_text = tokenizer.decode(temp_gen.get_sequence(0))
-        del temp_gen
-        text = [generated_text] * batch_size
-        prompt = f"{args.chat_template.format(input=text)}"
-        tokens = tokenizer.encode(prompt)
-        prompt_length = len(tokens)
-        max_length = prompt_length + generation_length
-
-    # Create GeneratorParams after the prompt is finalized so that max_length
-    # and min_length reflect the actual prompt length.
+    need_generate_prompt = prompt is None
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
+
+    # Create GeneratorParams with the target max_length (prompt + generation).
     params = og.GeneratorParams(model)
     params.set_search_options(
         do_sample=do_sample,
@@ -328,6 +306,26 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # rewind_to(0). This avoids recreating the generator (and reallocating
     # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
     generator = og.Generator(model, params) if args.reuse_generator else None
+
+    if need_generate_prompt:
+        # Use a generator to produce the prompt.  When reusing, use the single
+        # generator; otherwise create a temporary one that is destroyed after.
+        gen = generator if args.reuse_generator else og.Generator(model, params)
+
+        text_seed = "a"
+        seed_prompt = f"{args.chat_template.format(input=text_seed)}"
+        seed_tokens = tokenizer.encode(seed_prompt)
+        gen.append_tokens(seed_tokens)
+        while not gen.is_done() and gen.token_count() < prompt_length:
+            gen.generate_next_token()
+        generated_text = tokenizer.decode(gen.get_sequence(0))
+        if temp_gen is not None:
+            del temp_gen
+        text = [generated_text] * batch_size
+        prompt = f"{args.chat_template.format(input=text)}"
+        tokens = tokenizer.encode(prompt)
+        prompt_length = len(tokens)
+        max_length = prompt_length + generation_length
 
     if args.verbose:
         print("Running warmup runs...")
