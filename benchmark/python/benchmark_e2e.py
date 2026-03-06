@@ -73,27 +73,6 @@ def monitor_cpu_memory():
         time.sleep(0.1)
 
 
-# Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length, override_max_length) -> str:
-    text = "a"
-    prompt = f"{args.chat_template.format(input=text)}"
-    tokens = tokenizer.encode(prompt)
-    params = og.GeneratorParams(model)
-    max_length_to_use = prompt_length + len(tokens)
-    params.set_search_options(
-        min_length=prompt_length,
-        **({ "max_length": max_length_to_use } if override_max_length else {})
-    )
-
-    generator = og.Generator(model, params)
-    generator.append_tokens(tokens)
-    i = 0
-    while not generator.is_done() and i < prompt_length:
-        generator.generate_next_token()
-        i += 1
-    return tokenizer.decode(generator.get_sequence(0))
-
-
 # Use prompt length to get pre-defined prompt
 def get_prompt_by_length(prompt_length):
     json_path = "prompts.json"
@@ -285,11 +264,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             raise ValueError(
                 f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
             )
-    
+
     # When -1 is passed as max_length we should not override that search option
     override_max_length = max_length != -1
 
-    # Generate prompt
+    # Determine prompt and tokens up front so the generator is created with the
+    # full capacity (prompt + generation tokens).  This ensures the KV cache is
+    # large enough for all subsequent iterations.
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
         _random_tokens = np.random.randint(100, size=(batch_size, prompt_length))
@@ -302,37 +283,67 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
-        text = [generate_prompt(model, tokenizer, prompt_length, override_max_length)] * batch_size
-        prompt = f"{args.chat_template.format(input=text)}"
-        tokens = tokenizer.encode(prompt)
-        prompt_length = len(tokens)
-        max_length = prompt_length + generation_length
+        # We will generate the prompt using a generator below;
+        # prompt_length is already known from the args.
+        prompt = None
+        tokens = None
 
-    params = og.GeneratorParams(model)
+    need_generate_prompt = prompt is None
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
+
+    # Create GeneratorParams with the target max_length (prompt + generation).
+    params = og.GeneratorParams(model)
     params.set_search_options(
         do_sample=do_sample,
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
         **({ "max_length": max_length } if override_max_length else {}),
-        min_length=max_length,
+        min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
+
+    # When reuse_generator is enabled, create a single generator and reuse it via
+    # rewind_to(0). This avoids recreating the generator (and reallocating
+    # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
+    generator = og.Generator(model, params) if args.reuse_generator else None
+
+    if need_generate_prompt:
+        # Use a generator to produce the prompt.  When reusing, use the single
+        # generator; otherwise create a temporary one that is destroyed after.
+        gen = generator if args.reuse_generator else og.Generator(model, params)
+
+        text_seed = "a"
+        seed_prompt = f"{args.chat_template.format(input=text_seed)}"
+        seed_tokens = tokenizer.encode(seed_prompt)
+        gen.append_tokens(seed_tokens)
+        while not gen.is_done() and gen.token_count() < prompt_length:
+            gen.generate_next_token()
+        generated_text = tokenizer.decode(gen.get_sequence(0))
+        if not args.reuse_generator:
+            del gen
+        text = [generated_text] * batch_size
+        prompt = f"{args.chat_template.format(input=text)}"
+        tokens = tokenizer.encode(prompt)
+        prompt_length = len(tokens)
+        max_length = prompt_length + generation_length
 
     if args.verbose:
         print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
-        generator = og.Generator(model, params)
-        generator.append_tokens(tokens)
-        i = 0
-        while not generator.is_done() and i < generation_length:
-            generator.generate_next_token()
-            i += 1
+        if args.reuse_generator:
+            generator.rewind_to(0)
+            gen = generator
+        else:
+            gen = og.Generator(model, params)
+        gen.append_tokens(tokens)
+        target_token_count = gen.token_count() + generation_length
+        while not gen.is_done() and gen.token_count() < target_token_count:
+            gen.generate_next_token()
         if args.print_model_output:
-            print(tokenizer.decode(generator.get_sequence(0)))
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-        del generator
+            print(tokenizer.decode(gen.get_sequence(0)))
+        if not args.reuse_generator:
+            del gen
 
     tokenize_times = []
     prompt_times = []
@@ -353,49 +364,44 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         if args.use_random_tokens:
             tokens = _random_tokens
 
-        # Prepare run
-        params = og.GeneratorParams(model)
-        params.set_search_options(
-            do_sample=do_sample,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            temperature=temperature,
-            **({ "max_length": max_length } if override_max_length else {}),
-            min_length=max_length,
-            batch_size=batch_size,
-        )
-
-        generator = og.Generator(model, params)
+        if args.reuse_generator:
+            generator.rewind_to(0)
+            gen = generator
+        else:
+            gen = og.Generator(model, params)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.append_tokens(tokens)
+        gen.append_tokens(tokens)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
+        target_token_count = gen.token_count() + generation_length
+
         sampling_start_time = time.perf_counter()
-        generator.generate_next_token()
-        generator_done = generator.is_done()
+        gen.generate_next_token()
+        generator_done = gen.is_done()
         sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        i = 1
-        while not generator_done and i < generation_length:
+        while not generator_done and gen.token_count() < target_token_count:
             # Run inference
             token_gen_start_time = time.perf_counter()
-            generator.generate_next_token()
-            generator_done = generator.is_done()
+            gen.generate_next_token()
+            generator_done = gen.is_done()
             token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
-            i += 1
 
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output:
-            print(tokenizer.decode(generator.get_sequence(0)))
+            print(tokenizer.decode(gen.get_sequence(0)))
+        if not args.reuse_generator:
+            del gen
 
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+    # Release the generator before computing results
+    if generator:
         del generator
 
     # Calculate tokenization metrics
@@ -557,6 +563,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
     parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
+    parser.add_argument(
+        "--reuse_generator",
+        action="store_true",
+        default=False,
+        help="Reuse a single generator via rewind_to(0) instead of creating a new one per iteration",
+    )
     parser.add_argument("-pm", "--print_memory_usage", default=False, help="Print memory footprint")
     parser.add_argument("-mn", "--model_name", type=str, default="model_name", help="Model name defined by users")
     parser.add_argument("-pr", "--precision", type=str, default="fp16", help="Model precision for metrics info")
