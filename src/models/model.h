@@ -39,12 +39,6 @@ struct State {
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
-  /// RNNT-specific: run full encoder+decoder for the current mel chunk and return decoded text.
-  /// Only implemented by NemotronSpeechState; default throws.
-  virtual std::string ProcessChunk() {
-    throw std::runtime_error("ProcessChunk is not supported for this model type. It is only available for streaming ASR models.");
-  }
-
   void DumpInputs();
   void DumpOutputs();
 

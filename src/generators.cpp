@@ -6,6 +6,7 @@
 #include "generators.h"
 #include "streaming_asr.h"
 #include "models/audio_processor.h"
+#include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -549,8 +550,10 @@ std::string Generator::GenerateNextTokens() {
   state_->SetExtraInputs(extra_inputs_);
   extra_inputs_.clear();
 
-  // Delegate to the state's RNNT ProcessChunk
-  return state_->ProcessChunk();
+  auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
+  if (!speech_state)
+    throw std::runtime_error("GenerateNextTokens is only supported for streaming ASR (nemotron_speech) models.");
+  return speech_state->ProcessChunk();
 }
 
 void Generator::GenerateNextToken() {

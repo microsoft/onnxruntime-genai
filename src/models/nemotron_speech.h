@@ -128,7 +128,7 @@ struct NemotronSpeechState : State {
 
   /// Run full encoder + RNNT decode loop for the current mel chunk.
   /// Returns newly decoded text.
-  std::string ProcessChunk() override;
+  std::string ProcessChunk();
 
   /// Get the full accumulated transcript.
   const std::string& GetTranscript() const { return full_transcript_; }
