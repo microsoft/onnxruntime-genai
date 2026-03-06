@@ -300,36 +300,42 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         batch_size=batch_size,
     )
 
-    # Create a single generator and reuse it for prompt generation, warmup, and
-    # benchmark iterations via rewind_to(0).  This guarantees the KV cache is
-    # always sized for the full workload.
-    generator = og.Generator(model, params)
+    # When reuse_generator is enabled, create a single generator and reuse it via
+    # rewind_to(0). Otherwise, create a fresh generator for each iteration.
+    generator = og.Generator(model, params) if args.reuse_generator else None
 
     if prompt is None:
-        # Use the same generator (with full-size KV cache) to produce the prompt
+        # Use a generator to produce the prompt
+        gen = generator if generator else og.Generator(model, params)
         text_seed = "a"
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
         seed_tokens = tokenizer.encode(seed_prompt)
-        generator.append_tokens(seed_tokens)
-        while not generator.is_done() and generator.token_count() < prompt_length:
-            generator.generate_next_token()
-        generated_text = tokenizer.decode(generator.get_sequence(0))
+        gen.append_tokens(seed_tokens)
+        while not gen.is_done() and gen.token_count() < prompt_length:
+            gen.generate_next_token()
+        generated_text = tokenizer.decode(gen.get_sequence(0))
         text = [generated_text] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
         max_length = prompt_length + generation_length
+        if not args.reuse_generator:
+            del gen
 
     if args.verbose:
         print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
-        generator.rewind_to(0)
-        generator.append_tokens(tokens)
-        target_token_count = generator.token_count() + generation_length
-        while not generator.is_done() and generator.token_count() < target_token_count:
-            generator.generate_next_token()
+        if args.reuse_generator:
+            generator.rewind_to(0)
+            gen = generator
+        else:
+            gen = og.Generator(model, params)
+        gen.append_tokens(tokens)
+        target_token_count = gen.token_count() + generation_length
+        while not gen.is_done() and gen.token_count() < target_token_count:
+            gen.generate_next_token()
         if args.print_model_output:
-            print(tokenizer.decode(generator.get_sequence(0)))
+            print(tokenizer.decode(gen.get_sequence(0)))
 
     tokenize_times = []
     prompt_times = []
@@ -350,39 +356,43 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         if args.use_random_tokens:
             tokens = _random_tokens
 
-        # Rewind the generator to reuse it
-        generator.rewind_to(0)
+        if args.reuse_generator:
+            generator.rewind_to(0)
+            gen = generator
+        else:
+            gen = og.Generator(model, params)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.append_tokens(tokens)
+        gen.append_tokens(tokens)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
-        target_token_count = generator.token_count() + generation_length
+        target_token_count = gen.token_count() + generation_length
 
         sampling_start_time = time.perf_counter()
-        generator.generate_next_token()
-        generator_done = generator.is_done()
+        gen.generate_next_token()
+        generator_done = gen.is_done()
         sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        while not generator_done and generator.token_count() < target_token_count:
+        while not generator_done and gen.token_count() < target_token_count:
             # Run inference
             token_gen_start_time = time.perf_counter()
-            generator.generate_next_token()
-            generator_done = generator.is_done()
+            gen.generate_next_token()
+            generator_done = gen.is_done()
             token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
 
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output:
-            print(tokenizer.decode(generator.get_sequence(0)))
+            print(tokenizer.decode(gen.get_sequence(0)))
 
     # Release the generator before computing results
-    del generator
+    if generator:
+        del generator
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
@@ -543,6 +553,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
     parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
+    parser.add_argument(
+        "--reuse_generator", action="store_true", default=True,
+        help="Reuse a single generator via rewind_to(0) instead of creating a new one per iteration (default)"
+    )
+    parser.add_argument(
+        "--no_reuse_generator", dest="reuse_generator", action="store_false",
+        help="Create a new generator for each iteration instead of reusing one"
+    )
     parser.add_argument("-pm", "--print_memory_usage", default=False, help="Print memory footprint")
     parser.add_argument("-mn", "--model_name", type=str, default="model_name", help="Model name defined by users")
     parser.add_argument("-pr", "--precision", type=str, default="fp16", help="Model precision for metrics info")
