@@ -37,19 +37,172 @@ void NemoStreamingASR::LoadVocab() {
   vocab_loaded_ = true;
 }
 
-NemoStreamingASR::NemoStreamingASR(Model& model)
-    : model_{model} {
-  // Get the NemotronSpeechModel to access its sessions
-  auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
-  if (!nemotron_model) {
-    throw std::runtime_error("NemoStreamingASR requires a nemotron_speech model type. Got: " + model.config_->model.type);
-  }
+NemotronEncoderState::NemotronEncoderState(const NemotronSpeechModel& model,
+                                           std::shared_ptr<GeneratorParams> params)
+    : State{*params, model}, model_{model} {
+  const auto& cfg = model_.cache_config_;
 
-  encoder_session_ = std::move(nemotron_model->session_encoder_);
-  decoder_session_ = std::move(nemotron_model->session_decoder_);
-  joiner_session_ = std::move(nemotron_model->session_joiner_);
-  run_options_ = OrtRunOptions::Create();
-  cache_config_ = nemotron_model->cache_config_;
+  // Register input names
+  input_names_.push_back(cfg.enc_in_audio.c_str());
+  input_names_.push_back(cfg.enc_in_length.c_str());
+  input_names_.push_back(cfg.enc_in_cache_channel.c_str());
+  input_names_.push_back(cfg.enc_in_cache_time.c_str());
+  input_names_.push_back(cfg.enc_in_cache_channel_len.c_str());
+  inputs_.resize(5, nullptr);
+
+  // Register output names
+  output_names_.push_back(cfg.enc_out_encoded.c_str());
+  output_names_.push_back(cfg.enc_out_length.c_str());
+  output_names_.push_back(cfg.enc_out_cache_channel.c_str());
+  output_names_.push_back(cfg.enc_out_cache_time.c_str());
+  output_names_.push_back(cfg.enc_out_cache_channel_len.c_str());
+  outputs_.resize(5, nullptr);
+
+  // Apply run options once at construction
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
+}
+
+void NemotronEncoderState::SetInputs(OrtValue* audio_signal, OrtValue* length,
+                                     OrtValue* cache_channel, OrtValue* cache_time,
+                                     OrtValue* cache_channel_len) {
+  inputs_[0] = audio_signal;
+  inputs_[1] = length;
+  inputs_[2] = cache_channel;
+  inputs_[3] = cache_time;
+  inputs_[4] = cache_channel_len;
+}
+
+DeviceSpan<float> NemotronEncoderState::Run(int /*current_length*/, DeviceSpan<int32_t>& /*next_tokens*/,
+                                            DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_encoder_);
+  return {};
+}
+
+OrtValue* NemotronEncoderState::GetEncoded() {
+  return outputs_[0];
+}
+
+int64_t NemotronEncoderState::GetEncodedLength() {
+  return *outputs_[1]->GetTensorData<int64_t>();
+}
+
+std::unique_ptr<OrtValue> NemotronEncoderState::TakeCacheChannel() {
+  auto p = std::unique_ptr<OrtValue>(outputs_[2]);
+  outputs_[2] = nullptr;
+  return p;
+}
+
+std::unique_ptr<OrtValue> NemotronEncoderState::TakeCacheTime() {
+  auto p = std::unique_ptr<OrtValue>(outputs_[3]);
+  outputs_[3] = nullptr;
+  return p;
+}
+
+std::unique_ptr<OrtValue> NemotronEncoderState::TakeCacheChannelLen() {
+  auto p = std::unique_ptr<OrtValue>(outputs_[4]);
+  outputs_[4] = nullptr;
+  return p;
+}
+
+NemotronPredNetState::NemotronPredNetState(const NemotronSpeechModel& model,
+                                           std::shared_ptr<GeneratorParams> params)
+    : State{*params, model}, model_{model} {
+  const auto& cfg = model_.cache_config_;
+
+  input_names_.push_back(cfg.dec_in_targets.c_str());
+  input_names_.push_back(cfg.dec_in_target_length.c_str());
+  input_names_.push_back(cfg.dec_in_lstm_hidden.c_str());
+  input_names_.push_back(cfg.dec_in_lstm_cell.c_str());
+  inputs_.resize(4, nullptr);
+
+  output_names_.push_back(cfg.dec_out_outputs.c_str());
+  output_names_.push_back(cfg.dec_out_prednet_lengths.c_str());
+  output_names_.push_back(cfg.dec_out_lstm_hidden.c_str());
+  output_names_.push_back(cfg.dec_out_lstm_cell.c_str());
+  outputs_.resize(4, nullptr);
+
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+}
+
+void NemotronPredNetState::SetInputs(OrtValue* targets, OrtValue* target_length,
+                                     OrtValue* lstm_hidden, OrtValue* lstm_cell) {
+  inputs_[0] = targets;
+  inputs_[1] = target_length;
+  inputs_[2] = lstm_hidden;
+  inputs_[3] = lstm_cell;
+}
+
+DeviceSpan<float> NemotronPredNetState::Run(int /*current_length*/, DeviceSpan<int32_t>& /*next_tokens*/,
+                                            DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_decoder_);
+  return {};
+}
+
+std::unique_ptr<OrtValue> NemotronPredNetState::TakeLstmHidden() {
+  auto p = std::unique_ptr<OrtValue>(outputs_[2]);
+  outputs_[2] = nullptr;
+  return p;
+}
+
+std::unique_ptr<OrtValue> NemotronPredNetState::TakeLstmCell() {
+  auto p = std::unique_ptr<OrtValue>(outputs_[3]);
+  outputs_[3] = nullptr;
+  return p;
+}
+
+
+NemotronJoinerState::NemotronJoinerState(const NemotronSpeechModel& model,
+                                         std::shared_ptr<GeneratorParams> params)
+    : State{*params, model}, model_{model} {
+  const auto& cfg = model_.cache_config_;
+
+  input_names_.push_back(cfg.join_in_encoder.c_str());
+  input_names_.push_back(cfg.join_in_decoder.c_str());
+  inputs_.resize(2, nullptr);
+
+  output_names_.push_back(cfg.join_out_logits.c_str());
+  outputs_.resize(1, nullptr);
+
+  if (model_.config_->model.joiner.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.joiner.run_options.value());
+  }
+}
+
+void NemotronJoinerState::SetInputs(OrtValue* encoder_out, OrtValue* decoder_out) {
+  inputs_[0] = encoder_out;
+  inputs_[1] = decoder_out;
+}
+
+DeviceSpan<float> NemotronJoinerState::Run(int /*current_length*/, DeviceSpan<int32_t>& /*next_tokens*/,
+                                           DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_joiner_);
+  return {};
+}
+
+const float* NemotronJoinerState::GetLogitsData() {
+  return outputs_[0]->GetTensorData<float>();
+}
+
+int NemotronJoinerState::GetLogitsSize() {
+  auto shape = outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
+  int total = 1;
+  for (auto d : shape) total *= static_cast<int>(d);
+  return total;
+}
+
+NemoStreamingASR::NemoStreamingASR(Model& model)
+    : model_{dynamic_cast<NemotronSpeechModel&>(model)} {
+  cache_config_ = model_.cache_config_;
+  params_ = CreateGeneratorParams(model_);
+
+  // Create State subclasses for each session
+  encoder_state_ = std::make_unique<NemotronEncoderState>(model_, params_);
+  prednet_state_ = std::make_unique<NemotronPredNetState>(model_, params_);
+  joiner_state_ = std::make_unique<NemotronJoinerState>(model_, params_);
 
   // Initialize mel extractor from config
   nemo_mel::NemoMelConfig mel_cfg{
@@ -179,36 +332,24 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
   auto signal_length = OrtValue::CreateTensor(allocator, len_shape, len_type);
   *signal_length->GetTensorMutableData<int64_t>() = static_cast<int64_t>(total_mel_frames);
 
-  // Encoder inputs
-  const char* enc_input_names[] = {
-      cache_config_.enc_in_audio.c_str(), cache_config_.enc_in_length.c_str(),
-      cache_config_.enc_in_cache_channel.c_str(), cache_config_.enc_in_cache_time.c_str(),
-      cache_config_.enc_in_cache_channel_len.c_str()};
-  OrtValue* enc_inputs[] = {
+  // Run encoder via State subclass
+  encoder_state_->SetInputs(
       processed_signal.get(), signal_length.get(),
       encoder_cache_.cache_last_channel.get(),
       encoder_cache_.cache_last_time.get(),
-      encoder_cache_.cache_last_channel_len.get()};
+      encoder_cache_.cache_last_channel_len.get());
 
-  const char* enc_output_names[] = {
-      cache_config_.enc_out_encoded.c_str(), cache_config_.enc_out_length.c_str(),
-      cache_config_.enc_out_cache_channel.c_str(), cache_config_.enc_out_cache_time.c_str(),
-      cache_config_.enc_out_cache_channel_len.c_str()};
-
-  // Run encoder
-  auto enc_outputs = encoder_session_->Run(
-      run_options_.get(),
-      enc_input_names, enc_inputs, 5,
-      enc_output_names, 5);
+  DeviceSpan<int32_t> dummy_tokens;
+  encoder_state_->Run(0, dummy_tokens, {});
 
   // Parse encoder outputs
-  auto* encoded = enc_outputs[0].get();
-  int64_t encoded_len = *enc_outputs[1]->GetTensorData<int64_t>();
+  auto* encoded = encoder_state_->GetEncoded();
+  int64_t encoded_len = encoder_state_->GetEncodedLength();
 
   // Update cache
-  encoder_cache_.cache_last_channel = std::move(enc_outputs[2]);
-  encoder_cache_.cache_last_time = std::move(enc_outputs[3]);
-  encoder_cache_.cache_last_channel_len = std::move(enc_outputs[4]);
+  encoder_cache_.cache_last_channel = encoder_state_->TakeCacheChannel();
+  encoder_cache_.cache_last_time = encoder_state_->TakeCacheTime();
+  encoder_cache_.cache_last_channel_len = encoder_state_->TakeCacheChannelLen();
 
   // Run RNNT decoder on ALL encoder output frames (no drop_last needed)
   std::string chunk_text = RunRNNTDecoder(encoded, encoded_len);
@@ -227,14 +368,11 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   int64_t time_steps = std::min(enc_shape[1], encoded_len);
   int64_t hidden_dim = enc_shape[2];
 
-  auto run_options = OrtRunOptions::Create();
-
   // Pre-allocate reusable tensors
   auto enc_out_type = model_.session_info_.GetOutputDataType(cache_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
   auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, enc_out_type);
 
-  // Wrap full encoder output and frame tensor as DeviceSpans for efficient copy
   auto enc_span = ByteWrapTensor(*model_.p_device_, *encoder_output);
   auto frame_span = ByteWrapTensor(*model_.p_device_, *encoder_frame);
   const size_t frame_bytes = static_cast<size_t>(hidden_dim) * sizeof(float);
@@ -250,6 +388,7 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   *target_length->GetTensorMutableData<int64_t>() = 1;
 
   const int max_sym = cache_config_.max_symbols_per_step;
+  DeviceSpan<int32_t> dummy_tokens;
 
   for (int64_t t = 0; t < time_steps; ++t) {
     auto src_frame = enc_span.subspan(static_cast<size_t>(t) * frame_bytes, frame_bytes);
@@ -258,48 +397,28 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
     for (int sym = 0; sym < max_sym; ++sym) {
       *targets_data = decoder_state_.last_token;
 
-      const char* dec_input_names[] = {
-          cache_config_.dec_in_targets.c_str(), cache_config_.dec_in_target_length.c_str(),
-          cache_config_.dec_in_lstm_hidden.c_str(), cache_config_.dec_in_lstm_cell.c_str()};
-      OrtValue* dec_inputs[] = {
+      // Run prediction network via State subclass
+      prednet_state_->SetInputs(
           targets.get(), target_length.get(),
-          decoder_state_.lstm_hidden_state.get(), decoder_state_.lstm_cell_state.get()};
+          decoder_state_.lstm_hidden_state.get(), decoder_state_.lstm_cell_state.get());
+      prednet_state_->Run(0, dummy_tokens, {});
 
-      const char* dec_output_names[] = {
-          cache_config_.dec_out_outputs.c_str(), cache_config_.dec_out_prednet_lengths.c_str(),
-          cache_config_.dec_out_lstm_hidden.c_str(), cache_config_.dec_out_lstm_cell.c_str()};
-
-      auto dec_outputs = decoder_session_->Run(
-          run_options_.get(),
-          dec_input_names, dec_inputs, 4,
-          dec_output_names, 4);
-
-      auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+      // Reshape decoder output [1, dim] -> [1, 1, dim] for joiner
+      auto dec_out_shape = prednet_state_->GetDecoderOutput()->GetTensorTypeAndShapeInfo()->GetShape();
       auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
       auto dec_out_type = model_.session_info_.GetOutputDataType(cache_config_.dec_out_outputs);
       auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, dec_out_type);
-      auto source_span = ByteWrapTensor(*model_.p_device_, *dec_outputs[0]);
+      auto source_span = ByteWrapTensor(*model_.p_device_, *prednet_state_->GetDecoderOutput());
       auto destination_span = ByteWrapTensor(*model_.p_device_, *decoder_frame);
       destination_span.CopyFrom(source_span);
 
-      // Run joiner
-      const char* join_input_names[] = {
-          cache_config_.join_in_encoder.c_str(), cache_config_.join_in_decoder.c_str()};
-      OrtValue* join_inputs[] = {
-          encoder_frame.get(), decoder_frame.get()};
-
-      const char* join_output_names[] = {cache_config_.join_out_logits.c_str()};
-
-      auto join_outputs = joiner_session_->Run(
-          run_options_.get(),
-          join_input_names, join_inputs, 2,
-          join_output_names, 1);
+      // Run joiner via State subclass
+      joiner_state_->SetInputs(encoder_frame.get(), decoder_frame.get());
+      joiner_state_->Run(0, dummy_tokens, {});
 
       // Find argmax
-      const float* logits_data = join_outputs[0]->GetTensorData<float>();  // Logits are always float for argmax
-      auto logits_shape = join_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
-      int total_logits = 1;
-      for (auto d : logits_shape) total_logits *= static_cast<int>(d);
+      const float* logits_data = joiner_state_->GetLogitsData();
+      int total_logits = joiner_state_->GetLogitsSize();
 
       int best_token = 0;
       float best_score = logits_data[0];
@@ -310,15 +429,15 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
         }
       }
 
-      // Blank means current frame is done, move to the next frame.
+      // Blank means current frame is done
       if (best_token == cache_config_.blank_id || best_token >= cache_config_.vocab_size) {
         break;
       }
 
       // Emit token & update state
       decoder_state_.last_token = best_token;
-      decoder_state_.lstm_hidden_state = std::move(dec_outputs[2]);
-      decoder_state_.lstm_cell_state = std::move(dec_outputs[3]);
+      decoder_state_.lstm_hidden_state = prednet_state_->TakeLstmHidden();
+      decoder_state_.lstm_cell_state = prednet_state_->TakeLstmCell();
 
       result += vocab_[best_token];
     }
