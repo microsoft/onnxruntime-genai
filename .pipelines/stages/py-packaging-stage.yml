@@ -36,15 +36,15 @@ parameters:
 stages:
 - stage: python_packaging
   jobs:
-  - ${{ if and(eq(parameters.enable_winml, true), contains(parameters.cuda_versions, '13.0')) }}:
+  - ${{ if and(eq(parameters.enable_winml, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         enable_winml: true
         os: 'win'
         arch: 'x64'
         ep: 'winml'
-        cuda_version: '13.0'
-        cuda_display_version: '130'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
 
@@ -60,12 +60,14 @@ stages:
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
 
-  - ${{ if eq(parameters.enable_winml, true) }}:
+  - ${{ if and(eq(parameters.enable_winml, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         os: 'win'
         arch: 'arm64'
         ep: 'winml'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
 
@@ -102,12 +104,12 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '13.0'
-        cuda_display_version: '130'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         ep: 'cuda'
         os: 'win'
         build_config: ${{ parameters.build_config }}
@@ -150,12 +152,12 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '13.0'
-        cuda_display_version: '130'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         ep: 'cuda'
         os: 'linux'
         build_config: ${{ parameters.build_config }}

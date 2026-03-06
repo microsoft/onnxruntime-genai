@@ -67,7 +67,59 @@ steps:
   condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if or(eq(parameters.ep, 'cuda'), and(eq(parameters.ep, 'winml'), eq(parameters.arch, 'x64'))) }}:
+- powershell: |
+    Write-Host "Downloading Azure CLI..."
+    $azCliUrl = "https://aka.ms/installazurecliwindows"
+    $installerPath = "$(Agent.TempDirectory)\AzureCLI.msi"
+    Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
+    Write-Host "Installing Azure CLI..."
+    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
+    Write-Host "Azure CLI installed successfully"
+    # Add Azure CLI to PATH
+    $azCliBin = "C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin"
+    if (!(Test-Path $azCliBin)) {
+      Write-Error "Azure CLI install failed or path not found: $azCliBin"
+      exit 1
+    }
+    $env:PATH = "$azCliBin;$env:PATH"
+    
+    Write-Host "Downloading AzCopy..."
+    $azcopyUrl = "https://aka.ms/downloadazcopy-v10-windows"
+    $azcopyZip = "$(Agent.TempDirectory)\azcopy.zip"
+    Invoke-WebRequest -Uri $azcopyUrl -OutFile $azcopyZip
+    $azcopyExtractPath = "$(Agent.TempDirectory)\azcopy"
+    Expand-Archive -Path $azcopyZip -DestinationPath $azcopyExtractPath -Force
+    # Find the actual azcopy.exe (it's in a versioned subfolder)
+    $azcopyExeFile = Get-ChildItem -Path $azcopyExtractPath -Name "azcopy.exe" -Recurse | Select-Object -First 1
+    if (-not $azcopyExeFile) {
+      Write-Error "AzCopy executable not found after extraction"
+      exit 1
+    }
+    $azcopyFullPath = Get-ChildItem -Path $azcopyExtractPath -Filter "azcopy.exe" -Recurse | Select-Object -First 1
+    $azcopyDir = $azcopyFullPath.Directory.FullName
+    Write-Host "AzCopy found at: $azcopyDir"
+    $env:PATH = "$azcopyDir;$env:PATH"
+    
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    # Verify installations
+    az --version
+    azcopy --version
+  displayName: 'Install Azure CLI and AzCopy'
+  condition: and(eq(variables['arch'], 'arm64'), or(eq(variables['ep'], 'winml'), eq(variables['ep'], 'cuda')))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if and(or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'winml')), eq(parameters.arch, 'arm64')) }}:
+  - task: AzureCLI@2
+    displayName: 'Download CUDA $(cuda_version)'
+    inputs:
+      azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+      scriptType: batch
+      scriptLocation: inlineScript
+      inlineScript: |
+        set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+        azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v$(cuda_version)" "cuda_sdk"
+
+- ${{ if or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'winml')) }}:
   - powershell: |
       if ('$(cuda_version)' -like '13.*') {
         $cuda_archs = "75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
@@ -167,8 +219,8 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -DWINML_SDK_VERSION='$(ort_version)'
-  displayName: 'Configure CMake C API with WinML (arm64, NO CUDA) - $(ort_version)'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+  displayName: 'Configure CMake C API with WinML (arm64, WITH CUDA) - $(ort_version)'
   condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
