@@ -3,10 +3,12 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# --------------------------------------------------------------------------
 
 import onnx_ir as ir
 import torch
+import transformers
 from transformers import Qwen2_5_VLForConditionalGeneration
 
 from .base import Model
@@ -677,6 +679,160 @@ class Qwen25VLTextModel(Model):
         # For non-quantized models, load the Hugging Face model
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            trust_remote_code=self.hf_remote,
+        )
+
+
+class Qwen3VLTextModel(Qwen25VLTextModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # GenAI config "model.type" must match C++ runtime checks.
+        self.model_type = "qwen3_vl"
+        # Keep Qwen3-VL-specific Q/K RMSNorm behavior scoped to this class.
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        self.mrope_interleaved = bool(
+            hasattr(config, "rope_scaling")
+            and isinstance(config.rope_scaling, dict)
+            and config.rope_scaling.get("mrope_interleaved", False)
+        )
+
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+        # Apply Q/K norm for Qwen3-VL before calling shared MRoPE+attention graph builder.
+        if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
+            self.make_qk_norm(layer_id, attention)
+
+        # Prevent the shared parent path from re-applying q/k norm logic.
+        prev_q_norm = self.attention_attrs["q_norm"]
+        prev_k_norm = self.attention_attrs["k_norm"]
+        self.attention_attrs["q_norm"] = False
+        self.attention_attrs["k_norm"] = False
+        try:
+            return super().make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+        finally:
+            self.attention_attrs["q_norm"] = prev_q_norm
+            self.attention_attrs["k_norm"] = prev_k_norm
+
+    def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename):
+        # Reuse RotaryEmbedding operator path from Qwen25VLTextModel.
+        return super().apply_mrope_rotation(
+            layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename
+        )
+
+    def make_mrope_flattened_caches(self, layer_id, dyn_cos, dyn_sin):
+        if not self.mrope_interleaved:
+            return super().make_mrope_flattened_caches(layer_id, dyn_cos, dyn_sin)
+
+        basename = f"/model/layers.{layer_id}/attn/mrope_flattened_cache"
+
+        def process_cache(input_name, name_suffix):
+            slice_name = f"{basename}/{name_suffix}/half/Slice"
+            slice_output = f"{slice_name}/output_0"
+            self.make_slice(
+                slice_name,
+                [
+                    input_name,
+                    "/model/constants/INT64/[0]",
+                    f"/model/constants/INT64/[{self.head_size // 2}]",
+                    "/model/constants/INT64/[-1]",
+                ],
+                ir.DataType.FLOAT,
+                [3, "batch_size", "sequence_length", self.head_size // 2],
+            )
+
+            gather_outputs = []
+            for i in range(3):
+                gather_name = f"{basename}/{name_suffix}/dim_{i}/Gather"
+                gather_output = f"{gather_name}/output_0"
+                self.make_node(
+                    "Gather",
+                    [slice_output, f"/model/constants/INT64/[{i}]"],
+                    [gather_output],
+                    name=gather_name,
+                    axis=0,
+                )
+                squeeze_name = f"{basename}/{name_suffix}/dim_{i}/Squeeze"
+                squeeze_output = f"{squeeze_name}/output_0"
+                self.make_squeeze(
+                    squeeze_name,
+                    [gather_output, "/model/constants/INT64/[0]"],
+                    ir.DataType.FLOAT,
+                    ["batch_size", "sequence_length", self.head_size // 2],
+                )
+                gather_outputs.append(squeeze_output)
+
+            half_dim = self.head_size // 2
+            mask_h = torch.zeros(half_dim, dtype=torch.float32)
+            mask_w = torch.zeros(half_dim, dtype=torch.float32)
+            for idx in range(1, self.mrope_sections[1] * 3, 3):
+                if idx < half_dim:
+                    mask_h[idx] = 1.0
+            for idx in range(2, self.mrope_sections[2] * 3, 3):
+                if idx < half_dim:
+                    mask_w[idx] = 1.0
+            mask_t = 1.0 - mask_h - mask_w
+
+            mask_t_name = f"{basename}/mrope_masks/mask_t"
+            mask_h_name = f"{basename}/mrope_masks/mask_h"
+            mask_w_name = f"{basename}/mrope_masks/mask_w"
+            self.make_initializer(mask_t.reshape(1, 1, half_dim), mask_t_name, to=ir.DataType.FLOAT)
+            self.make_initializer(mask_h.reshape(1, 1, half_dim), mask_h_name, to=ir.DataType.FLOAT)
+            self.make_initializer(mask_w.reshape(1, 1, half_dim), mask_w_name, to=ir.DataType.FLOAT)
+
+            t_mul_name = f"{basename}/{name_suffix}/T/Mul"
+            t_mul_output = f"{t_mul_name}/output_0"
+            self.make_node("Mul", [gather_outputs[0], mask_t_name], [t_mul_output], name=t_mul_name)
+            self.make_value(t_mul_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_dim])
+
+            h_mul_name = f"{basename}/{name_suffix}/H/Mul"
+            h_mul_output = f"{h_mul_name}/output_0"
+            self.make_node("Mul", [gather_outputs[1], mask_h_name], [h_mul_output], name=h_mul_name)
+            self.make_value(h_mul_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_dim])
+
+            w_mul_name = f"{basename}/{name_suffix}/W/Mul"
+            w_mul_output = f"{w_mul_name}/output_0"
+            self.make_node("Mul", [gather_outputs[2], mask_w_name], [w_mul_output], name=w_mul_name)
+            self.make_value(w_mul_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_dim])
+
+            th_add_name = f"{basename}/{name_suffix}/TH/Add"
+            th_add_output = f"{th_add_name}/output_0"
+            self.make_node("Add", [t_mul_output, h_mul_output], [th_add_output], name=th_add_name)
+            self.make_value(th_add_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_dim])
+
+            merged_name = f"{basename}/{name_suffix}/THW/Add"
+            merged_output = f"{merged_name}/output_0"
+            self.make_node("Add", [th_add_output, w_mul_output], [merged_output], name=merged_name)
+            self.make_value(merged_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_dim])
+
+            reshape_name = f"{basename}/{name_suffix}_flat/Reshape"
+            reshape_output = f"{reshape_name}/output_0"
+            self.make_reshape(
+                reshape_name,
+                [merged_output, f"/model/constants/INT64/[-1, {self.head_size // 2}]"],
+                ir.DataType.FLOAT,
+                ["total_token_count", self.head_size // 2],
+            )
+            return reshape_output
+
+        flat_cos = process_cache(dyn_cos, "cos")
+        flat_sin = process_cache(dyn_sin, "sin")
+        return flat_cos, flat_sin
+
+    def load_weights(self, input_path):
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
+        model_cls = getattr(transformers, "Qwen3VLForConditionalGeneration", None)
+        if model_cls is None:
+            raise ImportError(
+                "Qwen3VLForConditionalGeneration is unavailable in this transformers version."
+            )
+
+        print("Loading Qwen3VLForConditionalGeneration model...")
+        return model_cls.from_pretrained(
             self.model_name_or_path,
             cache_dir=self.cache_dir,
             token=self.hf_token,

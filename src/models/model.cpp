@@ -21,6 +21,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "qwen3vl_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
 #include "../ryzenai/interface.h"
@@ -1276,6 +1277,15 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+  if (config->model.type == "qwen3_vl") {
+    // Keep compatibility with text-only exports where vision/embedding components are absent.
+    const bool has_vision = !config->model.vision.filename.empty();
+    const bool has_embedding = !config->model.embedding.filename.empty();
+    if (has_vision && has_embedding) {
+      return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    }
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  }
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
@@ -1371,7 +1381,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>}} {
+          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
+          {"qwen3_vl", Processor::Create<Qwen3VLImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

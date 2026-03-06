@@ -39,6 +39,7 @@ from builders import (
     Phi4MMModel,
     PhiModel,
     Qwen3Model,
+    Qwen3VLTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
@@ -309,6 +310,16 @@ def create_model(
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
