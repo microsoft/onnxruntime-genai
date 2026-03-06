@@ -23,9 +23,10 @@ struct NemoStreamingASR : StreamingASR {
   Model& model_;
   NemotronCacheConfig cache_config_;
 
-  std::unique_ptr<OrtSession> encoder_session_;
-  std::unique_ptr<OrtSession> decoder_session_;
-  std::unique_ptr<OrtSession> joiner_session_;
+  // Non-owning pointers to sessions owned by NemotronSpeechModel
+  OrtSession* encoder_session_;
+  OrtSession* decoder_session_;
+  OrtSession* joiner_session_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
   // Streaming state

@@ -14,6 +14,7 @@
 #include "smartptrs.h"
 #include "engine/engine.h"
 #include "streaming_asr.h"
+#include "models/audio_processor.h"
 
 namespace Generators {
 
@@ -62,6 +63,7 @@ struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
 struct OgaStreamingASR : Generators::StreamingASR, OgaAbstract {};
+struct OgaAudioProcessor : Generators::AudioProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -473,6 +475,14 @@ size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator) {
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
   OGA_TRY
   generator->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextTokens(OgaGenerator* generator, const char** text) {
+  OGA_TRY
+  auto result = generator->GenerateNextTokens();
+  *text = AllocOgaString(result);
   return nullptr;
   OGA_CATCH
 }
@@ -1125,5 +1135,48 @@ OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, const char** 
 }
 
 void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* p) { delete p; }
+
+OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out) {
+  OGA_TRY
+  auto processor = Generators::CreateAudioProcessor(*model);
+  *out = ReturnUnique<OgaAudioProcessor>(std::move(processor));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, const float* audio_data, size_t num_samples, OgaTensor** mel) {
+  OGA_TRY
+  auto result = processor->Process(audio_data, num_samples);
+  if (result) {
+    auto tensor = std::make_shared<Generators::Tensor>(std::move(result));
+    *mel = ReturnShared<OgaTensor>(tensor);
+  } else {
+    *mel = nullptr;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, OgaTensor** mel) {
+  OGA_TRY
+  auto result = processor->Flush();
+  if (result) {
+    auto tensor = std::make_shared<Generators::Tensor>(std::move(result));
+    *mel = ReturnShared<OgaTensor>(tensor);
+  } else {
+    *mel = nullptr;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaAudioProcessorReset(OgaAudioProcessor* processor) {
+  OGA_TRY
+  processor->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyAudioProcessor(OgaAudioProcessor* p) { delete p; }
 
 }  // extern "C"

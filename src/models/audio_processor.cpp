@@ -1,0 +1,125 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include <algorithm>
+#include <cstring>
+
+#include "../generators.h"
+#include "audio_processor.h"
+
+namespace Generators {
+
+AudioProcessor::AudioProcessor(Model& model)
+    : model_{model} {
+  auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
+  if (!nemotron_model) {
+    throw std::runtime_error("AudioProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
+  }
+
+  cache_config_ = nemotron_model->cache_config_;
+
+  // Initialize mel extractor from config
+  nemo_mel::NemoMelConfig mel_cfg{
+      cache_config_.num_mels, cache_config_.fft_size,
+      cache_config_.hop_length, cache_config_.win_length,
+      cache_config_.sample_rate,
+      cache_config_.preemph, cache_config_.log_eps};
+  mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
+
+  // Initialize mel pre-encode cache (time-major ring buffer, zeros for first chunk)
+  mel_pre_encode_cache_.assign(
+      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
+  cache_pos_ = 0;
+}
+
+AudioProcessor::~AudioProcessor() = default;
+
+void AudioProcessor::Reset() {
+  mel_extractor_.Reset();
+  mel_pre_encode_cache_.assign(
+      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
+  cache_pos_ = 0;
+  audio_buffer_.clear();
+}
+
+std::unique_ptr<OrtValue> AudioProcessor::Process(const float* audio_data, size_t num_samples) {
+  // Append incoming audio to accumulation buffer
+  audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
+
+  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
+
+  // Process the first complete chunk available
+  if (audio_buffer_.size() >= chunk_size) {
+    auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
+    audio_buffer_.erase(audio_buffer_.begin(),
+                        audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+    return mel;
+  }
+
+  return nullptr;  // Not enough audio yet
+}
+
+std::unique_ptr<OrtValue> AudioProcessor::Flush() {
+  if (audio_buffer_.empty()) {
+    return nullptr;
+  }
+
+  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
+  audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
+
+  auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
+  audio_buffer_.clear();
+  return mel;
+}
+
+std::unique_ptr<OrtValue> AudioProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
+  auto& allocator = model_.allocator_cpu_;
+
+  // Compute mel spectrogram for this chunk
+  auto [mel_data, num_frames] = mel_extractor_.Process(audio_chunk, chunk_samples);
+
+  const int cache_size = cache_config_.pre_encode_cache_size;
+  const int num_mels = cache_config_.num_mels;
+  const int total_mel_frames = cache_size + num_frames;
+
+  // Transpose mel from [num_mels, num_frames] to time-major [num_frames, num_mels]
+  std::vector<float> mel_time_major(static_cast<size_t>(num_frames) * num_mels);
+  for (int t = 0; t < num_frames; ++t) {
+    for (int m = 0; m < num_mels; ++m) {
+      mel_time_major[t * num_mels + m] = mel_data[m * num_frames + t];
+    }
+  }
+
+  // Create output tensor: [1, total_mel_frames, num_mels]
+  auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
+  auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
+  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
+  float* signal_data = processed_signal->GetTensorMutableData<float>();
+
+  // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
+  for (int t = 0; t < cache_size; ++t) {
+    int ring_idx = (cache_pos_ + t) % cache_size;
+    const float* src = mel_pre_encode_cache_.data() + ring_idx * num_mels;
+    std::memcpy(signal_data + t * num_mels, src, num_mels * sizeof(float));
+  }
+
+  // Copy current chunk's mel frames after cache
+  std::memcpy(signal_data + cache_size * num_mels,
+              mel_time_major.data(),
+              static_cast<size_t>(num_frames) * num_mels * sizeof(float));
+
+  // Update ring buffer with new mel frames
+  for (int t = 0; t < num_frames; ++t) {
+    float* destination = mel_pre_encode_cache_.data() + cache_pos_ * num_mels;
+    std::memcpy(destination, mel_time_major.data() + t * num_mels, num_mels * sizeof(float));
+    cache_pos_ = (cache_pos_ + 1) % cache_size;
+  }
+
+  return processed_signal;
+}
+
+std::unique_ptr<AudioProcessor> CreateAudioProcessor(Model& model) {
+  return std::make_unique<AudioProcessor>(model);
+}
+
+}  // namespace Generators

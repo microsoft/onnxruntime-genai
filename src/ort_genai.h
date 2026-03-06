@@ -488,6 +488,12 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
+  OgaString GenerateNextTokens() {
+    const char* text;
+    OgaCheckResult(OgaGenerator_GenerateNextTokens(this, &text));
+    return OgaString(text);
+  }
+
 #if OGA_USE_SPAN
   std::span<const int32_t> GetNextTokens() {
     const int32_t* out;
@@ -917,4 +923,30 @@ struct OgaStreamingASR : OgaAbstract {
   }
 
   static void operator delete(void* p) { OgaDestroyStreamingASR(reinterpret_cast<OgaStreamingASR*>(p)); }
+};
+
+struct OgaAudioProcessor : OgaAbstract {
+  static std::unique_ptr<OgaAudioProcessor> Create(OgaModel& model) {
+    OgaAudioProcessor* p;
+    OgaCheckResult(OgaCreateAudioProcessor(&model, &p));
+    return std::unique_ptr<OgaAudioProcessor>(p);
+  }
+
+  std::unique_ptr<OgaTensor> Process(const float* audio_data, size_t num_samples) {
+    OgaTensor* mel;
+    OgaCheckResult(OgaAudioProcessorProcess(this, audio_data, num_samples, &mel));
+    return std::unique_ptr<OgaTensor>(mel);  // May be nullptr if not enough audio
+  }
+
+  std::unique_ptr<OgaTensor> Flush() {
+    OgaTensor* mel;
+    OgaCheckResult(OgaAudioProcessorFlush(this, &mel));
+    return std::unique_ptr<OgaTensor>(mel);
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaAudioProcessorReset(this));
+  }
+
+  static void operator delete(void* p) { OgaDestroyAudioProcessor(reinterpret_cast<OgaAudioProcessor*>(p)); }
 };

@@ -45,9 +45,9 @@ NemoStreamingASR::NemoStreamingASR(Model& model)
     throw std::runtime_error("NemoStreamingASR requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
-  encoder_session_ = std::move(nemotron_model->session_encoder_);
-  decoder_session_ = std::move(nemotron_model->session_decoder_);
-  joiner_session_ = std::move(nemotron_model->session_joiner_);
+  encoder_session_ = nemotron_model->session_encoder_.get();
+  decoder_session_ = nemotron_model->session_decoder_.get();
+  joiner_session_ = nemotron_model->session_joiner_.get();
   run_options_ = OrtRunOptions::Create();
   cache_config_ = nemotron_model->cache_config_;
 

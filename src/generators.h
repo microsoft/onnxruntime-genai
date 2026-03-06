@@ -103,6 +103,9 @@ struct Generator : LeakChecked<Generator> {
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
+  /// For streaming RNNT models: process the current mel input through encoder+decoder
+  /// and return newly decoded text. Call set_model_input("audio_features", mel) first.
+  std::string GenerateNextTokens();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);

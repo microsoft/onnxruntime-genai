@@ -113,4 +113,47 @@ struct NemotronSpeechModel : Model {
   NemotronCacheConfig cache_config_;
 };
 
+/// State implementation for NemotronSpeech that works with the Generator pipeline.
+/// Manages encoder cache, RNNT decoder state, and vocab for streaming inference.
+struct NemotronSpeechState : State {
+  NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
+  ~NemotronSpeechState() override;
+
+  /// Not used for RNNT - throws. Use ProcessChunk() instead.
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
+
+  /// Receives mel tensor from Generator's extra_inputs (keyed as "audio_features" or graph name).
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
+  /// Run full encoder + RNNT decode loop for the current mel chunk.
+  /// Returns newly decoded text.
+  std::string ProcessChunk() override;
+
+  /// Get the full accumulated transcript.
+  const std::string& GetTranscript() const { return full_transcript_; }
+
+  /// Reset all streaming state for a new utterance.
+  void ResetStreamingState();
+
+ private:
+  const NemotronSpeechModel& nemotron_model_;
+  NemotronCacheConfig cache_config_;
+
+  // Streaming state
+  NemotronEncoderCache encoder_cache_;
+  NemotronDecoderState decoder_state_;
+  std::string full_transcript_;
+
+  // Current mel input (set via SetExtraInputs)
+  std::shared_ptr<Tensor> current_mel_;
+
+  // Vocabulary
+  std::vector<std::string> vocab_;
+  bool vocab_loaded_{false};
+
+  void LoadVocab();
+  std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
+};
+
 }  // namespace Generators

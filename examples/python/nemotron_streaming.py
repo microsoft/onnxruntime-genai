@@ -63,15 +63,76 @@ def simulate_microphone(model_path, audio_path):
     print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration/total_wall:.2f}x")
 
 
+def simulate_microphone_generator_api(model_path, audio_path):
+    """Demonstrates the new Generator + AudioProcessor API for streaming ASR."""
+    audio = load_audio(audio_path)
+    duration = len(audio) / SAMPLE_RATE
+    num_chunks = (len(audio) + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES
+    print(f"Audio: {duration:.1f}s | {num_chunks} chunks × {CHUNK_DURATION*1000:.0f}ms")
+
+    config = og.Config(model_path)
+    model = og.Model(config)
+    processor = og.AudioProcessor(model)
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+
+    print("-" * 60)
+    stream_start = time.time()
+    full_transcript = ""
+
+    for i in range(0, len(audio), CHUNK_SAMPLES):
+        chunk = audio[i:i + CHUNK_SAMPLES].astype(np.float32)
+        mel = processor.process(chunk)
+        if mel is not None:
+            generator.set_model_input("audio_features", mel)
+            text = generator.generate_next_tokens()
+            if text:
+                print(text, end="", flush=True)
+                full_transcript += text
+
+    # Flush remaining audio
+    mel = processor.flush()
+    if mel is not None:
+        generator.set_model_input("audio_features", mel)
+        text = generator.generate_next_tokens()
+        if text:
+            print(text, end="", flush=True)
+            full_transcript += text
+
+    # Feed silence chunks for right context
+    for _ in range(4):
+        silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
+        mel = processor.process(silence)
+        if mel is not None:
+            generator.set_model_input("audio_features", mel)
+            text = generator.generate_next_tokens()
+            if text:
+                print(text, end="", flush=True)
+                full_transcript += text
+
+    total_wall = time.time() - stream_start
+
+    print(f"\n{'=' * 60}")
+    print(f"  {full_transcript.strip()}")
+    print(f"{'=' * 60}")
+    print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration/total_wall:.2f}x")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
+    parser.add_argument("--api", type=str, choices=["streaming_asr", "generator"],
+                        default="generator",
+                        help="Which API to use: 'streaming_asr' (legacy) or 'generator' (new)")
     args = parser.parse_args()
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
         sys.exit(1)
-    simulate_microphone(args.model_path, args.audio_file)
+    if args.api == "generator":
+        simulate_microphone_generator_api(args.model_path, args.audio_file)
+    else:
+        simulate_microphone(args.model_path, args.audio_file)
 
 
 if __name__ == "__main__":

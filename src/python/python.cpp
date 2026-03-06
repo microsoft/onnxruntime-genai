@@ -246,6 +246,10 @@ struct PyGenerator {
     generator_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
   }
 
+  void SetModelInputTensor(const std::string& name, OgaTensor& tensor) {
+    generator_->SetModelInput(name.c_str(), tensor);
+  }
+
   void SetInputs(OgaNamedTensors& named_tensors) {
     generator_->SetInputs(named_tensors);
   }
@@ -272,6 +276,10 @@ struct PyGenerator {
 
   void GenerateNextToken() {
     generator_->GenerateNextToken();
+  }
+
+  std::string GenerateNextTokens() {
+    return std::string(generator_->GenerateNextTokens().p_);
   }
 
   void RewindTo(size_t new_length) {
@@ -477,7 +485,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
-      .def("create_streaming_asr", [](OgaModel& model) { return OgaStreamingASR::Create(model); }, "Create a StreamingASR instance for real-time streaming speech recognition.");
+      .def("create_streaming_asr", [](OgaModel& model) { return OgaStreamingASR::Create(model); }, "Create a StreamingASR instance for real-time streaming speech recognition.")
+      .def("create_audio_processor", [](OgaModel& model) { return OgaAudioProcessor::Create(model); }, "Create an AudioProcessor for mel spectrogram extraction from raw audio.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
@@ -486,12 +495,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)
       .def("set_model_input", &PyGenerator::SetModelInput)
+      .def("set_model_input", &PyGenerator::SetModelInputTensor)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("token_count", &PyGenerator::TokenCount)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
+      .def("generate_next_tokens", &PyGenerator::GenerateNextTokens, "For streaming RNNT models: process mel input through encoder+decoder and return decoded text.")
       .def("rewind_to", &PyGenerator::RewindTo)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
@@ -631,6 +642,28 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("step", &OgaEngine::Step)
       .def("remove_request", &OgaEngine::Remove)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
+
+  pybind11::class_<OgaAudioProcessor>(m, "AudioProcessor")
+      .def(pybind11::init([](OgaModel& model) { return OgaAudioProcessor::Create(model); }),
+           "Create an AudioProcessor for mel spectrogram extraction.\n"
+           "The model must be of type 'nemotron_speech'.")
+      .def("process", [](OgaAudioProcessor& proc, pybind11::array_t<float> audio_chunk) -> pybind11::object {
+        auto buf = audio_chunk.request();
+        auto mel = proc.Process(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
+        if (mel) {
+          return pybind11::cast(std::move(mel));
+        }
+        return pybind11::none();
+      }, pybind11::arg("audio_chunk"),
+         "Feed raw PCM audio. Returns an OgaTensor if a full chunk is ready, or None if more audio is needed.")
+      .def("flush", [](OgaAudioProcessor& proc) -> pybind11::object {
+        auto mel = proc.Flush();
+        if (mel) {
+          return pybind11::cast(std::move(mel));
+        }
+        return pybind11::none();
+      }, "Flush remaining buffered audio (pads with silence). Returns OgaTensor or None.")
+      .def("reset", [](OgaAudioProcessor& proc) { proc.Reset(); }, "Reset processor state for a new utterance.");
 
   pybind11::class_<OgaStreamingASR>(m, "StreamingASR")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingASR::Create(model); }),

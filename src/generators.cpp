@@ -5,9 +5,11 @@
 
 #include "generators.h"
 #include "streaming_asr.h"
+#include "models/audio_processor.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
@@ -346,6 +348,13 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+  // Streaming ASR (RNNT) models don't use the traditional search/logits pipeline,
+  // so skip the standard validations and just create the state.
+  if (ModelType::IsStreamingASR(model.config_->model.type)) {
+    state_ = model.CreateState({}, params);
+    return;
+  }
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -533,6 +542,15 @@ bool Generator::IsSessionTerminated() const {
 void Generator::SetLogits(DeviceSpan<float> logits) {
   search_->SetLogits(logits);
   computed_logits_ = true;
+}
+
+std::string Generator::GenerateNextTokens() {
+  // Forward any pending extra inputs to state
+  state_->SetExtraInputs(extra_inputs_);
+  extra_inputs_.clear();
+
+  // Delegate to the state's RNNT ProcessChunk
+  return state_->ProcessChunk();
 }
 
 void Generator::GenerateNextToken() {
