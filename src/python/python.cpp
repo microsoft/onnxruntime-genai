@@ -278,10 +278,6 @@ struct PyGenerator {
     generator_->GenerateNextToken();
   }
 
-  std::string GenerateNextTokens() {
-    return std::string(generator_->GenerateNextTokens().p_);
-  }
-
   void RewindTo(size_t new_length) {
     generator_->RewindTo(new_length);
   }
@@ -502,7 +498,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("generate_next_tokens", &PyGenerator::GenerateNextTokens, "For streaming RNNT models: process mel input through encoder+decoder and return decoded text.")
       .def("rewind_to", &PyGenerator::RewindTo)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)

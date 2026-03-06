@@ -352,6 +352,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   // Streaming ASR (RNNT) models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsStreamingASR(model.config_->model.type)) {
+    is_streaming_asr_ = true;
     state_ = model.CreateState({}, params);
     return;
   }
@@ -515,10 +516,18 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
+  if (is_streaming_asr_) return 0;
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
+  if (is_streaming_asr_) {
+    // Pending mel input means we haven't started processing this chunk yet
+    if (!extra_inputs_.empty()) return false;
+    auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
+    return speech_state->IsChunkDone();
+  }
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -545,19 +554,18 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
   computed_logits_ = true;
 }
 
-std::string Generator::GenerateNextTokens() {
-  // Forward any pending extra inputs to state
-  state_->SetExtraInputs(extra_inputs_);
-  extra_inputs_.clear();
-
-  auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
-  if (!speech_state)
-    throw std::runtime_error("GenerateNextTokens is only supported for streaming ASR (nemotron_speech) models.");
-  return speech_state->ProcessChunk();
-}
-
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
+
+  // Streaming ASR (RNNT) models: yield one token per call from the decoder state machine
+  auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
+  if (speech_state) {
+    state_->SetExtraInputs(extra_inputs_);
+    extra_inputs_.clear();
+    speech_state->StepToken();
+    last_chunk_tokens_ = speech_state->GetLastTokens();
+    return;
+  }
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)

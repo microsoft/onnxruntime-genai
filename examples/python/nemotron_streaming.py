@@ -73,31 +73,46 @@ def simulate_microphone_generator_api(model_path, audio_path):
     config = og.Config(model_path)
     model = og.Model(config)
     processor = og.AudioProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
 
     print("-" * 60)
     stream_start = time.time()
     full_transcript = ""
+    chunk_idx = 0
+
+    def decode_chunk():
+        nonlocal full_transcript
+        while not generator.is_done():
+            generator.generate_next_token()
+            tokens = generator.get_next_tokens()
+            for token in tokens:
+                text = tokenizer_stream.decode(token)
+                if text:
+                    print(text, end="", flush=True)
+                    full_transcript += text
 
     for i in range(0, len(audio), CHUNK_SAMPLES):
+        # Simulate real-time: wait until this chunk's audio would have arrived
+        #expected_time = chunk_idx * CHUNK_DURATION
+        #elapsed = time.time() - stream_start
+        #if elapsed < expected_time:
+        #    time.sleep(expected_time - elapsed)
+        chunk_idx += 1
+
         chunk = audio[i:i + CHUNK_SAMPLES].astype(np.float32)
         mel = processor.process(chunk)
         if mel is not None:
             generator.set_model_input("audio_features", mel)
-            text = generator.generate_next_tokens()
-            if text:
-                print(text, end="", flush=True)
-                full_transcript += text
+            decode_chunk()
 
     # Flush remaining audio
     mel = processor.flush()
     if mel is not None:
         generator.set_model_input("audio_features", mel)
-        text = generator.generate_next_tokens()
-        if text:
-            print(text, end="", flush=True)
-            full_transcript += text
+        decode_chunk()
 
     # Feed silence chunks for right context
     for _ in range(4):
@@ -105,10 +120,7 @@ def simulate_microphone_generator_api(model_path, audio_path):
         mel = processor.process(silence)
         if mel is not None:
             generator.set_model_input("audio_features", mel)
-            text = generator.generate_next_tokens()
-            if text:
-                print(text, end="", flush=True)
-                full_transcript += text
+            decode_chunk()
 
     total_wall = time.time() - stream_start
 

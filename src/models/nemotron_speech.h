@@ -114,24 +114,27 @@ struct NemotronSpeechModel : Model {
 };
 
 /// State implementation for NemotronSpeech that works with the Generator pipeline.
-/// Manages encoder cache, RNNT decoder state, and vocab for streaming inference.
+/// The RNNT decoder is a state machine: each StepToken() call yields one non-blank token.
 struct NemotronSpeechState : State {
   NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
   ~NemotronSpeechState() override;
 
-  /// Not used for RNNT - throws. Use ProcessChunk() instead.
+  /// Not used for RNNT. Throws.
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 
-  /// Receives mel tensor from Generator's extra_inputs (keyed as "audio_features" or graph name).
+  /// Receives mel tensor from Generator's extra_inputs.
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
-  /// Run full encoder + RNNT decode loop for the current mel chunk.
-  /// Returns newly decoded text.
-  std::string ProcessChunk();
+  /// Run one step of the RNNT decoder, producing at most one non-blank token.
+  /// Skips blanks internally. Sets chunk_done_ when the chunk is fully decoded.
+  void StepToken();
 
-  /// Get the full accumulated transcript.
-  const std::string& GetTranscript() const { return full_transcript_; }
+  /// Whether the current chunk has been fully decoded.
+  bool IsChunkDone() const { return chunk_done_; }
+
+  /// Token produced by the last StepToken() call (empty if chunk exhausted).
+  const std::vector<int32_t>& GetLastTokens() const { return last_tokens_; }
 
   /// Reset all streaming state for a new utterance.
   void ResetStreamingState();
@@ -140,20 +143,31 @@ struct NemotronSpeechState : State {
   const NemotronSpeechModel& nemotron_model_;
   NemotronCacheConfig cache_config_;
 
-  // Streaming state
+  // Streaming encoder cache
   NemotronEncoderCache encoder_cache_;
   NemotronDecoderState decoder_state_;
-  std::string full_transcript_;
 
-  // Current mel input (set via SetExtraInputs)
+  // Current mel input
   std::shared_ptr<Tensor> current_mel_;
 
-  // Vocabulary
-  std::vector<std::string> vocab_;
-  bool vocab_loaded_{false};
+  // Encoder output persisted across StepToken calls
+  std::unique_ptr<OrtValue> encoded_output_;
+  int64_t encoded_len_{0};
 
-  void LoadVocab();
-  std::string RunRNNTDecoder(OrtValue* encoder_output, int64_t encoded_len);
+  // Decoder state machine
+  int64_t time_step_{0};
+  int symbol_step_{0};
+  bool need_encoder_run_{false};
+  bool chunk_done_{true};
+  std::vector<int32_t> last_tokens_;
+
+  // Pre-allocated reusable tensors
+  std::unique_ptr<OrtValue> encoder_frame_;   // [1, 1, hidden_dim]
+  std::unique_ptr<OrtValue> targets_;         // [1, 1]
+  std::unique_ptr<OrtValue> target_length_;   // [1]
+  std::unique_ptr<OrtRunOptions> run_options_;
+
+  void RunEncoder();
 };
 
 }  // namespace Generators
