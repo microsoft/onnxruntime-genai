@@ -141,35 +141,35 @@ std::string NemoStreamingASR::TranscribeMelChunk(const std::vector<float>& mel_d
 
   int total_mel_frames = cache_size + num_frames;
 
-  // Create processed_signal: [1, num_mels, total_mel_frames]
+  std::vector<float> mel_time_major(static_cast<size_t>(num_frames) * num_mels);
+  for (int t = 0; t < num_frames; ++t) {
+    for (int m = 0; m < num_mels; ++m) {
+      mel_time_major[t * num_mels + m] = mel_data[m * num_frames + t];
+    }
+  }
+
+  // Create processed_signal: [1, total_mel_frames, num_mels] (time-major layout)
   auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
-  auto signal_shape = std::array<int64_t, 3>{1, num_mels, total_mel_frames};
+  auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
-  // Materialize cache frames into processed_signal [num_mels, total_mel_frames].
+  // Materialize cache frames into processed_signal [total_mel_frames, num_mels].
   // Ring buffer is time-major [cache_size, num_mels]; read oldest-first starting at cache_pos_.
   for (int t = 0; t < cache_size; ++t) {
     int ring_idx = (cache_pos_ + t) % cache_size;
     const float* src = mel_pre_encode_cache_.data() + ring_idx * num_mels;
-    for (int m = 0; m < num_mels; ++m) {
-      signal_data[m * total_mel_frames + t] = src[m];
-    }
+    std::memcpy(signal_data + t * num_mels, src, num_mels * sizeof(float));
   }
 
-  // Append new mel frames (mel_data is mel-major [num_mels, num_frames])
-  for (int m = 0; m < num_mels; ++m) {
-    std::memcpy(signal_data + m * total_mel_frames + cache_size,
-                mel_data.data() + m * num_frames,
-                num_frames * sizeof(float));
-  }
+  std::memcpy(signal_data + cache_size * num_mels,
+              mel_time_major.data(),
+              static_cast<size_t>(num_frames) * num_mels * sizeof(float));
 
-  // Update ring buffer: write new frames into cache (no memmove needed)
+  // Update ring buffer with time-major data (contiguous memcpy per frame)
   for (int t = 0; t < num_frames; ++t) {
     float* destination = mel_pre_encode_cache_.data() + cache_pos_ * num_mels;
-    for (int m = 0; m < num_mels; ++m) {
-      destination[m] = mel_data[m * num_frames + t];
-    }
+    std::memcpy(destination, mel_time_major.data() + t * num_mels, num_mels * sizeof(float));
     cache_pos_ = (cache_pos_ + 1) % cache_size;
   }
 
@@ -223,11 +223,9 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 
   auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
-  int64_t hidden_dim = enc_shape[1];
-
-  // Decode ALL encoder output frames, pre-encode cache is already removed by the ONNX graph.
-  int64_t time_steps = std::min(enc_shape[2], encoded_len);
-  const float* enc_data = encoder_output->GetTensorData<float>();
+  // Encoder output layout: [batch, time, hidden_dim]
+  int64_t time_steps = std::min(enc_shape[1], encoded_len);
+  int64_t hidden_dim = enc_shape[2];
 
   auto run_options = OrtRunOptions::Create();
 
@@ -235,7 +233,11 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   auto enc_out_type = model_.session_info_.GetOutputDataType(cache_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
   auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, enc_out_type);
-  float* frame_data = encoder_frame->GetTensorMutableData<float>();
+
+  // Wrap full encoder output and frame tensor as DeviceSpans for efficient copy
+  auto enc_span = ByteWrapTensor(*model_.p_device_, *encoder_output);
+  auto frame_span = ByteWrapTensor(*model_.p_device_, *encoder_frame);
+  const size_t frame_bytes = static_cast<size_t>(hidden_dim) * sizeof(float);
 
   auto targets_shape = std::array<int64_t, 2>{1, 1};
   auto targets_type = model_.session_info_.GetInputDataType(cache_config_.dec_in_targets);
@@ -250,10 +252,8 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
   const int max_sym = cache_config_.max_symbols_per_step;
 
   for (int64_t t = 0; t < time_steps; ++t) {
-    // Fill encoder frame data (reusing pre-allocated tensor)
-    for (int64_t d = 0; d < hidden_dim; ++d) {
-      frame_data[d] = enc_data[d * enc_shape[2] + t];
-    }
+    auto src_frame = enc_span.subspan(static_cast<size_t>(t) * frame_bytes, frame_bytes);
+    frame_span.CopyFrom(src_frame);
 
     for (int sym = 0; sym < max_sym; ++sym) {
       *targets_data = decoder_state_.last_token;
