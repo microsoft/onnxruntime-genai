@@ -328,7 +328,11 @@ std::string NemoStreamingASR::RunRNNTDecoder(OrtValue* encoder_output, int64_t e
 }
 
 std::unique_ptr<StreamingASR> CreateStreamingASR(Model& model) {
-  return std::make_unique<NemoStreamingASR>(model);
+  const auto& model_type = model.config_->model.type;
+  if (model_type == "nemotron_speech") {
+    return std::make_unique<NemoStreamingASR>(model);
+  }
+  throw std::runtime_error("Unsupported model type for StreamingASR: " + model_type);
 }
 
 }  // namespace Generators
