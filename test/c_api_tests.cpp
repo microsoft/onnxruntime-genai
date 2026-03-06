@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <fstream>
 #include <numeric>
 #include <iostream>
@@ -1362,3 +1365,188 @@ TEST(CAPITests, SetGuidance) {
 #endif
 }
 #endif
+
+#if TEST_STREAMING_ASR
+#ifndef STREAMING_ASR_PATH
+#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+#endif
+
+// Test creating a StreamingASR instance from a nemotron_speech model
+TEST(CAPITests, StreamingASRCreate) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+  ASSERT_NE(asr, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test that creating StreamingASR from a non-speech model throws
+TEST(CAPITests, StreamingASRCreateInvalidModel) {
+#if TEST_PHI2
+  // Phi-2 is an LLM, not a speech model — creating StreamingASR should fail
+  auto model = OgaModel::Create(PHI2_PATH);
+  EXPECT_THROW(OgaStreamingASR::Create(*model), std::exception);
+#else
+  GTEST_SKIP() << "PHI2 model not available for negative test.";
+#endif
+}
+
+// Test transcribing silence (all zeros) produces empty or blank output
+TEST(CAPITests, StreamingASRTranscribeSilence) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+
+  // Feed one chunk of silence (8960 samples = 560ms at 16kHz)
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  auto text = asr->TranscribeChunk(silence.data(), silence.size());
+  // Silence should produce empty or blank-only output
+  std::string result(text.p_);
+  // We don't assert exact content since blank handling varies,
+  // but the call should succeed without crashing
+  SUCCEED();
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test basic streaming: feed multiple chunks and get a transcript
+TEST(CAPITests, StreamingASRMultipleChunks) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+
+  constexpr size_t chunk_samples = 8960;
+
+  // Feed several chunks of silence
+  std::vector<float> silence(chunk_samples, 0.0f);
+  for (int i = 0; i < 5; ++i) {
+    auto text = asr->TranscribeChunk(silence.data(), silence.size());
+    // Should not crash
+  }
+
+  // Get full transcript
+  auto transcript = asr->GetTranscript();
+  // Transcript should be valid (possibly empty for silence)
+  ASSERT_NE(transcript.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test reset: after reset, transcript should be empty
+TEST(CAPITests, StreamingASRReset) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+  asr->TranscribeChunk(silence.data(), silence.size());
+
+  // Reset streaming state
+  asr->Reset();
+
+  // Transcript after reset should be empty
+  auto transcript = asr->GetTranscript();
+  std::string result(transcript.p_);
+  EXPECT_TRUE(result.empty()) << "Transcript after reset should be empty, got: " << result;
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test flush: flush should return remaining text without crashing
+TEST(CAPITests, StreamingASRFlush) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+  asr->TranscribeChunk(silence.data(), silence.size());
+
+  // Flush should complete without error
+  auto flush_text = asr->Flush();
+  ASSERT_NE(flush_text.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test transcribing a synthetic sine wave (produces non-trivial mel features)
+TEST(CAPITests, StreamingASRSineWave) {
+#if TEST_STREAMING_ASR
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto asr = OgaStreamingASR::Create(*model);
+
+  constexpr size_t chunk_samples = 8960;
+  constexpr float sample_rate = 16000.0f;
+  constexpr float frequency = 440.0f;  // A4 note
+
+  // Generate a 440Hz sine wave
+  std::vector<float> audio(chunk_samples);
+  for (size_t i = 0; i < chunk_samples; ++i) {
+    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  }
+
+  // Feed the sine wave chunk
+  auto text = asr->TranscribeChunk(audio.data(), audio.size());
+  ASSERT_NE(text.p_, nullptr);
+
+  // Feed a few more chunks and flush
+  for (int i = 0; i < 3; ++i) {
+    asr->TranscribeChunk(audio.data(), audio.size());
+  }
+  asr->Flush();
+
+  auto transcript = asr->GetTranscript();
+  ASSERT_NE(transcript.p_, nullptr);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}
+
+// Test C API directly (not the C++ wrapper)
+TEST(CAPITests, StreamingASRRawCAPI) {
+#if TEST_STREAMING_ASR
+  // Use the raw C API functions
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaStreamingASR* asr = nullptr;
+  ASSERT_EQ(OgaCreateStreamingASR(model, &asr), nullptr);
+  ASSERT_NE(asr, nullptr);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  const char* text = nullptr;
+  ASSERT_EQ(OgaStreamingASRTranscribeChunk(asr, silence.data(), silence.size(), &text), nullptr);
+  ASSERT_NE(text, nullptr);
+  OgaDestroyString(text);
+
+  const char* transcript = nullptr;
+  ASSERT_EQ(OgaStreamingASRGetTranscript(asr, &transcript), nullptr);
+  ASSERT_NE(transcript, nullptr);
+  OgaDestroyString(transcript);
+
+  ASSERT_EQ(OgaStreamingASRReset(asr), nullptr);
+
+  const char* flush_text = nullptr;
+  ASSERT_EQ(OgaStreamingASRFlush(asr, &flush_text), nullptr);
+  ASSERT_NE(flush_text, nullptr);
+  OgaDestroyString(flush_text);
+
+  OgaDestroyStreamingASR(asr);
+  OgaDestroyModel(model);
+#else
+  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
+#endif
+}

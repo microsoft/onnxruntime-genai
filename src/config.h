@@ -60,6 +60,25 @@ struct Config {
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+
+    // Cache-aware streaming encoder names
+    static constexpr std::string_view EncoderInputLengthsName = "length";
+    static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
+    static constexpr std::string_view CacheLastTimeName = "cache_last_time";
+    static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
+    static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
+    static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
+    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_next_len";
+
+    // Cross present key/value names
+    static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
+    static constexpr std::string_view CrossPresentValueName = "present_value_cross_%d";
+
+    // Joiner names
+    static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
+    static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -133,12 +152,22 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        // Cache-aware streaming encoder I/O names
+        std::string input_lengths{Defaults::EncoderInputLengthsName};
+        std::string cache_last_channel{Defaults::CacheLastChannelName};
+        std::string cache_last_time{Defaults::CacheLastTimeName};
+        std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
-        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        std::string cross_present_key_names{Defaults::CrossPresentKeyName}, cross_present_value_names{Defaults::CrossPresentValueName};
+        // Cache-aware streaming encoder output names
+        std::string output_lengths{Defaults::EncoderOutputLengthsName};
+        std::string cache_last_channel_next{Defaults::CacheLastChannelNextName};
+        std::string cache_last_time_next{Defaults::CacheLastTimeNextName};
+        std::string cache_last_channel_len_next{Defaults::CacheLastChannelLenNextName};
       } outputs;
     } encoder;
 
@@ -202,6 +231,22 @@ struct Config {
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
+      // Mel spectrogram / streaming ASR parameters
+      int num_mels{};
+      int fft_size{};
+      int hop_length{};
+      int win_length{};
+      float preemph{};
+      float log_eps{};
+      int subsampling_factor{};
+      int left_context{};
+      int conv_context{};
+      int pre_encode_cache_size{};
+      int sample_rate{};
+      int chunk_samples{};
+      int blank_id{};
+      int max_symbols_per_step{};
+
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
@@ -213,6 +258,21 @@ struct Config {
         std::string audio_features{Defaults::AudioFeaturesName};
       } outputs;
     } speech;
+
+    struct Joiner {
+      std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string encoder_outputs{Defaults::JoinerEncoderOutputsName};
+        std::string decoder_outputs{Defaults::JoinerDecoderOutputsName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::JoinerLogitsName};
+      } outputs;
+    } joiner;
 
     struct Decoder {
       std::string filename;
@@ -255,6 +315,12 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+
+        // RNNT decoder inputs
+        std::string targets;
+        std::string target_length;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } inputs;
 
       struct Outputs {
@@ -264,6 +330,12 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+
+        // RNNT decoder outputs
+        std::string outputs;
+        std::string prednet_lengths;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } outputs;
 
       struct PipelineModel {

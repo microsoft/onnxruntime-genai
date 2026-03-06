@@ -440,5 +440,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaUnloadAdapter(IntPtr /* OgaAdapters* */ adapters,
                                                                       byte[] /* const char* */ adapterName);
+
+        // StreamingASR API
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateStreamingASR(IntPtr /* const OgaModel* */ model,
+                                                                           out IntPtr /* OgaStreamingASR** */ streamingASR);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyStreamingASR(IntPtr /* OgaStreamingASR* */ streamingASR);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaStreamingASRTranscribeChunk(IntPtr /* OgaStreamingASR* */ streamingASR,
+                                                                                           float* /* const float* */ audioData,
+                                                                                           UIntPtr /* size_t */ numSamples,
+                                                                                           out IntPtr /* const char** */ text);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingASRGetTranscript(IntPtr /* const OgaStreamingASR* */ streamingASR,
+                                                                                  out IntPtr /* const char** */ text);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingASRReset(IntPtr /* OgaStreamingASR* */ streamingASR);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingASRFlush(IntPtr /* OgaStreamingASR* */ streamingASR,
+                                                                          out IntPtr /* const char** */ text);
     }
 }
