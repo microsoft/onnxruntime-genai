@@ -59,7 +59,6 @@ def validate_model(args, model_dict, model_dir):
         try:
             while not generator.is_done():
                 generator.compute_logits()
-                generator.()
 
                 new_token = generator.get_next_tokens()[0]
 

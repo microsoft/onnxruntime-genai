@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// AudioProcessor - Streaming mel spectrogram extraction for Nemotron ASR models.
+// StreamingAudioProcessor - Streaming mel spectrogram extraction for Nemotron ASR models.
 // Converts raw PCM audio chunks into mel features ready for the encoder.
 #pragma once
 
@@ -19,13 +19,13 @@ namespace Generators {
 ///   - Pre-encode cache management (ring buffer of previous frames)
 ///
 /// Usage:
-///   auto processor = CreateAudioProcessor(*model);
+///   auto processor = CreateStreamingAudioProcessor(*model);
 ///   auto mel = processor->Process(audio_data, num_samples);
 ///   if (mel) { generator.set_model_input("audio_features", mel); }
 ///
-struct AudioProcessor : LeakChecked<AudioProcessor> {
-  explicit AudioProcessor(Model& model);
-  ~AudioProcessor();
+struct StreamingAudioProcessor : LeakChecked<StreamingAudioProcessor> {
+  explicit StreamingAudioProcessor(Model& model);
+  ~StreamingAudioProcessor();
 
   /// Feed raw PCM audio (mono, float32, model sample rate).
   /// Returns a mel tensor [1, total_frames, num_mels] when a full chunk is ready,
@@ -66,6 +66,6 @@ struct AudioProcessor : LeakChecked<AudioProcessor> {
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
 };
 
-std::unique_ptr<AudioProcessor> CreateAudioProcessor(Model& model);
+std::unique_ptr<StreamingAudioProcessor> CreateStreamingAudioProcessor(Model& model);
 
 }  // namespace Generators

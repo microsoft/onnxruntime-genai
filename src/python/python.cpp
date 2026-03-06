@@ -482,7 +482,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
       .def("create_streaming_asr", [](OgaModel& model) { return OgaStreamingASR::Create(model); }, "Create a StreamingASR instance for real-time streaming speech recognition.")
-      .def("create_audio_processor", [](OgaModel& model) { return OgaAudioProcessor::Create(model); }, "Create an AudioProcessor for mel spectrogram extraction from raw audio.");
+      .def("create_streaming_audio_processor", [](OgaModel& model) { return OgaAudioProcessor::Create(model); }, "Create a StreamingAudioProcessor for mel spectrogram extraction from raw audio.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
@@ -638,9 +638,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("remove_request", &OgaEngine::Remove)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
-  pybind11::class_<OgaAudioProcessor>(m, "AudioProcessor")
+  pybind11::class_<OgaAudioProcessor>(m, "StreamingAudioProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaAudioProcessor::Create(model); }),
-           "Create an AudioProcessor for mel spectrogram extraction.\n"
+           "Create a StreamingAudioProcessor for mel spectrogram extraction.\n"
            "The model must be of type 'nemotron_speech'.")
       .def("process", [](OgaAudioProcessor& proc, pybind11::array_t<float> audio_chunk) -> pybind11::object {
         auto buf = audio_chunk.request();

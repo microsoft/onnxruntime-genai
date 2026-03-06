@@ -14,7 +14,7 @@
 #include "smartptrs.h"
 #include "engine/engine.h"
 #include "streaming_asr.h"
-#include "models/audio_processor.h"
+#include "models/streaming_audio_processor.h"
 
 namespace Generators {
 
@@ -63,7 +63,7 @@ struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
 struct OgaStreamingASR : Generators::StreamingASR, OgaAbstract {};
-struct OgaAudioProcessor : Generators::AudioProcessor, OgaAbstract {};
+struct OgaAudioProcessor : Generators::StreamingAudioProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -1136,7 +1136,7 @@ void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* p) { delete p; }
 
 OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out) {
   OGA_TRY
-  auto processor = Generators::CreateAudioProcessor(*model);
+  auto processor = Generators::CreateStreamingAudioProcessor(*model);
   *out = ReturnUnique<OgaAudioProcessor>(std::move(processor));
   return nullptr;
   OGA_CATCH

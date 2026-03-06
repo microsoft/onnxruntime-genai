@@ -1197,16 +1197,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, co
 OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* asr);
 
 /**
- * \brief Creates an AudioProcessor for mel spectrogram extraction from raw audio.
+ * \brief Creates a StreamingAudioProcessor for mel spectrogram extraction from raw audio.
  * \param[in] model The model to create the processor for (must be nemotron_speech type).
- * \param[out] out Pointer to store the created AudioProcessor instance.
+ * \param[out] out Pointer to store the created StreamingAudioProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out);
 
 /**
  * \brief Process a chunk of raw PCM audio and return a mel spectrogram tensor if a full chunk is ready.
- * \param[in] processor The AudioProcessor instance.
+ * \param[in] processor The StreamingAudioProcessor instance.
  * \param[in] audio_data Pointer to float32 PCM audio samples (mono, model sample rate).
  * \param[in] num_samples Number of audio samples.
  * \param[out] mel Pointer to store the mel tensor. Set to nullptr if not enough audio yet.
@@ -1217,7 +1217,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* p
 
 /**
  * \brief Flush remaining buffered audio (pads with silence).
- * \param[in] processor The AudioProcessor instance.
+ * \param[in] processor The StreamingAudioProcessor instance.
  * \param[out] mel Pointer to store the mel tensor. Set to nullptr if buffer was empty.
  * \return OgaResult on error, nullptr on success.
  */
@@ -1225,14 +1225,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* pro
 
 /**
  * \brief Reset audio processor state for a new utterance.
- * \param[in] processor The AudioProcessor instance.
+ * \param[in] processor The StreamingAudioProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorReset(OgaAudioProcessor* processor);
 
 /**
- * \brief Destroy an AudioProcessor instance.
- * \param[in] processor The AudioProcessor instance to destroy.
+ * \brief Destroy a StreamingAudioProcessor instance.
+ * \param[in] processor The StreamingAudioProcessor instance to destroy.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyAudioProcessor(OgaAudioProcessor* processor);
 

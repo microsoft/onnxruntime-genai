@@ -64,7 +64,7 @@ def simulate_microphone(model_path, audio_path):
 
 
 def simulate_microphone_generator_api(model_path, audio_path):
-    """Demonstrates the new Generator + AudioProcessor API for streaming ASR."""
+    """Demonstrates the new Generator + StreamingAudioProcessor API for streaming ASR."""
     audio = load_audio(audio_path)
     duration = len(audio) / SAMPLE_RATE
     num_chunks = (len(audio) + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES
@@ -72,7 +72,7 @@ def simulate_microphone_generator_api(model_path, audio_path):
 
     config = og.Config(model_path)
     model = og.Model(config)
-    processor = og.AudioProcessor(model)
+    processor = og.StreamingAudioProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)

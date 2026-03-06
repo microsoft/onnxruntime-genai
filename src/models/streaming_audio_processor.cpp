@@ -5,15 +5,15 @@
 #include <cstring>
 
 #include "../generators.h"
-#include "audio_processor.h"
+#include "streaming_audio_processor.h"
 
 namespace Generators {
 
-AudioProcessor::AudioProcessor(Model& model)
+StreamingAudioProcessor::StreamingAudioProcessor(Model& model)
     : model_{model} {
   auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
   if (!nemotron_model) {
-    throw std::runtime_error("AudioProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
+    throw std::runtime_error("StreamingAudioProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
   cache_config_ = nemotron_model->cache_config_;
@@ -32,9 +32,9 @@ AudioProcessor::AudioProcessor(Model& model)
   cache_pos_ = 0;
 }
 
-AudioProcessor::~AudioProcessor() = default;
+StreamingAudioProcessor::~StreamingAudioProcessor() = default;
 
-void AudioProcessor::Reset() {
+void StreamingAudioProcessor::Reset() {
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
@@ -42,7 +42,7 @@ void AudioProcessor::Reset() {
   audio_buffer_.clear();
 }
 
-std::unique_ptr<OrtValue> AudioProcessor::Process(const float* audio_data, size_t num_samples) {
+std::unique_ptr<OrtValue> StreamingAudioProcessor::Process(const float* audio_data, size_t num_samples) {
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
@@ -59,7 +59,7 @@ std::unique_ptr<OrtValue> AudioProcessor::Process(const float* audio_data, size_
   return nullptr;  // Not enough audio yet
 }
 
-std::unique_ptr<OrtValue> AudioProcessor::Flush() {
+std::unique_ptr<OrtValue> StreamingAudioProcessor::Flush() {
   if (audio_buffer_.empty()) {
     return nullptr;
   }
@@ -72,7 +72,7 @@ std::unique_ptr<OrtValue> AudioProcessor::Flush() {
   return mel;
 }
 
-std::unique_ptr<OrtValue> AudioProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
+std::unique_ptr<OrtValue> StreamingAudioProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
   auto& allocator = model_.allocator_cpu_;
 
   // Compute mel spectrogram for this chunk
@@ -118,8 +118,8 @@ std::unique_ptr<OrtValue> AudioProcessor::BuildMelTensor(const float* audio_chun
   return processed_signal;
 }
 
-std::unique_ptr<AudioProcessor> CreateAudioProcessor(Model& model) {
-  return std::make_unique<AudioProcessor>(model);
+std::unique_ptr<StreamingAudioProcessor> CreateStreamingAudioProcessor(Model& model) {
+  return std::make_unique<StreamingAudioProcessor>(model);
 }
 
 }  // namespace Generators

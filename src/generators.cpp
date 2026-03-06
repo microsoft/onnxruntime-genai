@@ -5,7 +5,7 @@
 
 #include "generators.h"
 #include "streaming_asr.h"
-#include "models/audio_processor.h"
+#include "models/streaming_audio_processor.h"
 #include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
@@ -558,8 +558,8 @@ void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 
   // Streaming ASR (RNNT) models: yield one token per call from the decoder state machine
-  auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
-  if (speech_state) {
+  if (is_streaming_asr_) {
+    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     speech_state->StepToken();
