@@ -320,8 +320,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         while not gen.is_done() and gen.token_count() < prompt_length:
             gen.generate_next_token()
         generated_text = tokenizer.decode(gen.get_sequence(0))
-        if temp_gen is not None:
-            del temp_gen
+        if not args.reuse_generator:
+            del gen
         text = [generated_text] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
