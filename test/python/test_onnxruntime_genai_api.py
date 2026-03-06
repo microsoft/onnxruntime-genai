@@ -961,3 +961,146 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     prompts = ["".join(decoder_prompt_tokens)] * batch_size
     _ = processor(prompts, audios=audios)
+
+
+def test_streaming_asr_create(nemotron_speech_model_path):
+    """Test that a StreamingASR instance can be created from a nemotron_speech model."""
+    model = og.Model(nemotron_speech_model_path)
+    asr = og.StreamingASR(model)
+    assert asr is not None
+
+
+def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
+    """Test transcribing a chunk of silence (all zeros) does not crash."""
+    model = og.Model(nemotron_speech_model_path)
+    asr = og.StreamingASR(model)
+
+    # Feed one 560ms chunk of silence (8960 samples at 16kHz)
+    silence = np.zeros(8960, dtype=np.float32)
+    text = asr.transcribe_chunk(silence)
+    # Should succeed without exception; silence must produce empty output
+    assert isinstance(text, str)
+    assert text == "" or text.isspace(), f"Expected empty or whitespace transcript for silence, got: '{text}'"
+
+
+def test_streaming_asr_flush(nemotron_speech_model_path):
+    """Test that flush processes remaining buffered audio."""
+    model = og.Model(nemotron_speech_model_path)
+    asr = og.StreamingASR(model)
+
+    chunk_samples = 8960
+    silence = np.zeros(chunk_samples, dtype=np.float32)
+    asr.transcribe_chunk(silence)
+
+    flush_text = asr.flush()
+    assert isinstance(flush_text, str)
+
+
+def test_streaming_asr_sine_wave(nemotron_speech_model_path):
+    """Test transcribing a synthetic sine wave (non-trivial mel features)."""
+    model = og.Model(nemotron_speech_model_path)
+    asr = og.StreamingASR(model)
+
+    chunk_samples = 8960
+    sample_rate = 16000.0
+    frequency = 440.0  # A4 note
+
+    # Generate 440Hz sine wave
+    t = np.arange(chunk_samples, dtype=np.float32) / sample_rate
+    audio = (0.5 * np.sin(2.0 * np.pi * frequency * t)).astype(np.float32)
+
+    # Feed multiple chunks
+    for _ in range(4):
+        text = asr.transcribe_chunk(audio)
+        assert isinstance(text, str)
+
+    flush_text = asr.flush()
+    assert isinstance(flush_text, str)
+
+    transcript = asr.get_transcript()
+    assert isinstance(transcript, str)
+
+
+def test_streaming_asr_config_model_type(nemotron_speech_model_path):
+    """Test that a nemotron_speech model reports the correct type."""
+    model = og.Model(nemotron_speech_model_path)
+    assert model.type == "nemotron_speech"
+
+def _word_error_rate(reference: str, hypothesis: str) -> float:
+    """Compute Word Error Rate (WER) using edit distance on word sequences."""
+    import re
+
+    def normalize(text):
+        text = re.sub(r"[^\w\s]", "", text.lower())
+        return text.split()
+
+    r = normalize(reference)
+    h = normalize(hypothesis)
+    d = [[0] * (len(h) + 1) for _ in range(len(r) + 1)]
+    for i in range(len(r) + 1):
+        d[i][0] = i
+    for j in range(len(h) + 1):
+        d[0][j] = j
+    for i in range(1, len(r) + 1):
+        for j in range(1, len(h) + 1):
+            if r[i - 1] == h[j - 1]:
+                d[i][j] = d[i - 1][j - 1]
+            else:
+                d[i][j] = 1 + min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1])
+    return d[len(r)][len(h)] / max(len(r), 1)
+
+
+def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
+    """Test that transcription of a known audio file has acceptable WER."""
+    try:
+        import soundfile as sf
+    except ImportError:
+        pytest.skip("soundfile not installed")
+        return  # unreachable, but satisfies static analysis
+
+    audio_path = os.path.join(test_data_path, "audios", "1272-141231-0002.mp3")
+    if not os.path.exists(audio_path):
+        pytest.skip(f"Test audio not found: {audio_path}")
+
+    # Load audio as float32 mono 16kHz
+    audio, sr = sf.read(audio_path, dtype="float32")
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+    if sr != 16000:
+        try:
+            import scipy.signal
+            num_samples = int(len(audio) * 16000 / sr)
+            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+        except ImportError:
+            pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
+
+    # Transcribe in chunks
+    model = og.Model(nemotron_speech_model_path)
+    asr = og.StreamingASR(model)
+
+    chunk_size = 8960
+    for start in range(0, len(audio), chunk_size):
+        chunk = audio[start : start + chunk_size]
+        asr.transcribe_chunk(chunk)
+
+    asr.flush()
+    transcript = asr.get_transcript()
+
+    reference = (
+        "the cut on his chest still dripping blood the ache of his overstrained eyes "
+        "even the soaring arena around him with the thousands of spectators were "
+        "trivialities not worth thinking about"
+    )
+
+    wer = _word_error_rate(reference, transcript)
+    assert wer < 0.15, (
+        f"WER too high: {wer:.1%}\n"
+        f"  Reference:  {reference}\n"
+        f"  Hypothesis: {transcript.lower()}"
+    )
+
+    # Test reset after transcription
+    asr.reset()
+    transcript = asr.get_transcript()
+    assert transcript == "", f"Expected empty transcript after reset, got: '{transcript}'"
+

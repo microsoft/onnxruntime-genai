@@ -886,3 +886,35 @@ inline int GetCurrentGpuDeviceId() {
 }
 
 }  // namespace Oga
+
+struct OgaStreamingASR : OgaAbstract {
+  static std::unique_ptr<OgaStreamingASR> Create(OgaModel& model) {
+    OgaStreamingASR* p;
+    OgaCheckResult(OgaCreateStreamingASR(&model, &p));
+    return std::unique_ptr<OgaStreamingASR>(p);
+  }
+
+  OgaString TranscribeChunk(const float* audio_data, size_t num_samples) {
+    const char* text;
+    OgaCheckResult(OgaStreamingASRTranscribeChunk(this, audio_data, num_samples, &text));
+    return text;
+  }
+
+  OgaString GetTranscript() const {
+    const char* text;
+    OgaCheckResult(OgaStreamingASRGetTranscript(this, &text));
+    return text;
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaStreamingASRReset(this));
+  }
+
+  OgaString Flush() {
+    const char* text;
+    OgaCheckResult(OgaStreamingASRFlush(this, &text));
+    return text;
+  }
+
+  static void operator delete(void* p) { OgaDestroyStreamingASR(reinterpret_cast<OgaStreamingASR*>(p)); }
+};
