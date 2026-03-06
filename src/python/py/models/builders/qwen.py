@@ -7,7 +7,7 @@
 
 import onnx_ir as ir
 import torch
-from transformers import Qwen2_5_VLForConditionalGeneration
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration
 
 from .base import Model
 
@@ -677,6 +677,229 @@ class Qwen25VLTextModel(Model):
         # For non-quantized models, load the Hugging Face model
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            trust_remote_code=self.hf_remote,
+        )
+
+
+class Qwen3VLTextModel(Qwen25VLTextModel):
+    """
+    Qwen3-VL text model builder. Inherits from Qwen25VLTextModel.
+
+    Key differences from Qwen2.5-VL:
+    - Uses interleaved MRoPE layout [THWTHWTHW...TT] instead of chunked [TTT...HHH...WWW]
+    - Adds QK normalization (q_norm, k_norm) from Qwen3 base architecture
+    - Default mrope_section is [24, 20, 20] (vs [16, 24, 24] in Qwen2.5-VL)
+    - Vision encoder uses DeepStack for multi-layer feature injection (handled by vision ONNX model)
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
+        # but the C++ runtime expects "qwen3_vl" (with underscore)
+        self.model_type = "Qwen3_VLForConditionalGeneration"
+
+        # Qwen3 attention uses QK normalization
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+        # Qwen3-VL adds QK normalization before MRoPE rotation
+        # The parent class (Qwen25VLTextModel) skips make_qk_norm since Qwen2.5-VL doesn't use it.
+        # We must call it here before proceeding with MRoPE.
+        if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
+            self.make_qk_norm(layer_id, attention)
+
+        # Delegate to parent for MRoPE rotation + GQA
+        super().make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+
+    def make_mrope_flattened_caches(self, layer_id, dyn_cos, dyn_sin):
+        """
+        Converts the 3D MRoPE caches [3, B, S, H] into flattened, interleaved caches [B*S, H/2]
+        suitable for the RotaryEmbedding operator.
+
+        Qwen3-VL uses interleaved MRoPE layout: [THWTHWTHW...TT]
+        This differs from Qwen2.5-VL's chunked layout: [TTT...HHH...WWW]
+
+        The interleaving logic (from HuggingFace Qwen3VLTextRotaryEmbedding.apply_interleaved_mrope):
+          freqs_t = freqs[0]  # start with temporal
+          for dim, offset in enumerate((1, 2), start=1):  # H=1, W=2
+              length = mrope_section[dim] * 3
+              idx = slice(offset, length, 3)
+              freqs_t[..., idx] = freqs[dim, ..., idx]
+
+        For mrope_section = [24, 20, 20], head_dim/2 = 64:
+          - All 64 positions start with Temporal values
+          - Height overwrites positions [1, 4, 7, ..., 58] (20 values)
+          - Width overwrites positions [2, 5, 8, ..., 59] (20 values)
+          - Result pattern: [T,H,W, T,H,W, ..., T,H,W, T,T,T,T] (20 THW groups + 4 T-only)
+        """
+        basename = f"/model/layers.{layer_id}/attn/mrope_interleaved_cache"
+
+        # Pre-compute the interleaved index mapping: for each position in H/2, which dimension (0=T, 1=H, 2=W)?
+        half_head = self.head_size // 2
+        dim_assignments = [0] * half_head  # Start all positions as Temporal
+
+        for dim_idx, offset in enumerate((1, 2), start=1):  # H=1, W=2
+            length = self.mrope_sections[dim_idx] * 3
+            for i in range(offset, length, 3):
+                if i < half_head:
+                    dim_assignments[i] = dim_idx
+
+        def process_cache(input_name, name_suffix):
+            # 1. Slice to H/2: [3, B, S, H] -> [3, B, S, H/2]
+            slice_name = f"{basename}/{name_suffix}/half/Slice"
+            slice_output = f"{slice_name}/output_0"
+            self.make_slice(
+                slice_name,
+                [
+                    input_name,
+                    "/model/constants/INT64/[0]",
+                    f"/model/constants/INT64/[{half_head}]",
+                    "/model/constants/INT64/[-1]",
+                ],
+                ir.DataType.FLOAT,
+                [3, "batch_size", "sequence_length", half_head],
+            )
+
+            # 2. Build interleaved output by gathering individual positions from appropriate dimensions
+            # Group positions by which dimension they need: {dim: [positions]}
+            dim_to_positions = {0: [], 1: [], 2: []}
+            for pos, dim in enumerate(dim_assignments):
+                dim_to_positions[dim].append(pos)
+
+            gathered_pieces = []
+            for dim_idx in range(3):
+                positions = dim_to_positions[dim_idx]
+                if not positions:
+                    continue
+
+                # Gather this dimension: [3, B, S, H/2] -> [1, B, S, H/2] via index dim_idx on axis 0
+                gather_dim_name = f"{basename}/{name_suffix}/dim{dim_idx}/Gather"
+                gather_dim_output = f"{gather_dim_name}/output_0"
+                self.make_node(
+                    "Gather",
+                    [slice_output, f"/model/constants/INT64/[{dim_idx}]"],
+                    [gather_dim_output],
+                    name=gather_dim_name,
+                    axis=0,
+                )
+
+                squeeze_dim_name = f"{basename}/{name_suffix}/dim{dim_idx}/Squeeze"
+                squeeze_dim_output = f"{squeeze_dim_name}/output_0"
+                self.make_squeeze(
+                    squeeze_dim_name,
+                    [gather_dim_output, "/model/constants/INT64/[0]"],
+                    ir.DataType.FLOAT,
+                    ["batch_size", "sequence_length", half_head],
+                )
+
+                # Gather specific positions from the last dimension
+                positions_const_name = f"{basename}/{name_suffix}/dim{dim_idx}/Positions/Constant"
+                positions_const_output = f"{basename}/{name_suffix}/dim{dim_idx}/positions"
+                self.make_node(
+                    "Constant",
+                    [],
+                    [positions_const_output],
+                    name=positions_const_name,
+                    value=ir.tensor(torch.tensor(positions, dtype=torch.int64), name=positions_const_output),
+                )
+                self.make_value(positions_const_output, ir.DataType.INT64, [len(positions)])
+
+                gather_pos_name = f"{basename}/{name_suffix}/dim{dim_idx}/Positions/Gather"
+                gather_pos_output = f"{gather_pos_name}/output_0"
+                self.make_node(
+                    "Gather",
+                    [squeeze_dim_output, positions_const_output],
+                    [gather_pos_output],
+                    name=gather_pos_name,
+                    axis=-1,
+                )
+                self.make_value(gather_pos_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", len(positions)])
+
+                gathered_pieces.append((positions, gather_pos_output))
+
+            # 3. Scatter all pieces back to the correct positions in a [B, S, H/2] tensor
+            # Create the permutation order: we need to place each piece's values at the correct positions
+            # Build a complete mapping: output_position -> (piece_idx, offset_within_piece)
+            all_positions = []
+            all_outputs = []
+            for positions, output in gathered_pieces:
+                all_positions.extend(positions)
+                all_outputs.append((positions, output))
+
+            # Instead of scatter, concatenate all gathered pieces and then use Gather to reorder
+            # Concatenate all pieces: [B, S, sum_of_positions] = [B, S, H/2]
+            if len(all_outputs) == 1:
+                concat_output = all_outputs[0][1]
+            else:
+                concat_name = f"{basename}/{name_suffix}/AllPieces/Concat"
+                concat_output = f"{concat_name}/output_0"
+                self.make_concat(
+                    concat_name,
+                    [out for _, out in all_outputs],
+                    ir.DataType.FLOAT,
+                    ["batch_size", "sequence_length", half_head],
+                    axis=-1,
+                )
+
+            # Build reorder indices: the concatenated tensor has positions in order
+            # [dim0_positions..., dim1_positions..., dim2_positions...]
+            # We need to reorder to [0, 1, 2, ..., H/2-1]
+            concat_order = []
+            for positions, _ in all_outputs:
+                concat_order.extend(positions)
+            # concat_order[i] = original position of element i in the concatenated tensor
+            # We need inverse: for output position p, find where it is in concat_order
+            reorder_indices = [0] * half_head
+            for concat_idx, orig_pos in enumerate(concat_order):
+                reorder_indices[orig_pos] = concat_idx
+
+            reorder_const_name = f"{basename}/{name_suffix}/Reorder/Constant"
+            reorder_const_output = f"{basename}/{name_suffix}/reorder"
+            self.make_node(
+                "Constant",
+                [],
+                [reorder_const_output],
+                name=reorder_const_name,
+                value=ir.tensor(torch.tensor(reorder_indices, dtype=torch.int64), name=reorder_const_output),
+            )
+            self.make_value(reorder_const_output, ir.DataType.INT64, [half_head])
+
+            gather_reorder_name = f"{basename}/{name_suffix}/Reorder/Gather"
+            gather_reorder_output = f"{gather_reorder_name}/output_0"
+            self.make_node(
+                "Gather",
+                [concat_output, reorder_const_output],
+                [gather_reorder_output],
+                name=gather_reorder_name,
+                axis=-1,
+            )
+            self.make_value(gather_reorder_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_head])
+
+            # 4. Flatten: -> [B*S, H/2]
+            reshape_name = f"{basename}/{name_suffix}_flat/Reshape"
+            reshape_output = f"{reshape_name}/output_0"
+            self.make_reshape(
+                reshape_name,
+                [gather_reorder_output, f"/model/constants/INT64/[-1, {half_head}]"],
+                ir.DataType.FLOAT,
+                ["total_token_count", half_head],
+            )
+            return reshape_output
+
+        flat_cos = process_cache(dyn_cos, "cos")
+        flat_sin = process_cache(dyn_sin, "sin")
+
+        return flat_cos, flat_sin
+
+    def load_weights(self, input_path):
+        # Load the Hugging Face model
+        print("Loading Qwen3VLForConditionalGeneration model...")
+        return Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
             cache_dir=self.cache_dir,
             token=self.hf_token,
