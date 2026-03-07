@@ -193,6 +193,10 @@ inline void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registra
   ThrowOnError(Ort::api->UnregisterExecutionProviderLibrary(env, registration_name));
 }
 
+inline void CompileModel(OrtEnv& env, const OrtModelCompilationOptions& model_compilation_options) {
+  ThrowOnError(Ort::GetCompileApi().CompileModel(&env, &model_compilation_options));
+}
+
 }  // namespace Ort
 
 inline std::unique_ptr<OrtStatus> OrtStatus::Create(OrtErrorCode code, const std::string& what) {
@@ -758,6 +762,79 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_V2(OrtEnv& 
     values.push_back(kv.second.c_str());
   }
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(this, &env, ep_devices.data(), ep_devices.size(), keys.data(), values.data(), keys.size()));
+  return *this;
+}
+
+/// OrtModelCompilationOptions
+inline std::unique_ptr<OrtModelCompilationOptions> OrtModelCompilationOptions::Create(OrtEnv& env, const OrtSessionOptions& session_options) {
+  OrtModelCompilationOptions* p;
+  Ort::ThrowOnError(Ort::GetCompileApi().CreateModelCompilationOptionsFromSessionOptions(&env, &session_options, &p));
+  return std::unique_ptr<OrtModelCompilationOptions>(p);
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetInputModelPath(const ORTCHAR_T* input_model_path) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetInputModelPath(this, input_model_path));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetInputModelFromBuffer(const void* input_model_data, 
+                                                                                         size_t input_model_data_size) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetInputModelFromBuffer(this, input_model_data, input_model_data_size));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetOutputModelPath(const ORTCHAR_T* output_model_path) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetOutputModelPath(this, output_model_path));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetOutputModelExternalInitializersFile(
+    const ORTCHAR_T* external_initializers_file_path, 
+    size_t external_initializers_size_threshold) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetOutputModelExternalInitializersFile(
+      this, external_initializers_file_path, external_initializers_size_threshold));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetOutputModelBuffer(OrtAllocator* allocator, 
+                                                                                      void** output_model_buffer_ptr, 
+                                                                                      size_t* output_model_buffer_size_ptr) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetOutputModelBuffer(
+      this, allocator, output_model_buffer_ptr, output_model_buffer_size_ptr));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetOutputModelWriteFunc(OrtWriteBufferFunc write_func, void* state) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetOutputModelWriteFunc(this, write_func, state));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetOutputModelGetInitializerLocationFunc(
+    OrtGetInitializerLocationFunc get_initializer_location_func, 
+    void* state) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetOutputModelGetInitializerLocationFunc(
+      this, get_initializer_location_func, state));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetEpContextEmbedMode(bool embed_ep_context_in_model) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetEpContextEmbedMode(this, embed_ep_context_in_model));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetEpContextBinaryInformation(const ORTCHAR_T* output_directory, 
+                                                                                               const ORTCHAR_T* model_name) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetEpContextBinaryInformation(this, output_directory, model_name));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetFlags(uint32_t flags) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetFlags(this, flags));
+  return *this;
+}
+
+inline OrtModelCompilationOptions& OrtModelCompilationOptions::SetGraphOptimizationLevel(GraphOptimizationLevel graph_optimization_level) {
+  Ort::ThrowOnError(Ort::GetCompileApi().ModelCompilationOptions_SetGraphOptimizationLevel(this, graph_optimization_level));
   return *this;
 }
 

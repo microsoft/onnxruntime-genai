@@ -8,10 +8,13 @@ namespace Generators {
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true, false);
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, false, false);
 
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
-  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  std::string encoder_model_path = CompileModel(ort_env, config_->model.encoder.filename, encoder_session_options_.get(), false, config_->model.encoder.compile_options);
+  session_encoder_ = CreateSession(ort_env, encoder_model_path, encoder_session_options_.get());
+  
+  std::string decoder_model_path = CompileModel(ort_env, config_->model.decoder.filename, session_options_.get(), true, config_->model.decoder.compile_options);
+  session_decoder_ = CreateSession(ort_env, decoder_model_path, session_options_.get());
 
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);

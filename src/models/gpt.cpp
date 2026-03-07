@@ -5,7 +5,8 @@ namespace Generators {
 
 Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  std::string decoder_model_path = CompileModel(ort_env, config_->model.decoder.filename, session_options_.get(), true, config_->model.decoder.compile_options);
+  session_decoder_ = CreateSession(ort_env, decoder_model_path, session_options_.get());
   session_info_.Add(*session_decoder_);
 }
 

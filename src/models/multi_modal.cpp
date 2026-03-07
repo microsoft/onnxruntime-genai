@@ -65,21 +65,26 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, false, true);
+    std::string vision_model_path = CompileModel(ort_env, config_->model.vision.filename, vision_session_options_.get(), false, config_->model.vision.compile_options);
+    vision_session_ = CreateSession(ort_env, vision_model_path, vision_session_options_.get());
   }
 
   if (speech) {
     speech_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, true);
-    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
+    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, false, true);
+    std::string speech_model_path = CompileModel(ort_env, config_->model.speech.filename, speech_session_options_.get(), false, config_->model.speech.compile_options);
+    speech_session_ = CreateSession(ort_env, speech_model_path, speech_session_options_.get());
   }
 
   embedding_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, true);
+  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, false, true);
 
-  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
-  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  std::string embedding_model_path = CompileModel(ort_env, config_->model.embedding.filename, embedding_session_options_.get(), false, config_->model.embedding.compile_options);
+  embedding_session_ = CreateSession(ort_env, embedding_model_path, embedding_session_options_.get());
+  
+  std::string decoder_model_path = CompileModel(ort_env, config_->model.decoder.filename, session_options_.get(), true, config_->model.decoder.compile_options);
+  decoder_session_ = CreateSession(ort_env, decoder_model_path, session_options_.get());
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
