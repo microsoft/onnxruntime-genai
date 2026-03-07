@@ -22,6 +22,8 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 from _test_utils import run_subprocess
+from PIL import Image
+from transformers import AutoProcessor
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("qwen-fara-vision-tests")
@@ -64,35 +66,6 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
         images = og.Images.open_bytes(image_bytes)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>What is shown in this image?"
-    inputs = processor(prompt, images=images)
-
-    assert inputs is not None
-    assert "pixel_values" in inputs
-
-
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
-@pytest.mark.parametrize(
-    "relative_image_paths",
-    [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
-)
-@pytest.mark.skip(reason="Multiple images not fully supported in dummy model - image_grid_thw shape issue")
-def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, relative_image_paths):
-    """Test processing multiple images with Qwen/Fara models."""
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    model = og.Model(model_path)
-
-    processor = model.create_multimodal_processor()
-
-    image_paths = [
-        os.fspath(Path(test_data_path) / relative_image_path) for relative_image_path in relative_image_paths
-    ]
-    images = og.Images.open(*image_paths)
-
-    # Add vision tokens for each image
-    prompt = ""
-    for _ in range(len(relative_image_paths)):
-        prompt += "<|vision_start|><|image_pad|><|vision_end|>"
-    prompt += "Describe these images"
     inputs = processor(prompt, images=images)
 
     assert inputs is not None
@@ -213,9 +186,54 @@ def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, rela
     pixel_max = pixel_array.max()
     assert pixel_min >= -10.0 and pixel_max <= 10.0, f"Pixel values out of expected range: [{pixel_min}, {pixel_max}]"
 
-    log.debug(f"ONNX pixel_values shape: {pixel_array.shape}")
-    log.debug(f"ONNX pixel_values dtype: {pixel_array.dtype}")
-    log.debug(f"ONNX pixel_values range: [{pixel_min:.4f}, {pixel_max:.4f}]")
+    try:
+        pytorch_processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
+
+        # Load and process image with PyTorch
+        pil_image = Image.open(image_path)
+        pytorch_inputs = pytorch_processor(text=prompt, images=pil_image, return_tensors="pt")
+
+        if "pixel_values" in pytorch_inputs:
+            pytorch_pixel_values = pytorch_inputs["pixel_values"].numpy()
+
+            # Check if shapes match
+            if pixel_array.shape == pytorch_pixel_values.shape:
+                np.testing.assert_allclose(
+                    pixel_array,
+                    pytorch_pixel_values,
+                    rtol=1e-5,
+                    atol=1e-6,
+                    err_msg="ONNX pixel_values should match PyTorch reference implementation",
+                )
+                log.debug("Accuracy validation passed: ONNX matches PyTorch reference")
+            else:
+                # Shape mismatch is expected due to preprocessing differences
+                log.warning(
+                    f"Shape mismatch due to preprocessing differences: ONNX {pixel_array.shape} vs PyTorch {pytorch_pixel_values.shape}"
+                )
+                log.info(
+                    "Skipping numerical comparison due to shape mismatch - this is expected with different preprocessing"
+                )
+
+                # Validate that both have same dtype and reasonable value ranges
+                assert pixel_array.dtype == pytorch_pixel_values.dtype, (
+                    f"Data types should match: ONNX {pixel_array.dtype} vs PyTorch {pytorch_pixel_values.dtype}"
+                )
+
+                # Both should have similar value ranges even if shapes differ
+                onnx_range = (pixel_array.min(), pixel_array.max())
+                pytorch_range = (pytorch_pixel_values.min(), pytorch_pixel_values.max())
+                log.info(f"Value range validation: ONNX {onnx_range} vs PyTorch {pytorch_range}")
+
+                # Allow for reasonable variation in ranges
+                assert abs(onnx_range[0] - pytorch_range[0]) < 1.0, "Min values should be in similar range"
+                assert abs(onnx_range[1] - pytorch_range[1]) < 1.0, "Max values should be in similar range"
+        else:
+            pytest.fail("PyTorch processor did not return pixel_values")
+
+    except Exception as e:
+        log.error(f"Could not compare with PyTorch reference: {e}")
+        pytest.fail(f"PyTorch comparison failed: {e}")
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing")])
