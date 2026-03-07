@@ -27,6 +27,59 @@ class Qwen3Model(QwenModel):
         super().make_attention_init()
 
 
+class Qwen35Model(Qwen3Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self._normalize_qwen35_config(config)
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # The exported model is text-only even though the HF architecture is multimodal.
+        self.model_type = "qwen3_5_text"
+
+        unsupported_layer_types = sorted(set(getattr(config, "layer_types", [])) - {"full_attention"})
+        if unsupported_layer_types:
+            raise NotImplementedError(
+                "Qwen3.5 text export is not supported for layer_types "
+                f"{unsupported_layer_types}. The current builder only supports full_attention layers, "
+                "but this config uses hybrid linear attention."
+            )
+
+        if getattr(config, "attn_output_gate", False):
+            raise NotImplementedError(
+                "Qwen3.5 text export is not supported when attn_output_gate is enabled. "
+                "The current builder does not implement the gated attention output path."
+            )
+
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None and getattr(rope_parameters, "mrope_interleaved", False):
+            raise NotImplementedError(
+                "Qwen3.5 text export is not supported for interleaved MRoPE rotary embeddings."
+            )
+
+    @staticmethod
+    def _normalize_qwen35_config(config):
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            for key in text_config:
+                if not hasattr(config, key):
+                    setattr(config, key, getattr(text_config, key))
+
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is None and text_config is not None:
+            rope_parameters = getattr(text_config, "rope_parameters", None)
+
+        if rope_parameters is None:
+            return
+
+        if not hasattr(config, "rope_theta") and hasattr(rope_parameters, "rope_theta"):
+            config.rope_theta = rope_parameters.rope_theta
+
+        if not hasattr(config, "partial_rotary_factor") and hasattr(rope_parameters, "partial_rotary_factor"):
+            config.partial_rotary_factor = rope_parameters.partial_rotary_factor
+
+        if not hasattr(config, "rope_scaling"):
+            config.rope_scaling = None
+
+
 class Qwen25VLTextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
