@@ -5,4 +5,7 @@ namespace Generators {
 
 DeviceInterface* GetQNNInterface();
 
+struct Model;
+bool IsQNNStatefulModel(const Model& model);
+
 }  // namespace Generators
