@@ -8,6 +8,16 @@
 
 namespace Generators {
 
+struct AuxiliaryStateSet {
+  std::vector<int64_t> shape;
+  ONNXTensorElementDataType type{};
+  std::unique_ptr<OrtValue> empty_past;
+  std::vector<std::unique_ptr<OrtValue>> pasts;
+  std::vector<std::unique_ptr<OrtValue>> presents;
+  std::vector<std::string> input_name_strings;
+  std::vector<std::string> output_name_strings;
+};
+
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
 
@@ -37,16 +47,6 @@ struct CombinedKeyValueCache : KeyValueCache {
   void RewindTo(size_t index) override;
 
  private:
-  struct AuxiliaryStateSet {
-    std::vector<int64_t> shape;
-    ONNXTensorElementDataType type{};
-    std::unique_ptr<OrtValue> empty_past;
-    std::vector<std::unique_ptr<OrtValue>> pasts;
-    std::vector<std::unique_ptr<OrtValue>> presents;
-    std::vector<std::string> input_name_strings;
-    std::vector<std::string> output_name_strings;
-  };
-
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
@@ -94,6 +94,10 @@ struct DefaultKeyValueCache : KeyValueCache {
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+
+  template <typename ScoreType>
+  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
+  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
 
   template <typename T>
   void RewindPastTensorsTo(size_t index);
