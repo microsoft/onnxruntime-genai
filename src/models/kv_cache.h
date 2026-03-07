@@ -51,10 +51,6 @@ struct CombinedKeyValueCache : KeyValueCache {
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
-  template <typename ScoreType>
-  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
-  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
-
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
