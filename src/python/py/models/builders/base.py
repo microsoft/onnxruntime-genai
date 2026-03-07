@@ -198,6 +198,11 @@ class Model:
                 self.head_size,
             ],  # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
+        self.extra_decoder_state_specs = []
+        self.extra_decoder_input_name_templates = {}
+        self.extra_decoder_output_name_templates = {}
+        self.has_auxiliary_decoder_states = False
+        self.make_auxiliary_decoder_state_init(config)
         self.make_outputs_init()
 
         # Store names of nodes already created
@@ -312,6 +317,8 @@ class Model:
             "sinks": False,  # Sink values for softmax in attention
         }
         self.make_attention_init()
+        if self.has_auxiliary_decoder_states:
+            self.past_present_share_buffer = False
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -578,6 +585,7 @@ class Model:
                 "past_value_names": "past_key_values.%d.value",
             }
         )
+        inputs.update(self.extra_decoder_input_name_templates)
         outputs = dict(zip(self.output_names, self.output_names, strict=False))
         outputs.update(
             {
@@ -585,6 +593,7 @@ class Model:
                 "present_value_names": "present.%d.value",
             }
         )
+        outputs.update(self.extra_decoder_output_name_templates)
         if "hidden_states" in outputs:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
             del outputs["hidden_states"]
@@ -615,6 +624,11 @@ class Model:
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
+                    "linear_num_key_heads": getattr(config, "linear_num_key_heads", 0),
+                    "linear_num_value_heads": getattr(config, "linear_num_value_heads", 0),
+                    "linear_key_head_dim": getattr(config, "linear_key_head_dim", 0),
+                    "linear_value_head_dim": getattr(config, "linear_value_head_dim", 0),
+                    "linear_conv_kernel_dim": getattr(config, "linear_conv_kernel_dim", 0),
                 },
                 "eos_token_id": eos_token_id,
                 "pad_token_id": pad_token_id,
@@ -673,6 +687,80 @@ class Model:
         if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
+
+    def make_auxiliary_decoder_state_init(self, config):
+        required_attrs = [
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+            "linear_conv_kernel_dim",
+        ]
+        if not all(hasattr(config, attr) for attr in required_attrs):
+            return
+
+        linear_num_key_heads = getattr(config, "linear_num_key_heads", 0)
+        linear_num_value_heads = getattr(config, "linear_num_value_heads", 0)
+        linear_key_head_dim = getattr(config, "linear_key_head_dim", 0)
+        linear_value_head_dim = getattr(config, "linear_value_head_dim", 0)
+        linear_conv_kernel_dim = getattr(config, "linear_conv_kernel_dim", 0)
+
+        if min(
+            linear_num_key_heads,
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+            linear_conv_kernel_dim,
+        ) <= 0:
+            return
+
+        linear_conv_dim = linear_num_key_heads * linear_key_head_dim * 2 + linear_num_value_heads * linear_value_head_dim
+
+        self.input_types["past_conv_states"] = self.io_dtype
+        self.input_shapes["past_conv_states"] = ["batch_size", linear_conv_dim, linear_conv_kernel_dim]
+        self.output_types["present_conv_states"] = self.io_dtype
+        self.output_shapes["present_conv_states"] = ["batch_size", linear_conv_dim, linear_conv_kernel_dim]
+
+        self.input_types["past_recurrent_states"] = ir.DataType.FLOAT
+        self.input_shapes["past_recurrent_states"] = [
+            "batch_size",
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+        ]
+        self.output_types["present_recurrent_states"] = ir.DataType.FLOAT
+        self.output_shapes["present_recurrent_states"] = [
+            "batch_size",
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+        ]
+
+        self.extra_decoder_state_specs = [
+            {
+                "input_key": "past_conv_states",
+                "output_key": "present_conv_states",
+                "input_template_key": "past_conv_state_names",
+                "output_template_key": "present_conv_state_names",
+                "input_template": "past_conv_states.%d",
+                "output_template": "present_conv_states.%d",
+            },
+            {
+                "input_key": "past_recurrent_states",
+                "output_key": "present_recurrent_states",
+                "input_template_key": "past_recurrent_state_names",
+                "output_template_key": "present_recurrent_state_names",
+                "input_template": "past_recurrent_states.%d",
+                "output_template": "present_recurrent_states.%d",
+            },
+        ]
+        self.extra_decoder_input_name_templates = {
+            spec["input_template_key"]: spec["input_template"] for spec in self.extra_decoder_state_specs
+        }
+        self.extra_decoder_output_name_templates = {
+            spec["output_template_key"]: spec["output_template"] for spec in self.extra_decoder_state_specs
+        }
+        self.has_auxiliary_decoder_states = True
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(
@@ -883,6 +971,18 @@ class Model:
             value_name = f"present.{i}.value"
             value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
             outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
+
+        for spec in self.extra_decoder_state_specs:
+            for i in range(self.num_layers):
+                input_name = spec["input_template"] % i
+                input_shape = self.input_shapes[spec["input_key"]]
+                inputs.append(self.make_value(input_name, dtype=self.input_types[spec["input_key"]], shape=input_shape))
+
+                output_name = spec["output_template"] % i
+                output_shape = self.output_shapes[spec["output_key"]]
+                outputs.append(
+                    self.make_value(output_name, dtype=self.output_types[spec["output_key"]], shape=output_shape)
+                )
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
