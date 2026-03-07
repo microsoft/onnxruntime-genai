@@ -89,6 +89,7 @@ class Qwen35Model(Qwen3Model):
         if layer_type == "linear_attention":
             self.make_linear_attention(layer_id, layer.linear_attn, root_input=self.layernorm_attrs["output_0"])
         else:
+            self._make_qwen35_passthrough_auxiliary_states(layer_id)
             self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
 
         self.make_layernorm(
@@ -184,6 +185,32 @@ class Qwen35Model(Qwen3Model):
             root_input=zero_hidden,
             past_kv=f"past_key_values.{layer_id}.value",
             present_kv=f"present.{layer_id}.value",
+        )
+
+    def _make_qwen35_passthrough_auxiliary_states(self, layer_id):
+        if not self.qwen35_linear_use_aux_state:
+            return
+
+        present_conv_name = f"present_conv_states.{layer_id}"
+        self.make_node(
+            "Identity",
+            inputs=[f"past_conv_states.{layer_id}"],
+            outputs=[present_conv_name],
+            name=f"/model/layers.{layer_id}/attn/present_conv_states/Identity",
+        )
+        self.make_value(present_conv_name, self.io_dtype, shape=self.output_shapes["present_conv_states"])
+
+        present_recurrent_name = f"present_recurrent_states.{layer_id}"
+        self.make_node(
+            "Identity",
+            inputs=[f"past_recurrent_states.{layer_id}"],
+            outputs=[present_recurrent_name],
+            name=f"/model/layers.{layer_id}/attn/present_recurrent_states/Identity",
+        )
+        self.make_value(
+            present_recurrent_name,
+            ir.DataType.FLOAT,
+            shape=self.output_shapes["present_recurrent_states"],
         )
 
     def _make_qwen35_linear_zero_kv_hidden(self, layer_id, root_input):
