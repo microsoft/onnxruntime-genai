@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from huggingface_hub.errors import LocalTokenNotFoundError
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -598,15 +599,31 @@ class Model:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
             del outputs["hidden_states"]
 
-        bos_token_id = config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1
-        eos_token_id = config.eos_token_id
-        pad_token_id = (
-            config.pad_token_id
-            if hasattr(config, "pad_token_id") and config.pad_token_id is not None
-            else config.eos_token_id[0]
-            if isinstance(config.eos_token_id, list)
-            else config.eos_token_id
-        )
+        tokenizer = None
+
+        def ensure_tokenizer():
+            nonlocal tokenizer
+            if tokenizer is None:
+                tokenizer = self.load_tokenizer(model_name_or_path, extra_kwargs)
+            return tokenizer
+
+        def resolve_special_token_id(name):
+            value = getattr(config, name, None) if hasattr(config, name) else None
+            if value is not None:
+                return value
+            token_value = getattr(ensure_tokenizer(), name, None)
+            if token_value is not None:
+                return token_value
+            return None
+
+        bos_token_id = resolve_special_token_id("bos_token_id")
+        if bos_token_id is None:
+            bos_token_id = 1
+
+        eos_token_id = resolve_special_token_id("eos_token_id")
+        pad_token_id = resolve_special_token_id("pad_token_id")
+        if pad_token_id is None:
+            pad_token_id = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
         genai_config = {
             "model": {
                 "bos_token_id": bos_token_id,
@@ -763,14 +780,27 @@ class Model:
         self.has_auxiliary_decoder_states = True
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-        )
+        tokenizer = self.load_tokenizer(model_name_or_path, extra_kwargs)
         # Overwrite model_max_length with the model's context_length so it is a normal integer
         # (HF often uses 1e30 for "no limit", which can serialize to a huge decimal in JSON)
         tokenizer.model_max_length = self.context_length
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
+
+    def load_tokenizer(self, model_name_or_path, extra_kwargs):
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+            )
+        except LocalTokenNotFoundError:
+            if self.hf_token is True:
+                return AutoTokenizer.from_pretrained(
+                    model_name_or_path,
+                    token=None,
+                    trust_remote_code=self.hf_remote,
+                    **extra_kwargs,
+                )
+            raise
 
     def make_int4_algo_config(self, quant_method: str):
         customized_weight_config = {}
