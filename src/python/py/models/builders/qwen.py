@@ -105,6 +105,8 @@ class Qwen35Model(Qwen3Model):
             self.layernorm_attrs["last_layernorm"] = True
 
     def make_linear_attention(self, layer_id, linear_attn, root_input, **kwargs):
+        self._make_qwen35_linear_placeholder_present_kv(layer_id, root_input)
+
         qkv_conv_input = self._make_qwen35_linear_conv_input(layer_id, linear_attn, root_input)
         query, key, value = self._make_qwen35_linear_qkv(layer_id, qkv_conv_input)
         z_path = self._make_qwen35_linear_proj_with_shape(
@@ -168,6 +170,80 @@ class Qwen35Model(Qwen3Model):
             output_path = f"{out_add_name}/output_0"
 
         self.layernorm_attrs["skip_input"] = output_path
+
+    def _make_qwen35_linear_placeholder_present_kv(self, layer_id, root_input):
+        zero_hidden = self._make_qwen35_linear_zero_kv_hidden(layer_id, root_input)
+        self.make_repeat_kv(
+            layer_id,
+            root_input=zero_hidden,
+            past_kv=f"past_key_values.{layer_id}.key",
+            present_kv=f"present.{layer_id}.key",
+        )
+        self.make_repeat_kv(
+            layer_id,
+            root_input=zero_hidden,
+            past_kv=f"past_key_values.{layer_id}.value",
+            present_kv=f"present.{layer_id}.value",
+        )
+
+    def _make_qwen35_linear_zero_kv_hidden(self, layer_id, root_input):
+        shape_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/Shape"
+        self.make_shape(shape_name, root_input, shape=[3])
+
+        batch_dim_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/BatchDim"
+        self.make_gather(
+            batch_dim_name,
+            [f"{shape_name}/output_0", "/model/constants/INT64/0"],
+            dtype=ir.DataType.INT64,
+            shape=[],
+            axis=0,
+        )
+        batch_unsqueeze_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/BatchUnsqueeze"
+        self.make_unsqueeze(
+            batch_unsqueeze_name,
+            [f"{batch_dim_name}/output_0", "/model/constants/INT64/[0]"],
+            dtype=ir.DataType.INT64,
+            shape=[1],
+        )
+
+        seq_dim_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/SeqDim"
+        self.make_gather(
+            seq_dim_name,
+            [f"{shape_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=[],
+            axis=0,
+        )
+        seq_unsqueeze_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/SeqUnsqueeze"
+        self.make_unsqueeze(
+            seq_unsqueeze_name,
+            [f"{seq_dim_name}/output_0", "/model/constants/INT64/[0]"],
+            dtype=ir.DataType.INT64,
+            shape=[1],
+        )
+
+        hidden_shape_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/HiddenShape"
+        self.make_concat(
+            hidden_shape_name,
+            [
+                f"{batch_unsqueeze_name}/output_0",
+                f"{seq_unsqueeze_name}/output_0",
+                f"/model/constants/INT64/[{self.num_kv_heads * self.head_size}]",
+            ],
+            dtype=ir.DataType.INT64,
+            shape=[3],
+            axis=0,
+        )
+
+        zero_name = f"/model/layers.{layer_id}/linear_attn/kv_placeholder/ConstantOfShape"
+        self.make_constant_of_shape(
+            zero_name,
+            f"{hidden_shape_name}/output_0",
+            ir.tensor(0, dtype=self.io_dtype),
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.num_kv_heads * self.head_size],
+        )
+        return f"{zero_name}/output_0"
 
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         if not self.qwen35_attn_output_gate:
