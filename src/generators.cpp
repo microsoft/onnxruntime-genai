@@ -348,9 +348,9 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
-  // Streaming ASR (RNNT) models don't use the traditional search/logits pipeline,
+  // RNNT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
-  if (ModelType::IsStreamingASR(model.config_->model.type)) {
+  if (ModelType::IsRNNT(model.config_->model.type)) {
     is_rnnt_ = true;
     state_ = model.CreateState({}, params);
     return;

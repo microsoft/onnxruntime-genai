@@ -488,7 +488,6 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-
 #if OGA_USE_SPAN
   std::span<const int32_t> GetNextTokens() {
     const int32_t* out;

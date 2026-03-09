@@ -162,10 +162,6 @@ std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> /*se
   return std::make_unique<NemotronSpeechState>(*this, params);
 }
 
-// ===========================================================================
-// NemotronSpeechState implementation
-// ===========================================================================
-
 NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
                                          const GeneratorParams& params)
     : State{params, model},
@@ -286,6 +282,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
   auto frame_span = ByteWrapTensor(*model_.p_device_, *encoder_frame_);
   auto& allocator = model_.allocator_cpu_;
 
+  // Run decoder
   while (time_step_ < time_steps) {
     // Copy current encoder frame
     auto src_frame = enc_span.subspan(static_cast<size_t>(time_step_) * frame_bytes, frame_bytes);
@@ -312,8 +309,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
     auto dec_out_type = model_.session_info_.GetOutputDataType(cache_config_.dec_out_outputs);
     auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, dec_out_type);
-    ByteWrapTensor(*model_.p_device_, *decoder_frame).CopyFrom(
-        ByteWrapTensor(*model_.p_device_, *dec_outputs[0]));
+    ByteWrapTensor(*model_.p_device_, *decoder_frame).CopyFrom(ByteWrapTensor(*model_.p_device_, *dec_outputs[0]));
 
     // Run joiner
     const char* join_input_names[] = {
@@ -363,7 +359,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
 
   // Exhausted all time steps
   chunk_done_ = true;
-  return last_tokens_;  // Empty
+  return last_tokens_;
 }
 
 }  // namespace Generators

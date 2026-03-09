@@ -1275,7 +1275,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (ModelType::IsStreamingASR(config->model.type))
+  if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
