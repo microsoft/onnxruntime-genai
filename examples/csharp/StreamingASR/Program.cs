@@ -12,40 +12,75 @@ if (args.Length < 2)
 string modelPath = args[0];
 string audioFile = args[1];
 
-// Load raw PCM audio (expects 16kHz mono float32 WAV)
+// Load raw PCM audio (expects 16kHz mono int16 WAV)
 float[] audio = LoadWavAudio(audioFile);
 Console.WriteLine($"Audio: {audio.Length / 16000.0:F1}s ({audio.Length} samples)");
 
 using var model = new Model(modelPath);
-using var asr = new StreamingASR(model);
+using var processor = new StreamingAudioProcessor(model);
+using var tokenizer = new Tokenizer(model);
+using var tokenizerStream = tokenizer.CreateStream();
+using var genParams = new GeneratorParams(model);
+using var generator = new Generator(model, genParams);
 
 int chunkSize = 8960; // 560ms chunks
 Console.WriteLine(new string('-', 60));
+string fullTranscript = "";
+
+void DecodeChunk()
+{
+    while (!generator.IsDone())
+    {
+        generator.GenerateNextToken();
+        var tokens = generator.GetNextTokens();
+        foreach (int token in tokens)
+        {
+            string text = tokenizerStream.Decode(token);
+            if (!string.IsNullOrEmpty(text))
+            {
+                Console.Write(text);
+                fullTranscript += text;
+            }
+        }
+    }
+}
 
 for (int i = 0; i < audio.Length; i += chunkSize)
 {
     int remaining = Math.Min(chunkSize, audio.Length - i);
-    float[] chunk = new float[chunkSize];
+    float[] chunk = new float[remaining];
     Array.Copy(audio, i, chunk, 0, remaining);
 
-    string text = asr.TranscribeChunk(chunk);
-    if (!string.IsNullOrEmpty(text))
+    using var mel = processor.Process(chunk);
+    if (mel != null)
     {
-        Console.Write(text);
+        generator.SetModelInput("audio_features", mel);
+        DecodeChunk();
     }
 }
 
-// Flush remaining audio
-string flushText = asr.Flush();
-if (!string.IsNullOrEmpty(flushText))
+// Flush remaining buffered audio
+using var flushMel = processor.Flush();
+if (flushMel != null)
 {
-    Console.Write(flushText);
+    generator.SetModelInput("audio_features", flushMel);
+    DecodeChunk();
 }
 
-// Final transcript
-string transcript = asr.GetTranscript();
+// Feed silence chunks for right context
+for (int i = 0; i < 4; i++)
+{
+    float[] silence = new float[chunkSize];
+    using var silenceMel = processor.Process(silence);
+    if (silenceMel != null)
+    {
+        generator.SetModelInput("audio_features", silenceMel);
+        DecodeChunk();
+    }
+}
+
 Console.WriteLine($"\n{new string('=', 60)}");
-Console.WriteLine($"  {transcript.Trim()}");
+Console.WriteLine($"  {fullTranscript.Trim()}");
 Console.WriteLine(new string('=', 60));
 
 static float[] LoadWavAudio(string path)

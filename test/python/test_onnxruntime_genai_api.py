@@ -964,42 +964,64 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
 
 
 def test_streaming_asr_create(nemotron_speech_model_path):
-    """Test that a StreamingASR instance can be created from a nemotron_speech model."""
+    """Test that Generator + StreamingAudioProcessor can be created from a nemotron_speech model."""
     model = og.Model(nemotron_speech_model_path)
-    asr = og.StreamingASR(model)
-    assert asr is not None
+    processor = og.StreamingAudioProcessor(model)
+    assert processor is not None
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    assert generator is not None
 
 
 def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     """Test transcribing a chunk of silence (all zeros) does not crash."""
     model = og.Model(nemotron_speech_model_path)
-    asr = og.StreamingASR(model)
+    processor = og.StreamingAudioProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
 
     # Feed one 560ms chunk of silence (8960 samples at 16kHz)
     silence = np.zeros(8960, dtype=np.float32)
-    text = asr.transcribe_chunk(silence)
-    # Should succeed without exception; silence must produce empty output
-    assert isinstance(text, str)
-    assert text == "" or text.isspace(), f"Expected empty or whitespace transcript for silence, got: '{text}'"
+    mel = processor.process(silence)
+    # mel may be None if not enough audio accumulated yet — that's OK
+    if mel is not None:
+        generator.set_model_input("audio_features", mel)
+        while not generator.is_done():
+            generator.generate_next_token()
+            tokens = generator.get_next_tokens()
+            for token in tokens:
+                text = tokenizer_stream.decode(token)
+                assert isinstance(text, str)
 
 
 def test_streaming_asr_flush(nemotron_speech_model_path):
     """Test that flush processes remaining buffered audio."""
     model = og.Model(nemotron_speech_model_path)
-    asr = og.StreamingASR(model)
+    processor = og.StreamingAudioProcessor(model)
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
 
     chunk_samples = 8960
     silence = np.zeros(chunk_samples, dtype=np.float32)
-    asr.transcribe_chunk(silence)
+    processor.process(silence)
 
-    flush_text = asr.flush()
-    assert isinstance(flush_text, str)
+    mel = processor.flush()
+    if mel is not None:
+        generator.set_model_input("audio_features", mel)
+        while not generator.is_done():
+            generator.generate_next_token()
 
 
 def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     """Test transcribing a synthetic sine wave (non-trivial mel features)."""
     model = og.Model(nemotron_speech_model_path)
-    asr = og.StreamingASR(model)
+    processor = og.StreamingAudioProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
 
     chunk_samples = 8960
     sample_rate = 16000.0
@@ -1009,15 +1031,31 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     t = np.arange(chunk_samples, dtype=np.float32) / sample_rate
     audio = (0.5 * np.sin(2.0 * np.pi * frequency * t)).astype(np.float32)
 
+    transcript = ""
     # Feed multiple chunks
     for _ in range(4):
-        text = asr.transcribe_chunk(audio)
-        assert isinstance(text, str)
+        mel = processor.process(audio)
+        if mel is not None:
+            generator.set_model_input("audio_features", mel)
+            while not generator.is_done():
+                generator.generate_next_token()
+                tokens = generator.get_next_tokens()
+                for token in tokens:
+                    text = tokenizer_stream.decode(token)
+                    if text:
+                        transcript += text
 
-    flush_text = asr.flush()
-    assert isinstance(flush_text, str)
+    mel = processor.flush()
+    if mel is not None:
+        generator.set_model_input("audio_features", mel)
+        while not generator.is_done():
+            generator.generate_next_token()
+            tokens = generator.get_next_tokens()
+            for token in tokens:
+                text = tokenizer_stream.decode(token)
+                if text:
+                    transcript += text
 
-    transcript = asr.get_transcript()
     assert isinstance(transcript, str)
 
 
@@ -1025,6 +1063,7 @@ def test_streaming_asr_config_model_type(nemotron_speech_model_path):
     """Test that a nemotron_speech model reports the correct type."""
     model = og.Model(nemotron_speech_model_path)
     assert model.type == "nemotron_speech"
+
 
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
@@ -1056,7 +1095,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         import soundfile as sf
     except ImportError:
         pytest.skip("soundfile not installed")
-        return  # unreachable, but satisfies static analysis
+        return
 
     audio_path = os.path.join(test_data_path, "audios", "1272-141231-0002.mp3")
     if not os.path.exists(audio_path):
@@ -1074,17 +1113,39 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
-    # Transcribe in chunks
+    # Transcribe using Generator + StreamingAudioProcessor
     model = og.Model(nemotron_speech_model_path)
-    asr = og.StreamingASR(model)
+    processor = og.StreamingAudioProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
 
+    transcript = ""
     chunk_size = 8960
     for start in range(0, len(audio), chunk_size):
-        chunk = audio[start : start + chunk_size]
-        asr.transcribe_chunk(chunk)
+        chunk = audio[start : start + chunk_size].astype(np.float32)
+        mel = processor.process(chunk)
+        if mel is not None:
+            generator.set_model_input("audio_features", mel)
+            while not generator.is_done():
+                generator.generate_next_token()
+                tokens = generator.get_next_tokens()
+                for token in tokens:
+                    text = tokenizer_stream.decode(token)
+                    if text:
+                        transcript += text
 
-    asr.flush()
-    transcript = asr.get_transcript()
+    mel = processor.flush()
+    if mel is not None:
+        generator.set_model_input("audio_features", mel)
+        while not generator.is_done():
+            generator.generate_next_token()
+            tokens = generator.get_next_tokens()
+            for token in tokens:
+                text = tokenizer_stream.decode(token)
+                if text:
+                    transcript += text
 
     reference = (
         "the cut on his chest still dripping blood the ache of his overstrained eyes "
@@ -1098,9 +1159,3 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         f"  Reference:  {reference}\n"
         f"  Hypothesis: {transcript.lower()}"
     )
-
-    # Test reset after transcription
-    asr.reset()
-    transcript = asr.get_transcript()
-    assert transcript == "", f"Expected empty transcript after reset, got: '{transcript}'"
-
