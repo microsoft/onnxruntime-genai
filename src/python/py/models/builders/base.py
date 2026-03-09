@@ -146,7 +146,7 @@ class Model:
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],  # For standard models
-            "attention_mask": ["batch_size", "total_sequence_length"],  # For standard models
+            "attention_mask": ["batch_size", 1] if extra_options.get("compact_attention_mask", False) else ["batch_size", "total_sequence_length"],  # For standard models
             "position_ids": ["batch_size", "sequence_length"],  # For standard models
             "inputs_embeds": [
                 "batch_size",
@@ -660,6 +660,9 @@ class Model:
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
+
+        if self.extra_options.get("compact_attention_mask", False):
+            genai_config["model"]["decoder"]["compact_attention_mask"] = True
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
@@ -4358,6 +4361,51 @@ class Model:
         self.mask_attrs["seqlens_k"] = sub_name
         self.mask_attrs["total_seq_len"] = reduce_max_name
 
+    def make_attention_mask_compact_reformatting_for_gqa(self, attn_mask_basename):
+        # Make nodes for the compact attention mask subgraph that calculates
+        # attributes about the attention mask to use in GroupQueryAttention.
+        #
+        # In compact mode, attention_mask has shape [batch_size, 1] where each value
+        # is the total sequence length for that batch element, instead of a full
+        # binary 0/1 mask of shape [batch_size, total_sequence_length].
+        #
+        # This greatly simplifies the graph by eliminating ReduceSum/Shape/Cast
+        # operations on the full-size mask tensor.
+        #
+        #          attention_mask [batch_size, 1] (int64, value = total_seq_len per batch)
+        #               |
+        #           Cast to int32
+        #               |
+        #           Reshape to [batch_size] (int32)
+        #              /    \
+        #             /      \
+        #           Sub    ReduceMax
+        #            |        |
+        #       seqlens_k  total_seq_len
+        #         (1D)       (scalar)
+
+        # Cast from INT64 to INT32
+        cast_name = f"{attn_mask_basename}/Cast"
+        self.make_cast(cast_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Reshape from [batch_size, 1] to [batch_size]
+        reshape_name = f"{attn_mask_basename}/Reshape"
+        reshape_inputs = [f"{cast_name}/output_0", "/model/constants/INT64/[-1]"]
+        self.make_reshape(reshape_name, reshape_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+        # Left branch: seqlens_k = reshape_result - 1
+        sub_name = f"{attn_mask_basename}/Sub"
+        sub_inputs = [f"{reshape_name}/output_0", "/model/constants/INT32/[1]"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+        # Right branch: total_seq_len = ReduceMax(reshape_result)
+        reduce_max_name = f"{attn_mask_basename}/ReduceMax"
+        reduce_max_inputs = [f"{reshape_name}/output_0"]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=ir.DataType.INT32, shape=[])
+
+        self.mask_attrs["seqlens_k"] = sub_name
+        self.mask_attrs["total_seq_len"] = reduce_max_name
+
     def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
@@ -4402,7 +4450,9 @@ class Model:
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
-        if self.extra_options.get("enable_webgpu_graph", False):
+        if self.extra_options.get("compact_attention_mask", False):
+            self.make_attention_mask_compact_reformatting_for_gqa(attn_mask_basename)
+        elif self.extra_options.get("enable_webgpu_graph", False):
             self.make_attention_mask_graph_capture_reformatting_for_gqa(attn_mask_basename)
         else:
             self.make_attention_mask_standard_reformatting_for_gqa(attn_mask_basename)

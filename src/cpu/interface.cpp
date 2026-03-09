@@ -160,6 +160,19 @@ struct CpuInterface : DeviceInterface {
     return true;
   }
 
+  bool UpdateCompactAttentionMask(void* mask_data, int batch_beam_size, int total_length, ONNXTensorElementDataType type) override {
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      auto* data = static_cast<int32_t*>(mask_data);
+      for (int i = 0; i < batch_beam_size; i++)
+        data[i] = static_cast<int32_t>(total_length);
+    } else {
+      auto* data = static_cast<int64_t*>(mask_data);
+      for (int i = 0; i < batch_beam_size; i++)
+        data[i] = static_cast<int64_t>(total_length);
+    }
+    return true;
+  }
+
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 

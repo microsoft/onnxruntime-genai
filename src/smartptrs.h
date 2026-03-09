@@ -123,6 +123,9 @@ struct DeviceInterface {
 
   virtual bool UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { return false; }
   virtual bool UpdateAttentionMask(void* /*next_mask_data*/, void* /*mask_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { return false; }
+  // Compact attention mask: write total_length into a [batch_beam_size, 1] tensor.
+  // Avoids GPU->CPU read round-trip since the value is known.
+  virtual bool UpdateCompactAttentionMask(void* /*mask_data*/, int /*batch_beam_size*/, int /*total_length*/, ONNXTensorElementDataType /*type*/) { return false; }
   virtual void LaunchAddLogitsMask(float* /*batch_logits*/, int /*batch_beam_size*/, int /*vocab_size*/, const uint32_t* /*logits_mask*/) { assert(false); }
 
   virtual void UpdateCacheIndirection(int32_t* /*tgt_indir_cache*/, const int32_t* /*src_indir_cache*/, const int32_t* /*beam_ids*/, int /*batch_size*/, int /*beam_width*/, int /*input_seq_length*/, int /*max_seq_length*/, int /*current_length*/) { assert(false); }
