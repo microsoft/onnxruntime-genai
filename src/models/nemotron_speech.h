@@ -114,7 +114,6 @@ struct NemotronSpeechModel : Model {
 };
 
 /// State implementation for NemotronSpeech that works with the Generator pipeline.
-/// The RNNT decoder is a state machine: each StepToken() call yields one non-blank token.
 struct NemotronSpeechState : State {
   NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
   ~NemotronSpeechState() override;
@@ -128,13 +127,14 @@ struct NemotronSpeechState : State {
 
   /// Run one step of the RNNT decoder, producing at most one non-blank token.
   /// Skips blanks internally. Sets chunk_done_ when the chunk is fully decoded.
-  void StepToken();
+  /// Returns the emitted token(s) (0 or 1 tokens).
+  std::span<const int32_t> StepToken();
 
   /// Whether the current chunk has been fully decoded.
   bool IsChunkDone() const { return chunk_done_; }
 
-  /// Token produced by the last StepToken() call (empty if chunk exhausted).
-  const std::vector<int32_t>& GetLastTokens() const { return last_tokens_; }
+  /// Tokens from the last StepToken() call (valid until next StepToken).
+  std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
 
   /// Reset all streaming state for a new utterance.
   void ResetStreamingState();
@@ -162,9 +162,9 @@ struct NemotronSpeechState : State {
   std::vector<int32_t> last_tokens_;
 
   // Pre-allocated reusable tensors
-  std::unique_ptr<OrtValue> encoder_frame_;   // [1, 1, hidden_dim]
-  std::unique_ptr<OrtValue> targets_;         // [1, 1]
-  std::unique_ptr<OrtValue> target_length_;   // [1]
+  std::unique_ptr<OrtValue> encoder_frame_;
+  std::unique_ptr<OrtValue> targets_;
+  std::unique_ptr<OrtValue> target_length_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
   void RunEncoder();

@@ -9,24 +9,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Include all C# source files from the managed library -->
-    <Compile Include="../../../src/csharp/Model.cs" Link="GenAI/Model.cs" />
-    <Compile Include="../../../src/csharp/Config.cs" Link="GenAI/Config.cs" />
-    <Compile Include="../../../src/csharp/Generator.cs" Link="GenAI/Generator.cs" />
-    <Compile Include="../../../src/csharp/GeneratorParams.cs" Link="GenAI/GeneratorParams.cs" />
-    <Compile Include="../../../src/csharp/Tokenizer.cs" Link="GenAI/Tokenizer.cs" />
-    <Compile Include="../../../src/csharp/TokenizerStream.cs" Link="GenAI/TokenizerStream.cs" />
-    <Compile Include="../../../src/csharp/Tensor.cs" Link="GenAI/Tensor.cs" />
-    <Compile Include="../../../src/csharp/Sequences.cs" Link="GenAI/Sequences.cs" />
-    <Compile Include="../../../src/csharp/NativeMethods.cs" Link="GenAI/NativeMethods.cs" />
-    <Compile Include="../../../src/csharp/Result.cs" Link="GenAI/Result.cs" />
-    <Compile Include="../../../src/csharp/Exceptions.cs" Link="GenAI/Exceptions.cs" />
-    <Compile Include="../../../src/csharp/Utils.cs" Link="GenAI/Utils.cs" />
-    <Compile Include="../../../src/csharp/StreamingAudioProcessor.cs" Link="GenAI/StreamingAudioProcessor.cs" />
-    <Compile Include="../../../src/csharp/Audios.cs" Link="GenAI/Audios.cs" />
-    <Compile Include="../../../src/csharp/Images.cs" Link="GenAI/Images.cs" />
-    <Compile Include="../../../src/csharp/MultiModalProcessor.cs" Link="GenAI/MultiModalProcessor.cs" />
-    <Compile Include="../../../src/csharp/Adapters.cs" Link="GenAI/Adapters.cs" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.12.0" Condition=" '$(Configuration)' == 'Debug' OR '$(Configuration)' == 'Release' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="0.12.0" Condition=" '$(Configuration)' == 'Debug_Cuda' OR '$(Configuration)' == 'Release_Cuda' " />
   </ItemGroup>
 
 </Project>

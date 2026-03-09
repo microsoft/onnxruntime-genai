@@ -267,7 +267,7 @@ void NemotronSpeechState::RunEncoder() {
   current_mel_.reset();
 }
 
-void NemotronSpeechState::StepToken() {
+std::span<const int32_t> NemotronSpeechState::StepToken() {
   if (need_encoder_run_) {
     RunEncoder();
     need_encoder_run_ = false;
@@ -358,11 +358,12 @@ void NemotronSpeechState::StepToken() {
     }
 
     last_tokens_.push_back(static_cast<int32_t>(best_token));
-    return;  // One token emitted
+    return last_tokens_;
   }
 
   // Exhausted all time steps
   chunk_done_ = true;
+  return last_tokens_;  // Empty
 }
 
 }  // namespace Generators

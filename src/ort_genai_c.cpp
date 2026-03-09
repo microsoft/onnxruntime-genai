@@ -14,6 +14,7 @@
 #include "smartptrs.h"
 #include "engine/engine.h"
 #include "models/streaming_audio_processor.h"
+#include "models/nemotron_speech.h"
 
 namespace Generators {
 
@@ -479,10 +480,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
   OGA_TRY
-  // For streaming ASR models, search_ is not used; return tokens from last ProcessChunk
-  if (generator->is_streaming_asr_) {
-    *out = generator->last_chunk_tokens_.data();
-    *out_count = generator->last_chunk_tokens_.size();
+  // For RNNT models, search_ is not used; return tokens from last StepToken
+  if (generator->is_rnnt_) {
+    auto* speech_state = static_cast<Generators::NemotronSpeechState*>(generator->state_.get());
+    auto tokens = speech_state->GetStepTokens();
+    *out = tokens.data();
+    *out_count = tokens.size();
     return nullptr;
   }
   auto tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();

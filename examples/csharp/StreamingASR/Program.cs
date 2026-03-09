@@ -12,7 +12,7 @@ if (args.Length < 2)
 string modelPath = args[0];
 string audioFile = args[1];
 
-// Load raw PCM audio (expects 16kHz mono int16 WAV)
+// Load raw PCM audio
 float[] audio = LoadWavAudio(audioFile);
 Console.WriteLine($"Audio: {audio.Length / 16000.0:F1}s ({audio.Length} samples)");
 
