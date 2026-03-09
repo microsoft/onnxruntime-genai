@@ -563,6 +563,8 @@ struct Decoder_Element : JSON::Element {
       v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "compact_attention_mask") {
+      v_.compact_attention_mask = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

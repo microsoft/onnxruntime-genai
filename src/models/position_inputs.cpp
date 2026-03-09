@@ -140,15 +140,52 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
     }
   }
   if (has_mask_input_) {
-    // Initialize on first update
-    if (is_first_update_) {
-      attention_mask_shape_[1] = new_length;
-      if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializeAttentionMask<int32_t>(next_tokens, attention_mask_shape_);
-      else
-        CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
+    if (model_.config_->model.decoder.compact_attention_mask && state_.params_->search.batch_size == 1) {
+      // Fast path for compact attention mask with batch_size == 1.
+      // The mask is [num_beams, 1] with value always equal to total_length.
+      // A static buffer is allocated once and reused across all updates.
+      // Works for both graph capture and non-graph capture modes.
+      if (is_first_update_) {
+        attention_mask_shape_[0] = state_.params_->search.batch_size * state_.params_->search.num_beams;
+        attention_mask_shape_[1] = 1;
+        attention_mask_->CreateTensor(attention_mask_shape_, true);
+        state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+      }
+      // Try device-native path first (WebGPU: single CPU->GPU copy, CPU: direct write)
+      if (!model_.p_device_inputs_->UpdateCompactAttentionMask(
+              attention_mask_->GetMutableRawData(),
+              static_cast<int>(attention_mask_shape_[0]),
+              total_length, type_)) {
+        // Fallback: use CPU interface via byte span round-trip
+        auto byte_span = attention_mask_->GetByteSpan();
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
+            byte_span.CopyDeviceToCpu().data(),
+            static_cast<int>(attention_mask_shape_[0]),
+            total_length, type_);
+        byte_span.CopyCpuToDevice();
+      }
+    } else if (is_first_update_) {
+      // Initialize on first update
+      if (model_.config_->model.decoder.compact_attention_mask) {
+        // Compact mode: attention_mask shape is always [batch_size, 1]
+        attention_mask_shape_[1] = 1;
+        if (type_ == Ort::TypeToTensorType<int32_t>)
+          CreateAndInitializeCompactAttentionMask<int32_t>(next_tokens, static_cast<int64_t>(new_length));
+        else
+          CreateAndInitializeCompactAttentionMask<int64_t>(next_tokens, static_cast<int64_t>(new_length));
+      } else {
+        attention_mask_shape_[1] = new_length;
+        if (type_ == Ort::TypeToTensorType<int32_t>)
+          CreateAndInitializeAttentionMask<int32_t>(next_tokens, attention_mask_shape_);
+        else
+          CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
+      }
     } else {
-      UpdateAttentionMask(total_length, new_length);
+      if (model_.config_->model.decoder.compact_attention_mask) {
+        UpdateCompactAttentionMask();
+      } else {
+        UpdateAttentionMask(total_length, new_length);
+      }
     }
   }
   is_first_update_ = false;
@@ -163,7 +200,20 @@ void DefaultPositionInputs::RewindTo(size_t index) {
       position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
     // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
-    if (attention_mask_shape_[0] == 1) {
+    if (model_.config_->model.decoder.compact_attention_mask) {
+      // In compact mode, rewind by setting each value to `index` (the target total seq len)
+      if (!model_.p_device_inputs_->UpdateCompactAttentionMask(
+              attention_mask_->GetMutableRawData(),
+              static_cast<int>(attention_mask_shape_[0]),
+              static_cast<int>(index), type_)) {
+        auto byte_span = attention_mask_->GetByteSpan();
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
+            byte_span.CopyDeviceToCpu().data(),
+            static_cast<int>(attention_mask_shape_[0]),
+            static_cast<int>(index), type_);
+        byte_span.CopyCpuToDevice();
+      }
+    } else if (attention_mask_shape_[0] == 1) {
       RewindMask(index);
     } else
       throw std::runtime_error("DefaultPositionInputs::RewindTo - Unsupported batch size");
@@ -370,6 +420,57 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     attention_mask_shape_[0] *= state_.params_->search.num_beams;
   }
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+}
+
+template <typename T>
+void DefaultPositionInputs::CreateAndInitializeCompactAttentionMask(DeviceSpan<int32_t> next_tokens, int64_t prompt_length) {
+  // In compact mode, attention_mask has shape [batch_size, 1] where each value
+  // is the total sequence length (number of non-pad tokens) for that batch element,
+  // instead of a full binary 0/1 mask of shape [batch_size, total_sequence_length].
+  std::array<int64_t, 2> compact_shape{attention_mask_shape_[0], 1};
+  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, compact_shape, type_);
+  auto* mask_data = attention_mask->GetTensorMutableData<T>();
+
+  if (compact_shape[0] == 1) {
+    // Batch size == 1: no padding, total seq len = prompt_length
+    mask_data[0] = static_cast<T>(prompt_length);
+  } else {
+    // Count non-pad tokens per batch to get the effective sequence length
+    const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
+    for (int64_t i = 0; i < compact_shape[0]; i++) {
+      T count = 0;
+      for (int64_t j = 0; j < prompt_length; j++) {
+        if (word_id[i * prompt_length + j] != model_.config_->model.pad_token_id) {
+          count++;
+        }
+      }
+      mask_data[i] = count;
+    }
+  }
+
+  // Expand for beam search (duplicate per beam)
+  attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
+  attention_mask_->ort_tensor_ = std::move(attention_mask);
+  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  attention_mask_shape_[1] = 1;
+  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+}
+
+void DefaultPositionInputs::UpdateCompactAttentionMask() {
+  // In compact mode, attention_mask has shape [batch_size, 1] containing total seq len per batch.
+  // Each decode step adds one token, so increment each value by 1.
+  auto byte_span = attention_mask_->GetByteSpan();
+  auto cpu_data = byte_span.CopyDeviceToCpu();
+  if (type_ == Ort::TypeToTensorType<int32_t>) {
+    auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
+    for (int64_t i = 0; i < attention_mask_shape_[0]; i++)
+      data[i] += 1;
+  } else {
+    auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
+    for (int64_t i = 0; i < attention_mask_shape_[0]; i++)
+      data[i] += 1;
+  }
+  byte_span.CopyCpuToDevice();
 }
 
 template <typename T>
