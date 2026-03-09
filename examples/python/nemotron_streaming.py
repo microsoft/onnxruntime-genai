@@ -49,8 +49,8 @@ def simulate_microphone(model_path, audio_path):
         while not generator.is_done():
             generator.generate_next_token()
             tokens = generator.get_next_tokens()
-            for token in tokens:
-                text = tokenizer_stream.decode(token)
+            if len(tokens) > 0:
+                text = tokenizer_stream.decode(tokens[0])
                 if text:
                     print(text, end="", flush=True)
                     full_transcript += text

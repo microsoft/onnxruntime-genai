@@ -33,9 +33,9 @@ void DecodeChunk()
     {
         generator.GenerateNextToken();
         var tokens = generator.GetNextTokens();
-        foreach (int token in tokens)
+        if (tokens.Length > 0)
         {
-            string text = tokenizerStream.Decode(token);
+            string text = tokenizerStream.Decode(tokens[0]);
             if (!string.IsNullOrEmpty(text))
             {
                 Console.Write(text);
