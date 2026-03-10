@@ -523,7 +523,7 @@ bool Generator::IsDone() {
   if (is_rnnt_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get());
+    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
     return speech_state->IsChunkDone();
   }
 

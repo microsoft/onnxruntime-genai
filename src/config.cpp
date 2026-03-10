@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include "generators.h"
+#include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
@@ -1517,22 +1518,10 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-namespace {
-bool IsNonGenerativeModelType(std::string_view type) {
-  static constexpr std::string_view kNonGenerativeTypes[] = {
-      "nemotron_speech",
-  };
-  for (auto t : kNonGenerativeTypes) {
-    if (type == t) return true;
-  }
-  return false;
-}
-}  // namespace
-
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
-  if (model.context_length == 0 && !IsNonGenerativeModelType(model.type)) {
+  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 

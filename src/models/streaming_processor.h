@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// StreamingProcessor - Streaming mel spectrogram extraction for Nemotron ASR models.
-// Converts raw PCM audio chunks into mel features ready for the encoder.
+// StreamingProcessor converts raw PCM audio chunks into mel features ready for the encoder.
 #pragma once
 
 #include "nemo_mel_spectrogram.h"
@@ -12,17 +11,6 @@ namespace Generators {
 
 /// Stateful audio processor that converts raw PCM audio into mel spectrogram
 /// tensors suitable for feeding into the Nemotron encoder via Generator.set_inputs().
-///
-/// Handles:
-///   - Audio buffering (accumulates until a full chunk is available)
-///   - Mel spectrogram extraction (NeMo-compatible)
-///   - Pre-encode cache management (ring buffer of previous frames)
-///
-/// Usage:
-///   auto processor = CreateStreamingProcessor(*model);
-///   auto mel = processor->Process(audio_data, num_samples);
-///   if (mel) { generator.set_model_input("audio_features", mel); }
-///
 struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   explicit StreamingProcessor(Model& model);
   ~StreamingProcessor();

@@ -113,7 +113,6 @@ struct NemotronSpeechModel : Model {
   NemotronCacheConfig cache_config_;
 };
 
-/// State implementation for NemotronSpeech that works with the Generator pipeline.
 struct NemotronSpeechState : State {
   NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
   ~NemotronSpeechState() override;

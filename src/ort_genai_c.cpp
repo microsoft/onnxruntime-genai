@@ -62,7 +62,7 @@ struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
-struct OgaAudioProcessor : Generators::StreamingProcessor, OgaAbstract {};
+struct OgaStreamingProcessor : Generators::StreamingProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -1095,15 +1095,15 @@ void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
 }
 
-OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out) {
+OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out) {
   OGA_TRY
   auto processor = Generators::CreateStreamingProcessor(*model);
-  *out = ReturnUnique<OgaAudioProcessor>(std::move(processor));
+  *out = ReturnUnique<OgaStreamingProcessor>(std::move(processor));
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out) {
   OGA_TRY
   auto result = processor->Process(audio_data, num_samples);
   if (result) {
@@ -1115,7 +1115,7 @@ OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, c
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, OgaNamedTensors** out) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out) {
   OGA_TRY
   auto result = processor->Flush();
   if (result) {
@@ -1127,13 +1127,13 @@ OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, Oga
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaAudioProcessorReset(OgaAudioProcessor* processor) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorReset(OgaStreamingProcessor* processor) {
   OGA_TRY
   processor->Reset();
   return nullptr;
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyAudioProcessor(OgaAudioProcessor* p) { delete p; }
+void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
 
 }  // extern "C"

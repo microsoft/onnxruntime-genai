@@ -452,23 +452,23 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // StreamingProcessor API
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaCreateAudioProcessor(IntPtr /* const OgaModel* */ model,
-                                                                              out IntPtr /* OgaAudioProcessor** */ processor);
+        public static extern IntPtr /* OgaResult* */ OgaCreateStreamingProcessor(IntPtr /* const OgaModel* */ model,
+                                                                              out IntPtr /* OgaStreamingProcessor** */ processor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaDestroyAudioProcessor(IntPtr /* OgaAudioProcessor* */ processor);
+        public static extern void OgaDestroyStreamingProcessor(IntPtr /* OgaStreamingProcessor* */ processor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaAudioProcessorProcess(IntPtr /* OgaAudioProcessor* */ processor,
+        public static extern unsafe IntPtr /* OgaResult* */ OgaStreamingProcessorProcess(IntPtr /* OgaStreamingProcessor* */ processor,
                                                                                       float* /* const float* */ audioData,
                                                                                       UIntPtr /* size_t */ numSamples,
                                                                                       out IntPtr /* OgaNamedTensors** */ out_named_tensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaAudioProcessorFlush(IntPtr /* OgaAudioProcessor* */ processor,
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorFlush(IntPtr /* OgaStreamingProcessor* */ processor,
                                                                              out IntPtr /* OgaNamedTensors** */ out_named_tensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaAudioProcessorReset(IntPtr /* OgaAudioProcessor* */ processor);
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorReset(IntPtr /* OgaStreamingProcessor* */ processor);
     }
 }

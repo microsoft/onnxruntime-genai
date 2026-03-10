@@ -12,7 +12,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public StreamingProcessor(Model model)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateAudioProcessor(model.Handle, out _processorHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateStreamingProcessor(model.Handle, out _processorHandle));
         }
 
         internal IntPtr Handle { get { return _processorHandle; } }
@@ -28,7 +28,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 fixed (float* audioPtr = audioData)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaAudioProcessorProcess(
+                    Result.VerifySuccess(NativeMethods.OgaStreamingProcessorProcess(
                         _processorHandle, audioPtr, (UIntPtr)audioData.Length, out outHandle));
                 }
             }
@@ -42,7 +42,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public NamedTensors? Flush()
         {
             IntPtr outHandle = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaAudioProcessorFlush(_processorHandle, out outHandle));
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorFlush(_processorHandle, out outHandle));
             return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
@@ -51,7 +51,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         public void Reset()
         {
-            Result.VerifySuccess(NativeMethods.OgaAudioProcessorReset(_processorHandle));
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorReset(_processorHandle));
         }
 
         ~StreamingProcessor()
@@ -71,7 +71,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return;
             }
-            NativeMethods.OgaDestroyAudioProcessor(_processorHandle);
+            NativeMethods.OgaDestroyStreamingProcessor(_processorHandle);
             _processorHandle = IntPtr.Zero;
             _disposed = true;
         }

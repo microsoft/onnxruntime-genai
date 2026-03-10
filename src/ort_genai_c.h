@@ -79,7 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
-typedef struct OgaAudioProcessor OgaAudioProcessor;
+typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 //! @}
 
@@ -1153,7 +1153,7 @@ OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* r
  * \param[out] out Pointer to store the created StreamingProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out);
 
 /**
  * \brief Process a chunk of raw PCM audio and return a NamedTensors if a full chunk is ready.
@@ -1164,7 +1164,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaA
  *                  Caller must free with OgaDestroyNamedTensors.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out);
 
 /**
  * \brief Flush remaining buffered audio (pads with silence).
@@ -1172,20 +1172,20 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* p
  * \param[out] out Pointer to store the NamedTensors. Set to nullptr if buffer was empty.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, OgaNamedTensors** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out);
 
 /**
  * \brief Reset audio processor state for a new utterance.
  * \param[in] processor The StreamingProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorReset(OgaAudioProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorReset(OgaStreamingProcessor* processor);
 
 /**
  * \brief Destroy a StreamingProcessor instance.
  * \param[in] processor The StreamingProcessor instance to destroy.
  */
-OGA_EXPORT void OGA_API_CALL OgaDestroyAudioProcessor(OgaAudioProcessor* processor);
+OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
 
 #ifdef __cplusplus
 }

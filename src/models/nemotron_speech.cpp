@@ -196,7 +196,7 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
                                            DeviceSpan<int32_t> /*next_indices*/) {
   throw std::runtime_error(
       "NemotronSpeechState::Run() is not used directly. "
-      "Use Generator::GenerateNextToken() with set_model_input.");
+      "Use Generator::GenerateNextToken() with set_inputs.");
 }
 
 void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {

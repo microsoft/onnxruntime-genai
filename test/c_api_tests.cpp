@@ -1372,11 +1372,11 @@ TEST(CAPITests, SetGuidance) {
 #endif
 #endif
 
-// Test creating a Generator + AudioProcessor from a nemotron_speech model
+// Test creating a Generator + StreamingProcessor from a nemotron_speech model
 TEST(CAPITests, StreamingASRCreate) {
 #if TEST_STREAMING_ASR
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
-  auto processor = OgaAudioProcessor::Create(*model);
+  auto processor = OgaStreamingProcessor::Create(*model);
   ASSERT_NE(processor, nullptr);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
@@ -1390,7 +1390,7 @@ TEST(CAPITests, StreamingASRCreate) {
 TEST(CAPITests, StreamingASRTranscribeSilence) {
 #if TEST_STREAMING_ASR
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
-  auto processor = OgaAudioProcessor::Create(*model);
+  auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -1399,7 +1399,7 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
 
   auto mel = processor->Process(silence.data(), silence.size());
   if (mel) {
-    generator->SetModelInput("audio_features", *mel);
+    generator->SetInputs(*mel);
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
     }
@@ -1414,7 +1414,7 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
 TEST(CAPITests, StreamingASRMultipleChunks) {
 #if TEST_STREAMING_ASR
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
-  auto processor = OgaAudioProcessor::Create(*model);
+  auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -1424,7 +1424,7 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
   for (int i = 0; i < 5; ++i) {
     auto mel = processor->Process(silence.data(), silence.size());
     if (mel) {
-      generator->SetModelInput("audio_features", *mel);
+      generator->SetInputs(*mel);
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
       }
@@ -1440,7 +1440,7 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
 TEST(CAPITests, StreamingASRFlush) {
 #if TEST_STREAMING_ASR
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
-  auto processor = OgaAudioProcessor::Create(*model);
+  auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -1450,7 +1450,7 @@ TEST(CAPITests, StreamingASRFlush) {
 
   auto mel = processor->Flush();
   if (mel) {
-    generator->SetModelInput("audio_features", *mel);
+    generator->SetInputs(*mel);
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
     }
@@ -1465,7 +1465,7 @@ TEST(CAPITests, StreamingASRFlush) {
 TEST(CAPITests, StreamingASRSineWave) {
 #if TEST_STREAMING_ASR
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
-  auto processor = OgaAudioProcessor::Create(*model);
+  auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -1481,7 +1481,7 @@ TEST(CAPITests, StreamingASRSineWave) {
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
     if (mel) {
-      generator->SetModelInput("audio_features", *mel);
+      generator->SetInputs(*mel);
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
       }
@@ -1490,7 +1490,7 @@ TEST(CAPITests, StreamingASRSineWave) {
 
   auto flush_mel = processor->Flush();
   if (flush_mel) {
-    generator->SetModelInput("audio_features", *flush_mel);
+    generator->SetInputs(*flush_mel);
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
     }
@@ -1501,15 +1501,15 @@ TEST(CAPITests, StreamingASRSineWave) {
 #endif
 }
 
-// Test raw C API for AudioProcessor + Generator
+// Test raw C API for StreamingProcessor + Generator
 TEST(CAPITests, StreamingASRRawCAPI) {
 #if TEST_STREAMING_ASR
   OgaModel* model = nullptr;
   ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
   ASSERT_NE(model, nullptr);
 
-  OgaAudioProcessor* processor = nullptr;
-  ASSERT_EQ(OgaCreateAudioProcessor(model, &processor), nullptr);
+  OgaStreamingProcessor* processor = nullptr;
+  ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
   ASSERT_NE(processor, nullptr);
 
   OgaGeneratorParams* params = nullptr;
@@ -1521,19 +1521,19 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   constexpr size_t chunk_samples = 8960;
   std::vector<float> silence(chunk_samples, 0.0f);
 
-  OgaTensor* mel = nullptr;
-  ASSERT_EQ(OgaAudioProcessorProcess(processor, silence.data(), silence.size(), &mel), nullptr);
-  if (mel) {
-    ASSERT_EQ(OgaGenerator_SetModelInput(generator, "audio_features", mel), nullptr);
+  OgaNamedTensors* inputs = nullptr;
+  ASSERT_EQ(OgaStreamingProcessorProcess(processor, silence.data(), silence.size(), &inputs), nullptr);
+  if (inputs) {
+    ASSERT_EQ(OgaGenerator_SetInputs(generator, inputs), nullptr);
     while (!OgaGenerator_IsDone(generator)) {
       ASSERT_EQ(OgaGenerator_GenerateNextToken(generator), nullptr);
     }
-    OgaDestroyTensor(mel);
+    OgaDestroyNamedTensors(inputs);
   }
 
   OgaDestroyGenerator(generator);
   OgaDestroyGeneratorParams(params);
-  OgaDestroyAudioProcessor(processor);
+  OgaDestroyStreamingProcessor(processor);
   OgaDestroyModel(model);
 #else
   GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";

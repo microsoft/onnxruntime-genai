@@ -481,7 +481,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
-      .def("create_streaming_processor", [](OgaModel& model) { return OgaAudioProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.");
+      .def("create_streaming_processor", [](OgaModel& model) { return OgaStreamingProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
@@ -637,13 +637,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("remove_request", &OgaEngine::Remove)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
-  pybind11::class_<OgaAudioProcessor>(m, "StreamingProcessor")
-      .def(pybind11::init([](OgaModel& model) { return OgaAudioProcessor::Create(model); }),
+  pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
+      .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),
            "Create a StreamingProcessor for mel spectrogram extraction.\n"
            "The model must be of type 'nemotron_speech'.")
       .def(
           "process",
-          [](OgaAudioProcessor& proc, pybind11::array_t<float> audio_chunk) -> pybind11::object {
+          [](OgaStreamingProcessor& proc, pybind11::array_t<float> audio_chunk) -> pybind11::object {
             auto buf = audio_chunk.request();
             auto result = proc.Process(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
             if (result) {
@@ -655,7 +655,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           "Feed raw PCM audio. Returns a NamedTensors if a full chunk is ready, or None if more audio is needed.")
       .def(
           "flush",
-          [](OgaAudioProcessor& proc) -> pybind11::object {
+          [](OgaStreamingProcessor& proc) -> pybind11::object {
             auto result = proc.Flush();
             if (result) {
               return pybind11::cast(std::move(result));
@@ -663,7 +663,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             return pybind11::none();
           },
           "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
-      .def("reset", [](OgaAudioProcessor& proc) { proc.Reset(); }, "Reset processor state for a new utterance.");
+      .def("reset", [](OgaStreamingProcessor& proc) { proc.Reset(); }, "Reset processor state for a new utterance.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);

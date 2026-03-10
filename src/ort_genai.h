@@ -887,28 +887,28 @@ inline int GetCurrentGpuDeviceId() {
 
 }  // namespace Oga
 
-struct OgaAudioProcessor : OgaAbstract {
-  static std::unique_ptr<OgaAudioProcessor> Create(OgaModel& model) {
-    OgaAudioProcessor* p;
-    OgaCheckResult(OgaCreateAudioProcessor(&model, &p));
-    return std::unique_ptr<OgaAudioProcessor>(p);
+struct OgaStreamingProcessor : OgaAbstract {
+  static std::unique_ptr<OgaStreamingProcessor> Create(OgaModel& model) {
+    OgaStreamingProcessor* p;
+    OgaCheckResult(OgaCreateStreamingProcessor(&model, &p));
+    return std::unique_ptr<OgaStreamingProcessor>(p);
   }
 
   std::unique_ptr<OgaNamedTensors> Process(const float* audio_data, size_t num_samples) {
     OgaNamedTensors* out;
-    OgaCheckResult(OgaAudioProcessorProcess(this, audio_data, num_samples, &out));
+    OgaCheckResult(OgaStreamingProcessorProcess(this, audio_data, num_samples, &out));
     return std::unique_ptr<OgaNamedTensors>(out);  // May be nullptr if not enough audio
   }
 
   std::unique_ptr<OgaNamedTensors> Flush() {
     OgaNamedTensors* out;
-    OgaCheckResult(OgaAudioProcessorFlush(this, &out));
+    OgaCheckResult(OgaStreamingProcessorFlush(this, &out));
     return std::unique_ptr<OgaNamedTensors>(out);
   }
 
   void Reset() {
-    OgaCheckResult(OgaAudioProcessorReset(this));
+    OgaCheckResult(OgaStreamingProcessorReset(this));
   }
 
-  static void operator delete(void* p) { OgaDestroyAudioProcessor(reinterpret_cast<OgaAudioProcessor*>(p)); }
+  static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
 };
