@@ -316,7 +316,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         text_seed = "a"
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
         seed_tokens = tokenizer.encode(seed_prompt)
-        gen.append_tokens(seed_tokens)
+        # Tile seed tokens for batch_size > 1 so append_tokens gets
+        # batch_size * seq_len tokens in the expected layout.
+        batched_seed_tokens = np.tile(seed_tokens, batch_size)
+        gen.append_tokens(batched_seed_tokens)
         while not gen.is_done() and gen.token_count() < prompt_length:
             gen.generate_next_token()
         generated_text = tokenizer.decode(gen.get_sequence(0))
