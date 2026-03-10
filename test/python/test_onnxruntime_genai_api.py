@@ -964,9 +964,9 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
 
 
 def test_streaming_asr_create(nemotron_speech_model_path):
-    """Test that Generator + StreamingAudioProcessor can be created from a nemotron_speech model."""
+    """Test that Generator + StreamingProcessor can be created from a nemotron_speech model."""
     model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     assert processor is not None
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
@@ -976,7 +976,7 @@ def test_streaming_asr_create(nemotron_speech_model_path):
 def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     """Test transcribing a chunk of silence (all zeros) does not crash."""
     model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
@@ -999,7 +999,7 @@ def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
 def test_streaming_asr_flush(nemotron_speech_model_path):
     """Test that flush processes remaining buffered audio."""
     model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
 
@@ -1017,7 +1017,7 @@ def test_streaming_asr_flush(nemotron_speech_model_path):
 def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     """Test transcribing a synthetic sine wave (non-trivial mel features)."""
     model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
@@ -1113,9 +1113,9 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
-    # Transcribe using Generator + StreamingAudioProcessor
+    # Transcribe using Generator + StreamingProcessor
     model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)

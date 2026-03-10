@@ -26,7 +26,7 @@ def load_audio(audio_path):
 
 
 def simulate_microphone(model_path, audio_path):
-    """Stream audio through Generator + StreamingAudioProcessor API."""
+    """Stream audio through Generator + StreamingProcessor API."""
     audio = load_audio(audio_path)
     duration = len(audio) / SAMPLE_RATE
     num_chunks = (len(audio) + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES
@@ -34,7 +34,7 @@ def simulate_microphone(model_path, audio_path):
 
     config = og.Config(model_path)
     model = og.Model(config)
-    processor = og.StreamingAudioProcessor(model)
+    processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
@@ -57,23 +57,23 @@ def simulate_microphone(model_path, audio_path):
 
     for i in range(0, len(audio), CHUNK_SAMPLES):
         chunk = audio[i:i + CHUNK_SAMPLES].astype(np.float32)
-        mel = processor.process(chunk)
-        if mel is not None:
-            generator.set_model_input("audio_features", mel)
+        inputs = processor.process(chunk)
+        if inputs is not None:
+            generator.set_inputs(inputs)
             decode_chunk()
 
     # Flush remaining audio
-    mel = processor.flush()
-    if mel is not None:
-        generator.set_model_input("audio_features", mel)
+    inputs = processor.flush()
+    if inputs is not None:
+        generator.set_inputs(inputs)
         decode_chunk()
 
     # Feed silence chunks for right context
     for _ in range(4):
         silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
-        mel = processor.process(silence)
-        if mel is not None:
-            generator.set_model_input("audio_features", mel)
+        inputs = processor.process(silence)
+        if inputs is not None:
+            generator.set_inputs(inputs)
             decode_chunk()
 
     total_wall = time.time() - stream_start

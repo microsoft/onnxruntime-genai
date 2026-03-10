@@ -894,16 +894,16 @@ struct OgaAudioProcessor : OgaAbstract {
     return std::unique_ptr<OgaAudioProcessor>(p);
   }
 
-  std::unique_ptr<OgaTensor> Process(const float* audio_data, size_t num_samples) {
-    OgaTensor* mel;
-    OgaCheckResult(OgaAudioProcessorProcess(this, audio_data, num_samples, &mel));
-    return std::unique_ptr<OgaTensor>(mel);  // May be nullptr if not enough audio
+  std::unique_ptr<OgaNamedTensors> Process(const float* audio_data, size_t num_samples) {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaAudioProcessorProcess(this, audio_data, num_samples, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);  // May be nullptr if not enough audio
   }
 
-  std::unique_ptr<OgaTensor> Flush() {
-    OgaTensor* mel;
-    OgaCheckResult(OgaAudioProcessorFlush(this, &mel));
-    return std::unique_ptr<OgaTensor>(mel);
+  std::unique_ptr<OgaNamedTensors> Flush() {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaAudioProcessorFlush(this, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);
   }
 
   void Reset() {

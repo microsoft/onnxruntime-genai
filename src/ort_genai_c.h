@@ -1148,42 +1148,42 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
 
 /**
- * \brief Creates a StreamingAudioProcessor for mel spectrogram extraction from raw audio.
+ * \brief Creates a StreamingProcessor for mel spectrogram extraction from raw audio.
  * \param[in] model The model to create the processor for (must be nemotron_speech type).
- * \param[out] out Pointer to store the created StreamingAudioProcessor instance.
+ * \param[out] out Pointer to store the created StreamingProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAudioProcessor(OgaModel* model, OgaAudioProcessor** out);
 
 /**
- * \brief Process a chunk of raw PCM audio and return a mel spectrogram tensor if a full chunk is ready.
- * \param[in] processor The StreamingAudioProcessor instance.
+ * \brief Process a chunk of raw PCM audio and return a NamedTensors if a full chunk is ready.
+ * \param[in] processor The StreamingProcessor instance.
  * \param[in] audio_data Pointer to float32 PCM audio samples (mono, model sample rate).
  * \param[in] num_samples Number of audio samples.
- * \param[out] mel Pointer to store the mel tensor. Set to nullptr if not enough audio yet.
- *                  Caller must free with OgaDestroyTensor.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if not enough audio yet.
+ *                  Caller must free with OgaDestroyNamedTensors.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, const float* audio_data, size_t num_samples, OgaTensor** mel);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorProcess(OgaAudioProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out);
 
 /**
  * \brief Flush remaining buffered audio (pads with silence).
- * \param[in] processor The StreamingAudioProcessor instance.
- * \param[out] mel Pointer to store the mel tensor. Set to nullptr if buffer was empty.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if buffer was empty.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, OgaTensor** mel);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorFlush(OgaAudioProcessor* processor, OgaNamedTensors** out);
 
 /**
  * \brief Reset audio processor state for a new utterance.
- * \param[in] processor The StreamingAudioProcessor instance.
+ * \param[in] processor The StreamingProcessor instance.
  * \return OgaResult on error, nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaAudioProcessorReset(OgaAudioProcessor* processor);
 
 /**
- * \brief Destroy a StreamingAudioProcessor instance.
- * \param[in] processor The StreamingAudioProcessor instance to destroy.
+ * \brief Destroy a StreamingProcessor instance.
+ * \param[in] processor The StreamingProcessor instance to destroy.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyAudioProcessor(OgaAudioProcessor* processor);
 

@@ -5,15 +5,15 @@
 #include <cstring>
 
 #include "../generators.h"
-#include "streaming_audio_processor.h"
+#include "streaming_processor.h"
 
 namespace Generators {
 
-StreamingAudioProcessor::StreamingAudioProcessor(Model& model)
+StreamingProcessor::StreamingProcessor(Model& model)
     : model_{model} {
   auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
   if (!nemotron_model) {
-    throw std::runtime_error("StreamingAudioProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
+    throw std::runtime_error("StreamingProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
   cache_config_ = nemotron_model->cache_config_;
@@ -32,9 +32,9 @@ StreamingAudioProcessor::StreamingAudioProcessor(Model& model)
   cache_pos_ = 0;
 }
 
-StreamingAudioProcessor::~StreamingAudioProcessor() = default;
+StreamingProcessor::~StreamingProcessor() = default;
 
-void StreamingAudioProcessor::Reset() {
+void StreamingProcessor::Reset() {
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
@@ -42,7 +42,7 @@ void StreamingAudioProcessor::Reset() {
   audio_buffer_.clear();
 }
 
-std::unique_ptr<OrtValue> StreamingAudioProcessor::Process(const float* audio_data, size_t num_samples) {
+std::unique_ptr<NamedTensors> StreamingProcessor::Process(const float* audio_data, size_t num_samples) {
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
@@ -53,13 +53,15 @@ std::unique_ptr<OrtValue> StreamingAudioProcessor::Process(const float* audio_da
     auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
-    return mel;
+    auto result = std::make_unique<NamedTensors>();
+    result->emplace("audio_features", std::make_shared<Tensor>(std::move(mel)));
+    return result;
   }
 
   return nullptr;  // Not enough audio yet
 }
 
-std::unique_ptr<OrtValue> StreamingAudioProcessor::Flush() {
+std::unique_ptr<NamedTensors> StreamingProcessor::Flush() {
   if (audio_buffer_.empty()) {
     return nullptr;
   }
@@ -69,10 +71,12 @@ std::unique_ptr<OrtValue> StreamingAudioProcessor::Flush() {
 
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
-  return mel;
+  auto result = std::make_unique<NamedTensors>();
+  result->emplace("audio_features", std::make_shared<Tensor>(std::move(mel)));
+  return result;
 }
 
-std::unique_ptr<OrtValue> StreamingAudioProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
+std::unique_ptr<OrtValue> StreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
   auto& allocator = model_.allocator_cpu_;
 
   // Compute mel spectrogram for this chunk
@@ -118,8 +122,8 @@ std::unique_ptr<OrtValue> StreamingAudioProcessor::BuildMelTensor(const float* a
   return processed_signal;
 }
 
-std::unique_ptr<StreamingAudioProcessor> CreateStreamingAudioProcessor(Model& model) {
-  return std::make_unique<StreamingAudioProcessor>(model);
+std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
+  return std::make_unique<StreamingProcessor>(model);
 }
 
 }  // namespace Generators

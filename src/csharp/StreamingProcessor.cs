@@ -5,12 +5,12 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    public class StreamingAudioProcessor : IDisposable
+    public class StreamingProcessor : IDisposable
     {
         private IntPtr _processorHandle;
         private bool _disposed = false;
 
-        public StreamingAudioProcessor(Model model)
+        public StreamingProcessor(Model model)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateAudioProcessor(model.Handle, out _processorHandle));
         }
@@ -19,31 +19,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Feed a chunk of raw PCM audio (mono, float32, 16kHz).
-        /// Returns a mel spectrogram Tensor if a full chunk is ready, or null if more audio is needed.
+        /// Returns a NamedTensors if a full chunk is ready, or null if more audio is needed.
         /// </summary>
-        public Tensor? Process(float[] audioData)
+        public NamedTensors? Process(float[] audioData)
         {
-            IntPtr melHandle = IntPtr.Zero;
+            IntPtr outHandle = IntPtr.Zero;
             unsafe
             {
                 fixed (float* audioPtr = audioData)
                 {
                     Result.VerifySuccess(NativeMethods.OgaAudioProcessorProcess(
-                        _processorHandle, audioPtr, (UIntPtr)audioData.Length, out melHandle));
+                        _processorHandle, audioPtr, (UIntPtr)audioData.Length, out outHandle));
                 }
             }
-            return melHandle != IntPtr.Zero ? new Tensor(melHandle) : null;
+            return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
         /// <summary>
         /// Flush remaining buffered audio (pads with silence).
-        /// Returns a mel Tensor or null if the buffer was empty.
+        /// Returns a NamedTensors or null if the buffer was empty.
         /// </summary>
-        public Tensor? Flush()
+        public NamedTensors? Flush()
         {
-            IntPtr melHandle = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaAudioProcessorFlush(_processorHandle, out melHandle));
-            return melHandle != IntPtr.Zero ? new Tensor(melHandle) : null;
+            IntPtr outHandle = IntPtr.Zero;
+            Result.VerifySuccess(NativeMethods.OgaAudioProcessorFlush(_processorHandle, out outHandle));
+            return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
         /// <summary>
@@ -54,7 +54,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaAudioProcessorReset(_processorHandle));
         }
 
-        ~StreamingAudioProcessor()
+        ~StreamingProcessor()
         {
             Dispose(false);
         }

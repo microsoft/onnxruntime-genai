@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// StreamingAudioProcessor - Streaming mel spectrogram extraction for Nemotron ASR models.
+// StreamingProcessor - Streaming mel spectrogram extraction for Nemotron ASR models.
 // Converts raw PCM audio chunks into mel features ready for the encoder.
 #pragma once
 
@@ -19,23 +19,22 @@ namespace Generators {
 ///   - Pre-encode cache management (ring buffer of previous frames)
 ///
 /// Usage:
-///   auto processor = CreateStreamingAudioProcessor(*model);
+///   auto processor = CreateStreamingProcessor(*model);
 ///   auto mel = processor->Process(audio_data, num_samples);
 ///   if (mel) { generator.set_model_input("audio_features", mel); }
 ///
-struct StreamingAudioProcessor : LeakChecked<StreamingAudioProcessor> {
-  explicit StreamingAudioProcessor(Model& model);
-  ~StreamingAudioProcessor();
+struct StreamingProcessor : LeakChecked<StreamingProcessor> {
+  explicit StreamingProcessor(Model& model);
+  ~StreamingProcessor();
 
   /// Feed raw PCM audio (mono, float32, model sample rate).
-  /// Returns a mel tensor [1, total_frames, num_mels] when a full chunk is ready,
+  /// Returns a NamedTensors with the mel tensor when a full chunk is ready,
   /// or nullptr if more audio is needed.
-  /// The tensor includes pre-encode cache frames prepended.
-  std::unique_ptr<OrtValue> Process(const float* audio_data, size_t num_samples);
+  std::unique_ptr<NamedTensors> Process(const float* audio_data, size_t num_samples);
 
   /// Flush remaining buffered audio (pads to full chunk with silence).
-  /// Returns final mel tensor, or nullptr if buffer is empty.
-  std::unique_ptr<OrtValue> Flush();
+  /// Returns final NamedTensors with mel, or nullptr if buffer is empty.
+  std::unique_ptr<NamedTensors> Flush();
 
   /// Reset all streaming state for a new utterance.
   void Reset();
@@ -66,6 +65,6 @@ struct StreamingAudioProcessor : LeakChecked<StreamingAudioProcessor> {
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
 };
 
-std::unique_ptr<StreamingAudioProcessor> CreateStreamingAudioProcessor(Model& model);
+std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model);
 
 }  // namespace Generators
