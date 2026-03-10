@@ -5,15 +5,15 @@
 #include <cstring>
 
 #include "../generators.h"
-#include "streaming_processor.h"
+#include "nemotron_streaming_processor.h"
 
 namespace Generators {
 
-StreamingProcessor::StreamingProcessor(Model& model)
+NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
     : model_{model} {
   auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
   if (!nemotron_model) {
-    throw std::runtime_error("StreamingProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
+    throw std::runtime_error("NemotronStreamingProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
   cache_config_ = nemotron_model->cache_config_;
@@ -32,9 +32,9 @@ StreamingProcessor::StreamingProcessor(Model& model)
   cache_pos_ = 0;
 }
 
-StreamingProcessor::~StreamingProcessor() = default;
+NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
 
-void StreamingProcessor::Reset() {
+void NemotronStreamingProcessor::Reset() {
   mel_extractor_.Reset();
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
@@ -42,7 +42,7 @@ void StreamingProcessor::Reset() {
   audio_buffer_.clear();
 }
 
-std::unique_ptr<NamedTensors> StreamingProcessor::Process(const float* audio_data, size_t num_samples) {
+std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* audio_data, size_t num_samples) {
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
@@ -61,7 +61,7 @@ std::unique_ptr<NamedTensors> StreamingProcessor::Process(const float* audio_dat
   return nullptr;  // Not enough audio yet
 }
 
-std::unique_ptr<NamedTensors> StreamingProcessor::Flush() {
+std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   if (audio_buffer_.empty()) {
     return nullptr;
   }
@@ -76,7 +76,7 @@ std::unique_ptr<NamedTensors> StreamingProcessor::Flush() {
   return result;
 }
 
-std::unique_ptr<OrtValue> StreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
+std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
   auto& allocator = model_.allocator_cpu_;
 
   // Compute mel spectrogram for this chunk
@@ -96,6 +96,11 @@ std::unique_ptr<OrtValue> StreamingProcessor::BuildMelTensor(const float* audio_
 
   // Create output tensor: [1, total_mel_frames, num_mels]
   auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
+
+  // TODO: Optimize for GPU/CUDA later, CPU always expects float32.
+  if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error("NemotronStreamingProcessor only supports float32 encoder input. Got type: " + std::to_string(signal_type));
+  }
   auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
@@ -123,7 +128,7 @@ std::unique_ptr<OrtValue> StreamingProcessor::BuildMelTensor(const float* audio_
 }
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
-  return std::make_unique<StreamingProcessor>(model);
+  return std::make_unique<NemotronStreamingProcessor>(model);
 }
 
 }  // namespace Generators
