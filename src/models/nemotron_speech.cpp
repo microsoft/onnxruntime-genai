@@ -14,7 +14,6 @@ namespace Generators {
 void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
   const auto& dec = config.model.decoder;
-  const auto& sp = config.model.speech;
   const auto& jo = config.model.joiner;
 
   // Encoder dimensions
@@ -25,21 +24,21 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   decoder_lstm_dim = dec.hidden_size;
   decoder_lstm_layers = dec.num_hidden_layers;
 
-  // Speech / mel feature config
-  num_mels = sp.num_mels;
-  fft_size = sp.fft_size;
-  hop_length = sp.hop_length;
-  win_length = sp.win_length;
-  preemph = sp.preemph;
-  log_eps = sp.log_eps;
-  subsampling_factor = sp.subsampling_factor;
-  left_context = sp.left_context;
-  conv_context = sp.conv_context;
-  pre_encode_cache_size = sp.pre_encode_cache_size;
-  sample_rate = sp.sample_rate;
-  chunk_samples = sp.chunk_samples;
-  blank_id = sp.blank_id;
-  max_symbols_per_step = sp.max_symbols_per_step;
+  // Speech / mel feature config (now at model level)
+  num_mels = config.model.num_mels;
+  fft_size = config.model.fft_size;
+  hop_length = config.model.hop_length;
+  win_length = config.model.win_length;
+  preemph = config.model.preemph;
+  log_eps = config.model.log_eps;
+  subsampling_factor = config.model.subsampling_factor;
+  left_context = config.model.left_context;
+  conv_context = config.model.conv_context;
+  pre_encode_cache_size = config.model.pre_encode_cache_size;
+  sample_rate = config.model.sample_rate;
+  chunk_samples = config.model.chunk_samples;
+  blank_id = config.model.blank_id;
+  max_symbols_per_step = config.model.max_symbols_per_step;
 
   // Vocab size from top-level config (includes blank)
   vocab_size = config.model.vocab_size - 1;

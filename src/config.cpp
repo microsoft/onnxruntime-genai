@@ -859,34 +859,6 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else if (name == "num_mels") {
-      v_.num_mels = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "fft_size") {
-      v_.fft_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "hop_length") {
-      v_.hop_length = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "win_length") {
-      v_.win_length = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "preemph") {
-      v_.preemph = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "log_eps") {
-      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "subsampling_factor") {
-      v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "left_context") {
-      v_.left_context = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "conv_context") {
-      v_.conv_context = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "pre_encode_cache_size") {
-      v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "sample_rate") {
-      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "chunk_samples") {
-      v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "blank_id") {
-      v_.blank_id = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "max_symbols_per_step") {
-      v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1090,6 +1062,34 @@ struct Model_Element : JSON::Element {
       v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "vision_start_token_id") {
       v_.vision_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_mels") {
+      v_.num_mels = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "fft_size") {
+      v_.fft_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "hop_length") {
+      v_.hop_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "win_length") {
+      v_.win_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "preemph") {
+      v_.preemph = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "log_eps") {
+      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "subsampling_factor") {
+      v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context") {
+      v_.left_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv_context") {
+      v_.conv_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "pre_encode_cache_size") {
+      v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sample_rate") {
+      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "chunk_samples") {
+      v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "blank_id") {
+      v_.blank_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_symbols_per_step") {
+      v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

@@ -135,6 +135,22 @@ struct Config {
     int vocab_size{};
     int context_length{};
 
+    // Streaming ASR / RNNT model parameters
+    int num_mels{};
+    int fft_size{};
+    int hop_length{};
+    int win_length{};
+    float preemph{};
+    float log_eps{};
+    int subsampling_factor{};
+    int left_context{};
+    int conv_context{};
+    int pre_encode_cache_size{};
+    int sample_rate{};
+    int chunk_samples{};
+    int blank_id{};
+    int max_symbols_per_step{};
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;
@@ -230,22 +246,6 @@ struct Config {
 
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
-
-      // Mel spectrogram / streaming ASR parameters
-      int num_mels{};
-      int fft_size{};
-      int hop_length{};
-      int win_length{};
-      float preemph{};
-      float log_eps{};
-      int subsampling_factor{};
-      int left_context{};
-      int conv_context{};
-      int pre_encode_cache_size{};
-      int sample_rate{};
-      int chunk_samples{};
-      int blank_id{};
-      int max_symbols_per_step{};
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
