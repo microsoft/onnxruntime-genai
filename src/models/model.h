@@ -166,6 +166,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
+  DeviceInterface* p_device_scoring_{};  // Device for search/scoring (sequences, token allocation). CPU for WebGPU since it uses GreedySearch_Cpu.
   DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
 
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};

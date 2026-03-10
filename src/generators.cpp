@@ -268,7 +268,7 @@ GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
-      p_device{model.p_device_inputs_} {
+      p_device{model.p_device_scoring_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
   }
@@ -360,6 +360,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
+  DurationTrace trace{"AllocateInputIdsOnDevice"};
   size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
@@ -456,6 +457,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
+  DurationTrace trace{"Generator::ComputeLogits"};
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 

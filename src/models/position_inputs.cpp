@@ -158,10 +158,7 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
               total_length, type_)) {
         // Fallback: use CPU interface via byte span round-trip
         auto byte_span = attention_mask_->GetByteSpan();
-        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            byte_span.CopyDeviceToCpu().data(),
-            static_cast<int>(attention_mask_shape_[0]),
-            total_length, type_);
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(byte_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), total_length, type_);
         byte_span.CopyCpuToDevice();
       }
     } else if (is_first_update_) {
@@ -207,10 +204,7 @@ void DefaultPositionInputs::RewindTo(size_t index) {
               static_cast<int>(attention_mask_shape_[0]),
               static_cast<int>(index), type_)) {
         auto byte_span = attention_mask_->GetByteSpan();
-        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            byte_span.CopyDeviceToCpu().data(),
-            static_cast<int>(attention_mask_shape_[0]),
-            static_cast<int>(index), type_);
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(byte_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), static_cast<int>(index), type_);
         byte_span.CopyCpuToDevice();
       }
     } else if (attention_mask_shape_[0] == 1) {
