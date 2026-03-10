@@ -987,7 +987,7 @@ def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     mel = processor.process(silence)
     # mel may be None if not enough audio accumulated yet — that's OK
     if mel is not None:
-        generator.set_model_input("audio_features", mel)
+        generator.set_inputs(mel)
         while not generator.is_done():
             generator.generate_next_token()
             tokens = generator.get_next_tokens()
@@ -1009,7 +1009,7 @@ def test_streaming_asr_flush(nemotron_speech_model_path):
 
     mel = processor.flush()
     if mel is not None:
-        generator.set_model_input("audio_features", mel)
+        generator.set_inputs(mel)
         while not generator.is_done():
             generator.generate_next_token()
 
@@ -1036,7 +1036,7 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     for _ in range(4):
         mel = processor.process(audio)
         if mel is not None:
-            generator.set_model_input("audio_features", mel)
+            generator.set_inputs(mel)
             while not generator.is_done():
                 generator.generate_next_token()
                 tokens = generator.get_next_tokens()
@@ -1047,7 +1047,7 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
 
     mel = processor.flush()
     if mel is not None:
-        generator.set_model_input("audio_features", mel)
+        generator.set_inputs(mel)
         while not generator.is_done():
             generator.generate_next_token()
             tokens = generator.get_next_tokens()
@@ -1127,7 +1127,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
         chunk = audio[start : start + chunk_size].astype(np.float32)
         mel = processor.process(chunk)
         if mel is not None:
-            generator.set_model_input("audio_features", mel)
+            generator.set_inputs(mel)
             while not generator.is_done():
                 generator.generate_next_token()
                 tokens = generator.get_next_tokens()
@@ -1138,7 +1138,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
 
     mel = processor.flush()
     if mel is not None:
-        generator.set_model_input("audio_features", mel)
+        generator.set_inputs(mel)
         while not generator.is_done():
             generator.generate_next_token()
             tokens = generator.get_next_tokens()

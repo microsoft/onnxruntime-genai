@@ -16,7 +16,7 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   /// Returns a NamedTensors when a full chunk is ready, or nullptr if more data is needed.
   virtual std::unique_ptr<NamedTensors> Process(const float* data, size_t num_samples) = 0;
 
-  /// Flush remaining buffered data (pads with silence).
+  /// Flush remaining buffered data.
   /// Returns final NamedTensors, or nullptr if buffer is empty.
   virtual std::unique_ptr<NamedTensors> Flush() = 0;
 
