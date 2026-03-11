@@ -459,10 +459,16 @@ class Model:
             }
 
         elif "mrope_section" in config.rope_scaling:
-            # For models that use MRoPE (e.g. Qwen 2.5 VL)
+            # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
             self.rope_attrs["mrope"] = {
                 "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
+
+            # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
+            # instead of as a top-level config attribute. Override the default theta
+            # if rope_scaling provides one.
+            if "rope_theta" in config.rope_scaling:
+                self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
 
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
@@ -3685,7 +3691,7 @@ class Model:
             seq_dim = 1
 
             # Gather: [B, S, H] + scalar(-1) -> [B, H]
-            gather_name = "/lm_head/GatherLastToken"
+            gather_name = "/lm_head/prune/Gather"
             self.make_gather(
                 gather_name,
                 inputs=[root_input, "/model/constants/INT64/-1"],
@@ -3695,7 +3701,7 @@ class Model:
             )
 
             # Unsqueeze: [B, H] -> [B, 1, H]
-            unsqueeze_name = "/lm_head/UnsqueezeLastToken"
+            unsqueeze_name = "/lm_head/prune/Unsqueeze"
             self.make_unsqueeze(
                 unsqueeze_name,
                 inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"],

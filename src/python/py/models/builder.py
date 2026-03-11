@@ -40,6 +40,7 @@ from builders import (
     PhiModel,
     Qwen3Model,
     Qwen25VLTextModel,
+    Qwen3VLTextModel,
     QwenModel,
     SmolLM3Model,
     WhisperModel,
@@ -214,7 +215,7 @@ def create_model(
         config.hidden_act = "swiglu"
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
-    elif config.architectures[0] == "Ernie4_5_ForCausalLM":
+    elif config.architectures[0] == "Ernie4_5ForCausalLM":
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -287,6 +288,14 @@ def create_model(
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "WhisperForConditionalGeneration":

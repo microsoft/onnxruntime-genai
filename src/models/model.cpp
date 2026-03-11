@@ -174,6 +174,7 @@ void State::SetRunOption(const char* key, const char* value) {
     }
     return;
   } else if (strcmp(key, "enable_profiling") == 0) {
+#if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
       run_options_->DisableProfiling();
     } else {
@@ -183,6 +184,9 @@ void State::SetRunOption(const char* key, const char* value) {
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
       run_options_->EnableProfiling(fs::path(prefix).c_str());
     }
+#else
+    throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
+#endif
     return;
   }
   run_options_->AddConfigEntry(key, value);
@@ -1268,7 +1272,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
-  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl") && !config->model.decoder.pipeline.empty())
+  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
@@ -1367,7 +1371,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>}} {
+          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
+          {"qwen3_vl", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

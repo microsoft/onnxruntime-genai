@@ -7,6 +7,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 else()
   cmake_minimum_required(VERSION 3.26)
 endif()
+
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -25,11 +26,6 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # DLL initialization errors due to old conda msvcp140.dll dll are a result of the new MSVC compiler
-  # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
-  # Remove this definition once the conda msvcp140.dll dll is updated.
-  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-
   # Add compiler options for security standards
   # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
 
@@ -83,6 +79,10 @@ if(MSVC)
     # Suppress warning C4819: file contains character that cannot be represented in current code page
     "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
+
+    # Suppress warning C4996: use of deprecated function or variable
+    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
 
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
@@ -196,6 +196,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
     $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4996>
   )
   
   if(WIN32)

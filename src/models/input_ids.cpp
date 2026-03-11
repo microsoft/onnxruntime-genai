@@ -214,10 +214,10 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
       if (past_sequence_length_)
         *past_sequence_length_->GetTensorMutableData<int32_t>() = historical_num_tokens_;
     } else {
-      if (past_sequence_length_)
+      if (past_sequence_length_) {
         *past_sequence_length_->GetTensorMutableData<int32_t>() += 1;
-
-      historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
+        historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
+      }
     }
 
     value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];

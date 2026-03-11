@@ -32,6 +32,12 @@ python model-qa.py -m {path to model folder} -e {execution provider}
 python model-mm.py -m {path to model folder} -e {execution provider}
 ```
 
+```bash
+# Pass one or more images via --image_paths (space-separated). Supported by Qwen2.5-VL, Qwen3-VL, Phi-3-vision, etc.
+# In non-interactive mode the default prompt is "What color is the sky?" (override with --user_prompt).
+python model-mm.py -m {path to model folder} -e {execution provider} --image_paths image1.jpg image2.jpg --non_interactive
+```
+
 ## Tool Calling
 
 Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.
