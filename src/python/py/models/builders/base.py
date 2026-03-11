@@ -558,6 +558,13 @@ class Model:
         config = AutoConfig.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
         )
+        # Flatten text_config attributes to top level for VLM-style models (e.g. Qwen3.5)
+        # so that decoder-specific attributes like linear_num_key_heads are accessible.
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            for key in text_config:
+                if not hasattr(config, key):
+                    setattr(config, key, getattr(text_config, key))
         try:
             # Override search attributes in config based on values in generation_config.json
             gen_config = GenerationConfig.from_pretrained(

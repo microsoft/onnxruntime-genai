@@ -1073,7 +1073,7 @@ class Qwen35Model(Qwen3Model):
             expand_name,
             [
                 f"{unsqueeze_name}/output_0",
-                f"/model/constants/INT64/[0, 0, {num_heads}, {repeat_factor}, {head_dim}]",
+                f"/model/constants/INT64/[1, 1, {num_heads}, {repeat_factor}, {head_dim}]",
             ],
             dtype=self.io_dtype,
             shape=["batch_size", "sequence_length", num_heads, repeat_factor, head_dim],
