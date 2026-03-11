@@ -193,7 +193,7 @@ class WhisperEncoder(Model):
 
 class WhisperDecoder(Model):
     # Each Whisper decoder layer is typically defined as:
-    # input_layernorm --> attention --> output_layernorm --> MLP
+    # self_attn_layernorm --> self-attention --> cross_attn_layernorm --> cross-attention --> output_layernorm --> MLP
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Standardize config attributes for decoder layers to simplify layer building logic
@@ -270,106 +270,6 @@ class WhisperDecoder(Model):
 
         # Now set inputs and outputs
         super().make_inputs_and_outputs()
-
-    # def make_preprocessing_nodes(self):
-    #     # Make the following subgraph (from Hugging Face version):
-    #     #
-    #     #    past_key_self_0      input_ids
-    #     #           |                  |
-    #     #         Shape              Shape--------+------------------+
-    #     #           |               /             |                  |
-    #     #         Gather       Gather          Gather              Gather
-    #     #         (idx=2)      (idx=1)         (idx=0)               |
-    #     #           |  \        /             /       \              |
-    #     #           |   \      /      Unsqueeze     Unsqueeze        |
-    #     #           |    \    /           |            |             |
-    #     #           |      Add          Concat       Concat          |
-    #     #           |       |             |            |             |
-    #     #           +-----Range         Shape          |             |
-    #     #                   |             |            |             |
-    #     #               Unsqueeze   ConstantOfShape    |             |
-    #     #                   |             |            |             |
-    #     #                 Expand----------+            |             |
-    #     #                   |                          |             |
-    #     #                  Tile------------------------+             |
-    #     #                   |                                        |
-    #     #                 Gather                                     |
-    #     #                   |                                        |
-    #     #                  Add---------------------------------------+
-    #     basename = "/model/preprocessing"
-    #     input_ids_basename = f"{basename}/input_ids_subgraph"
-    #     past_key_basename = f"{basename}/past_key_subgraph"
-
-    #     # Make past key 0 subgraph
-    #     past_key_shape_name = f"{past_key_basename}/Shape"
-    #     self.make_shape(past_key_shape_name, "past_key_self_0", shape=[4])
-    #     past_key_gather_name = f"{past_key_basename}/Gather"
-    #     past_key_gather_inputs = [f"{past_key_shape_name}/output_0", "/model/constants/INT64/2"]
-    #     self.make_gather(past_key_gather_name, past_key_gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-
-    #     # Make input_ids subgraph
-    #     add_name = self.make_input_ids_subgraph(input_ids_basename, past_key_gather_name)
-
-    #     self.layernorm_attrs["root_input"] = f"{add_name}/output_0"
-    #     self.layernorm_attrs["skip_input"] = f"{add_name}/output_0"
-
-    def make_input_ids_subgraph(self, basename, past_key_gather_name):
-        shape_0_name = f"{basename}/Shape_0"
-        self.make_shape(shape_0_name, root_input="input_ids", shape=[2])
-
-        gather_0_name = f"{basename}/Gather_0"
-        self.make_gather(gather_0_name, [f"{shape_0_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT64, shape=[], axis=0)
-
-        unsqueeze_0_name = f"{basename}/Unsqueeze_0"
-        self.make_unsqueeze(unsqueeze_0_name, [f"{gather_0_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
-        concat_0_name = f"{basename}/Concat_0"
-        self.make_concat(concat_0_name, [f"{unsqueeze_0_name}/output_0", "/model/constants/INT64/[1]"], dtype=ir.DataType.INT64, shape=[2], axis=0)
-        shape_1_name = f"{basename}/Shape_1"
-        self.make_shape(shape_1_name, root_input=f"{concat_0_name}/output_0", shape=[2])
-        constant_shape_name = f"{basename}/ConstantOfShape"
-        constant_shape_value = ir.tensor(torch.tensor([1], dtype=torch.int64), name="constant_of_shape_value")
-        self.make_constant_of_shape(
-            constant_shape_name,
-            f"{shape_1_name}/output_0",
-            value=constant_shape_value,
-            dtype=ir.DataType.INT64,
-            shape=[2],
-        )
-
-        unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        self.make_unsqueeze(unsqueeze_1_name, [f"{shape_0_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
-        concat_1_name = f"{basename}/Concat_1"
-        self.make_concat(concat_1_name, [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/[1]"], dtype=ir.DataType.INT64, shape=[2], axis=0)
-
-        gather_1_name = f"{basename}/Gather_1"
-        self.make_gather(gather_0_name, [f"{shape_0_name}/output_0", "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=[], axis=0)
-        add_name = f"{basename}/Add"
-        self.make_add(add_name, [f"{past_key_gather_name}/output_0", f"{gather_1_name}/output_0"], dtype=ir.DataType.INT64, shape=[])
-
-        range_name = f"{basename}/Range"
-        self.make_range(range_name, [f"{past_key_gather_name}/output_0", f"{add_name}/output_0", "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=["sequence_length"])
-        unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        self.make_unsqueeze(unsqueeze_2_name, [f"{range_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1, -1])
-        expand_name = f"{basename}/Expand"  # TODO: unneeded?
-        self.make_expand(expand_name, [f"{unsqueeze_2_name}/output_0", f"{constant_shape_name}/output_0"], dtype=ir.DataType.INT64, shape=[1, "sequence_length"])
-        tile_name = f"{basename}/Tile"
-        self.make_tile(tile_name, [f"{expand_name}/output_0", f"{concat_0_name}/output_0"], dtype=ir.DataType.INT64, shape=["batch_size", "sequence_length"])
-        
-        # Positional embeddings
-        position_embeds = "decoder.embed_positions.weight"
-        self.make_initializer(self.weights.model.decoder.embed_positions.weight, position_embeds, to=self.io_dtype)
-        gather_2_name = f"{basename}/Gather_2"
-        self.make_gather(gather_2_name, [position_embeds, f"{tile_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size], axis=0)
-
-        # Token embeddings
-        token_embeds = "decoder.embed_tokens.weight"
-        self.make_initializer(self.weights.model.decoder.embed_tokens.weight, token_embeds, to=self.io_dtype)
-        gather_3_name = f"{basename}/Gather_3"
-        self.make_gather(gather_3_name, [token_embeds, "input_ids"], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size], axis=0)
-        add_name = f"{basename}/Add"
-        self.make_add(add_name, [f"{gather_2_name}/output_0", f"{gather_3_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
-        
-        return add_name
 
     def make_preprocessing_nodes(self):
         # Make the following subgraph (from OpenAI version):
