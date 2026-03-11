@@ -264,7 +264,7 @@ class Qwen35Model(Qwen3Model):
         self.make_constant_of_shape(
             zero_name,
             f"{hidden_shape_name}/output_0",
-            ir.tensor(0, dtype=self.io_dtype),
+            ir.tensor([0], dtype=self.io_dtype),
             self.io_dtype,
             ["batch_size", "sequence_length", self.num_kv_heads * self.head_size],
         )
