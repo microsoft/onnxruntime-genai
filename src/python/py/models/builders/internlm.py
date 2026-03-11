@@ -1,10 +1,11 @@
 # -------------------------------------------------------------------------
-# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content
-# Licensed under the MIT License.  See License.txt in the project root for
+# Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
+# Licensed under the MIT License. See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
 from .base import Model
-import torch.nn as nn
+import torch
 
 
 class InternLM2Model(Model):
@@ -92,9 +93,9 @@ class InternLM2Model(Model):
                 v_weight = wqkv_grouped[:, -1, :, :].reshape(kv_size, config.hidden_size)
                 
                 # Create separate projection layers
-                attn.q_proj = nn.Linear(config.hidden_size, q_size, bias=config.bias)
-                attn.k_proj = nn.Linear(config.hidden_size, kv_size, bias=config.bias)
-                attn.v_proj = nn.Linear(config.hidden_size, kv_size, bias=config.bias)
+                attn.q_proj = torch.nn.Linear(config.hidden_size, q_size, bias=config.bias)
+                attn.k_proj = torch.nn.Linear(config.hidden_size, kv_size, bias=config.bias)
+                attn.v_proj = torch.nn.Linear(config.hidden_size, kv_size, bias=config.bias)
                 
                 # Copy weights (ensure proper copy and contiguous memory)
                 attn.q_proj.weight.data.copy_(q_weight.contiguous())

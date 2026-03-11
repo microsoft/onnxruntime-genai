@@ -67,7 +67,7 @@ class Qwen25VLTextModel(Model):
 
         if "position_ids" not in self.input_names:
             print("Re-adding 'position_ids' to self.input_names.")
-            self.input_names.append("position_ids")
+            self.input_names["position_ids"] = "position_ids"
 
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
@@ -152,7 +152,7 @@ class Qwen25VLTextModel(Model):
         #                         Mul                         Mul
         #                   (apply scaling)             (apply scaling)
         #
-        pos_ids_name = "position_ids"
+        pos_ids_name = self.input_names["position_ids"]
         inv_freq_name = "model.inv_freq"
         head_dim_half = self.head_size // 2
 
