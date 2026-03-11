@@ -787,6 +787,16 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+        # Patch unsupported tokenizer_class values for onnxruntime-extensions compatibility
+        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
+        if os.path.isfile(tokenizer_config_path):
+            with open(tokenizer_config_path) as f:
+                tok_cfg = json.load(f)
+            if tok_cfg.get("tokenizer_class") == "TokenizersBackend":
+                tok_cfg["tokenizer_class"] = "PreTrainedTokenizer"
+                with open(tokenizer_config_path, "w") as f:
+                    json.dump(tok_cfg, f, indent=2)
+
     def load_tokenizer(self, model_name_or_path, extra_kwargs):
         try:
             return AutoTokenizer.from_pretrained(
