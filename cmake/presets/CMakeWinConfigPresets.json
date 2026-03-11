@@ -3,7 +3,7 @@
   "configurePresets": [
     {
       "name": "windows_cpu_default",
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
