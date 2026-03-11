@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
-#include <filesystem>
 #include <fstream>
 #include <numeric>
 #include <iostream>

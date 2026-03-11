@@ -18,6 +18,11 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
 
   cache_config_ = nemotron_model->cache_config_;
 
+  if (cache_config_.pre_encode_cache_size <= 0) {
+    throw std::runtime_error("NemotronStreamingProcessor requires pre_encode_cache_size > 0. Got: " +
+                             std::to_string(cache_config_.pre_encode_cache_size));
+  }
+
   // Initialize mel extractor from config
   nemo_mel::NemoMelConfig mel_cfg{
       cache_config_.num_mels, cache_config_.fft_size,

@@ -69,7 +69,7 @@ struct Config {
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
-    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_next_len";
+    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_len_next";
 
     // Cross present key/value names
     static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
