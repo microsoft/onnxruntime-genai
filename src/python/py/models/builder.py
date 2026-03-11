@@ -317,10 +317,8 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
-        extra_options["exclude_embeds"] = True
+        if "exclude_embeds" not in extra_options:
+            extra_options["exclude_embeds"] = False
         onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
