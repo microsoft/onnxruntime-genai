@@ -506,6 +506,11 @@ class WhisperDecoder(Model):
         q_matmul_basename = f"/model/layers.{layer_id}/cross_attn/q_proj/MatMul"
         q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
         self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
+
+        q_add_name = f"/model/layers.{layer_id}/cross_attn/q_proj/Add"
+        self.make_add_bias(attention.q_proj.bias, q_add_name, root_input=self.attention_attrs["q_path"])
+        self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
+
         self.attention_attrs["k_path"] = self.input_names["past_key_cross"][layer_id]
         self.attention_attrs["v_path"] = self.input_names["past_value_cross"][layer_id]
 
