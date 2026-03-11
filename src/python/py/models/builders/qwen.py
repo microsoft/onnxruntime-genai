@@ -757,6 +757,12 @@ class Qwen35Model(Qwen3Model):
         core_output_name = f"/model/layers.{layer_id}/linear_attn/Loop/output_1"
         present_state_name = f"present_recurrent_states.{layer_id}"
         loop_name = f"/model/layers.{layer_id}/linear_attn/Loop"
+        # Dummy output names for carried-through loop variables (read-only sequences)
+        query_final = f"/model/layers.{layer_id}/linear_attn/Loop/_query_final"
+        key_final = f"/model/layers.{layer_id}/linear_attn/Loop/_key_final"
+        value_final = f"/model/layers.{layer_id}/linear_attn/Loop/_value_final"
+        beta_final = f"/model/layers.{layer_id}/linear_attn/Loop/_beta_final"
+        g_final = f"/model/layers.{layer_id}/linear_attn/Loop/_g_final"
         body_graph = self._make_qwen35_linear_loop_body(layer_id)
         self.make_node(
             "Loop",
@@ -770,7 +776,7 @@ class Qwen35Model(Qwen3Model):
                 beta,
                 g,
             ],
-            outputs=[present_state_name, core_output_name],
+            outputs=[present_state_name, query_final, key_final, value_final, beta_final, g_final, core_output_name],
             name=loop_name,
             body=body_graph,
         )
@@ -778,6 +784,31 @@ class Qwen35Model(Qwen3Model):
             present_state_name,
             ir.DataType.FLOAT,
             shape=["batch_size", self.num_linear_v_heads, self.linear_head_k_dim, self.linear_head_v_dim],
+        )
+        self.make_value(
+            query_final,
+            ir.DataType.FLOAT,
+            shape=["sequence_length", "batch_size", self.num_linear_v_heads, self.linear_head_k_dim],
+        )
+        self.make_value(
+            key_final,
+            ir.DataType.FLOAT,
+            shape=["sequence_length", "batch_size", self.num_linear_v_heads, self.linear_head_k_dim],
+        )
+        self.make_value(
+            value_final,
+            ir.DataType.FLOAT,
+            shape=["sequence_length", "batch_size", self.num_linear_v_heads, self.linear_head_v_dim],
+        )
+        self.make_value(
+            beta_final,
+            ir.DataType.FLOAT,
+            shape=["sequence_length", "batch_size", self.num_linear_v_heads],
+        )
+        self.make_value(
+            g_final,
+            ir.DataType.FLOAT,
+            shape=["sequence_length", "batch_size", self.num_linear_v_heads],
         )
         self.make_value(
             core_output_name,
@@ -932,7 +963,7 @@ class Qwen35Model(Qwen3Model):
 
         return ir.Graph(
             inputs=[iteration, cond_in, state_in, query_seq, key_seq, value_seq, beta_seq, g_seq],
-            outputs=[cond_true, state_out, out_t],
+            outputs=[cond_true, state_out, query_seq, key_seq, value_seq, beta_seq, g_seq, out_t],
             nodes=body_nodes,
             name=f"qwen35_linear_loop_body_{layer_id}",
             opset_imports={"": 21},

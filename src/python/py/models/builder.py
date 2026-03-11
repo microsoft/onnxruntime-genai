@@ -322,9 +322,6 @@ def create_model(
         )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        # Builder only produces the text decoder; set LLM type so model loads without vision/embedding ONNX files.
-        # For full VLM usage, change type to "qwen3_5" in genai_config.json and supply the additional ONNX files.
-        onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
