@@ -312,6 +312,10 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     int64_t pixel_patch_dim = pixel_shape[pixel_num_dims - 1];  // last dim is always patch_dim (e.g. 1536)
     int64_t total_pixel_elements = 1;
     for (size_t i = 0; i < pixel_num_dims; ++i) total_pixel_elements *= pixel_shape[i];
+    if (pixel_patch_dim <= 0 || total_pixel_elements % pixel_patch_dim != 0)
+      throw std::runtime_error("pixel_values total elements (" + std::to_string(total_pixel_elements) +
+                               ") is not divisible by patch_dim (" + std::to_string(pixel_patch_dim) +
+                               "). Unexpected layout from ort-extensions.");
     int64_t total_pixel_patches = total_pixel_elements / pixel_patch_dim;
     std::vector<int64_t> pixel_target_shape = {total_pixel_patches, pixel_patch_dim};
 

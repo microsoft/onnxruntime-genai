@@ -424,23 +424,31 @@ def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_mode
         f"Missing keys: {expected_keys - actual_keys}. Got: {actual_keys}"
     )
 
+    def _to_numpy(tensor):
+        """Convert a tensor-like object to NumPy (supports as_numpy, numpy, np.array)."""
+        if hasattr(tensor, "as_numpy"):
+            return tensor.as_numpy()
+        if hasattr(tensor, "numpy"):
+            return tensor.numpy()
+        return np.array(tensor)
+
     # pixel_values: [num_patches, patch_dim]
-    pv = inputs["pixel_values"].as_numpy()
+    pv = _to_numpy(inputs["pixel_values"])
     assert len(pv.shape) == 2, f"pixel_values should be 2D, got shape {pv.shape}"
     assert pv.dtype == np.float32, f"pixel_values should be float32, got {pv.dtype}"
 
     # image_grid_thw: [num_images, 3] for single image
-    grid = inputs["image_grid_thw"].as_numpy()
+    grid = _to_numpy(inputs["image_grid_thw"])
     assert grid.shape == (1, 3), f"image_grid_thw should be (1, 3) for single image, got {grid.shape}"
     assert grid.dtype == np.int64, f"image_grid_thw should be int64, got {grid.dtype}"
 
     # num_image_tokens: [num_images]
-    nit = inputs["num_image_tokens"].as_numpy()
+    nit = _to_numpy(inputs["num_image_tokens"])
     assert nit.shape == (1,), f"num_image_tokens should be (1,) for single image, got {nit.shape}"
     assert nit.dtype == np.int64, f"num_image_tokens should be int64, got {nit.dtype}"
 
     # input_ids: [1, seq_len]
-    ids = inputs["input_ids"].as_numpy()
+    ids = _to_numpy(inputs["input_ids"])
     assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
     assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
 

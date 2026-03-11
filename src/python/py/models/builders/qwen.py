@@ -699,8 +699,9 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
-        # but the C++ runtime expects "qwen3_vl" (with underscore)
-        self.model_type = "Qwen3_VLForConditionalGeneration"
+        # but the C++ runtime expects "qwen3_vl" (with underscore).
+        # Intentional override of the superclass attribute (used in genai_config.json).
+        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
@@ -738,16 +739,67 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
           - Result pattern: [T,H,W, T,H,W, ..., T,H,W, T,T,T,T] (20 THW groups + 4 T-only)
         """
         basename = f"/model/layers.{layer_id}/attn/mrope_interleaved_cache"
+        shared_base = "/model/attn/mrope_interleaved_cache"
 
-        # Pre-compute the interleaved index mapping: for each position in H/2, which dimension (0=T, 1=H, 2=W)?
         half_head = self.head_size // 2
-        dim_assignments = [0] * half_head  # Start all positions as Temporal
 
-        for dim_idx, offset in enumerate((1, 2), start=1):  # H=1, W=2
-            length = self.mrope_sections[dim_idx] * 3
-            for i in range(offset, length, 3):
-                if i < half_head:
-                    dim_assignments[i] = dim_idx
+        # Cache the deterministic index mappings on self so we compute them once
+        # and emit shared ONNX Constant nodes that all layers reference.
+        if not hasattr(self, "_mrope_cache"):
+            # Pre-compute the interleaved index mapping: for each position in H/2,
+            # which dimension (0=T, 1=H, 2=W)?
+            dim_assignments = [0] * half_head  # Start all positions as Temporal
+            for dim_idx, offset in enumerate((1, 2), start=1):  # H=1, W=2
+                length = self.mrope_sections[dim_idx] * 3
+                for i in range(offset, length, 3):
+                    if i < half_head:
+                        dim_assignments[i] = dim_idx
+
+            dim_to_positions = {0: [], 1: [], 2: []}
+            for pos, dim in enumerate(dim_assignments):
+                dim_to_positions[dim].append(pos)
+
+            # Build reorder indices (same for cos and sin, all layers)
+            concat_order = []
+            for dim_idx in range(3):
+                concat_order.extend(dim_to_positions[dim_idx])
+            reorder_indices = [0] * half_head
+            for concat_idx, orig_pos in enumerate(concat_order):
+                reorder_indices[orig_pos] = concat_idx
+
+            # Emit shared position constants (one per dimension, reused across all layers)
+            positions_outputs = {}
+            for dim_idx in range(3):
+                positions = dim_to_positions[dim_idx]
+                if not positions:
+                    continue
+                pname = f"{shared_base}/dim{dim_idx}/Positions/Constant"
+                pout = f"{shared_base}/dim{dim_idx}/positions"
+                self.make_node(
+                    "Constant", [], [pout], name=pname,
+                    value=ir.tensor(torch.tensor(positions, dtype=torch.int64), name=pout),
+                )
+                self.make_value(pout, ir.DataType.INT64, [len(positions)])
+                positions_outputs[dim_idx] = pout
+
+            # Emit shared reorder constant
+            rname = f"{shared_base}/Reorder/Constant"
+            rout = f"{shared_base}/reorder"
+            self.make_node(
+                "Constant", [], [rout], name=rname,
+                value=ir.tensor(torch.tensor(reorder_indices, dtype=torch.int64), name=rout),
+            )
+            self.make_value(rout, ir.DataType.INT64, [half_head])
+
+            self._mrope_cache = {
+                "dim_to_positions": dim_to_positions,
+                "positions_outputs": positions_outputs,
+                "reorder_output": rout,
+            }
+
+        dim_to_positions = self._mrope_cache["dim_to_positions"]
+        positions_outputs = self._mrope_cache["positions_outputs"]
+        reorder_const_output = self._mrope_cache["reorder_output"]
 
         def process_cache(input_name, name_suffix):
             # 1. Slice to H/2: [3, B, S, H] -> [3, B, S, H/2]
@@ -766,11 +818,6 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
             )
 
             # 2. Build interleaved output by gathering individual positions from appropriate dimensions
-            # Group positions by which dimension they need: {dim: [positions]}
-            dim_to_positions = {0: [], 1: [], 2: []}
-            for pos, dim in enumerate(dim_assignments):
-                dim_to_positions[dim].append(pos)
-
             gathered_pieces = []
             for dim_idx in range(3):
                 positions = dim_to_positions[dim_idx]
@@ -797,23 +844,12 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
                     ["batch_size", "sequence_length", half_head],
                 )
 
-                # Gather specific positions from the last dimension
-                positions_const_name = f"{basename}/{name_suffix}/dim{dim_idx}/Positions/Constant"
-                positions_const_output = f"{basename}/{name_suffix}/dim{dim_idx}/positions"
-                self.make_node(
-                    "Constant",
-                    [],
-                    [positions_const_output],
-                    name=positions_const_name,
-                    value=ir.tensor(torch.tensor(positions, dtype=torch.int64), name=positions_const_output),
-                )
-                self.make_value(positions_const_output, ir.DataType.INT64, [len(positions)])
-
+                # Gather specific positions (reuse shared constant node)
                 gather_pos_name = f"{basename}/{name_suffix}/dim{dim_idx}/Positions/Gather"
                 gather_pos_output = f"{gather_pos_name}/output_0"
                 self.make_node(
                     "Gather",
-                    [squeeze_dim_output, positions_const_output],
+                    [squeeze_dim_output, positions_outputs[dim_idx]],
                     [gather_pos_output],
                     name=gather_pos_name,
                     axis=-1,
@@ -822,17 +858,9 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
 
                 gathered_pieces.append((positions, gather_pos_output))
 
-            # 3. Scatter all pieces back to the correct positions in a [B, S, H/2] tensor
-            # Create the permutation order: we need to place each piece's values at the correct positions
-            # Build a complete mapping: output_position -> (piece_idx, offset_within_piece)
-            all_positions = []
-            all_outputs = []
-            for positions, output in gathered_pieces:
-                all_positions.extend(positions)
-                all_outputs.append((positions, output))
+            # 3. Concatenate all pieces and reorder to interleaved layout
+            all_outputs = [(positions, output) for positions, output in gathered_pieces]
 
-            # Instead of scatter, concatenate all gathered pieces and then use Gather to reorder
-            # Concatenate all pieces: [B, S, sum_of_positions] = [B, S, H/2]
             if len(all_outputs) == 1:
                 concat_output = all_outputs[0][1]
             else:
@@ -846,29 +874,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
                     axis=-1,
                 )
 
-            # Build reorder indices: the concatenated tensor has positions in order
-            # [dim0_positions..., dim1_positions..., dim2_positions...]
-            # We need to reorder to [0, 1, 2, ..., H/2-1]
-            concat_order = []
-            for positions, _ in all_outputs:
-                concat_order.extend(positions)
-            # concat_order[i] = original position of element i in the concatenated tensor
-            # We need inverse: for output position p, find where it is in concat_order
-            reorder_indices = [0] * half_head
-            for concat_idx, orig_pos in enumerate(concat_order):
-                reorder_indices[orig_pos] = concat_idx
-
-            reorder_const_name = f"{basename}/{name_suffix}/Reorder/Constant"
-            reorder_const_output = f"{basename}/{name_suffix}/reorder"
-            self.make_node(
-                "Constant",
-                [],
-                [reorder_const_output],
-                name=reorder_const_name,
-                value=ir.tensor(torch.tensor(reorder_indices, dtype=torch.int64), name=reorder_const_output),
-            )
-            self.make_value(reorder_const_output, ir.DataType.INT64, [half_head])
-
+            # Reorder using shared constant
             gather_reorder_name = f"{basename}/{name_suffix}/Reorder/Gather"
             gather_reorder_output = f"{gather_reorder_name}/output_0"
             self.make_node(
