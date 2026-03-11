@@ -155,18 +155,47 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
+  // Auto-discover which layer indices actually have KV cache inputs.
+  // For standard models, this finds 0..layer_count_-1 (sequential).
+  // For hybrid models (e.g., Qwen3.5), this finds only the full-attention layer indices.
+  kv_layer_indices_.clear();
+  for (int i = 0; i < 256; ++i) {
+    std::string key_name = ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i);
+    if (model_.session_info_.HasInput(key_name)) {
+      kv_layer_indices_.push_back(i);
+    }
+  }
+
+  // Use discovered count if it differs from config (hybrid model case)
+  if (!kv_layer_indices_.empty()) {
+    layer_count_ = static_cast<int>(kv_layer_indices_.size());
+  }
+
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i));
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, i));
+    // Use the actual layer index from auto-discovery
+    int layer_idx = kv_layer_indices_.empty() ? i : kv_layer_indices_[i];
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, layer_idx));
 
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, layer_idx));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, layer_idx));
   }
 
-  // Derive the KV data type from the KV input 0
+  if (g_log.enabled && !kv_layer_indices_.empty()) {
+    bool is_sequential = true;
+    for (int i = 0; i < layer_count_; ++i) {
+      if (kv_layer_indices_[i] != i) { is_sequential = false; break; }
+    }
+    if (!is_sequential) {
+      Log("info", "DefaultKeyValueCache: Auto-discovered " + std::to_string(layer_count_) +
+                      " KV cache layers at non-sequential indices");
+    }
+  }
+
+  // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
@@ -501,7 +530,13 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  return model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+  // Probe a range of layer indices, not just 0.
+  // Hybrid models (e.g., Qwen3.5) may have KV cache only on certain layers (e.g., 3, 7, 11, ...).
+  for (int i = 0; i < 256; ++i) {
+    if (model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, i)))
+      return true;
+  }
+  return false;
 }
 
 }  // namespace

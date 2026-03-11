@@ -116,12 +116,16 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       model_{model},
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
+      recurrent_state_{CreateRecurrentState(*this)},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();
   if (key_value_cache_) {
     key_value_cache_->Add();
+  }
+  if (recurrent_state_) {
+    recurrent_state_->Add();
   }
 
   const auto& config_pipeline = model_.config_->model.decoder.pipeline;
@@ -413,6 +417,9 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
   size_t new_length = input_ids_->GetShape()[1];
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   UpdateKeyValueCache(beam_indices, total_length);
+  if (recurrent_state_) {
+    recurrent_state_->Update();
+  }
 
   auto next_windowed_tokens = WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get());
   logits_.Update(next_windowed_tokens, new_length);
