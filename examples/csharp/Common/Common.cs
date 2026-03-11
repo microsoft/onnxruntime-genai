@@ -367,9 +367,9 @@ namespace CommonUtils
                 }
                 content = image_tags + audio_tags + prompt;
             }
-            else if (model_type == "qwen2_5_vl" || model_type == "fara")
+            else if (model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "fara")
             {
-                // Qwen-2.5 VL, Fara
+                // Qwen-2.5 VL, Qwen-3 VL, Fara
                 var image_tags = "";
                 for (int i = 0; i < num_images; i++)
                 {
