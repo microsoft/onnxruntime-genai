@@ -21,7 +21,6 @@ struct Options {
   size_t num_warmup_iterations{1};
   int64_t max_length{0};
   bool verbose{};
-  bool reuse_generator{};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);
