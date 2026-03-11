@@ -2640,7 +2640,7 @@ class Model:
             mask_filter_value=self.attention_attrs["mask_filter_value"],
             num_heads=self.num_attn_heads,
             past_present_share_buffer=self.past_present_share_buffer,
-            qkv_hidden_size=(self.head_size * self.num_attn_heads + self.head_size * self.num_kv_heads + self.head_size * self.num_kv_heads),
+            qkv_hidden_sizes=[self.head_size * self.num_attn_heads, self.head_size * self.num_kv_heads, self.head_size * self.num_kv_heads],
             rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
             scale=self.attention_attrs["scale"],
             unidirectional=self.attention_attrs["unidirectional"],
