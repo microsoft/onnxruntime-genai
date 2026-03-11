@@ -153,13 +153,13 @@ class WhisperEncoder(Model):
             for proj_type in ["k_proj", "v_proj"]:
                 basename = f"/model/layers.{i}/attn/cross/{proj_type}"
                 matmul_name = f"{basename}/MatMul"
-                proj = getattr(self.weights.model.decoder.layers[i].self_attn, proj_type)
+                proj = getattr(self.weights.model.decoder.layers[i].encoder_attn, proj_type)
                 self.make_matmul(proj, matmul_name, root_input="hidden_states", seq_dim=self.max_source_positions)
 
                 if proj_type == "v_proj":
                     add_name = f"{basename}/Add"
                     self.make_add_bias(
-                        self.weights.model.decoder.layers[i].self_attn.v_proj.bias,
+                        self.weights.model.decoder.layers[i].encoder_attn.v_proj.bias,
                         add_name,
                         root_input=f"{matmul_name}/output_0",
                         seq_dim=self.max_source_positions,
@@ -550,8 +550,10 @@ class WhisperDecoder(Model):
         hf_norm = hasattr(model, "model") and hasattr(model.model, "decoder") and hasattr(model.model.decoder, "layer_norm") and module == model.model.decoder.layer_norm
         return hf_norm
 
+
 class WhisperModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        config.rms_norm_eps = 0.000009999999747378752  # default value is insufficient for accuracy
         self.encoder = WhisperEncoder(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, copy.deepcopy(extra_options))
         self.decoder = WhisperDecoder(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, copy.deepcopy(extra_options))
 
