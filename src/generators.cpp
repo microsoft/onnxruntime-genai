@@ -4,9 +4,12 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "models/streaming_processor.h"
+#include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
@@ -345,6 +348,14 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+  // RNNT models don't use the traditional search/logits pipeline,
+  // so skip the standard validations and just create the state.
+  if (ModelType::IsRNNT(model.config_->model.type)) {
+    is_rnnt_ = true;
+    state_ = model.CreateState({}, params);
+    return;
+  }
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -504,10 +515,18 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
+  if (is_rnnt_) return 0;
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
+  if (is_rnnt_) {
+    // Pending mel input means we haven't started processing this chunk yet
+    if (!extra_inputs_.empty()) return false;
+    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
+    return speech_state->IsChunkDone();
+  }
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -536,6 +555,15 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
+
+  // RNNT models: yield one token per call from the decoder state machine
+  if (is_rnnt_) {
+    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
+    state_->SetExtraInputs(extra_inputs_);
+    extra_inputs_.clear();
+    speech_state->StepToken();
+    return;
+  }
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)

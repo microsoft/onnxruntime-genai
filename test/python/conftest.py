@@ -89,5 +89,15 @@ def path_for_model(request):
 
 
 @pytest.fixture
+def nemotron_speech_model_path(request):
+    """Return the path to a nemotron_speech model directory, or skip if not available."""
+    test_data = request.config.getoption("--test_models")
+    model_path = os.path.join(test_data, "nemotron-speech-streaming")
+    if not os.path.exists(model_path):
+        pytest.skip(f"Nemotron speech model not found at {model_path}")
+    return model_path
+
+
+@pytest.fixture
 def test_data_path(request):
     return request.config.getoption("--test_models")

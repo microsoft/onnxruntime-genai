@@ -122,6 +122,7 @@ struct Generator : LeakChecked<Generator> {
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
+  bool is_rnnt_{};               // True for RNNT models that bypass the search/logits pipeline
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
