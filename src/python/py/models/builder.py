@@ -322,6 +322,7 @@ def create_model(
         )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
