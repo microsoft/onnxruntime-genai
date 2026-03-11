@@ -163,8 +163,10 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
-      // Qwen2.5-VL specific vision config values
+      // Qwen VL specific vision config values
       int spatial_merge_size{2};
+      int patch_size{14};
+      int temporal_patch_size{2};
       float tokens_per_second{2.0f};
 
       std::string config_filename{"processor_config.json"};

@@ -33,8 +33,6 @@ class Qwen35Model(Qwen3Model):
         self._validate_qwen35_config(config)
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # The exported model is text-only even though the HF architecture is multimodal.
-        self.model_type = "qwen3_5_text"
         self.qwen35_config = config
         self.layer_types = list(getattr(config, "layer_types", ["full_attention"] * self.num_layers))
         self.qwen35_attn_output_gate = getattr(config, "attn_output_gate", False)

@@ -750,6 +750,10 @@ struct Vision_Element : JSON::Element {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
     } else if (name == "spatial_merge_size") {
       v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "patch_size") {
+      v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "temporal_patch_size") {
+      v_.temporal_patch_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "tokens_per_second") {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else {

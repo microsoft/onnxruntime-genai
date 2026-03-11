@@ -167,7 +167,9 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
-      spatial_merge_size_{config.model.vision.spatial_merge_size} {
+      spatial_merge_size_{config.model.vision.spatial_merge_size},
+      patch_size_{config.model.vision.patch_size},
+      temporal_patch_size_{config.model.vision.temporal_patch_size} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -221,8 +223,8 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
-    constexpr int64_t kPatchSize = 14;
-    constexpr int64_t kTemporalPatchSize = 2;
+    const int64_t kPatchSize = patch_size_;
+    const int64_t kTemporalPatchSize = temporal_patch_size_;
 
     int64_t height = pixel_values_shape[1];  // HWC: [batch, height, width, channels]
     int64_t width = pixel_values_shape[2];

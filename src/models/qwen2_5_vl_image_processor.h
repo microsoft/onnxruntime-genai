@@ -19,6 +19,8 @@ struct QwenImageProcessor : Processor {
 
   ONNXTensorElementDataType pixel_values_type_;
   int64_t spatial_merge_size_;
+  int64_t patch_size_;
+  int64_t temporal_patch_size_;
 };
 
 }  // namespace Generators
