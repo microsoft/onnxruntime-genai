@@ -496,6 +496,8 @@ class WhisperDecoder(Model):
         #           +--------+---------+
         #           |        |         |
         #       Q_MatMul  past_key  past_value
+        #           |        |         |
+        #         Q_Add      |         |
         #           \        |        /
         #            MultiHeadAttention
         #                    |
