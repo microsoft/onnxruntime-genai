@@ -2,35 +2,43 @@
 # Licensed under the MIT License.
 
 import argparse
+import json
 import os
 import sys
 import time
 import numpy as np
 import onnxruntime_genai as og
 
-SAMPLE_RATE = 16000
-CHUNK_SAMPLES = 8960
-CHUNK_DURATION = CHUNK_SAMPLES / SAMPLE_RATE
+
+def load_config(model_path):
+    """Read sample_rate and chunk_samples from genai_config.json."""
+    config_path = os.path.join(model_path, "genai_config.json")
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    sample_rate = config["model"]["sample_rate"]
+    chunk_samples = config["model"]["chunk_samples"]
+    return sample_rate, chunk_samples
 
 
-def load_audio(audio_path):
+def load_audio(audio_path, sample_rate):
     import soundfile as sf
     audio, sr = sf.read(audio_path, dtype="float32")
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
-    if sr != SAMPLE_RATE:
+    if sr != sample_rate:
         import scipy.signal
-        num_samples = int(len(audio) * SAMPLE_RATE / sr)
+        num_samples = int(len(audio) * sample_rate / sr)
         audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
     return audio
 
 
 def simulate_microphone(model_path, audio_path):
     """Stream audio through Generator + StreamingProcessor API."""
-    audio = load_audio(audio_path)
-    duration = len(audio) / SAMPLE_RATE
-    num_chunks = (len(audio) + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES
-    print(f"Audio: {duration:.1f}s | {num_chunks} chunks × {CHUNK_DURATION*1000:.0f}ms")
+    sample_rate, chunk_samples = load_config(model_path)
+    audio = load_audio(audio_path, sample_rate)
+    duration = len(audio) / sample_rate
+    chunk_duration = chunk_samples / sample_rate
+    num_chunks = (len(audio) + chunk_samples - 1) // chunk_samples
 
     config = og.Config(model_path)
     model = og.Model(config)
@@ -55,8 +63,8 @@ def simulate_microphone(model_path, audio_path):
                     print(text, end="", flush=True)
                     full_transcript += text
 
-    for i in range(0, len(audio), CHUNK_SAMPLES):
-        chunk = audio[i:i + CHUNK_SAMPLES].astype(np.float32)
+    for i in range(0, len(audio), chunk_samples):
+        chunk = audio[i:i + chunk_samples].astype(np.float32)
         inputs = processor.process(chunk)
         if inputs is not None:
             generator.set_inputs(inputs)
@@ -67,14 +75,6 @@ def simulate_microphone(model_path, audio_path):
     if inputs is not None:
         generator.set_inputs(inputs)
         decode_chunk()
-
-    # Feed silence chunks for right context
-    for _ in range(4):
-        silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
-        inputs = processor.process(silence)
-        if inputs is not None:
-            generator.set_inputs(inputs)
-            decode_chunk()
 
     total_wall = time.time() - stream_start
 

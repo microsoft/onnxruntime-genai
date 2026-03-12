@@ -2,18 +2,27 @@
 // Licensed under the MIT License.
 
 using Microsoft.ML.OnnxRuntimeGenAI;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using System.Text.Json;
 
 if (args.Length < 2) {
-  Console.WriteLine("Usage: StreamingASR <model_path> <audio_file.wav>");
+  Console.WriteLine("Usage: NemotronSpeech <model_path> <audio_file.wav>");
   return;
 }
 
 string modelPath = args[0];
 string audioFile = args[1];
 
-// Load raw PCM audio
-float[] audio = LoadWavAudio(audioFile);
-Console.WriteLine($"Audio: {audio.Length / 16000.0:F1}s ({audio.Length} samples)");
+// Read sample_rate and chunk_samples from genai_config.json
+var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
+var modelConfig = configJson.RootElement.GetProperty("model");
+int sampleRate = modelConfig.GetProperty("sample_rate").GetInt32();
+int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
+
+// Load audio, convert to mono, and resample to match the model's expected sample rate
+float[] audio = LoadAudio(audioFile, sampleRate);
+Console.WriteLine($"Audio: {audio.Length / (double)sampleRate:F1}s ({audio.Length} samples)");
 
 using var model = new Model(modelPath);
 using var processor = new StreamingProcessor(model);
@@ -21,8 +30,6 @@ using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
-
-int chunkSize = 8960;  // 560ms chunks
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 
@@ -59,34 +66,30 @@ if (flushInputs != null) {
   DecodeChunk();
 }
 
-// Feed silence chunks for right context
-for (int i = 0; i < 4; i++) {
-  float[] silence = new float[chunkSize];
-  using var silenceInputs = processor.Process(silence);
-  if (silenceInputs != null) {
-    generator.SetInputs(silenceInputs);
-    DecodeChunk();
-  }
-}
-
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
 Console.WriteLine(new string('=', 60));
 
-static float[] LoadWavAudio(string path) {
-  using var reader = new BinaryReader(File.OpenRead(path));
+static float[] LoadAudio(string path, int targetSampleRate) {
+  using var reader = new AudioFileReader(path);
 
-  // Skip RIFF header (44 bytes for standard WAV)
-  reader.ReadBytes(44);
+  // Convert to mono if needed
+  ISampleProvider source = reader;
+  if (reader.WaveFormat.Channels > 1) {
+    source = new StereoToMonoSampleProvider(source);
+  }
+
+  // Resample if needed
+  if (reader.WaveFormat.SampleRate != targetSampleRate) {
+    source = new WdlResamplingSampleProvider(source, targetSampleRate);
+  }
 
   var samples = new List<float>();
-  while (reader.BaseStream.Position < reader.BaseStream.Length) {
-    try {
-      short sample = reader.ReadInt16();
-      samples.Add(sample / 32768.0f);
-    } catch (EndOfStreamException) {
-      break;
-    }
+  float[] buffer = new float[4096];
+  int read;
+  while ((read = source.Read(buffer, 0, buffer.Length)) > 0) {
+    for (int i = 0; i < read; i++)
+      samples.Add(buffer[i]);
   }
   return samples.ToArray();
 }
