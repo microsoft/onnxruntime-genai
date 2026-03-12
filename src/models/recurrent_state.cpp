@@ -38,15 +38,13 @@ RecurrentState::RecurrentState(State& state)
   if (layer_indices_.empty()) return;
 
   if (g_log.enabled)
-    Log("info", "RecurrentState: Auto-discovered " + std::to_string(layer_indices_.size()) +
-                    " recurrent layers (indices: " + [&]() {
+    Log("info", "RecurrentState: Auto-discovered " + std::to_string(layer_indices_.size()) + " recurrent layers (indices: " + [&]() {
                       std::string s;
                       for (size_t i = 0; i < layer_indices_.size(); ++i) {
                         if (i) s += ",";
                         s += std::to_string(layer_indices_[i]);
                       }
-                      return s;
-                    }() + ")");
+                      return s; }() + ")");
 
   for (int idx : layer_indices_) {
     input_name_strings_.push_back(ComposeKeyValueName(past_conv_template, idx));

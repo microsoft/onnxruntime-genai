@@ -183,7 +183,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (g_log.enabled && !kv_layer_indices_.empty()) {
     bool is_sequential = true;
     for (int i = 0; i < layer_count_; ++i) {
-      if (kv_layer_indices_[i] != i) { is_sequential = false; break; }
+      if (kv_layer_indices_[i] != i) {
+        is_sequential = false;
+        break;
+      }
     }
     if (!is_sequential) {
       Log("info", "DefaultKeyValueCache: Auto-discovered " + std::to_string(layer_count_) +
