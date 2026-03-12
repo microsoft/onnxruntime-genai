@@ -52,6 +52,24 @@ class Qwen35Model(Qwen3Model):
         self._qwen35_linear_num_key_heads = getattr(config, "linear_num_key_heads", 0)
         self._qwen35_linear_num_value_heads = getattr(config, "linear_num_value_heads", 0)
 
+        # Qwen3.5 linear attention is very sensitive to low-bit quantization.
+        # Keep critical linear-attention projections in higher precision by default
+        # to avoid generation collapse (e.g., repeated punctuation tokens).
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+            int4_nodes_to_exclude = self.quant_attrs["int4"]["nodes_to_exclude"]
+            for layer_id, layer_type in enumerate(self.layer_types):
+                if layer_type != "linear_attention":
+                    continue
+                int4_nodes_to_exclude.extend(
+                    [
+                        f"/model/layers.{layer_id}/linear_attn/in_proj_qkv/MatMul",
+                        f"/model/layers.{layer_id}/linear_attn/in_proj_z/MatMul",
+                        f"/model/layers.{layer_id}/linear_attn/in_proj_b/MatMul",
+                        f"/model/layers.{layer_id}/linear_attn/in_proj_a/MatMul",
+                        f"/model/layers.{layer_id}/linear_attn/out_proj/MatMul",
+                    ]
+                )
+
     @staticmethod
     def _normalize_qwen35_config(config):
         text_config = getattr(config, "text_config", None)
