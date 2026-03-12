@@ -226,6 +226,7 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      int rotary_embedding_dim{};
       int linear_num_key_heads{};
       int linear_num_value_heads{};
       int linear_key_head_dim{};

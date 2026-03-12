@@ -571,6 +571,8 @@ struct Decoder_Element : JSON::Element {
       v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "rotary_embedding_dim") {
+      v_.rotary_embedding_dim = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "linear_num_key_heads") {
       v_.linear_num_key_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "linear_num_value_heads") {
