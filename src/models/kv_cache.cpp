@@ -220,9 +220,19 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         layer_shapes_[layer_idx][2] = max_length;
       }
 
+      // Build model-layer-index to cache-slot-index mapping for sparse KV layouts
+      std::unordered_map<int, int> model_layer_to_cache_slot;
+      for (int slot = 0; slot < layer_count_; ++slot) {
+        int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
+        model_layer_to_cache_slot[model_idx] = slot;
+      }
+
       // Update sliding window layers with constrained cache size
-      for (int layer_idx : model_.config_->model.decoder.sliding_window->layers) {
-        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
+      for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
+        auto it = model_layer_to_cache_slot.find(model_layer_idx);
+        if (it != model_layer_to_cache_slot.end()) {
+          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+        }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;

@@ -66,6 +66,17 @@ RecurrentState::RecurrentState(State& state)
   conv_shape_ = fix_batch_dim(model_.session_info_.GetInputShape(input_name_strings_[0]));
   recurrent_shape_ = fix_batch_dim(model_.session_info_.GetInputShape(input_name_strings_[1]));
 
+  // Validate all dims are positive (only batch dim is expected to be dynamic)
+  auto validate_shape = [](const std::vector<int64_t>& shape, const std::string& name) {
+    for (size_t i = 0; i < shape.size(); ++i) {
+      if (shape[i] <= 0)
+        throw std::runtime_error("RecurrentState: " + name + " has unsupported dynamic dim " +
+                                 std::to_string(shape[i]) + " at axis " + std::to_string(i));
+    }
+  };
+  validate_shape(conv_shape_, "conv_state");
+  validate_shape(recurrent_shape_, "recurrent_state");
+
   size_t conv_elems = 1;
   for (auto d : conv_shape_) conv_elems *= static_cast<size_t>(d);
   size_t recurrent_elems = 1;
@@ -73,22 +84,24 @@ RecurrentState::RecurrentState(State& state)
 
   conv_bytes_ = conv_elems * Ort::SizeOf(conv_type_);
   recurrent_bytes_ = recurrent_elems * Ort::SizeOf(recurrent_type_);
-  per_layer_bytes_ = conv_bytes_ + recurrent_bytes_;
+
+  // Align per-layer stride to 8 bytes to satisfy all element type alignments
+  constexpr size_t kAlignment = 8;
+  per_layer_stride_ = ((conv_bytes_ + recurrent_bytes_) + kAlignment - 1) & ~(kAlignment - 1);
 
   const int num_layers = static_cast<int>(layer_indices_.size());
-  const size_t per_layer_floats = (per_layer_bytes_ + sizeof(float) - 1) / sizeof(float);
-  const size_t total_floats = per_layer_floats * num_layers;
+  const size_t total_bytes = per_layer_stride_ * num_layers;
 
   pasts_.resize(num_layers * 2);
   presents_.reserve(num_layers * 2);
 
-  past_block_ = std::make_unique<float[]>(total_floats);
-  present_block_ = std::make_unique<float[]>(total_floats);
+  past_block_ = std::make_unique<uint8_t[]>(total_bytes);
+  present_block_ = std::make_unique<uint8_t[]>(total_bytes);
   cpu_mem_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
 
   for (int i = 0; i < num_layers; ++i) {
-    auto* past_base = reinterpret_cast<uint8_t*>(past_block_.get()) + i * per_layer_bytes_;
-    auto* present_base = reinterpret_cast<uint8_t*>(present_block_.get()) + i * per_layer_bytes_;
+    auto* past_base = past_block_.get() + i * per_layer_stride_;
+    auto* present_base = present_block_.get() + i * per_layer_stride_;
 
     pasts_[i * 2] = OrtValue::CreateTensor(
         *cpu_mem_info_, past_base, conv_bytes_, conv_shape_, conv_type_);
@@ -131,32 +144,36 @@ void RecurrentState::Update() {
 void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
-  if (index == 0) {
-    const int num_layers = static_cast<int>(layer_indices_.size());
+  if (index != 0) {
+    throw std::runtime_error(
+        "RecurrentState does not support rewinding to index > 0. "
+        "Recurrent states cannot be partially rewound.");
+  }
 
-    std::memset(past_block_.get(), 0, per_layer_bytes_ * num_layers);
-    std::memset(present_block_.get(), 0, per_layer_bytes_ * num_layers);
+  const int num_layers = static_cast<int>(layer_indices_.size());
 
-    // Recreate OrtValue views after swap
-    for (int i = 0; i < num_layers; ++i) {
-      auto* past_base = reinterpret_cast<uint8_t*>(past_block_.get()) + i * per_layer_bytes_;
-      auto* present_base = reinterpret_cast<uint8_t*>(present_block_.get()) + i * per_layer_bytes_;
+  std::memset(past_block_.get(), 0, per_layer_stride_ * num_layers);
+  std::memset(present_block_.get(), 0, per_layer_stride_ * num_layers);
 
-      pasts_[i * 2] = OrtValue::CreateTensor(
-          *cpu_mem_info_, past_base, conv_bytes_, conv_shape_, conv_type_);
-      pasts_[i * 2 + 1] = OrtValue::CreateTensor(
-          *cpu_mem_info_, past_base + conv_bytes_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
+  // Recreate OrtValue views after swap
+  for (int i = 0; i < num_layers; ++i) {
+    auto* past_base = past_block_.get() + i * per_layer_stride_;
+    auto* present_base = present_block_.get() + i * per_layer_stride_;
 
-      presents_[i * 2] = OrtValue::CreateTensor(
-          *cpu_mem_info_, present_base, conv_bytes_, conv_shape_, conv_type_);
-      presents_[i * 2 + 1] = OrtValue::CreateTensor(
-          *cpu_mem_info_, present_base + conv_bytes_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
+    pasts_[i * 2] = OrtValue::CreateTensor(
+        *cpu_mem_info_, past_base, conv_bytes_, conv_shape_, conv_type_);
+    pasts_[i * 2 + 1] = OrtValue::CreateTensor(
+        *cpu_mem_info_, past_base + conv_bytes_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
 
-      state_.inputs_[input_index_ + i * 2] = pasts_[i * 2].get();
-      state_.inputs_[input_index_ + i * 2 + 1] = pasts_[i * 2 + 1].get();
-      state_.outputs_[output_index_ + i * 2] = presents_[i * 2].get();
-      state_.outputs_[output_index_ + i * 2 + 1] = presents_[i * 2 + 1].get();
-    }
+    presents_[i * 2] = OrtValue::CreateTensor(
+        *cpu_mem_info_, present_base, conv_bytes_, conv_shape_, conv_type_);
+    presents_[i * 2 + 1] = OrtValue::CreateTensor(
+        *cpu_mem_info_, present_base + conv_bytes_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
+
+    state_.inputs_[input_index_ + i * 2] = pasts_[i * 2].get();
+    state_.inputs_[input_index_ + i * 2 + 1] = pasts_[i * 2 + 1].get();
+    state_.outputs_[output_index_ + i * 2] = presents_[i * 2].get();
+    state_.outputs_[output_index_ + i * 2 + 1] = presents_[i * 2 + 1].get();
   }
 }
 

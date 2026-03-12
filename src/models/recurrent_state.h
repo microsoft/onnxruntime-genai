@@ -44,12 +44,12 @@ struct RecurrentState {
   // Precomputed for RewindTo
   size_t conv_bytes_{};
   size_t recurrent_bytes_{};
-  size_t per_layer_bytes_{};
+  size_t per_layer_stride_{};  // Aligned stride per layer (>= conv_bytes_ + recurrent_bytes_)
 
   // Self-owned contiguous memory blocks (not from ORT arena)
   std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;
-  std::unique_ptr<float[]> past_block_;
-  std::unique_ptr<float[]> present_block_;
+  std::unique_ptr<uint8_t[]> past_block_;
+  std::unique_ptr<uint8_t[]> present_block_;
 };
 
 // Factory: returns nullptr if no recurrent layers are found in the session.
