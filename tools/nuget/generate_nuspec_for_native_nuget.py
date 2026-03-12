@@ -133,7 +133,7 @@ def generate_files(lines, args):
         if p.exists():
             xml_lines.append(f'<file src="{p.absolute()}" target="runtimes\\{runtime}\\native" />')
 
-    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64", "ios", "android"]
+    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-arm64", "ios", "android"]
     for runtime in runtimes:
         if runtime.startswith("win"):
             add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
