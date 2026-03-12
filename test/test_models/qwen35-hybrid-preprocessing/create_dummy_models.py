@@ -19,8 +19,6 @@ import json
 import os
 import shutil
 
-import numpy as np
-
 try:
     import onnx
     from onnx import TensorProto, helper
