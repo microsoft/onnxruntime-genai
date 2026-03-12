@@ -736,8 +736,6 @@ struct Vision_Element : JSON::Element {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
       v_.patch_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "temporal_patch_size") {
-      v_.temporal_patch_size = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

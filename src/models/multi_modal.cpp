@@ -235,24 +235,34 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   int64_t total_feats = feat_shape[0];
   int64_t merge_sq = spatial_merge_size * spatial_merge_size;
 
+  // Detect temporal padding: processor may produce more rows than sum(t*h*w)
+  int64_t total_grid_tokens = 0;
+  int64_t total_hw = 0;
+  for (int64_t img = 0; img < num_images_; ++img) {
+    total_grid_tokens += grid_data[img * 3] * grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
+    total_hw += grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
+  }
+  bool temporal_padded = (total_patches != total_grid_tokens && total_hw > 0 && total_patches % total_hw == 0);
+  int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
+
   int64_t patch_offset = 0;
   int64_t feat_offset = 0;
   for (int64_t img = 0; img < num_images_; ++img) {
     int64_t t = grid_data[img * 3];
     int64_t h = grid_data[img * 3 + 1];
     int64_t w = grid_data[img * 3 + 2];
-    int64_t num_patches = t * h * w;
+    int64_t grid_tokens = t * h * w;
+    int64_t num_patches = temporal_padded ? (hw_multiplier * h * w) : grid_tokens;
+    int64_t num_feats = grid_tokens / merge_sq;
 
-    if (num_patches % merge_sq != 0)
-      throw std::runtime_error("num_patches (" + std::to_string(num_patches) +
+    if (grid_tokens % merge_sq != 0)
+      throw std::runtime_error("grid tokens (" + std::to_string(grid_tokens) +
                                ") is not divisible by spatial_merge_size^2 (" +
                                std::to_string(merge_sq) + ") for image " + std::to_string(img));
     if (patch_offset + num_patches > total_patches)
       throw std::runtime_error("patch_offset (" + std::to_string(patch_offset) + ") + num_patches (" +
                                std::to_string(num_patches) + ") exceeds pixel_values dim 0 (" +
                                std::to_string(total_patches) + ")");
-
-    int64_t num_feats = num_patches / merge_sq;
     if (feat_offset + num_feats > total_feats)
       throw std::runtime_error("feat_offset (" + std::to_string(feat_offset) + ") + num_feats (" +
                                std::to_string(num_feats) + ") exceeds image_features dim 0 (" +
@@ -293,13 +303,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     patch_offset += num_patches;
     feat_offset += num_feats;
   }
-
-  if (patch_offset != total_patches)
-    throw std::runtime_error("Final patch_offset (" + std::to_string(patch_offset) +
-                             ") != total patches (" + std::to_string(total_patches) + ")");
-  if (feat_offset != total_feats)
-    throw std::runtime_error("Final feat_offset (" + std::to_string(feat_offset) +
-                             ") != total features (" + std::to_string(total_feats) + ")");
 
   // Restore original pointers so the State remains valid after this call.
   inputs_[pv_idx] = pv_full;

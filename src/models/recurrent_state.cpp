@@ -15,7 +15,6 @@ RecurrentState::RecurrentState(State& state)
   const auto& present_key_template = model_.config_->model.decoder.outputs.present_key_names;
 
   // Derive recurrent name templates from KV name templates
-  // e.g. "past_key_values.%d.key" -> "past_key_values.%d.conv_state"
   auto derive_template = [](const std::string& kv_template, const std::string& suffix) -> std::string {
     auto pos = kv_template.rfind('.');
     if (pos == std::string::npos) return "";
@@ -29,7 +28,6 @@ RecurrentState::RecurrentState(State& state)
 
   if (past_conv_template.empty()) return;
 
-  // Auto-discover recurrent layer indices by probing session inputs
   for (int i = 0; i < 256; ++i) {
     std::string conv_name = ComposeKeyValueName(past_conv_template, i);
     if (model_.session_info_.HasInput(conv_name)) {
@@ -50,7 +48,6 @@ RecurrentState::RecurrentState(State& state)
                       return s;
                     }() + ")");
 
-  // Build name strings for all recurrent layers
   for (int idx : layer_indices_) {
     input_name_strings_.push_back(ComposeKeyValueName(past_conv_template, idx));
     input_name_strings_.push_back(ComposeKeyValueName(past_recurrent_template, idx));
@@ -87,12 +84,10 @@ RecurrentState::RecurrentState(State& state)
   pasts_.resize(num_layers * 2);
   presents_.reserve(num_layers * 2);
 
-  // Two contiguous zero-initialized blocks (self-owned, not from ORT arena)
   past_block_ = std::make_unique<float[]>(total_floats);
   present_block_ = std::make_unique<float[]>(total_floats);
   cpu_mem_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
 
-  // Create OrtValue views into the contiguous blocks
   for (int i = 0; i < num_layers; ++i) {
     auto* past_base = reinterpret_cast<uint8_t*>(past_block_.get()) + i * per_layer_bytes_;
     auto* present_base = reinterpret_cast<uint8_t*>(present_block_.get()) + i * per_layer_bytes_;
@@ -144,7 +139,7 @@ void RecurrentState::RewindTo(size_t index) {
     std::memset(past_block_.get(), 0, per_layer_bytes_ * num_layers);
     std::memset(present_block_.get(), 0, per_layer_bytes_ * num_layers);
 
-    // Recreate OrtValue views (Update() swaps may have changed which block each tensor points to)
+    // Recreate OrtValue views after swap
     for (int i = 0; i < num_layers; ++i) {
       auto* past_base = reinterpret_cast<uint8_t*>(past_block_.get()) + i * per_layer_bytes_;
       auto* present_base = reinterpret_cast<uint8_t*>(present_block_.get()) + i * per_layer_bytes_;

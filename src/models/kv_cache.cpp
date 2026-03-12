@@ -155,8 +155,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
-  // Auto-discover which layer indices have KV cache inputs.
-  // For hybrid models (e.g., Qwen3.5), only full-attention layers have KV cache.
+  // Auto-discover which layer indices have KV cache inputs
   kv_layer_indices_.clear();
   for (int i = 0; i < 256; ++i) {
     std::string key_name = ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i);
@@ -165,7 +164,6 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
-  // Use discovered count if it differs from config
   if (!kv_layer_indices_.empty()) {
     layer_count_ = static_cast<int>(kv_layer_indices_.size());
   }
@@ -528,7 +526,6 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  // Hybrid models may have KV cache only on certain layers, so probe beyond index 0
   for (int i = 0; i < 256; ++i) {
     if (model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, i)))
       return true;

@@ -7,11 +7,8 @@
 
 namespace Generators {
 
-// Manages recurrent (linear attention) state tensors for hybrid models (e.g., Qwen3.5 Gated DeltaNet).
-// Auto-discovers which layers have recurrent states by probing session inputs.
-// Each recurrent layer carries two fixed-size states across generation steps:
-//   - conv_state: causal convolution buffer
-//   - recurrent_state: compressed sequence history
+// Manages recurrent state tensors (conv_state + recurrent_state) for hybrid models.
+// Auto-discovers recurrent layers by probing session inputs.
 struct RecurrentState {
   RecurrentState(State& state);
 
@@ -49,8 +46,7 @@ struct RecurrentState {
   size_t recurrent_bytes_{};
   size_t per_layer_bytes_{};
 
-  // Two contiguous memory blocks laid out as [conv_0 | recurrent_0 | conv_1 | recurrent_1 | ...]
-  // Self-owned (not from ORT arena) to guarantee zero-initialization.
+  // Self-owned contiguous memory blocks (not from ORT arena)
   std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;
   std::unique_ptr<float[]> past_block_;
   std::unique_ptr<float[]> present_block_;
