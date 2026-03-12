@@ -53,7 +53,6 @@ def simulate_microphone(model_path, audio_path, execution_provider):
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
     chunk_duration = chunk_samples / sample_rate
-    num_chunks = (len(audio) + chunk_samples - 1) // chunk_samples
 
     config = get_config(model_path, execution_provider)
     model = og.Model(config)
