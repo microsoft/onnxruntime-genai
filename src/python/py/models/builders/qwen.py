@@ -59,11 +59,21 @@ class Qwen35Model(Qwen3Model):
         if rope_parameters is None:
             return
 
-        if not hasattr(config, "rope_theta") and hasattr(rope_parameters, "rope_theta"):
-            config.rope_theta = rope_parameters.rope_theta
+        def _get_rope_param(params, key):
+            # rope_parameters may be a plain dict (from JSON) or a config object with attributes
+            if isinstance(params, dict):
+                return params.get(key)
+            return getattr(params, key, None)
 
-        if not hasattr(config, "partial_rotary_factor") and hasattr(rope_parameters, "partial_rotary_factor"):
-            config.partial_rotary_factor = rope_parameters.partial_rotary_factor
+        if not hasattr(config, "rope_theta"):
+            rope_theta = _get_rope_param(rope_parameters, "rope_theta")
+            if rope_theta is not None:
+                config.rope_theta = rope_theta
+
+        if not hasattr(config, "partial_rotary_factor"):
+            partial_rotary_factor = _get_rope_param(rope_parameters, "partial_rotary_factor")
+            if partial_rotary_factor is not None:
+                config.partial_rotary_factor = partial_rotary_factor
 
         if not hasattr(config, "rope_scaling"):
             config.rope_scaling = None
