@@ -486,11 +486,6 @@ class WhisperModel(Model):
         self.decoder.save_model(output_dir)
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        # Create config with attributes from config.json and generation_config.json (if latter file exists)
-        config = AutoConfig.from_pretrained(
-            model_name_or_path, token=self.encoder.hf_token, trust_remote_code=self.encoder.hf_remote, **extra_kwargs
-        )
-
         audio_processor_cfg = {
             "feature_extraction": {
                 "sequence": [
@@ -930,7 +925,7 @@ class WhisperModel(Model):
                 "decoder": {
                     "session_options": {
                         "log_id": "onnxruntime-genai",
-                        "provider_options": {self.decoder.ep: self.decoder.ep_attrs[self.decoder.ep]} if self.decoder.ep != "cpu" else [],
+                        "provider_options": [{self.decoder.ep: self.decoder.ep_attrs[self.decoder.ep]}] if self.decoder.ep != "cpu" else [],
                     },
                     "filename": self.decoder.filename,
                     "head_size": self.decoder.head_size,
@@ -954,7 +949,7 @@ class WhisperModel(Model):
                 "encoder": {
                     "session_options": {
                         "log_id": "onnxruntime-genai",
-                        "provider_options": {self.encoder.ep: self.encoder.ep_attrs[self.encoder.ep]} if self.encoder.ep != "cpu" else [],
+                        "provider_options": [{self.encoder.ep: self.encoder.ep_attrs[self.encoder.ep]}] if self.encoder.ep != "cpu" else [],
                     },
                     "filename": self.encoder.filename,
                     "head_size": self.encoder.head_size,

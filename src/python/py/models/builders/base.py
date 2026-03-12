@@ -2834,8 +2834,9 @@ class Model:
         v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
         any_bias_exists = q_bias_exists or k_bias_exists or v_bias_exists
 
-        if self.attention_attrs["use_matmul_in_attn"]:
-            # Make packed bias initializer
+        if self.attention_attrs["use_matmul_in_attn"] and qkv_dtype_equal and any_bias_exists:
+            # Combine 3 bias tensors into 1 packed bias tensor
+            # Save packed bias tensor as initializer
             qkv_basename = f"/model/layers.{layer_id}/attn/qkv_proj"
             self.attention_attrs["bias"] = qkv_basename[1:].replace("/", ".") + ".bias"
 
@@ -3866,7 +3867,7 @@ class Model:
                 "ForCausalLM": AutoModelForCausalLM,
                 "Whisper": AutoModelForSpeechSeq2Seq,
             }
-            auto_class = None
+            auto_class = AutoModelForCausalLM
             for k, v in auto_class_map.items():
                 if k in self.model_type:
                     auto_class = v
