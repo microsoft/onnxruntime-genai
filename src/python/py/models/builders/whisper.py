@@ -248,23 +248,28 @@ class WhisperDecoder(Model):
             "past_key_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
             "past_value_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
         }
+        self.make_inputs_init()
 
         # Set output dicts
         self.output_names = {
+            "hidden_states": "hidden_states",
             "logits": "logits",
             "present_key_self": [f"present_key_self_{i}" for i in range(self.num_layers)],
             "present_value_self": [f"present_value_self_{i}" for i in range(self.num_layers)],
         }
         self.output_types = {
+            "hidden_states": self.io_dtype,
             "logits": self.io_dtype,
             "present_key_self": self.io_dtype,
             "present_value_self": self.io_dtype,
         }
         self.output_shapes = {
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],
             "logits": ["batch_size", "sequence_length", self.vocab_size],
             "present_key_self": ["batch_size", self.num_attn_heads, "total_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
             "present_value_self": ["batch_size", self.num_attn_heads, "total_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
         }
+        self.make_outputs_init()
 
         # Now set inputs and outputs
         super().make_inputs_and_outputs()

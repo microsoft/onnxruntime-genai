@@ -155,16 +155,14 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
-        self.exclude_embeds = extra_options.get("exclude_embeds", False)
-        if self.exclude_embeds:
-            del self.input_names["input_ids"]
+        self.make_inputs_init()
 
         # Map output names to their types and shapes
         self.output_names = {
-            "hidden_states": "hidden_states",                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": "logits",
-            "present.key": [f"present.{i}.key" for i in range(self.num_layers)],                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": [f"present.{i}.value" for i in range(self.num_layers)],                                    # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "hidden_states": "hidden_states",                                                                    # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": "logits",                                                                                  # For standard models
+            "present.key": [f"present.{i}.key" for i in range(self.num_layers)],                                 # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": [f"present.{i}.value" for i in range(self.num_layers)],                             # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
@@ -395,6 +393,11 @@ class Model:
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
 
+    def make_inputs_init(self):
+        self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
+        if self.exclude_embeds:
+            del self.input_names["input_ids"]
+
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
         if self.io_dtype == ir.DataType.BFLOAT16:
@@ -407,6 +410,9 @@ class Model:
         if self.prune_lm_head and self.exclude_lm_head:
             print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
             self.prune_lm_head = False
+
+        if not (self.include_hidden_states or self.exclude_lm_head):
+            del self.output_names["hidden_states"]
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
