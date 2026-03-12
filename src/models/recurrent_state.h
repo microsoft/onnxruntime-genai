@@ -41,10 +41,11 @@ struct RecurrentState {
   std::vector<int64_t> conv_shape_;
   std::vector<int64_t> recurrent_shape_;
 
-  // Precomputed for RewindTo
+  // Precomputed for allocation and RewindTo
   size_t conv_bytes_{};
   size_t recurrent_bytes_{};
-  size_t per_layer_stride_{};  // Aligned stride per layer (>= conv_bytes_ + recurrent_bytes_)
+  size_t recurrent_offset_{};  // Aligned offset of recurrent tensor within each layer block
+  size_t per_layer_stride_{};  // Aligned stride per layer
 
   // Self-owned contiguous memory blocks (not from ORT arena)
   std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;

@@ -157,11 +157,19 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Auto-discover which layer indices have KV cache inputs
   kv_layer_indices_.clear();
-  for (int i = 0; i < 256; ++i) {
-    std::string key_name = ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i);
-    if (model_.session_info_.HasInput(key_name)) {
-      kv_layer_indices_.push_back(i);
+  {
+    const auto& key_template = model_.config_->model.decoder.inputs.past_key_names;
+    auto prefix = key_template.substr(0, key_template.find('%'));
+    auto suffix = key_template.substr(key_template.find('%') + 2);
+    for (const auto& name : model_.session_info_.GetInputNames()) {
+      if (name.size() > prefix.size() + suffix.size() &&
+          name.compare(0, prefix.size(), prefix) == 0 &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+        kv_layer_indices_.push_back(std::stoi(idx_str));
+      }
     }
+    std::sort(kv_layer_indices_.begin(), kv_layer_indices_.end());
   }
 
   if (!kv_layer_indices_.empty()) {
@@ -539,8 +547,13 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  for (int i = 0; i < 256; ++i) {
-    if (model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, i)))
+  const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
+  auto prefix = key_template.substr(0, key_template.find('%'));
+  auto suffix = key_template.substr(key_template.find('%') + 2);
+  for (const auto& name : model.session_info_.GetInputNames()) {
+    if (name.size() > prefix.size() + suffix.size() &&
+        name.compare(0, prefix.size(), prefix) == 0 &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
       return true;
   }
   return false;
