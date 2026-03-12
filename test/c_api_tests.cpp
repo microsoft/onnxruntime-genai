@@ -1371,6 +1371,16 @@ TEST(CAPITests, SetGuidance) {
 #endif
 #endif
 
+// Helper: if mel is not null, set inputs and run the decode loop
+static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
+  if (mel) {
+    generator.SetInputs(*mel);
+    while (!generator.IsDone()) {
+      generator.GenerateNextToken();
+    }
+  }
+}
+
 // Test creating a Generator + StreamingProcessor from a nemotron_speech model
 TEST(CAPITests, StreamingASRCreate) {
 #if TEST_STREAMING_ASR
@@ -1397,12 +1407,7 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
   std::vector<float> silence(chunk_samples, 0.0f);
 
   auto mel = processor->Process(silence.data(), silence.size());
-  if (mel) {
-    generator->SetInputs(*mel);
-    while (!generator->IsDone()) {
-      generator->GenerateNextToken();
-    }
-  }
+  DecodeInputs(*generator, mel.get());
   SUCCEED();
 #else
   GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
@@ -1422,12 +1427,7 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
 
   for (int i = 0; i < 5; ++i) {
     auto mel = processor->Process(silence.data(), silence.size());
-    if (mel) {
-      generator->SetInputs(*mel);
-      while (!generator->IsDone()) {
-        generator->GenerateNextToken();
-      }
-    }
+    DecodeInputs(*generator, mel.get());
   }
   SUCCEED();
 #else
@@ -1448,12 +1448,7 @@ TEST(CAPITests, StreamingASRFlush) {
   processor->Process(silence.data(), silence.size());
 
   auto mel = processor->Flush();
-  if (mel) {
-    generator->SetInputs(*mel);
-    while (!generator->IsDone()) {
-      generator->GenerateNextToken();
-    }
-  }
+  DecodeInputs(*generator, mel.get());
   SUCCEED();
 #else
   GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
@@ -1479,21 +1474,11 @@ TEST(CAPITests, StreamingASRSineWave) {
 
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
-    if (mel) {
-      generator->SetInputs(*mel);
-      while (!generator->IsDone()) {
-        generator->GenerateNextToken();
-      }
-    }
+    DecodeInputs(*generator, mel.get());
   }
 
   auto flush_mel = processor->Flush();
-  if (flush_mel) {
-    generator->SetInputs(*flush_mel);
-    while (!generator->IsDone()) {
-      generator->GenerateNextToken();
-    }
-  }
+  DecodeInputs(*generator, flush_mel.get());
   SUCCEED();
 #else
   GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";

@@ -515,11 +515,13 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
-  if (is_rnnt_) return 0;
+  if (is_rnnt_) return rnnt_token_count_;
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  
   if (is_rnnt_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
@@ -527,7 +529,6 @@ bool Generator::IsDone() {
     return speech_state->IsChunkDone();
   }
 
-  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
   }
@@ -561,7 +562,8 @@ void Generator::GenerateNextToken() {
     auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
-    speech_state->StepToken();
+    auto tokens = speech_state->StepToken();
+    rnnt_token_count_ += tokens.size();
     return;
   }
 

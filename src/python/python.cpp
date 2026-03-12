@@ -246,10 +246,6 @@ struct PyGenerator {
     generator_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
   }
 
-  void SetModelInputTensor(const std::string& name, OgaTensor& tensor) {
-    generator_->SetModelInput(name.c_str(), tensor);
-  }
-
   void SetInputs(OgaNamedTensors& named_tensors) {
     generator_->SetInputs(named_tensors);
   }
@@ -490,7 +486,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)
       .def("set_model_input", &PyGenerator::SetModelInput)
-      .def("set_model_input", &PyGenerator::SetModelInputTensor)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("token_count", &PyGenerator::TokenCount)

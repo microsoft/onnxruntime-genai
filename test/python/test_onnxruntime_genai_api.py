@@ -973,8 +973,38 @@ def test_streaming_asr_create(nemotron_speech_model_path):
     assert generator is not None
 
 
+def _load_streaming_config(model_path):
+    """Read sample_rate and chunk_samples from genai_config.json."""
+    import json
+    config_path = os.path.join(model_path, "genai_config.json")
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    return config["model"]["sample_rate"], config["model"]["chunk_samples"]
+
+
+def _decode_inputs(generator, inputs, tokenizer_stream=None):
+    """Common helper: set inputs on the generator and decode all tokens.
+
+    Returns the decoded text if tokenizer_stream is provided, otherwise empty string.
+    """
+    if inputs is None:
+        return ""
+    generator.set_inputs(inputs)
+    text = ""
+    while not generator.is_done():
+        generator.generate_next_token()
+        tokens = generator.get_next_tokens()
+        if tokenizer_stream is not None:
+            for token in tokens:
+                token_text = tokenizer_stream.decode(token)
+                if token_text:
+                    text += token_text
+    return text
+
+
 def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     """Test transcribing a chunk of silence (all zeros) does not crash."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     model = og.Model(nemotron_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
@@ -982,40 +1012,30 @@ def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
 
-    # Feed one 560ms chunk of silence (8960 samples at 16kHz)
-    silence = np.zeros(8960, dtype=np.float32)
+    silence = np.zeros(chunk_samples, dtype=np.float32)
     mel = processor.process(silence)
-    # mel may be None if not enough audio accumulated yet — that's OK
-    if mel is not None:
-        generator.set_inputs(mel)
-        while not generator.is_done():
-            generator.generate_next_token()
-            tokens = generator.get_next_tokens()
-            for token in tokens:
-                text = tokenizer_stream.decode(token)
-                assert isinstance(text, str)
+    text = _decode_inputs(generator, mel, tokenizer_stream)
+    assert isinstance(text, str)
 
 
 def test_streaming_asr_flush(nemotron_speech_model_path):
     """Test that flush processes remaining buffered audio."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     model = og.Model(nemotron_speech_model_path)
     processor = og.StreamingProcessor(model)
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
 
-    chunk_samples = 8960
     silence = np.zeros(chunk_samples, dtype=np.float32)
     processor.process(silence)
 
     mel = processor.flush()
-    if mel is not None:
-        generator.set_inputs(mel)
-        while not generator.is_done():
-            generator.generate_next_token()
+    _decode_inputs(generator, mel)
 
 
 def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     """Test transcribing a synthetic sine wave (non-trivial mel features)."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     model = og.Model(nemotron_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
@@ -1023,8 +1043,6 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
 
-    chunk_samples = 8960
-    sample_rate = 16000.0
     frequency = 440.0  # A4 note
 
     # Generate 440Hz sine wave
@@ -1032,29 +1050,12 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     audio = (0.5 * np.sin(2.0 * np.pi * frequency * t)).astype(np.float32)
 
     transcript = ""
-    # Feed multiple chunks
     for _ in range(4):
         mel = processor.process(audio)
-        if mel is not None:
-            generator.set_inputs(mel)
-            while not generator.is_done():
-                generator.generate_next_token()
-                tokens = generator.get_next_tokens()
-                for token in tokens:
-                    text = tokenizer_stream.decode(token)
-                    if text:
-                        transcript += text
+        transcript += _decode_inputs(generator, mel, tokenizer_stream)
 
     mel = processor.flush()
-    if mel is not None:
-        generator.set_inputs(mel)
-        while not generator.is_done():
-            generator.generate_next_token()
-            tokens = generator.get_next_tokens()
-            for token in tokens:
-                text = tokenizer_stream.decode(token)
-                if text:
-                    transcript += text
+    transcript += _decode_inputs(generator, mel, tokenizer_stream)
 
     assert isinstance(transcript, str)
 
@@ -1101,14 +1102,15 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     if not os.path.exists(audio_path):
         pytest.skip(f"Test audio not found: {audio_path}")
 
-    # Load audio as float32 mono 16kHz
+    # Load audio as float32 mono, resample to model's sample rate
     audio, sr = sf.read(audio_path, dtype="float32")
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
-    if sr != 16000:
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    if sr != sample_rate:
         try:
             import scipy.signal
-            num_samples = int(len(audio) * 16000 / sr)
+            num_samples = int(len(audio) * sample_rate / sr)
             audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
@@ -1122,30 +1124,13 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     generator = og.Generator(model, params)
 
     transcript = ""
-    chunk_size = 8960
-    for start in range(0, len(audio), chunk_size):
-        chunk = audio[start : start + chunk_size].astype(np.float32)
+    for start in range(0, len(audio), chunk_samples):
+        chunk = audio[start : start + chunk_samples].astype(np.float32)
         mel = processor.process(chunk)
-        if mel is not None:
-            generator.set_inputs(mel)
-            while not generator.is_done():
-                generator.generate_next_token()
-                tokens = generator.get_next_tokens()
-                for token in tokens:
-                    text = tokenizer_stream.decode(token)
-                    if text:
-                        transcript += text
+        transcript += _decode_inputs(generator, mel, tokenizer_stream)
 
     mel = processor.flush()
-    if mel is not None:
-        generator.set_inputs(mel)
-        while not generator.is_done():
-            generator.generate_next_token()
-            tokens = generator.get_next_tokens()
-            for token in tokens:
-                text = tokenizer_stream.decode(token)
-                if text:
-                    transcript += text
+    transcript += _decode_inputs(generator, mel, tokenizer_stream)
 
     reference = (
         "the cut on his chest still dripping blood the ache of his overstrained eyes "
