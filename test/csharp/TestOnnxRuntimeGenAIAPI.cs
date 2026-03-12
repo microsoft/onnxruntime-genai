@@ -162,7 +162,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                             Assert.False(generator.IsDone());
                             Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
-                            Assert.Equal(true, generatorParams.GetSearchBool("early_stopping"));
+                            Assert.True(generatorParams.GetSearchBool("early_stopping"));
                             Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
 
                             while (!generator.IsDone())
