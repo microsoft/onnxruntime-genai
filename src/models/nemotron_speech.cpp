@@ -369,7 +369,7 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
 
 void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   for (const auto& input : extra_inputs) {
-    if (input.name == "audio_features" || input.name == cache_config_.enc_in_audio) {
+    if (input.name == Config::Defaults::AudioFeaturesName || input.name == cache_config_.enc_in_audio) {
       current_mel_ = input.tensor;
       need_encoder_run_ = true;
       chunk_done_ = false;

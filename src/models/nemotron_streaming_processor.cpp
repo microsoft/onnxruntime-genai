@@ -59,7 +59,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
     auto result = std::make_unique<NamedTensors>();
-    result->emplace("audio_features", std::make_shared<Tensor>(std::move(mel)));
+    result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
     return result;
   }
 
@@ -77,31 +77,23 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
   auto result = std::make_unique<NamedTensors>();
-  result->emplace("audio_features", std::make_shared<Tensor>(std::move(mel)));
+  result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
   return result;
 }
 
 std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
   auto& allocator = model_.allocator_cpu_;
 
-  // Compute mel spectrogram for this chunk
+  // Compute mel spectrogram for this chunk: returns [num_mels, num_frames] (frequency-major)
   auto [mel_data, num_frames] = mel_extractor_.Process(audio_chunk, chunk_samples);
 
   const int cache_size = cache_config_.pre_encode_cache_size;
   const int num_mels = cache_config_.num_mels;
   const int total_mel_frames = cache_size + num_frames;
 
-  // Transpose mel from [num_mels, num_frames] to time-major [num_frames, num_mels]
-  std::vector<float> mel_time_major(static_cast<size_t>(num_frames) * num_mels);
-  for (int t = 0; t < num_frames; ++t) {
-    for (int m = 0; m < num_mels; ++m) {
-      mel_time_major[t * num_mels + m] = mel_data[m * num_frames + t];
-    }
-  }
-
-  // Create output tensor: [1, total_mel_frames, num_mels]
+  // Create output tensor: [1, total_mel_frames, num_mels] (time-major)
   auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
-
+  
   // TODO: Optimize for GPU/CUDA later, CPU always expects float32.
   if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     throw std::runtime_error("NemotronStreamingProcessor only supports float32 encoder input. Got type: " + std::to_string(signal_type));
@@ -113,19 +105,22 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
   for (int t = 0; t < cache_size; ++t) {
     int ring_idx = (cache_pos_ + t) % cache_size;
-    const float* src = mel_pre_encode_cache_.data() + ring_idx * num_mels;
-    std::memcpy(signal_data + t * num_mels, src, num_mels * sizeof(float));
+    std::memcpy(signal_data + t * num_mels,
+                mel_pre_encode_cache_.data() + ring_idx * num_mels,
+                num_mels * sizeof(float));
   }
 
-  // Copy current chunk's mel frames after cache
-  std::memcpy(signal_data + cache_size * num_mels,
-              mel_time_major.data(),
-              static_cast<size_t>(num_frames) * num_mels * sizeof(float));
-
-  // Update ring buffer with new mel frames
+  // Transpose mel from [num_mels, num_frames] directly into output tensor after cache
+  // and update ring buffer in the same pass
+  float* out_ptr = signal_data + cache_size * num_mels;
   for (int t = 0; t < num_frames; ++t) {
-    float* destination = mel_pre_encode_cache_.data() + cache_pos_ * num_mels;
-    std::memcpy(destination, mel_time_major.data() + t * num_mels, num_mels * sizeof(float));
+    for (int m = 0; m < num_mels; ++m) {
+      out_ptr[t * num_mels + m] = mel_data[m * num_frames + t];
+    }
+    // Update ring buffer with this transposed frame
+    std::memcpy(mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
+                out_ptr + t * num_mels,
+                num_mels * sizeof(float));
     cache_pos_ = (cache_pos_ + 1) % cache_size;
   }
 
