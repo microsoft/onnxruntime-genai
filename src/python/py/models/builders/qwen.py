@@ -33,6 +33,10 @@ class Qwen35Model(Qwen3Model):
         self._validate_qwen35_config(config)
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        # Qwen3_5RMSNorm computes output * (1 + weight) with weight init at 0,
+        # so we need to add 1 to the stored weight before exporting (same as Gemma).
+        self.layernorm_attrs["add_offset"] = 1
+
         self.qwen35_config = config
         self.layer_types = list(getattr(config, "layer_types", ["full_attention"] * self.num_layers))
         self.qwen35_attn_output_gate = getattr(config, "attn_output_gate", False)
