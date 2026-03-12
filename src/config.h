@@ -99,6 +99,19 @@ struct Config {
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
 
+  struct CompileOptions {
+    std::optional<bool> enable_ep_context;  // Whether to enable model compilation
+    std::optional<bool> force_compile_if_needed;  // If true, treat PREFER_RECOMPILATION as invalid and recompile; if false, accept OPTIMAL or PREFER_RECOMPILATION as valid
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
+    std::optional<std::string> ep_context_file_path;  // Full path (relative to config path) for compiled EP context model, e.g. "contexts/model_ctx.onnx" (default: "contexts/{model_name}_{ep_name}_ctx.onnx")
+    std::optional<bool> ep_context_embed_mode;
+    std::optional<uint32_t> flags;
+    std::optional<std::string> external_initializers_file_path;
+    std::optional<size_t> external_initializers_size_threshold;
+    // Note: Function pointers for write_func and get_initializer_location_func 
+    // cannot be configured via JSON and must be set programmatically
+  };
+
   struct Model {
     std::string type;
 
@@ -120,6 +133,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<CompileOptions> compile_options;
 
       int hidden_size{};
       int num_attention_heads{};
@@ -146,6 +160,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<CompileOptions> compile_options;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -162,6 +177,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<CompileOptions> compile_options;
 
       // Qwen VL specific vision config values
       int spatial_merge_size{2};
@@ -199,6 +215,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<CompileOptions> compile_options;
 
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -219,6 +236,7 @@ struct Config {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::optional<CompileOptions> compile_options;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -271,6 +289,7 @@ struct Config {
         std::string filename;
         std::optional<SessionOptions> session_options;
         std::optional<RunOptions> run_options;
+        std::optional<CompileOptions> compile_options;
 
         std::string model_id;
         std::vector<std::string> inputs;

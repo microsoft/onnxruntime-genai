@@ -156,10 +156,84 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
+  /** \brief Gets the compiled model path for a pipeline model
+   *
+   * \param model_id The pipeline model ID
+   * \return The compiled model path if available, empty string otherwise
+   */
+  std::string GetPipelineCompiledModelPath(const std::string& model_id) const;
+
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
   bool IsPruned() const;
 
+  /** \brief Returns the ORT execution provider name for the given device type if it supports EP context; empty string otherwise.
+   * If EP Context is enabled for any provider, please add the provider name here.
+   */
+  static std::string EPContextSupportedProviders(DeviceType device_type) {
+    switch (device_type) {
+      case DeviceType::NvTensorRtRtx:
+        return "NvTensorRTRTXExecutionProvider";
+      default:
+        return "";
+    }
+  }
+
+  /** \brief Compiles the specified model and optionally all pipeline models
+   *
+   * Creates compilation options from session options and compiles the models.
+   * Automatically configures compilation based on config settings:
+   * - Input: Uses model data from buffer (if available via AddModelData), otherwise from file path
+   * - Output: Creates "contexts" folder and saves as "{model_name}_{ep_name}_ctx.onnx", or as configured
+   * - Reads compilation options from config.model.*.compile_options:
+   *   * enable_ep_context - Controls whether model compilation is performed (default: not set, no compilation)
+   *   * graph_optimization_level
+   *   * ep_context_file_path - Full path (relative to config path) for compiled EP context model, e.g. "contexts/model_ctx.onnx"
+   *   * ep_context_embed_mode - How EP context is stored (embedded vs external files)
+   *   * flags
+   *   * external_initializers_file_path and external_initializers_size_threshold
+   *
+   * Function pointers (write_func, get_initializer_location_func) must be set programmatically.
+   *
+   * Throws an exception on error.
+   *
+   * \param ort_env The OrtEnv object
+   * \param model_filename The model filename to compile
+   * \param session_options The session options to create compilation options from
+   * \param is_primary_session_option If true, also compiles all pipeline models
+   * \param compile_options The compile options from config for the specified model
+   * \return The model path to use for creating session (original if not compiled, compiled path if compiled)
+   */
+  std::string CompileModel(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options,
+                           bool is_primary_session_option, const std::optional<Config::CompileOptions>& compile_options = std::nullopt);
+
+ private:
+  /** \brief Checks if a compiled model exists and is valid
+   *
+   * \param ort_env OrtEnv (used for EP device / compatibility validation)
+   * \param model_filename The original model filename
+   * \param compile_options_config The compile options from config (output path, force_compile_if_needed, etc.)
+   * \param out_compiled_model_path Output parameter for the compiled model path (default or from config)
+   * \return true if compiled model exists and is valid, false otherwise
+   */
+  bool CheckCompiledModelExists(OrtEnv& ort_env,
+                                const std::string& model_filename,
+                                const Config::CompileOptions& compile_options_config,
+                                fs::path& out_compiled_model_path);
+
+  /** \brief Validates a compiled model using EP compatibility APIs.
+   * Context is valid only if: (1) compatibility info is present for this EP, and
+   * (2) GetModelCompatibilityForEpDevices returns OPTIMAL or (PREFER_RECOMPILATION when force_compile_if_needed is false).
+   * All other cases return false.
+   *
+   * \param ort_env OrtEnv (for GetEpDevices)
+   * \param compiled_model_path Path to the compiled model file
+   * \param force_compile_if_needed If true, PREFER_RECOMPILATION is treated as invalid (recompile); if false, it is accepted as valid with a warning
+   * \return true if the compiled model is valid for the current EP (or validation not applicable)
+   */
+  bool ValidateCompiledModel(OrtEnv& ort_env, const fs::path& compiled_model_path, bool force_compile_if_needed);
+
+ public:
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtArenaCfg> arena_cfg_;
@@ -174,6 +248,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
  protected:
   void CreateSessionOptions();
+  std::unique_ptr<OrtModelCompilationOptions> CreateModelCompilationOptions(OrtEnv& ort_env, OrtSessionOptions* session_options);
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
@@ -181,6 +256,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool disable_graph_capture);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+  std::map<std::string, std::string> pipeline_compiled_model_paths_;  // Maps pipeline model_id to compiled model path
 };
 
 }  // namespace Generators

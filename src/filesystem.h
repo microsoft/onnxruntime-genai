@@ -22,6 +22,11 @@
 #include <string>
 #include <fstream>
 
+#ifndef _WIN32
+#include <sys/types.h>
+#include <errno.h>
+#endif
+
 namespace fs {
 
 class path {
@@ -71,7 +76,7 @@ class path {
     return join(path);
   }
 
-  path operator/(const path& path) {
+  path operator/(const path& path) const {
     return join(path.path_);
   }
 
@@ -131,6 +136,14 @@ class path {
     return path(path_.substr(0, pos));
   }
 
+  std::string filename() const {
+    size_t pos = path_.find_last_of("/\\");
+    if (pos == std::string::npos) {
+      return path_;  // No separator found, entire path is the filename
+    }
+    return path_.substr(pos + 1);
+  }
+
  private:
   std::string path_;
 
@@ -176,6 +189,44 @@ class path {
 // Namespace-level functions
 inline bool exists(const path& p) {
   return p.exists();
+}
+
+inline bool create_directories(const path& p) {
+#ifdef _WIN32
+  // On Windows, create directory recursively using CreateDirectoryW
+  if (p.exists()) {
+    return true;  // Already exists
+  }
+  
+  // First create parent directory if needed
+  path parent = p.parent_path();
+  if (!parent.string().empty() && !parent.exists()) {
+    if (!create_directories(parent)) {
+      return false;
+    }
+  }
+  
+  // Create the directory
+  return CreateDirectoryW(p.c_str(), nullptr) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+  // On Unix-like systems, use mkdir with recursive creation
+  if (p.exists()) {
+    return true;  // Already exists
+  }
+  
+  // First create parent directory if needed
+  path parent = p.parent_path();
+  if (!parent.string().empty() && !parent.exists()) {
+    if (!create_directories(parent)) {
+      return false;
+    }
+  }
+  
+  // Create the directory with 0755 permissions
+  errno = 0;
+  int result = mkdir(p.c_str(), 0755);
+  return result == 0 || errno == EEXIST;
+#endif
 }
 
 }  // namespace fs

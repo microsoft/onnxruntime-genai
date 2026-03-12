@@ -137,6 +137,15 @@ inline const OrtModelEditorApi& GetModelEditorApi() {
   return *model_editor_api;
 }
 
+/// Returns a reference to the ORT C Compile API. Used if compiling a model at runtime.
+inline const OrtCompileApi& GetCompileApi() {
+  auto* compile_api = api->GetCompileApi();
+  if (compile_api == nullptr) {
+    throw std::runtime_error("Compile API is not available in this build");
+  }
+  return *compile_api;
+}
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
@@ -443,6 +452,16 @@ void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name
 
 void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name);
 
+/** \brief Compiles an input model to generate a model with EPContext nodes
+ *
+ * Wraps OrtCompileApi::CompileModel
+ * Throws an exception on error
+ *
+ * \param env OrtEnv object
+ * \param model_compilation_options Compilation options for the model
+ */
+void CompileModel(OrtEnv& env, const OrtModelCompilationOptions& model_compilation_options);
+
 }  // namespace Ort
 
 /** \brief The Status that holds ownership of OrtStatus received from C API
@@ -648,6 +667,94 @@ struct OrtSessionOptions {
                                                 const std::unordered_map<std::string, std::string>& options);
 
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Options object used for model compilation
+ *
+ * Wraps ::OrtModelCompilationOptions object and methods from the Compile API
+ */
+struct OrtModelCompilationOptions {
+  /** \brief Creates OrtModelCompilationOptions from an OrtEnv and OrtSessionOptions
+   *
+   * Wraps OrtCompileApi::CreateModelCompilationOptionsFromSessionOptions
+   */
+  static std::unique_ptr<OrtModelCompilationOptions> Create(OrtEnv& env, const OrtSessionOptions& session_options);
+
+  /** \brief Sets the input ONNX model file path to compile
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetInputModelPath
+   */
+  OrtModelCompilationOptions& SetInputModelPath(const ORTCHAR_T* input_model_path);
+
+  /** \brief Sets the input ONNX model from a memory buffer
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetInputModelFromBuffer
+   */
+  OrtModelCompilationOptions& SetInputModelFromBuffer(const void* input_model_data, size_t input_model_data_size);
+
+  /** \brief Sets the output compiled model file path
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetOutputModelPath
+   */
+  OrtModelCompilationOptions& SetOutputModelPath(const ORTCHAR_T* output_model_path);
+
+  /** \brief Sets external initializers file path and size threshold for the compiled model
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetOutputModelExternalInitializersFile
+   */
+  OrtModelCompilationOptions& SetOutputModelExternalInitializersFile(const ORTCHAR_T* external_initializers_file_path, 
+                                                                       size_t external_initializers_size_threshold);
+
+  /** \brief Sets the output compiled model to be written to a buffer
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetOutputModelBuffer
+   */
+  OrtModelCompilationOptions& SetOutputModelBuffer(OrtAllocator* allocator, 
+                                                    void** output_model_buffer_ptr, 
+                                                    size_t* output_model_buffer_size_ptr);
+
+  /** \brief Sets a custom write function for the output compiled model
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetOutputModelWriteFunc
+   */
+  OrtModelCompilationOptions& SetOutputModelWriteFunc(OrtWriteBufferFunc write_func, void* state);
+
+  /** \brief Sets a function to determine initializer locations in the output model
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetOutputModelGetInitializerLocationFunc
+   */
+  OrtModelCompilationOptions& SetOutputModelGetInitializerLocationFunc(OrtGetInitializerLocationFunc get_initializer_location_func, 
+                                                                         void* state);
+
+  /** \brief Enables or disables embedding of EPContext binary data in the compiled model
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetEpContextEmbedMode
+   */
+  OrtModelCompilationOptions& SetEpContextEmbedMode(bool embed_ep_context_in_model);
+
+  /** \brief Sets EP context binary information (output directory and model name)
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetEpContextBinaryInformation
+   */
+  OrtModelCompilationOptions& SetEpContextBinaryInformation(const ORTCHAR_T* output_directory, 
+                                                             const ORTCHAR_T* model_name);
+
+  /** \brief Sets flags for model compilation
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetFlags
+   */
+  OrtModelCompilationOptions& SetFlags(uint32_t flags);
+
+  /** \brief Sets the graph optimization level for model compilation
+   *
+   * Wraps OrtCompileApi::ModelCompilationOptions_SetGraphOptimizationLevel
+   */
+  OrtModelCompilationOptions& SetGraphOptimizationLevel(GraphOptimizationLevel graph_optimization_level);
+
+  static void operator delete(void* p) { 
+    if (p) Ort::GetCompileApi().ReleaseModelCompilationOptions(reinterpret_cast<OrtModelCompilationOptions*>(p)); 
+  }
   Ort::Abstract make_abstract;
 };
 
