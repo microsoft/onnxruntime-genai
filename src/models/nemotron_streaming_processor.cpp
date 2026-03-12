@@ -93,7 +93,7 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
 
   // Create output tensor: [1, total_mel_frames, num_mels] (time-major)
   auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
-  
+
   // TODO: Optimize for GPU/CUDA later, CPU always expects float32.
   if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     throw std::runtime_error("NemotronStreamingProcessor only supports float32 encoder input. Got type: " + std::to_string(signal_type));
@@ -103,26 +103,38 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
   // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
-  for (int t = 0; t < cache_size; ++t) {
-    int ring_idx = (cache_pos_ + t) % cache_size;
-    std::memcpy(signal_data + t * num_mels,
-                mel_pre_encode_cache_.data() + ring_idx * num_mels,
-                num_mels * sizeof(float));
+  // Use at most 2 memcpys instead of per-frame copies
+  int first_run = std::min(cache_size - cache_pos_, cache_size);
+  std::memcpy(signal_data,
+              mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
+              first_run * num_mels * sizeof(float));
+  if (first_run < cache_size) {
+    std::memcpy(signal_data + first_run * num_mels,
+                mel_pre_encode_cache_.data(),
+                (cache_size - first_run) * num_mels * sizeof(float));
   }
 
   // Transpose mel from [num_mels, num_frames] directly into output tensor after cache
-  // and update ring buffer in the same pass
   float* out_ptr = signal_data + cache_size * num_mels;
   for (int t = 0; t < num_frames; ++t) {
     for (int m = 0; m < num_mels; ++m) {
       out_ptr[t * num_mels + m] = mel_data[m * num_frames + t];
     }
-    // Update ring buffer with this transposed frame
-    std::memcpy(mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
-                out_ptr + t * num_mels,
-                num_mels * sizeof(float));
-    cache_pos_ = (cache_pos_ + 1) % cache_size;
   }
+
+  // Update ring buffer with the last cache_size frames (or all if fewer)
+  int frames_to_cache = std::min(num_frames, cache_size);
+  const float* cache_src = out_ptr + (num_frames - frames_to_cache) * num_mels;
+  int frames_to_end = std::min(frames_to_cache, cache_size - cache_pos_);
+  std::memcpy(mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
+              cache_src,
+              frames_to_end * num_mels * sizeof(float));
+  if (frames_to_end < frames_to_cache) {
+    std::memcpy(mel_pre_encode_cache_.data(),
+                cache_src + frames_to_end * num_mels,
+                (frames_to_cache - frames_to_end) * num_mels * sizeof(float));
+  }
+  cache_pos_ = (cache_pos_ + frames_to_cache) % cache_size;
 
   return processed_signal;
 }
