@@ -611,7 +611,6 @@ def test_qwen35_hybrid_text_generation(test_data_path):
         pytest.skip("qwen35-hybrid-preprocessing test model not found")
 
     model = og.Model(model_path)
-    tokenizer = og.Tokenizer(model)
 
     # Validate that the generator can be created and configured
     # Full text generation requires a real model (Identity can't simulate KV cache growth)
