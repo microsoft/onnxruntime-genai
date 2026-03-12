@@ -40,8 +40,8 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
 
-  // Vocab size from top-level config (includes blank)
-  vocab_size = config.model.vocab_size - 1;
+  // Vocab size from top-level config
+  vocab_size = config.model.vocab_size;
 
   // Encoder I/O names
   enc_in_audio = enc.inputs.audio_features;
@@ -73,41 +73,48 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   dec_out_lstm_cell = dec.outputs.lstm_cell_state;
 }
 
-void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+  auto cache_channel_type = session_info.GetInputDataType(cfg.enc_in_cache_channel);
+  auto cache_time_type = session_info.GetInputDataType(cfg.enc_in_cache_time);
+  auto cache_channel_len_type = session_info.GetInputDataType(cfg.enc_in_cache_channel_len);
+
   // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
-  cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, cache_channel_type);
   ByteWrapTensor(device, *cache_last_channel).Zero();
 
   // cache_last_time: [batch, num_layers, hidden_dim, conv_context]
   auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
-  cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, cache_time_type);
   ByteWrapTensor(device, *cache_last_time).Zero();
 
   // cache_last_channel_len: [1]
   auto len_shape = std::array<int64_t, 1>{1};
-  cache_last_channel_len = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  cache_last_channel_len = OrtValue::CreateTensor(allocator, len_shape, cache_channel_len_type);
   *cache_last_channel_len->GetTensorMutableData<int64_t>() = 0;
 }
 
-void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
-  Initialize(cfg, allocator, device);
+void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+  Initialize(cfg, session_info, allocator, device);
 }
 
-void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+  auto lstm_hidden_type = session_info.GetInputDataType(cfg.dec_in_lstm_hidden);
+  auto lstm_cell_type = session_info.GetInputDataType(cfg.dec_in_lstm_cell);
+
   // LSTM states: [lstm_layers, 1, lstm_dim]
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
-  lstm_hidden_state = OrtValue::CreateTensor(allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  lstm_hidden_state = OrtValue::CreateTensor(allocator, state_shape, lstm_hidden_type);
   ByteWrapTensor(device, *lstm_hidden_state).Zero();
 
-  lstm_cell_state = OrtValue::CreateTensor(allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  lstm_cell_state = OrtValue::CreateTensor(allocator, state_shape, lstm_cell_type);
   ByteWrapTensor(device, *lstm_cell_state).Zero();
 
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
 
-void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, OrtAllocator& allocator, DeviceInterface& device) {
-  Initialize(cfg, allocator, device);
+void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+  Initialize(cfg, session_info, allocator, device);
 }
 
 NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -169,11 +176,29 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
 
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
-  encoder_cache_.Initialize(cache_config_, allocator, device);
-  decoder_state_.Initialize(cache_config_, allocator, device);
+  encoder_cache_.Initialize(cache_config_, model_.session_info_, allocator, device);
+  decoder_state_.Initialize(cache_config_, model_.session_info_, allocator, device);
 
-  // Pre-allocate reusable decoder tensors
-  run_options_ = OrtRunOptions::Create();
+  // Pre-allocate run options per session
+  encoder_run_options_ = OrtRunOptions::Create();
+  decoder_run_options_ = OrtRunOptions::Create();
+  joiner_run_options_ = OrtRunOptions::Create();
+
+  if (model.config_->model.encoder.run_options.has_value()) {
+    for (auto& entry : model.config_->model.encoder.run_options.value()) {
+      encoder_run_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+    }
+  }
+  if (model.config_->model.decoder.run_options.has_value()) {
+    for (auto& entry : model.config_->model.decoder.run_options.value()) {
+      decoder_run_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+    }
+  }
+  if (model.config_->model.joiner.run_options.has_value()) {
+    for (auto& entry : model.config_->model.joiner.run_options.value()) {
+      joiner_run_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+    }
+  }
 
   auto enc_out_type = model_.session_info_.GetOutputDataType(cache_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, cache_config_.hidden_dim};
@@ -212,8 +237,8 @@ void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
 void NemotronSpeechState::ResetStreamingState() {
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
-  encoder_cache_.Reset(cache_config_, allocator, device);
-  decoder_state_.Reset(cache_config_, allocator, device);
+  encoder_cache_.Reset(cache_config_, model_.session_info_, allocator, device);
+  decoder_state_.Reset(cache_config_, model_.session_info_, allocator, device);
   current_mel_.reset();
   encoded_output_.reset();
   encoded_len_ = 0;
@@ -252,7 +277,7 @@ void NemotronSpeechState::RunEncoder() {
       cache_config_.enc_out_cache_channel_len.c_str()};
 
   auto enc_outputs = nemotron_model_.session_encoder_->Run(
-      run_options_.get(), enc_input_names, enc_inputs, 5, enc_output_names, 5);
+      encoder_run_options_.get(), enc_input_names, enc_inputs, 5, enc_output_names, 5);
 
   encoded_output_ = std::move(enc_outputs[0]);
   encoded_len_ = *enc_outputs[1]->GetTensorData<int64_t>();
@@ -301,7 +326,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
         cache_config_.dec_out_lstm_hidden.c_str(), cache_config_.dec_out_lstm_cell.c_str()};
 
     auto dec_outputs = nemotron_model_.session_decoder_->Run(
-        run_options_.get(), dec_input_names, dec_inputs, 4, dec_output_names, 4);
+        decoder_run_options_.get(), dec_input_names, dec_inputs, 4, dec_output_names, 4);
 
     // Reshape decoder output for joiner
     auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
@@ -317,7 +342,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     const char* join_output_names[] = {cache_config_.join_out_logits.c_str()};
 
     auto join_outputs = nemotron_model_.session_joiner_->Run(
-        run_options_.get(), join_input_names, join_inputs, 2, join_output_names, 1);
+        joiner_run_options_.get(), join_input_names, join_inputs, 2, join_output_names, 1);
 
     // Argmax
     const float* logits_data = join_outputs[0]->GetTensorData<float>();
@@ -334,8 +359,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
       }
     }
 
-    if (best_token == cache_config_.blank_id || best_token >= cache_config_.vocab_size) {
-      // Blank: advance to next time step
+    if (best_token == cache_config_.blank_id) {
       time_step_++;
       symbol_step_ = 0;
       continue;

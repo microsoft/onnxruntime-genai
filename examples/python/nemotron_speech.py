@@ -8,6 +8,7 @@ import sys
 import time
 import numpy as np
 import onnxruntime_genai as og
+from common import get_config
 
 
 def load_config(model_path):
@@ -32,7 +33,21 @@ def load_audio(audio_path, sample_rate):
     return audio
 
 
-def simulate_microphone(model_path, audio_path):
+def decode_tokens(generator, tokenizer_stream):
+    """Decode all available tokens from the generator, returning the text."""
+    text = ""
+    while not generator.is_done():
+        generator.generate_next_token()
+        tokens = generator.get_next_tokens()
+        if len(tokens) > 0:
+            token_text = tokenizer_stream.decode(tokens[0])
+            if token_text:
+                print(token_text, end="", flush=True)
+                text += token_text
+    return text
+
+
+def simulate_microphone(model_path, audio_path, execution_provider):
     """Stream audio through Generator + StreamingProcessor API."""
     sample_rate, chunk_samples = load_config(model_path)
     audio = load_audio(audio_path, sample_rate)
@@ -40,7 +55,7 @@ def simulate_microphone(model_path, audio_path):
     chunk_duration = chunk_samples / sample_rate
     num_chunks = (len(audio) + chunk_samples - 1) // chunk_samples
 
-    config = og.Config(model_path)
+    config = get_config(model_path, execution_provider)
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
@@ -52,29 +67,18 @@ def simulate_microphone(model_path, audio_path):
     stream_start = time.time()
     full_transcript = ""
 
-    def decode_chunk():
-        nonlocal full_transcript
-        while not generator.is_done():
-            generator.generate_next_token()
-            tokens = generator.get_next_tokens()
-            if len(tokens) > 0:
-                text = tokenizer_stream.decode(tokens[0])
-                if text:
-                    print(text, end="", flush=True)
-                    full_transcript += text
-
     for i in range(0, len(audio), chunk_samples):
         chunk = audio[i:i + chunk_samples].astype(np.float32)
         inputs = processor.process(chunk)
         if inputs is not None:
             generator.set_inputs(inputs)
-            decode_chunk()
+            full_transcript += decode_tokens(generator, tokenizer_stream)
 
     # Flush remaining audio
     inputs = processor.flush()
     if inputs is not None:
         generator.set_inputs(inputs)
-        decode_chunk()
+        full_transcript += decode_tokens(generator, tokenizer_stream)
 
     total_wall = time.time() - stream_start
 
@@ -88,11 +92,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
+    parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
+                        choices=["cpu", "cuda", "dml", "follow_config"],
+                        help="Execution provider to run with. Defaults to follow_config.")
     args = parser.parse_args()
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
         sys.exit(1)
-    simulate_microphone(args.model_path, args.audio_file)
+    simulate_microphone(args.model_path, args.audio_file, args.execution_provider)
 
 
 if __name__ == "__main__":
