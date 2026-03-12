@@ -65,15 +65,17 @@ class Qwen35Model(Qwen3Model):
                 return params.get(key)
             return getattr(params, key, None)
 
-        if not hasattr(config, "rope_theta"):
-            rope_theta = _get_rope_param(rope_parameters, "rope_theta")
-            if rope_theta is not None:
-                config.rope_theta = rope_theta
+        # Always prefer values from rope_parameters over class-level defaults.
+        # HF config base class defines partial_rotary_factor=1.0 and rope_theta=10000
+        # as class attributes, so hasattr() returns True even when the top-level JSON
+        # does not set them — causing the hasattr guard to silently keep wrong defaults.
+        rope_theta = _get_rope_param(rope_parameters, "rope_theta")
+        if rope_theta is not None:
+            config.rope_theta = rope_theta
 
-        if not hasattr(config, "partial_rotary_factor"):
-            partial_rotary_factor = _get_rope_param(rope_parameters, "partial_rotary_factor")
-            if partial_rotary_factor is not None:
-                config.partial_rotary_factor = partial_rotary_factor
+        partial_rotary_factor = _get_rope_param(rope_parameters, "partial_rotary_factor")
+        if partial_rotary_factor is not None:
+            config.partial_rotary_factor = partial_rotary_factor
 
         if not hasattr(config, "rope_scaling"):
             config.rope_scaling = None
