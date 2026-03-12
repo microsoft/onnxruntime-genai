@@ -51,12 +51,22 @@ def parse_hf_token(hf_token):
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        def _cfg_get(obj, key, default=None):
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        rope_scaling = _cfg_get(config, "rope_scaling")
+        original_max_position_embeddings = _cfg_get(config, "original_max_position_embeddings")
+        if original_max_position_embeddings is None:
+            original_max_position_embeddings = _cfg_get(rope_scaling, "original_max_position_embeddings")
+
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
-            config.original_max_position_embeddings
-            if hasattr(config, "original_max_position_embeddings")
-            else config.rope_scaling["original_max_position_embeddings"]
-            if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings")
+            original_max_position_embeddings
+            if original_max_position_embeddings is not None
             else self.context_length
         )
         self.window_size = (
@@ -263,13 +273,18 @@ class Model:
             if hasattr(config, "rope_embedding_base")
             else 10000
         )
+        rope_parameters = _cfg_get(config, "rope_parameters")
+        rope_interleaved = _cfg_get(config, "rope_interleaved")
+        if rope_interleaved is None:
+            rope_interleaved = _cfg_get(rope_parameters, "mrope_interleaved", False)
+
         self.rope_attrs = {
             "create_caches": True,  # Create cos/sin caches for rotary embeddings
             "save_caches": True,  # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,  # Cache length to use when creating cos/sin caches for rotary embeddings
             "theta": rope_theta,  # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
-            "interleaved": 0,  # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
+            "interleaved": 1 if rope_interleaved else 0,  # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": rotemb_dim,  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rescale_factors": 1,  # Rescale factors when calculating `inv_freq` in rotary embeddings
             "t_dtype": torch.int64,  # Torch dtype when calculating `t` in rotary embeddings

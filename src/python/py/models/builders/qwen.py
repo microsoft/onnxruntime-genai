@@ -37,6 +37,14 @@ class Qwen35Model(Qwen3Model):
         # so we need to add 1 to the stored weight before exporting (same as Gemma).
         self.layernorm_attrs["add_offset"] = 1
 
+        # HF Qwen3.5 RMSNorm computes normalization in float32, then casts back.
+        # Keep this behavior to avoid precision drift in long generations.
+        self.layernorm_attrs["cast"]["use_fp32"] = True
+        self.layernorm_attrs["cast"]["root_input"] = True
+        self.layernorm_attrs["cast"]["skip_input"] = True
+        self.layernorm_attrs["cast"]["output_0"] = True
+        self.layernorm_attrs["cast"]["output_3"] = True
+
         self.qwen35_config = config
         self.layer_types = list(getattr(config, "layer_types", ["full_attention"] * self.num_layers))
         self.qwen35_attn_output_gate = getattr(config, "attn_output_gate", False)
@@ -76,6 +84,24 @@ class Qwen35Model(Qwen3Model):
         partial_rotary_factor = _get_rope_param(rope_parameters, "partial_rotary_factor")
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
+
+        # Qwen3.5 places several RoPE fields under rope_parameters. Lift the
+        # fields that base.Model expects so they are consumed consistently.
+        mrope_interleaved = _get_rope_param(rope_parameters, "mrope_interleaved")
+        if mrope_interleaved is not None:
+            config.rope_interleaved = bool(mrope_interleaved)
+
+        mrope_section = _get_rope_param(rope_parameters, "mrope_section")
+        rope_type = _get_rope_param(rope_parameters, "rope_type")
+        if mrope_section is not None and (
+            not hasattr(config, "rope_scaling") or getattr(config, "rope_scaling") is None
+        ):
+            # Keep HF-style section values unchanged. Qwen2.5-VL and Qwen3.5
+            # consumers in this repo apply model-specific handling downstream.
+            config.rope_scaling = {
+                "type": rope_type if rope_type is not None else "mrope",
+                "mrope_section": mrope_section,
+            }
 
         if not hasattr(config, "rope_scaling"):
             config.rope_scaling = None
