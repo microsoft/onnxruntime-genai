@@ -1474,6 +1474,7 @@ TEST(CAPITests, StreamingASRSineWave) {
 
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
+    ASSERT_NE(mel, nullptr);
     DecodeInputs(*generator, mel.get());
   }
 
@@ -1507,13 +1508,12 @@ TEST(CAPITests, StreamingASRRawCAPI) {
 
   OgaNamedTensors* inputs = nullptr;
   ASSERT_EQ(OgaStreamingProcessorProcess(processor, silence.data(), silence.size(), &inputs), nullptr);
-  if (inputs) {
-    ASSERT_EQ(OgaGenerator_SetInputs(generator, inputs), nullptr);
-    while (!OgaGenerator_IsDone(generator)) {
-      ASSERT_EQ(OgaGenerator_GenerateNextToken(generator), nullptr);
-    }
-    OgaDestroyNamedTensors(inputs);
+  ASSERT_NE(inputs, nullptr);
+  ASSERT_EQ(OgaGenerator_SetInputs(generator, inputs), nullptr);
+  while (!OgaGenerator_IsDone(generator)) {
+    ASSERT_EQ(OgaGenerator_GenerateNextToken(generator), nullptr);
   }
+  OgaDestroyNamedTensors(inputs);
 
   OgaDestroyGenerator(generator);
   OgaDestroyGeneratorParams(params);

@@ -521,7 +521,7 @@ size_t Generator::TokenCount() const {
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  
+
   if (is_rnnt_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
@@ -557,6 +557,8 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+
   // RNNT models: yield one token per call from the decoder state machine
   if (is_rnnt_) {
     auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
@@ -567,7 +569,6 @@ void Generator::GenerateNextToken() {
     return;
   }
 
-  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 

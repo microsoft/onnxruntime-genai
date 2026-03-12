@@ -638,8 +638,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "The model must be of type 'nemotron_speech'.")
       .def(
           "process",
-          [](OgaStreamingProcessor& proc, pybind11::array_t<float> audio_chunk) -> pybind11::object {
+          [](OgaStreamingProcessor& proc, pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast> audio_chunk) -> pybind11::object {
             auto buf = audio_chunk.request();
+            if (buf.ndim != 1) {
+              throw std::runtime_error("audio_chunk must be a 1-D array, got " + std::to_string(buf.ndim) + "-D");
+            }
             auto result = proc.Process(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
             if (result) {
               return pybind11::cast(std::move(result));

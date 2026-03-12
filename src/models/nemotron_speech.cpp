@@ -81,12 +81,12 @@ void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, const Sess
   // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
   cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, cache_channel_type);
-  ByteWrapTensor(device, *cache_last_channel).Zero();
+  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *cache_last_channel).Zero();
 
   // cache_last_time: [batch, num_layers, hidden_dim, conv_context]
   auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
   cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, cache_time_type);
-  ByteWrapTensor(device, *cache_last_time).Zero();
+  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *cache_last_time).Zero();
 
   // cache_last_channel_len: [1]
   auto len_shape = std::array<int64_t, 1>{1};
@@ -105,10 +105,10 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, const Sess
   // LSTM states: [lstm_layers, 1, lstm_dim]
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
   lstm_hidden_state = OrtValue::CreateTensor(allocator, state_shape, lstm_hidden_type);
-  ByteWrapTensor(device, *lstm_hidden_state).Zero();
+  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_hidden_state).Zero();
 
   lstm_cell_state = OrtValue::CreateTensor(allocator, state_shape, lstm_cell_type);
-  ByteWrapTensor(device, *lstm_cell_state).Zero();
+  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_cell_state).Zero();
 
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
