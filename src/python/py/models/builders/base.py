@@ -648,6 +648,7 @@ class Model:
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
+                    "rotary_embedding_dim": self.rope_attrs["rotary_embedding_dim"],
                     "linear_num_key_heads": getattr(config, "linear_num_key_heads", 0),
                     "linear_num_value_heads": getattr(config, "linear_num_value_heads", 0),
                     "linear_key_head_dim": getattr(config, "linear_key_head_dim", 0),
