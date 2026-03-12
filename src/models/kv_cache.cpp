@@ -155,9 +155,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
-  // Auto-discover which layer indices actually have KV cache inputs.
-  // For standard models, this finds 0..layer_count_-1 (sequential).
-  // For hybrid models (e.g., Qwen3.5), this finds only the full-attention layer indices.
+  // Auto-discover which layer indices have KV cache inputs.
+  // For hybrid models (e.g., Qwen3.5), only full-attention layers have KV cache.
   kv_layer_indices_.clear();
   for (int i = 0; i < 256; ++i) {
     std::string key_name = ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i);
@@ -166,7 +165,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
-  // Use discovered count if it differs from config (hybrid model case)
+  // Use discovered count if it differs from config
   if (!kv_layer_indices_.empty()) {
     layer_count_ = static_cast<int>(kv_layer_indices_.size());
   }
@@ -175,7 +174,6 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   presents_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    // Use the actual layer index from auto-discovery
     int layer_idx = kv_layer_indices_.empty() ? i : kv_layer_indices_[i];
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, layer_idx));
@@ -530,8 +528,7 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  // Probe a range of layer indices, not just 0.
-  // Hybrid models (e.g., Qwen3.5) may have KV cache only on certain layers (e.g., 3, 7, 11, ...).
+  // Hybrid models may have KV cache only on certain layers, so probe beyond index 0
   for (int i = 0; i < 256; ++i) {
     if (model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, i)))
       return true;

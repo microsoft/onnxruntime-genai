@@ -97,8 +97,7 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;
 
-  // Auto-discovered layer indices that have KV cache inputs.
-  // For standard models this is [0, 1, ..., N-1]. For hybrid models it may be sparse (e.g., [3, 7, 11, ...]).
+  // Auto-discovered KV layer indices. Sparse for hybrid models (e.g., [3, 7, 11, ...]).
   std::vector<int> kv_layer_indices_;
 
   // Support for per-layer KV cache shapes (for models with alternating attention patterns)
