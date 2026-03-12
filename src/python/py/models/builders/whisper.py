@@ -12,8 +12,6 @@ import os
 import onnx_ir as ir
 import torch
 
-from transformers import AutoConfig
-
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
     # input_layernorm --> attention --> output_layernorm --> MLP
