@@ -1371,6 +1371,7 @@ TEST(CAPITests, SetGuidance) {
 #endif
 #endif
 
+#if TEST_STREAMING_ASR
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   if (mel) {
@@ -1380,6 +1381,7 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
     }
   }
 }
+#endif
 
 // Test creating a Generator + StreamingProcessor from a nemotron_speech model
 TEST(CAPITests, StreamingASRCreate) {
