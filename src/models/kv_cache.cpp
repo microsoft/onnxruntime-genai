@@ -8,6 +8,8 @@
 #include "../openvino/interface.h"
 #include <algorithm>
 #include <numeric>
+#include <unordered_map>
+#include <mutex>
 
 namespace Generators {
 
@@ -535,10 +537,46 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
+namespace {
+
+int64_t GetElementsPerBeam(const AuxiliaryStateSet& state_set) {
+  static std::mutex mutex;
+  static std::unordered_map<const AuxiliaryStateSet*, int64_t> cache;
+
+  const auto* key = &state_set;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+  }
+
+  int64_t elements_per_beam = std::accumulate(
+      state_set.shape.begin() + 1,
+      state_set.shape.end(),
+      int64_t{1},
+      std::multiplies<int64_t>{});
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto [it, inserted] = cache.emplace(key, elements_per_beam);
+    if (!inserted) {
+      // Another thread inserted the value first; use the existing one.
+      return it->second;
+    }
+  }
+
+  return elements_per_beam;
+}
+
+}  // namespace
+
 template <typename ScoreType>
 void DefaultKeyValueCache::PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices_device, AuxiliaryStateSet& state_set, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  auto elements_per_beam = std::accumulate(state_set.shape.begin() + 1, state_set.shape.end(), int64_t{1}, std::multiplies<int64_t>{});
+  const int64_t elements_per_beam = GetElementsPerBeam(state_set);
 
   OrtValue& present_value = *state_set.presents[index];
   std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), state_set.shape, state_set.type);
