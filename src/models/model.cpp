@@ -1030,6 +1030,15 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
 
+  // Scoring device for search/sequences. WebGPU uses GreedySearch_Cpu, so scoring always stays on CPU.
+  // For CUDA, scoring runs on GPU (with a CUDA-specific GreedySearch implementation).
+  // TODO: DML also delegates GreedySearch to CPU (Dml::InterfaceImpl::CreateGreedy). Consider expanding
+  // this check to include DML (and other CPU-search providers) to avoid CPU<->device transfer overhead.
+  if (p_device_->GetType() == DeviceType::WEBGPU)
+    p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
+  else
+    p_device_scoring_ = p_device_inputs_;
+
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
 }
