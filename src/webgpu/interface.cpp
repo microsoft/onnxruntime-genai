@@ -215,6 +215,42 @@ struct InterfaceImpl : DeviceInterface {
 
     return true;
   }
+
+  // Compact attention mask: write total_length into a [batch_beam_size, 1] tensor on WebGPU.
+  // This avoids GPU->CPU->GPU round-trips by only doing a single CPU->GPU copy.
+  bool UpdateCompactAttentionMask(void* mask_data, int batch_beam_size, int total_length, ONNXTensorElementDataType type) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Prepare the values on CPU
+    size_t elem_size = (type == Ort::TypeToTensorType<int32_t>) ? sizeof(int32_t) : sizeof(int64_t);
+    size_t byte_count = batch_beam_size * elem_size;
+    std::vector<uint8_t> cpu_buffer(byte_count);
+
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      auto* data = reinterpret_cast<int32_t*>(cpu_buffer.data());
+      for (int i = 0; i < batch_beam_size; i++)
+        data[i] = static_cast<int32_t>(total_length);
+    } else {
+      auto* data = reinterpret_cast<int64_t*>(cpu_buffer.data());
+      for (int i = 0; i < batch_beam_size; i++)
+        data[i] = static_cast<int64_t>(total_length);
+    }
+
+    // Single CPU->GPU copy (no GPU->CPU read needed since we know the value)
+    int64_t shape_val = static_cast<int64_t>(byte_count);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_buffer.data(), byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU
