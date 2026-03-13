@@ -8,7 +8,7 @@ import os
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import get_ci_data_path, run_subprocess
+from _test_utils import download_model, get_ci_data_path, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -52,29 +52,35 @@ def run_whisper():
     )
 
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
-        if execution_provider == "cuda" and not og.is_cuda_available():
-            continue
+        # Generate model via model builder
+        built_model = os.path.join(cwd, "..", "test_models", f"whisper-tiny-{precision}-{execution_provider}")
+        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision, device=execution_provider, one_layer=False)
 
-        model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
-        if not os.path.exists(model):
-            continue
+        # Get prebuilt model from CI
+        ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
+        for model in [built_model, ci_model]:
+            # Conditions for skipping test
+            if execution_provider == "cuda" and not og.is_cuda_available():
+                continue
+            if not os.path.exists(model):
+                continue
 
-        command = [
-            sys.executable,
-            os.path.join(cwd, "..", "..", "examples", "python", "whisper.py"),
-            "-m",
-            model,
-            "-e",
-            execution_provider,
-            "-b",
-            str(num_beams),
-            "-a",
-            audio_path,
-            "-o",
-            expected_transcription,
-            "--non_interactive",
-        ]
-        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+            command = [
+                sys.executable,
+                os.path.join(cwd, "..", "..", "examples", "python", "whisper.py"),
+                "-m",
+                model,
+                "-e",
+                execution_provider,
+                "-b",
+                str(num_beams),
+                "-a",
+                audio_path,
+                "-o",
+                expected_transcription,
+                "--non_interactive",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def run_tool_calling():
