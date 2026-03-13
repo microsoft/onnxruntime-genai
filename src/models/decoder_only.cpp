@@ -1,5 +1,4 @@
 #include "../generators.h"
-#include "../tracing.h"
 #include "decoder_only.h"
 
 namespace Generators {
@@ -29,7 +28,6 @@ void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  DurationTrace trace{"DecoderOnly_State::Run"};
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = model_.config_->search.chunk_size;
 
@@ -86,7 +84,6 @@ void DecoderOnly_State::RewindTo(size_t index) {
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
-  DurationTrace trace{"DecoderOnly_State::UpdateInputsOutputs"};
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
 
