@@ -105,9 +105,17 @@ class Qwen35Model(Qwen3Model):
 
         # Qwen3.5 places several RoPE fields under rope_parameters. Lift the
         # fields that base.Model expects so they are consumed consistently.
-        mrope_interleaved = _get_rope_param(rope_parameters, "mrope_interleaved")
-        if mrope_interleaved is not None:
-            config.rope_interleaved = bool(mrope_interleaved)
+        #
+        # IMPORTANT: Do NOT propagate mrope_interleaved to config.rope_interleaved.
+        # mrope_interleaved controls how multi-dimensional RoPE frequencies are
+        # interleaved across spatial dims (T, H, W) — a concept specific to MRoPE.
+        # config.rope_interleaved (consumed by the ORT RotaryEmbedding op) controls
+        # whether cos/sin values use [c0,s0,c1,s1] (interleaved=1, GPT-NeoX style)
+        # vs [c0,c1,...,s0,s1,...] (interleaved=0, standard rotate_half).
+        # Qwen3.5's apply_rotary_pos_emb uses rotate_half, so interleaved must be 0.
+        # We must explicitly set this so base.Model.__init__ doesn't fall back to
+        # reading mrope_interleaved from rope_parameters.
+        config.rope_interleaved = False
 
         mrope_section = _get_rope_param(rope_parameters, "mrope_section")
         rope_type = _get_rope_param(rope_parameters, "rope_type")
@@ -339,22 +347,66 @@ class Qwen35Model(Qwen3Model):
         gate_hidden_size = self.num_attn_heads * self.head_size
         q_proj_shape = ["batch_size", "sequence_length", gate_hidden_size * 2]
         q_path = self._make_qwen35_proj_with_bias(layer_id, attention.q_proj, "q_proj", root_input, q_proj_shape)
-        self.attention_attrs["q_path"] = self._make_qwen35_attention_gate_slice(
-            layer_id,
-            q_path,
-            "query",
-            start=0,
-            end=gate_hidden_size,
+
+        # HF splits Q and gate PER HEAD: view(B,S,num_heads,head_dim*2) then chunk(2,dim=-1).
+        # This interleaves Q and gate: [q_h0, g_h0, q_h1, g_h1, ...] in the flat layout.
+        # We must reshape to [B,S,num_heads,head_dim*2] first, then slice on the last axis.
+        q_reshape_name = f"/model/layers.{layer_id}/attn/q_proj/Reshape4D"
+        self.make_reshape(
+            q_reshape_name,
+            [q_path, f"/model/constants/INT64/[0, 0, {self.num_attn_heads}, {self.head_size * 2}]"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.num_attn_heads, self.head_size * 2],
+        )
+        q_reshaped = f"{q_reshape_name}/output_0"
+
+        # Slice query: [..., 0:head_dim]
+        q_slice_name = f"/model/layers.{layer_id}/attn/q_proj/query/Slice"
+        self.make_slice(
+            q_slice_name,
+            [
+                q_reshaped,
+                f"/model/constants/INT64/[0]",
+                f"/model/constants/INT64/[{self.head_size}]",
+                "/model/constants/INT64/[-1]",
+                "/model/constants/INT64/[1]",
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.num_attn_heads, self.head_size],
+        )
+        # Flatten query back to [B,S,D]
+        q_flat_name = f"/model/layers.{layer_id}/attn/q_proj/query/Reshape"
+        self.make_reshape(
+            q_flat_name,
+            [f"{q_slice_name}/output_0", f"/model/constants/INT64/[0, 0, {gate_hidden_size}]"],
+            dtype=self.io_dtype,
             shape=["batch_size", "sequence_length", gate_hidden_size],
         )
-        self.attention_attrs["q_gate_path"] = self._make_qwen35_attention_gate_slice(
-            layer_id,
-            q_path,
-            "gate",
-            start=gate_hidden_size,
-            end=gate_hidden_size * 2,
+        self.attention_attrs["q_path"] = f"{q_flat_name}/output_0"
+
+        # Slice gate: [..., head_dim:head_dim*2]
+        g_slice_name = f"/model/layers.{layer_id}/attn/q_proj/gate/Slice"
+        self.make_slice(
+            g_slice_name,
+            [
+                q_reshaped,
+                f"/model/constants/INT64/[{self.head_size}]",
+                f"/model/constants/INT64/[{self.head_size * 2}]",
+                "/model/constants/INT64/[-1]",
+                "/model/constants/INT64/[1]",
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.num_attn_heads, self.head_size],
+        )
+        # Flatten gate back to [B,S,D]
+        g_flat_name = f"/model/layers.{layer_id}/attn/q_proj/gate/Reshape"
+        self.make_reshape(
+            g_flat_name,
+            [f"{g_slice_name}/output_0", f"/model/constants/INT64/[0, 0, {gate_hidden_size}]"],
+            dtype=self.io_dtype,
             shape=["batch_size", "sequence_length", gate_hidden_size],
         )
+        self.attention_attrs["q_gate_path"] = f"{g_flat_name}/output_0"
 
         kv_hidden_size = self.num_kv_heads * self.head_size
         kv_shape = ["batch_size", "sequence_length", kv_hidden_size]
