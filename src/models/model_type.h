@@ -30,6 +30,11 @@ struct ModelType {
     return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_5";
   }
 
+  inline static bool IsQwenVLFamily(const std::string& model_type) {
+    // Qwen VL family models (Qwen2.5-VL, Qwen3-VL, Qwen3.5)
+    return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_5";
+  }
+
   inline static bool IsALM(const std::string& model_type) {
     // Audio-language model (ALM)
     static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
