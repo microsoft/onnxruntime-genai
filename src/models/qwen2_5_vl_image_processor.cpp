@@ -295,25 +295,32 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
-    // For non-patched pixel_values, we need to handle potential batch dimension from PatchImage extension
-    // Model expects [num_patches, 1176] but extension might return [batch, num_patches, 1176]
+    // For non-patched pixel_values, PatchImage may return various layouts depending on
+    // the number of images and the extension version:
+    //   [num_patches, patch_dim]        – already 2D (single image, some versions)
+    //   [1, num_patches, patch_dim]     – single batch wrapper
+    //   [N, patches_per_image, patch_dim] – N images stacked along dim 0
+    //
+    // vision.onnx is exported for exactly ONE image (with a symbolic 'num_patches'
+    // dim) and is called repeatedly by VisionState::Run via a C++ per-image loop.
+    // It therefore always expects a 2D input [patches, patch_dim].  Flatten
+    // unconditionally so the processor output is layout-agnostic.
     const void* pixel_data{};
     const int64_t* pixel_shape{};
     size_t pixel_num_dims;
     CheckResult(OrtxGetTensorData(pixel_values, &pixel_data, &pixel_shape, &pixel_num_dims));
 
-    // Squeeze out leading dimension of size 1 if present
-    std::vector<int64_t> pixel_target_shape;
-    size_t squeeze_offset = 0;
-    if (pixel_num_dims >= 3 && pixel_shape[0] == 1) {
-      // Skip the batch dimension
-      squeeze_offset = 1;
-    }
-    for (size_t i = squeeze_offset; i < pixel_num_dims; ++i) {
-      pixel_target_shape.push_back(pixel_shape[i]);
-    }
+    int64_t pixel_patch_dim = pixel_shape[pixel_num_dims - 1];  // last dim is always patch_dim (e.g. 1536)
+    int64_t total_pixel_elements = 1;
+    for (size_t i = 0; i < pixel_num_dims; ++i) total_pixel_elements *= pixel_shape[i];
+    if (pixel_patch_dim <= 0 || total_pixel_elements % pixel_patch_dim != 0)
+      throw std::runtime_error("pixel_values total elements (" + std::to_string(total_pixel_elements) +
+                               ") is not divisible by patch_dim (" + std::to_string(pixel_patch_dim) +
+                               "). Unexpected layout from ort-extensions.");
+    int64_t total_pixel_patches = total_pixel_elements / pixel_patch_dim;
+    std::vector<int64_t> pixel_target_shape = {total_pixel_patches, pixel_patch_dim};
 
-    int64_t num_pixel_elements = std::accumulate(pixel_target_shape.begin(), pixel_target_shape.end(), 1LL, std::multiplies<int64_t>());
+    int64_t num_pixel_elements = total_pixel_elements;
 
     // Create temporary float tensor from processor output
     auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
@@ -336,17 +343,23 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_data),
                                   &grid_shape, &grid_num_dims));
 
-    // The vision model expects shape [num_images, 3], but PatchImage might return [batch, num_images, 3]
-    // Squeeze out leading dimension of size 1
-    std::vector<int64_t> grid_target_shape;
-    size_t grid_squeeze_offset = 0;
-    if (grid_num_dims >= 3 && grid_shape[0] == 1) {
-      // Skip the batch dimension
-      grid_squeeze_offset = 1;
-    }
-    for (size_t i = grid_squeeze_offset; i < grid_num_dims; ++i) {
-      grid_target_shape.push_back(grid_shape[i]);
-    }
+    // PatchImage may return image_grid_thw in several layouts depending on the
+    // number of images and the extension version:
+    //   [3]        – single image, flat (rank 1)
+    //   [1, 3]     – single image, already [num_images, 3]
+    //   [N, 3]     – N images, already correct
+    //   [1, N, 3]  – single batch wrapper around N images
+    //   [N, 1, 3]  – per-image wrapper (one [1,3] per image stacked)
+    //
+    // Rather than trying to squeeze specific dimensions (which depends on
+    // knowing the exact layout), we compute num_images = total_elements / 3
+    // because the last logical dimension is always 3 (T, H, W per image).
+    // This is safe as long as the extension never inserts extra trailing dims,
+    // which holds for all current versions of ort-extensions PatchImage.
+    int64_t total_grid_elements = 1;
+    for (size_t i = 0; i < grid_num_dims; ++i) total_grid_elements *= grid_shape[i];
+    int64_t num_grid_images = total_grid_elements / 3;
+    std::vector<int64_t> grid_target_shape = {num_grid_images, 3LL};
 
     // Ensure we have rank 2 [num_images, 3]
     if (grid_target_shape.size() != 2 || grid_target_shape[1] != 3) {
