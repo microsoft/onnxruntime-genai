@@ -699,7 +699,7 @@ class Qwen35Model(Qwen3Model):
         eps_name = f"{basename}/Add"
         self.make_add(
             eps_name,
-            [f"{sum_name}/output_0", "/model/constants/FLOAT/1e-12"],
+            [f"{sum_name}/output_0", "/model/constants/FLOAT/1e-06"],
             ir.DataType.FLOAT,
             [shape[0], shape[1], shape[2], 1],
         )
