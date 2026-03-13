@@ -239,19 +239,19 @@ class Qwen35Model(Qwen3Model):
         self.layernorm_attrs["skip_input"] = output_path
 
     def _make_qwen35_linear_placeholder_present_kv(self, layer_id, root_input):
-        zero_hidden = self._make_qwen35_linear_zero_kv_hidden(layer_id, root_input)
-        self.make_repeat_kv(
-            layer_id,
-            root_input=zero_hidden,
-            past_kv=f"past_key_values.{layer_id}.key",
-            present_kv=f"present.{layer_id}.key",
-        )
-        self.make_repeat_kv(
-            layer_id,
-            root_input=zero_hidden,
-            past_kv=f"past_key_values.{layer_id}.value",
-            present_kv=f"present.{layer_id}.value",
-        )
+        # Linear attention layers don't use standard KV caches, but the runtime
+        # expects present.{i}.key/value outputs for every layer. Use Identity
+        # pass-through (present = past) instead of make_repeat_kv, which creates
+        # Concat + expand subgraphs that conflict with GQA's past_present_share_buffer.
+        for kv_type in ("key", "value"):
+            past_name = f"past_key_values.{layer_id}.{kv_type}"
+            present_name = f"present.{layer_id}.{kv_type}"
+            self.make_node(
+                "Identity",
+                inputs=[past_name],
+                outputs=[present_name],
+                name=f"/model/layers.{layer_id}/linear_attn/present_{kv_type}/Identity",
+            )
 
     def _make_qwen35_passthrough_auxiliary_states(self, layer_id):
         if not self.qwen35_linear_use_aux_state:
