@@ -41,6 +41,7 @@ from builders import (
     Qwen35Model,
     Qwen3Model,
     Qwen25VLTextModel,
+    Qwen3VLTextModel,
     QwenModel,
     SmolLM3Model,
 )
@@ -331,6 +332,16 @@ def create_model(
         )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
         # Create base Model class to guess model attributes
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)

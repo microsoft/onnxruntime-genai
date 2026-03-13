@@ -53,6 +53,7 @@ __all__ = [
     "PhiModel",
     "Qwen35Model",
     "Qwen3Model",
+    "Qwen3VLTextModel",
     "Qwen25VLTextModel",
     "QwenModel",
     "SmolLM3Model",

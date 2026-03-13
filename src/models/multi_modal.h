@@ -10,6 +10,8 @@
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
+#include "model_type.h"
+#include "recurrent_state.h"
 
 namespace Generators {
 
@@ -30,6 +32,8 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
 };
 
+// Base VisionState: runs vision.onnx with a single State::Run() call.
+// Works for models whose vision encoder accepts batched input (Phi, Gemma).
 struct VisionState : State {
   VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
   VisionState(const VisionState&) = delete;
@@ -38,7 +42,7 @@ struct VisionState : State {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
- private:
+ protected:
   friend struct MultiModalPipelineState;
 
   const MultiModalLanguageModel& model_;
@@ -47,6 +51,23 @@ struct VisionState : State {
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
 };
+
+// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
+//
+// vision.onnx is exported for exactly one image (Dynamo unrolls Python
+// for-loops at trace time, so an N-image dummy produces a graph that only
+// works for that exact N).  This subclass iterates over images in C++,
+// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
+// writing each result into the correct offset of the pre-allocated
+// image_features output buffer.
+struct QwenVisionState : VisionState {
+  using VisionState::VisionState;  // inherit constructor
+
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
+};
+
+// Factory: pick the right VisionState subclass based on model type.
+std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
 struct SpeechState : State {
   SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
@@ -108,6 +129,7 @@ struct DecoderState : State {
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<PositionInputs> position_inputs_;  // Model input
   DefaultKeyValueCache kv_cache_{*this};             // Model input
+  std::unique_ptr<RecurrentState> recurrent_state_;  // Model input (for hybrid models)
   Logits logits_{*this};                             // Model output
 };
 

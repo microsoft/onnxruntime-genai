@@ -50,6 +50,9 @@ namespace {
     << "    -ml,--max_length <number>\n"
     << "      Max sequence length (prompt + output). Overrides genai_config.json.\n"
     << "      Default: prompt_length + generation_length. Pass -1 to use config file value.\n"
+    << "    --reuse_generator\n"
+    << "      Reuse a single generator via RewindTo(0) instead of creating a new one per\n"
+    << "      iteration. Disabled by default.\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
     << "    -h,--help\n"
@@ -135,6 +138,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.num_warmup_iterations = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-ml" || arg == "--max_length") {
         opts.max_length = ParseNumber<int64_t>(next_arg(i));
+      } else if (arg == "--reuse_generator") {
+        opts.reuse_generator = true;
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
       } else if (arg == "-h" || arg == "--help") {

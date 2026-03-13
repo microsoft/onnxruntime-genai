@@ -5,6 +5,7 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "recurrent_state.h"
 
 namespace Generators {
 
@@ -36,6 +37,7 @@ struct DecoderOnly_State : State {
   DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> kv_cache_;
+  std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
