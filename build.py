@@ -62,6 +62,21 @@ def _resolve_ort_paths(ort_home: Path) -> tuple[Path, Path]:
         library_names = ["libonnxruntime.so"]
 
     lib_candidates = [ort_home / "lib", ort_home]
+
+    # Prioritize the runtimes directory matching the host architecture to avoid
+    # picking e.g. win-arm64 for an x64 build (sorted glob is alphabetical).
+    import platform as _platform
+
+    _arch = _platform.machine().lower()
+    if util.is_windows():
+        if "arm" in _arch or "aarch" in _arch:
+            preferred_rid = "win-arm64"
+        else:
+            preferred_rid = "win-x64"
+        preferred = ort_home / "runtimes" / preferred_rid / "native"
+        if preferred.is_dir():
+            lib_candidates.append(preferred)
+
     lib_candidates.extend(sorted(ort_home.glob("runtimes/*/native")))
     lib_candidates.extend(sorted(ort_home.glob("jni/*")))
 
