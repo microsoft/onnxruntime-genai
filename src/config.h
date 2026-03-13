@@ -166,7 +166,7 @@ struct Config {
       // Qwen VL specific vision config values
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL/3.5 uses 16
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};

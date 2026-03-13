@@ -11,6 +11,7 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "model_type.h"
+#include "recurrent_state.h"
 
 namespace Generators {
 
@@ -128,6 +129,7 @@ struct DecoderState : State {
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<PositionInputs> position_inputs_;  // Model input
   DefaultKeyValueCache kv_cache_{*this};             // Model input
+  std::unique_ptr<RecurrentState> recurrent_state_;  // Model input (for hybrid models)
   Logits logits_{*this};                             // Model output
 };
 
