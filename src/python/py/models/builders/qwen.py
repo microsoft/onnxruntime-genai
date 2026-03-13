@@ -687,9 +687,9 @@ class Qwen35Model(Qwen3Model):
         )
         self.make_value(f"{pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
-        mean_name = f"{basename}/ReduceMean"
-        self.make_reduce_mean(
-            mean_name,
+        sum_name = f"{basename}/ReduceSum"
+        self.make_reduce_sum(
+            sum_name,
             [f"{pow_name}/output_0", "/model/constants/INT64/[-1]"],
             ir.DataType.FLOAT,
             [shape[0], shape[1], shape[2], 1],
@@ -699,7 +699,7 @@ class Qwen35Model(Qwen3Model):
         eps_name = f"{basename}/Add"
         self.make_add(
             eps_name,
-            [f"{mean_name}/output_0", "/model/constants/FLOAT/1e-06"],
+            [f"{sum_name}/output_0", "/model/constants/FLOAT/1e-12"],
             ir.DataType.FLOAT,
             [shape[0], shape[1], shape[2], 1],
         )
