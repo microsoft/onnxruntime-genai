@@ -240,17 +240,81 @@ class Qwen35Model(Qwen3Model):
 
     def _make_qwen35_linear_placeholder_present_kv(self, layer_id, root_input):
         # Linear attention layers don't use standard KV caches, but the runtime
-        # expects present.{i}.key/value outputs for every layer. Use Identity
-        # pass-through (present = past) instead of make_repeat_kv, which creates
-        # Concat + expand subgraphs that conflict with GQA's past_present_share_buffer.
+        # expects present.{i}.key/value outputs for every layer with shape
+        # [B, num_kv_heads, total_seq_len, head_size] where total = past + current.
+        #
+        # We create a zero tensor of shape [B, num_kv_heads, seq_len, head_size]
+        # (matching the current step's tokens) and concat it with the past KV.
+        # This produces the correct total_sequence_length output without affecting
+        # model behavior since linear attention layers never read the KV cache.
+        basename = f"/model/layers.{layer_id}/linear_attn/kv_placeholder"
+
+        # Build zero tensor shape: [B, num_kv_heads, sequence_length, head_size]
+        # Get B and S dynamically from root_input [B, S, hidden_size]
+        shape_name = f"{basename}/Shape"
+        self.make_shape(shape_name, root_input, shape=[3])
+
+        batch_name = f"{basename}/Batch/Gather"
+        self.make_gather(
+            batch_name,
+            [f"{shape_name}/output_0", "/model/constants/INT64/0"],
+            dtype=ir.DataType.INT64, shape=[], axis=0,
+        )
+        batch_unsq = f"{basename}/Batch/Unsqueeze"
+        self.make_unsqueeze(
+            batch_unsq,
+            [f"{batch_name}/output_0", "/model/constants/INT64/[0]"],
+            dtype=ir.DataType.INT64, shape=[1],
+        )
+
+        seq_name = f"{basename}/Seq/Gather"
+        self.make_gather(
+            seq_name,
+            [f"{shape_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64, shape=[], axis=0,
+        )
+        seq_unsq = f"{basename}/Seq/Unsqueeze"
+        self.make_unsqueeze(
+            seq_unsq,
+            [f"{seq_name}/output_0", "/model/constants/INT64/[0]"],
+            dtype=ir.DataType.INT64, shape=[1],
+        )
+
+        # target shape: [B, num_kv_heads, S, head_size]
+        target_shape_name = f"{basename}/TargetShape/Concat"
+        self.make_concat(
+            target_shape_name,
+            [
+                f"{batch_unsq}/output_0",
+                f"/model/constants/INT64/[{self.num_kv_heads}]",
+                f"{seq_unsq}/output_0",
+                f"/model/constants/INT64/[{self.head_size}]",
+            ],
+            dtype=ir.DataType.INT64, shape=[4], axis=0,
+        )
+
+        # Create zero tensor [B, num_kv_heads, S, head_size]
+        zero_name = f"{basename}/Zeros"
+        self.make_constant_of_shape(
+            zero_name,
+            f"{target_shape_name}/output_0",
+            ir.tensor([0], dtype=self.io_dtype),
+            self.io_dtype,
+            ["batch_size", self.num_kv_heads, "sequence_length", self.head_size],
+        )
+        zero_out = f"{zero_name}/output_0"
+
+        # Concat past + zeros for each of key and value
         for kv_type in ("key", "value"):
             past_name = f"past_key_values.{layer_id}.{kv_type}"
             present_name = f"present.{layer_id}.{kv_type}"
+            concat_name = f"{basename}/{kv_type}/Concat"
             self.make_node(
-                "Identity",
-                inputs=[past_name],
+                "Concat",
+                inputs=[past_name, zero_out],
                 outputs=[present_name],
-                name=f"/model/layers.{layer_id}/linear_attn/present_{kv_type}/Identity",
+                name=concat_name,
+                axis=2,
             )
 
     def _make_qwen35_passthrough_auxiliary_states(self, layer_id):
