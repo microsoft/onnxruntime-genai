@@ -669,12 +669,6 @@ class Model:
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
-                    "rotary_embedding_dim": self.rope_attrs["rotary_embedding_dim"],
-                    "linear_num_key_heads": getattr(config, "linear_num_key_heads", 0),
-                    "linear_num_value_heads": getattr(config, "linear_num_value_heads", 0),
-                    "linear_key_head_dim": getattr(config, "linear_key_head_dim", 0),
-                    "linear_value_head_dim": getattr(config, "linear_value_head_dim", 0),
-                    "linear_conv_kernel_dim": getattr(config, "linear_conv_kernel_dim", 0),
                 },
                 "eos_token_id": eos_token_id,
                 "pad_token_id": pad_token_id,
@@ -702,6 +696,17 @@ class Model:
                 "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
             },
         }
+
+        # Add optional decoder fields only when they have non-default values
+        decoder = genai_config["model"]["decoder"]
+        rotemb_dim = self.rope_attrs["rotary_embedding_dim"]
+        if rotemb_dim and rotemb_dim != self.head_size:
+            decoder["rotary_embedding_dim"] = rotemb_dim
+        for attr in ["linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim",
+                      "linear_value_head_dim", "linear_conv_kernel_dim"]:
+            val = getattr(config, attr, 0)
+            if val:
+                decoder[attr] = val
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
