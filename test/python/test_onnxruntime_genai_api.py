@@ -961,3 +961,186 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     prompts = ["".join(decoder_prompt_tokens)] * batch_size
     _ = processor(prompts, audios=audios)
+
+
+def test_streaming_asr_create(nemotron_speech_model_path):
+    """Test that Generator + StreamingProcessor can be created from a nemotron_speech model."""
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    assert processor is not None
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    assert generator is not None
+
+
+def _load_streaming_config(model_path):
+    """Read sample_rate and chunk_samples from genai_config.json."""
+    import json
+    config_path = os.path.join(model_path, "genai_config.json")
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    return config["model"]["sample_rate"], config["model"]["chunk_samples"]
+
+
+def _decode_inputs(generator, inputs, tokenizer_stream=None):
+    """Common helper: set inputs on the generator and decode all tokens.
+
+    Returns the decoded text if tokenizer_stream is provided, otherwise empty string.
+    """
+    if inputs is None:
+        return ""
+    generator.set_inputs(inputs)
+    text = ""
+    while not generator.is_done():
+        generator.generate_next_token()
+        tokens = generator.get_next_tokens()
+        if tokenizer_stream is not None:
+            for token in tokens:
+                token_text = tokenizer_stream.decode(token)
+                if token_text:
+                    text += token_text
+    return text
+
+
+def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
+    """Test transcribing a chunk of silence (all zeros) does not crash."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+
+    silence = np.zeros(chunk_samples, dtype=np.float32)
+    mel = processor.process(silence)
+    text = _decode_inputs(generator, mel, tokenizer_stream)
+    assert isinstance(text, str)
+
+
+def test_streaming_asr_flush(nemotron_speech_model_path):
+    """Test that flush processes remaining buffered audio."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+
+    silence = np.zeros(chunk_samples, dtype=np.float32)
+    processor.process(silence)
+
+    mel = processor.flush()
+    _decode_inputs(generator, mel)
+
+
+def test_streaming_asr_sine_wave(nemotron_speech_model_path):
+    """Test transcribing a synthetic sine wave (non-trivial mel features)."""
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+
+    frequency = 440.0  # A4 note
+
+    # Generate 440Hz sine wave
+    t = np.arange(chunk_samples, dtype=np.float32) / sample_rate
+    audio = (0.5 * np.sin(2.0 * np.pi * frequency * t)).astype(np.float32)
+
+    transcript = ""
+    for _ in range(4):
+        mel = processor.process(audio)
+        transcript += _decode_inputs(generator, mel, tokenizer_stream)
+
+    mel = processor.flush()
+    transcript += _decode_inputs(generator, mel, tokenizer_stream)
+
+    assert isinstance(transcript, str)
+
+
+def test_streaming_asr_config_model_type(nemotron_speech_model_path):
+    """Test that a nemotron_speech model reports the correct type."""
+    model = og.Model(nemotron_speech_model_path)
+    assert model.type == "nemotron_speech"
+
+
+def _word_error_rate(reference: str, hypothesis: str) -> float:
+    """Compute Word Error Rate (WER) using edit distance on word sequences."""
+    import re
+
+    def normalize(text):
+        text = re.sub(r"[^\w\s]", "", text.lower())
+        return text.split()
+
+    r = normalize(reference)
+    h = normalize(hypothesis)
+    d = [[0] * (len(h) + 1) for _ in range(len(r) + 1)]
+    for i in range(len(r) + 1):
+        d[i][0] = i
+    for j in range(len(h) + 1):
+        d[0][j] = j
+    for i in range(1, len(r) + 1):
+        for j in range(1, len(h) + 1):
+            if r[i - 1] == h[j - 1]:
+                d[i][j] = d[i - 1][j - 1]
+            else:
+                d[i][j] = 1 + min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1])
+    return d[len(r)][len(h)] / max(len(r), 1)
+
+
+def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
+    """Test that transcription of a known audio file has acceptable WER."""
+    try:
+        import soundfile as sf
+    except ImportError:
+        pytest.skip("soundfile not installed")
+        return
+
+    audio_path = os.path.join(test_data_path, "audios", "1272-141231-0002.mp3")
+    if not os.path.exists(audio_path):
+        pytest.skip(f"Test audio not found: {audio_path}")
+
+    # Load audio as float32 mono, resample to model's sample rate
+    audio, sr = sf.read(audio_path, dtype="float32")
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    if sr != sample_rate:
+        try:
+            import scipy.signal
+            num_samples = int(len(audio) * sample_rate / sr)
+            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+        except ImportError:
+            pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
+
+    # Transcribe using Generator + StreamingProcessor
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+
+    transcript = ""
+    for start in range(0, len(audio), chunk_samples):
+        chunk = audio[start : start + chunk_samples].astype(np.float32)
+        mel = processor.process(chunk)
+        transcript += _decode_inputs(generator, mel, tokenizer_stream)
+
+    mel = processor.flush()
+    transcript += _decode_inputs(generator, mel, tokenizer_stream)
+
+    reference = (
+        "the cut on his chest still dripping blood the ache of his overstrained eyes "
+        "even the soaring arena around him with the thousands of spectators were "
+        "trivialities not worth thinking about"
+    )
+
+    wer = _word_error_rate(reference, transcript)
+    assert wer < 0.15, (
+        f"WER too high: {wer:.1%}\n"
+        f"  Reference:  {reference}\n"
+        f"  Hypothesis: {transcript.lower()}"
+    )

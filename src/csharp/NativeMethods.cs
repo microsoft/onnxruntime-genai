@@ -440,5 +440,26 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaUnloadAdapter(IntPtr /* OgaAdapters* */ adapters,
                                                                       byte[] /* const char* */ adapterName);
+
+        // StreamingProcessor API
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateStreamingProcessor(IntPtr /* const OgaModel* */ model,
+                                                                              out IntPtr /* OgaStreamingProcessor** */ processor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyStreamingProcessor(IntPtr /* OgaStreamingProcessor* */ processor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaStreamingProcessorProcess(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                      float* /* const float* */ audioData,
+                                                                                      UIntPtr /* size_t */ numSamples,
+                                                                                      out IntPtr /* OgaNamedTensors** */ out_named_tensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorFlush(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                             out IntPtr /* OgaNamedTensors** */ out_named_tensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorReset(IntPtr /* OgaStreamingProcessor* */ processor);
     }
 }

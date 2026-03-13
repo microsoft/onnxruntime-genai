@@ -79,6 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 //! @}
 
@@ -1145,6 +1146,46 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
  *
  */
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
+/**
+ * \brief Creates a StreamingProcessor for mel spectrogram extraction from raw audio.
+ * \param[in] model The model to create the processor for (must be nemotron_speech type).
+ * \param[out] out Pointer to store the created StreamingProcessor instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out);
+
+/**
+ * \brief Process a chunk of raw PCM audio and return a NamedTensors if a full chunk is ready.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] audio_data Pointer to float32 PCM audio samples (mono, model sample rate).
+ * \param[in] num_samples Number of audio samples.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if not enough audio yet.
+ *                  Caller must free with OgaDestroyNamedTensors.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out);
+
+/**
+ * \brief Flush remaining buffered audio (pads with silence).
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if buffer was empty.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out);
+
+/**
+ * \brief Reset audio processor state for a new utterance.
+ * \param[in] processor The StreamingProcessor instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorReset(OgaStreamingProcessor* processor);
+
+/**
+ * \brief Destroy a StreamingProcessor instance.
+ * \param[in] processor The StreamingProcessor instance to destroy.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
 
 #ifdef __cplusplus
 }
