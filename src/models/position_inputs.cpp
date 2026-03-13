@@ -156,10 +156,11 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
               attention_mask_->GetMutableRawData(),
               static_cast<int>(attention_mask_shape_[0]),
               total_length, type_)) {
-        // Fallback: use CPU interface via byte span round-trip
+        // Fallback: use CPU interface with write-only staging buffer to avoid D2H copy
         auto byte_span = attention_mask_->GetByteSpan();
+        auto cpu_span = byte_span.CpuSpan();
         GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            byte_span.CopyDeviceToCpu().data(),
+            cpu_span.data(),
             static_cast<int>(attention_mask_shape_[0]),
             total_length, type_);
         byte_span.CopyCpuToDevice();
@@ -207,8 +208,9 @@ void DefaultPositionInputs::RewindTo(size_t index) {
               static_cast<int>(attention_mask_shape_[0]),
               static_cast<int>(index), type_)) {
         auto byte_span = attention_mask_->GetByteSpan();
+        auto cpu_span = byte_span.CpuSpan();
         GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            byte_span.CopyDeviceToCpu().data(),
+            cpu_span.data(),
             static_cast<int>(attention_mask_shape_[0]),
             static_cast<int>(index), type_);
         byte_span.CopyCpuToDevice();
@@ -460,7 +462,7 @@ void DefaultPositionInputs::UpdateCompactAttentionMask() {
   // In compact mode, attention_mask has shape [batch_size, 1] containing total seq len per batch.
   // Each decode step adds one token, so increment each value by 1.
   auto byte_span = attention_mask_->GetByteSpan();
-  auto cpu_data = byte_span.CopyDeviceToCpu();
+  auto cpu_data = byte_span.CpuSpan();
   if (type_ == Ort::TypeToTensorType<int32_t>) {
     auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
     for (int64_t i = 0; i < attention_mask_shape_[0]; i++)
