@@ -360,7 +360,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  DurationTrace trace{"AllocateInputIdsOnDevice"};
+  DurationTrace trace{"Generator::AllocateInputIdsOnDevice"};
   size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size

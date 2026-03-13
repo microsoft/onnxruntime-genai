@@ -86,7 +86,7 @@ void DecoderOnly_State::RewindTo(size_t index) {
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
-  DurationTrace trace{"UpdateInputsOutputs"};
+  DurationTrace trace{"DecoderOnly_State::UpdateInputsOutputs"};
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
 

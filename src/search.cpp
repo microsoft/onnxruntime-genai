@@ -335,7 +335,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 }
 
 void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
-  DurationTrace trace{"GreedySearch::AppendTokens"};
+  DurationTrace trace{"GreedySearch_Cpu::AppendTokens"};
   // Set user-defined next tokens
   auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_size = params_->search.batch_size;
