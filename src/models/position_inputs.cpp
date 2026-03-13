@@ -159,10 +159,7 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
         // Fallback: use CPU interface with write-only staging buffer to avoid D2H copy
         auto byte_span = attention_mask_->GetByteSpan();
         auto cpu_span = byte_span.CpuSpan();
-        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            cpu_span.data(),
-            static_cast<int>(attention_mask_shape_[0]),
-            total_length, type_);
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(cpu_span.data(), static_cast<int>(attention_mask_shape_[0]), total_length, type_);
         byte_span.CopyCpuToDevice();
       }
     } else if (is_first_update_) {
@@ -209,10 +206,7 @@ void DefaultPositionInputs::RewindTo(size_t index) {
               static_cast<int>(index), type_)) {
         auto byte_span = attention_mask_->GetByteSpan();
         auto cpu_span = byte_span.CpuSpan();
-        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(
-            cpu_span.data(),
-            static_cast<int>(attention_mask_shape_[0]),
-            static_cast<int>(index), type_);
+        GetDeviceInterface(DeviceType::CPU)->UpdateCompactAttentionMask(cpu_span.data(), static_cast<int>(attention_mask_shape_[0]), static_cast<int>(index), type_);
         byte_span.CopyCpuToDevice();
       }
     } else if (attention_mask_shape_[0] == 1) {
