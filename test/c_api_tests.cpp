@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <fstream>
 #include <numeric>
 #include <iostream>
@@ -1365,13 +1366,10 @@ TEST(CAPITests, SetGuidance) {
 }
 #endif
 
-#if TEST_STREAMING_ASR
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
 #endif
-#endif
 
-#if TEST_STREAMING_ASR
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   if (mel) {
@@ -1381,25 +1379,23 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
     }
   }
 }
-#endif
 
 // Test creating a Generator + StreamingProcessor from a nemotron_speech model
 TEST(CAPITests, StreamingASRCreate) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   ASSERT_NE(processor, nullptr);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
   ASSERT_NE(generator, nullptr);
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken
 TEST(CAPITests, StreamingASRTranscribeSilence) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1411,14 +1407,12 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
   auto mel = processor->Process(silence.data(), silence.size());
   DecodeInputs(*generator, mel.get());
   SUCCEED();
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }
 
 // Test feeding multiple chunks and decoding via GenerateNextToken
 TEST(CAPITests, StreamingASRMultipleChunks) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1432,14 +1426,12 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
     DecodeInputs(*generator, mel.get());
   }
   SUCCEED();
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }
 
 // Test flush processes remaining buffered audio
 TEST(CAPITests, StreamingASRFlush) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1452,14 +1444,12 @@ TEST(CAPITests, StreamingASRFlush) {
   auto mel = processor->Flush();
   DecodeInputs(*generator, mel.get());
   SUCCEED();
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }
 
 // Test transcribing a synthetic sine wave via GenerateNextToken
 TEST(CAPITests, StreamingASRSineWave) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1483,14 +1473,12 @@ TEST(CAPITests, StreamingASRSineWave) {
   auto flush_mel = processor->Flush();
   DecodeInputs(*generator, flush_mel.get());
   SUCCEED();
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }
 
 // Test raw C API for StreamingProcessor + Generator
 TEST(CAPITests, StreamingASRRawCAPI) {
-#if TEST_STREAMING_ASR
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   OgaModel* model = nullptr;
   ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
   ASSERT_NE(model, nullptr);
@@ -1521,7 +1509,4 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   OgaDestroyGeneratorParams(params);
   OgaDestroyStreamingProcessor(processor);
   OgaDestroyModel(model);
-#else
-  GTEST_SKIP() << "Streaming ASR tests not enabled (TEST_STREAMING_ASR=0).";
-#endif
 }

@@ -194,6 +194,7 @@ struct NemotronSpeechState : State {
   std::span<const int32_t> StepToken();
   bool IsChunkDone() const { return chunk_done_; }
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
+  size_t TokenCount() const { return token_count_; }
   void ResetStreamingState();
 
   OrtValue* GetInput(const char* name) override;
@@ -223,6 +224,7 @@ struct NemotronSpeechState : State {
   bool need_encoder_run_{false};
   bool chunk_done_{true};
   std::vector<int32_t> last_tokens_;
+  size_t token_count_{};  // Total tokens emitted across all chunks
 
   void RunEncoder();
 };

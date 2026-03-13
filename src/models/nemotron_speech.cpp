@@ -523,6 +523,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     }
 
     last_tokens_.push_back(static_cast<int32_t>(best_token));
+    token_count_++;
     return last_tokens_;
   }
 

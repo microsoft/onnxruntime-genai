@@ -351,7 +351,6 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   // RNNT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsRNNT(model.config_->model.type)) {
-    is_rnnt_ = true;
     state_ = model.CreateState({}, params);
     return;
   }
@@ -515,17 +514,17 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
-  if (is_rnnt_) return rnnt_token_count_;
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get()))
+    return speech_state->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  if (is_rnnt_) {
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
     return speech_state->IsChunkDone();
   }
 
@@ -560,12 +559,10 @@ void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
   // RNNT models: yield one token per call from the decoder state machine
-  if (is_rnnt_) {
-    auto* speech_state = static_cast<NemotronSpeechState*>(state_.get());
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
-    auto tokens = speech_state->StepToken();
-    rnnt_token_count_ += tokens.size();
+    speech_state->StepToken();
     return;
   }
 

@@ -481,8 +481,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
   OGA_TRY
   // For RNNT models, search_ is not used; return tokens from last StepToken
-  if (generator->is_rnnt_) {
-    auto* speech_state = static_cast<Generators::NemotronSpeechState*>(generator->state_.get());
+  if (auto* speech_state = dynamic_cast<Generators::NemotronSpeechState*>(generator->state_.get())) {
     auto tokens = speech_state->GetStepTokens();
     *out = tokens.data();
     *out_count = tokens.size();
