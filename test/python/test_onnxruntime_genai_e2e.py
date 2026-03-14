@@ -14,17 +14,6 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("onnxruntime-genai-tests")
 
 
-def is_known_phi4_cuda_lm_head_oom(model_path: str | bytes | os.PathLike, error: Exception) -> bool:
-    model_path_str = os.fspath(model_path)
-    error_text = str(error)
-    return (
-        os.path.join("phi-4-mini", "int4", "cuda") in model_path_str
-        and "/lm_head/MatMul_Q4" in error_text
-        and "MatMulNBits" in error_text
-        and "Failed to allocate memory" in error_text
-    )
-
-
 def run_model(model_path: str | bytes | os.PathLike):
     model = og.Model(model_path)
 
@@ -192,13 +181,6 @@ if __name__ == "__main__":
             log.info(f"Running {model_path}")
             run_model(model_path)
         except Exception as e:
-            if is_known_phi4_cuda_lm_head_oom(model_path, e):
-                log.warning(
-                    "Skipping legacy phi-4-mini CUDA INT4 artifact with quantized lm_head. "
-                    "Rebuild the test model so /lm_head/MatMul uses the safer test configuration."
-                )
-                continue
-
             log.error(e)
             log.error(f"Failed to run {model_path}", exc_info=True)
 
