@@ -7,6 +7,21 @@ import subprocess
 import sys
 
 
+def get_builder_extra_options(model_alias: str, precision: str, device: str, one_layer: bool):
+    extra_options = ["include_hidden_states=1", "hf_token=0", "hf_remote=0"]
+
+    if device == "cpu" and precision == "int4":
+        extra_options += ["int4_accuracy_level=4"]
+
+    if one_layer:
+        extra_options += ["num_hidden_layers=1"]
+
+    if model_alias == "phi-4-mini" and precision == "int4" and device == "cuda":
+        extra_options += ["shared_embeddings=true", "int4_algo_config=rtn_last"]
+
+    return extra_options
+
+
 def is_windows():
     return sys.platform.startswith("win")
 
@@ -94,7 +109,7 @@ def get_model_paths():
     return ci_paths, hf_paths
 
 
-def download_model(model_name, input_path, output_path, precision, device, one_layer):
+def download_model(model_name, input_path, output_path, precision, device, one_layer, model_alias):
     command = [
         sys.executable,
         "-m",
@@ -121,11 +136,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         device,
     ]
 
-    extra_options = ["--extra_options", "include_hidden_states=1", "hf_token=0", "hf_remote=0"]
-    if device == "cpu" and precision == "int4":
-        extra_options += ["int4_accuracy_level=4"]
-    if one_layer:
-        extra_options += ["num_hidden_layers=1"]
+    extra_options = ["--extra_options", *get_builder_extra_options(model_alias, precision, device, one_layer)]
     if len(extra_options) > 1:
         command += extra_options
 
@@ -146,7 +157,7 @@ def download_models(download_path, precision, device, log):
             output_path = os.path.join(download_path, model_name, precision, device)
             log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
             if not os.path.exists(output_path):
-                download_model(None, input_path, output_path, precision, device, one_layer)
+                download_model(None, input_path, output_path, precision, device, one_layer, model_name)
                 output_paths.append(output_path)
         except Exception as e:
             log.warning(f"Error: {e}. Skipping CI model.")
@@ -169,7 +180,7 @@ def download_models(download_path, precision, device, log):
         log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
 
         if not os.path.exists(output_path):
-            download_model(hf_name, "", output_path, precision, device, one_layer)
+            download_model(hf_name, "", output_path, precision, device, one_layer, model_name)
             output_paths.append(output_path)
 
     log.info(f"Successfully downloaded {len(output_paths)} models")
