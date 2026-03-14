@@ -4,8 +4,19 @@
 #pragma once
 
 #include "model.h"
+#include <vector>
 
 namespace Generators {
+
+struct AuxiliaryStateSet {
+  std::vector<int64_t> shape;
+  ONNXTensorElementDataType type{};
+  std::unique_ptr<OrtValue> empty_past;
+  std::vector<std::unique_ptr<OrtValue>> pasts;
+  std::vector<std::unique_ptr<OrtValue>> presents;
+  std::vector<std::string> input_name_strings;
+  std::vector<std::string> output_name_strings;
+};
 
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
@@ -80,6 +91,10 @@ struct DefaultKeyValueCache : KeyValueCache {
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
+  template <typename ScoreType>
+  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
+  void PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index);
+
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
@@ -106,6 +121,8 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+  size_t auxiliary_input_index_{~0U}, auxiliary_output_index_{~0U};
+  std::vector<AuxiliaryStateSet> auxiliary_state_sets_;
 };
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step

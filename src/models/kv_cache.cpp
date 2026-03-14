@@ -7,6 +7,9 @@
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
 #include <algorithm>
+#include <numeric>
+#include <unordered_map>
+#include <mutex>
 
 namespace Generators {
 
@@ -152,30 +155,6 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
       shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
-  if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
-    Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
-
-  // Auto-discover which layer indices have KV cache inputs
-  kv_layer_indices_.clear();
-  {
-    const auto& key_template = model_.config_->model.decoder.inputs.past_key_names;
-    auto prefix = key_template.substr(0, key_template.find('%'));
-    auto suffix = key_template.substr(key_template.find('%') + 2);
-    for (const auto& name : model_.session_info_.GetInputNames()) {
-      if (name.size() > prefix.size() + suffix.size() &&
-          name.compare(0, prefix.size(), prefix) == 0 &&
-          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-        auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
-        kv_layer_indices_.push_back(std::stoi(idx_str));
-      }
-    }
-    std::sort(kv_layer_indices_.begin(), kv_layer_indices_.end());
-  }
-
-  if (!kv_layer_indices_.empty()) {
-    layer_count_ = static_cast<int>(kv_layer_indices_.size());
-  }
-
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
@@ -205,6 +184,63 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+  const auto maybe_add_auxiliary_state_set = [this](const std::string& input_name_template,
+                                                    const std::string& output_name_template,
+                                                    const std::vector<int64_t>& shape) {
+    if (input_name_template.empty() || output_name_template.empty()) {
+      return;
+    }
+
+    const std::string first_input_name = ComposeKeyValueName(input_name_template, 0);
+    if (!model_.session_info_.HasInput(first_input_name)) {
+      return;
+    }
+
+    AuxiliaryStateSet state_set;
+    state_set.shape = shape;
+    state_set.type = model_.session_info_.GetInputDataType(first_input_name);
+    state_set.empty_past = OrtValue::CreateTensor(Allocator(), state_set.shape, state_set.type);
+    if (Device().GetType() != DeviceType::WEBGPU) {
+      ByteWrapTensor(Device(), *state_set.empty_past).Zero();
+    }
+    state_set.pasts.resize(layer_count_);
+    state_set.presents.reserve(layer_count_);
+
+    for (int i = 0; i < layer_count_; ++i) {
+      state_set.input_name_strings.emplace_back(ComposeKeyValueName(input_name_template, i));
+      state_set.output_name_strings.emplace_back(ComposeKeyValueName(output_name_template, i));
+      state_set.presents.push_back(OrtValue::CreateTensor(Allocator(), state_set.shape, state_set.type));
+      if (Device().GetType() != DeviceType::WEBGPU) {
+        ByteWrapTensor(Device(), *state_set.presents.back()).Zero();
+      }
+    }
+
+    auxiliary_state_sets_.push_back(std::move(state_set));
+  };
+
+  const auto& decoder_config = model_.config_->model.decoder;
+  const int64_t linear_conv_dim = static_cast<int64_t>(decoder_config.linear_num_key_heads) * decoder_config.linear_key_head_dim * 2 +
+                                  static_cast<int64_t>(decoder_config.linear_num_value_heads) * decoder_config.linear_value_head_dim;
+  if (decoder_config.linear_conv_kernel_dim > 0 && linear_conv_dim > 0) {
+    maybe_add_auxiliary_state_set(
+        decoder_config.inputs.past_conv_state_names,
+        decoder_config.outputs.present_conv_state_names,
+        {shape_[0], linear_conv_dim, decoder_config.linear_conv_kernel_dim});
+  }
+  if (decoder_config.linear_num_value_heads > 0 && decoder_config.linear_key_head_dim > 0 && decoder_config.linear_value_head_dim > 0) {
+    maybe_add_auxiliary_state_set(
+        decoder_config.inputs.past_recurrent_state_names,
+        decoder_config.outputs.present_recurrent_state_names,
+        {shape_[0], decoder_config.linear_num_value_heads, decoder_config.linear_key_head_dim, decoder_config.linear_value_head_dim});
+  }
+
+  if (!auxiliary_state_sets_.empty()) {
+    past_present_share_buffer_ = false;
+  }
+
+  if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
+    Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
@@ -297,6 +333,19 @@ void DefaultKeyValueCache::Add() {
       state_.inputs_[input_index_ + i] = presents_[i].get();
     }
   }
+
+  if (!auxiliary_state_sets_.empty()) {
+    auxiliary_input_index_ = state_.inputs_.size();
+    auxiliary_output_index_ = state_.outputs_.size();
+    for (auto& state_set : auxiliary_state_sets_) {
+      for (int i = 0; i < layer_count_; ++i) {
+        state_.inputs_.push_back(state_set.empty_past.get());
+        state_.input_names_.push_back(state_set.input_name_strings[i].c_str());
+        state_.outputs_.push_back(state_set.presents[i].get());
+        state_.output_names_.push_back(state_set.output_name_strings[i].c_str());
+      }
+    }
+  }
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
@@ -304,7 +353,9 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   if (past_present_share_buffer_)
     return;
 
-  if (!is_first_update_) {
+  const bool first_update = is_first_update_;
+
+  if (!first_update) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       if (beam_indices.empty()) {
         pasts_[i] = std::move(presents_[i]);
@@ -339,12 +390,39 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   }
 
+  if (!auxiliary_state_sets_.empty()) {
+    size_t input_offset = auxiliary_input_index_;
+    size_t output_offset = auxiliary_output_index_;
+    for (auto& state_set : auxiliary_state_sets_) {
+      if (!first_update) {
+        for (int i = 0; i < layer_count_; ++i) {
+          if (beam_indices.empty()) {
+            state_set.pasts[i] = std::move(state_set.presents[i]);
+          } else {
+            PickPastAuxiliaryState(beam_indices, state_set, i);
+          }
+          state_.inputs_[input_offset + i] = state_set.pasts[i].get();
+        }
+      }
+
+      for (int i = 0; i < layer_count_; ++i) {
+        state_set.presents[i] = OrtValue::CreateTensor(Allocator(), state_set.shape, state_set.type);
+        state_.outputs_[output_offset + i] = state_set.presents[i].get();
+      }
+
+      input_offset += layer_count_;
+      output_offset += layer_count_;
+    }
+  }
+
   is_first_update_ = false;
 }
 
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;
+  } else if (!auxiliary_state_sets_.empty() && index > 0) {
+    throw std::runtime_error("RewindTo for models with auxiliary decoder state caches is currently only supported for index 0.");
   } else if (shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
@@ -354,6 +432,16 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
       state_.inputs_[input_index_ + i] = empty_past_.get();
+    }
+    if (!auxiliary_state_sets_.empty()) {
+      size_t input_offset = auxiliary_input_index_;
+      for (auto& state_set : auxiliary_state_sets_) {
+        for (int i = 0; i < layer_count_; ++i) {
+          state_set.pasts[i] = nullptr;
+          state_.inputs_[input_offset + i] = state_set.empty_past.get();
+        }
+        input_offset += layer_count_;
+      }
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
@@ -474,6 +562,71 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
+namespace {
+
+int64_t GetElementsPerBeam(const AuxiliaryStateSet& state_set) {
+  static std::mutex mutex;
+  static std::unordered_map<const AuxiliaryStateSet*, int64_t> cache;
+
+  const auto* key = &state_set;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+  }
+
+  int64_t elements_per_beam = std::accumulate(
+      state_set.shape.begin() + 1,
+      state_set.shape.end(),
+      int64_t{1},
+      std::multiplies<int64_t>{});
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto [it, inserted] = cache.emplace(key, elements_per_beam);
+    if (!inserted) {
+      // Another thread inserted the value first; use the existing one.
+      return it->second;
+    }
+  }
+
+  return elements_per_beam;
+}
+
+}  // namespace
+
+template <typename ScoreType>
+void DefaultKeyValueCache::PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices_device, AuxiliaryStateSet& state_set, int index) {
+  std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
+  const int64_t elements_per_beam = GetElementsPerBeam(state_set);
+
+  OrtValue& present_value = *state_set.presents[index];
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), state_set.shape, state_set.type);
+
+  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
+  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+
+  for (size_t j = 0; j < beam_indices.size(); ++j) {
+    const int32_t beam_index = beam_indices[j];
+    auto present = present_span.subspan(beam_index * elements_per_beam, elements_per_beam);
+    auto past = past_span.subspan(j * elements_per_beam, elements_per_beam);
+    past.CopyFrom(present);
+  }
+
+  state_set.pasts[index] = std::move(past_value);
+}
+
+void DefaultKeyValueCache::PickPastAuxiliaryState(DeviceSpan<int32_t> beam_indices, AuxiliaryStateSet& state_set, int index) {
+  if (state_set.type == Ort::TypeToTensorType<float>) {
+    PickPastAuxiliaryState<float>(beam_indices, state_set, index);
+  } else {
+    PickPastAuxiliaryState<Ort::Float16_t>(beam_indices, state_set, index);
+  }
+}
+
 CrossCache::CrossCache(State& state, int sequence_length) {
   const Model& model = state.model_;
   auto& allocator = state.model_.p_device_kvcache_->GetAllocator();
@@ -559,6 +712,14 @@ bool IsCacheNeeded(const Model& model) {
   return false;
 }
 
+bool HasAuxiliaryDecoderStateCache(const Model& model) {
+  const auto& decoder_inputs = model.config_->model.decoder.inputs;
+  return (!decoder_inputs.past_conv_state_names.empty() &&
+          model.session_info_.HasInput(ComposeKeyValueName(decoder_inputs.past_conv_state_names, 0))) ||
+         (!decoder_inputs.past_recurrent_state_names.empty() &&
+          model.session_info_.HasInput(ComposeKeyValueName(decoder_inputs.past_recurrent_state_names, 0)));
+}
+
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
@@ -575,9 +736,21 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
+  if (HasAuxiliaryDecoderStateCache(state.model_)) {
+    if (state.model_.config_->engine.dynamic_batching.has_value()) {
+      throw std::runtime_error("Dynamic batching is not currently supported for models with auxiliary decoder state caches.");
+    }
+    if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
+      throw std::runtime_error("NvTensorRtRtx is not currently supported for models with auxiliary decoder state caches.");
+    }
+  }
+
   if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
       state.model_.config_->model.decoder.sliding_window &&
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+    if (HasAuxiliaryDecoderStateCache(state.model_)) {
+      throw std::runtime_error("Sliding-window KV cache is not currently supported for models with auxiliary decoder state caches.");
+    }
     return std::make_unique<WindowedKeyValueCache>(state);
   }
 

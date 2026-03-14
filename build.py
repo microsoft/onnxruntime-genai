@@ -25,6 +25,83 @@ def _path_from_env_var(env_var: str):
     return Path(env_var_value) if env_var_value is not None else None
 
 
+def _resolve_ort_paths(ort_home: Path) -> tuple[Path, Path]:
+    ort_home = ort_home.resolve(strict=True)
+
+    include_candidates = []
+    if util.is_aix():
+        include_candidates.append(ort_home / "include" / "onnxruntime")
+
+    include_candidates.extend(
+        [
+            ort_home / "include",
+            ort_home / "include" / "onnxruntime",
+            ort_home / "Headers",
+            ort_home / "headers",
+            ort_home / "build" / "native" / "include",
+            ort_home / "build" / "native" / "include" / "onnxruntime",
+            ort_home / "buildTransitive" / "native" / "include",
+            ort_home / "buildTransitive" / "native" / "include" / "onnxruntime",
+        ]
+    )
+
+    include_dir = next(
+        (candidate for candidate in include_candidates if (candidate / "onnxruntime_cxx_api.h").exists()),
+        None,
+    )
+    if include_dir is None:
+        raise FileNotFoundError(f"Unable to locate ONNX Runtime headers under {ort_home}")
+
+    if util.is_windows():
+        library_names = ["onnxruntime.lib", "onnxruntime.dll"]
+    elif util.is_mac():
+        library_names = ["libonnxruntime.dylib"]
+    elif util.is_aix():
+        library_names = ["libonnxruntime.a"]
+    else:
+        library_names = ["libonnxruntime.so"]
+
+    lib_candidates = [ort_home / "lib", ort_home]
+
+    # Prioritize the runtimes directory matching the host architecture to avoid
+    # picking e.g. win-arm64 for an x64 build (sorted glob is alphabetical).
+    import platform as _platform
+
+    _arch = _platform.machine().lower()
+    if util.is_windows():
+        if "arm" in _arch or "aarch" in _arch:
+            preferred_rid = "win-arm64"
+        else:
+            preferred_rid = "win-x64"
+        preferred = ort_home / "runtimes" / preferred_rid / "native"
+        if preferred.is_dir():
+            lib_candidates.append(preferred)
+
+    lib_candidates.extend(sorted(ort_home.glob("runtimes/*/native")))
+    lib_candidates.extend(sorted(ort_home.glob("jni/*")))
+
+    lib_dir = next(
+        (
+            candidate
+            for candidate in lib_candidates
+            if candidate.is_dir() and any((candidate / library_name).exists() for library_name in library_names)
+        ),
+        None,
+    )
+    if lib_dir is None:
+        raise FileNotFoundError(f"Unable to locate ONNX Runtime libraries under {ort_home}")
+
+    return include_dir, lib_dir
+
+
+def _get_examples_ort_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.ort_home:
+        return _resolve_ort_paths(args.ort_home)
+
+    dependencies_dir = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, args.build_dir)
+    return _resolve_ort_paths(dependencies_dir / "ort")
+
+
 def _parse_args():
     class Parser(argparse.ArgumentParser):
         # override argument file line parsing behavior - allow multiple arguments per line and handle quotes
@@ -779,8 +856,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DWHISPER=ON",
     ]
 
-    ort_include_dir = REPO_ROOT / "ort" / "include"
-    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    ort_include_dir, ort_lib_dir = _get_examples_ort_paths(args)
     oga_include_dir = REPO_ROOT / "src"
     oga_lib_dir = args.build_dir
     if util.is_windows():
