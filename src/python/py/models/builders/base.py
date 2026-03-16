@@ -149,7 +149,7 @@ class Model:
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
-            "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
+            "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models; compact mask shape is overridden in make_attention_mask_reformatting_for_gqa
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
@@ -4456,6 +4456,10 @@ class Model:
         #            |        |
         #       seqlens_k  total_seq_len
         #         (1D)       (scalar)
+
+        # Override the attention_mask input shape to [batch_size, 1] for compact mode.
+        # This is scoped to GQA models only; other attention ops are not supported with compact masks.
+        self.input_shapes["attention_mask"] = ["batch_size", 1]
 
         # Cast from INT64 to INT32
         cast_name = f"{attn_mask_basename}/Cast"
