@@ -660,8 +660,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             }
             return pybind11::none();
           },
-          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
-;
+          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
