@@ -458,8 +458,5 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorFlush(IntPtr /* OgaStreamingProcessor* */ processor,
                                                                              out IntPtr /* OgaNamedTensors** */ out_named_tensors);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorReset(IntPtr /* OgaStreamingProcessor* */ processor);
     }
 }

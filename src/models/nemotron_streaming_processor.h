@@ -18,7 +18,6 @@ struct NemotronStreamingProcessor : StreamingProcessor {
 
   std::unique_ptr<NamedTensors> Process(const float* audio_data, size_t num_samples) override;
   std::unique_ptr<NamedTensors> Flush() override;
-  void Reset() override;
 
   int GetChunkSamples() const { return cache_config_.chunk_samples; }
   int GetSampleRate() const { return cache_config_.sample_rate; }

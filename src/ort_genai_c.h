@@ -1175,13 +1175,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProc
 OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out);
 
 /**
- * \brief Reset audio processor state for a new utterance.
- * \param[in] processor The StreamingProcessor instance.
- * \return OgaResult on error, nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorReset(OgaStreamingProcessor* processor);
-
-/**
  * \brief Destroy a StreamingProcessor instance.
  * \param[in] processor The StreamingProcessor instance to destroy.
  */

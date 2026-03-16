@@ -46,14 +46,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
-        /// <summary>
-        /// Reset processor state for a new utterance.
-        /// </summary>
-        public void Reset()
-        {
-            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorReset(_processorHandle));
-        }
-
         ~StreamingProcessor()
         {
             Dispose(false);

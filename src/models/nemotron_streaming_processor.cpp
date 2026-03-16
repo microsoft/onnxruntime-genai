@@ -39,14 +39,6 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
 
 NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
 
-void NemotronStreamingProcessor::Reset() {
-  mel_extractor_.Reset();
-  mel_pre_encode_cache_.assign(
-      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
-  cache_pos_ = 0;
-  audio_buffer_.clear();
-}
-
 std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* audio_data, size_t num_samples) {
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);

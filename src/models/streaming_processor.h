@@ -19,9 +19,6 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   /// Flush remaining buffered data.
   /// Returns final NamedTensors, or nullptr if buffer is empty.
   virtual std::unique_ptr<NamedTensors> Flush() = 0;
-
-  /// Reset all streaming state for a new utterance.
-  virtual void Reset() = 0;
 };
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model);

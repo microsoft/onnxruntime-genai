@@ -1126,13 +1126,6 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* proces
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaStreamingProcessorReset(OgaStreamingProcessor* processor) {
-  OGA_TRY
-  processor->Reset();
-  return nullptr;
-  OGA_CATCH
-}
-
 void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
 
 }  // extern "C"

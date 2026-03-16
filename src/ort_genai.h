@@ -906,9 +906,5 @@ struct OgaStreamingProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(out);
   }
 
-  void Reset() {
-    OgaCheckResult(OgaStreamingProcessorReset(this));
-  }
-
   static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
 };
