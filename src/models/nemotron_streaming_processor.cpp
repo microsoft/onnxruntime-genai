@@ -35,6 +35,12 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
   cache_pos_ = 0;
+
+  // Auto-enable VAD if silero_vad.onnx is found in the model directory
+  auto vad_path = model.config_->config_path / "silero_vad.onnx";
+  if (fs::path(vad_path).exists()) {
+    EnableVad(vad_path.string().c_str(), 0.5f);
+  }
 }
 
 NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
@@ -47,7 +53,16 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
 
   // Process the first complete chunk available
   if (audio_buffer_.size() >= chunk_size) {
-    auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
+    const float* chunk_data = audio_buffer_.data();
+
+    // VAD check: skip chunks with no speech
+    if (vad_ && !vad_->ContainsSpeech(chunk_data, chunk_size)) {
+      audio_buffer_.erase(audio_buffer_.begin(),
+                          audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+      return nullptr;  // No speech detected, skip this chunk
+    }
+
+    auto mel = BuildMelTensor(chunk_data, chunk_size);
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
     auto result = std::make_unique<NamedTensors>();
@@ -133,6 +148,24 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
   return std::make_unique<NemotronStreamingProcessor>(model);
+}
+
+void NemotronStreamingProcessor::EnableVad(const char* vad_model_path, float threshold) {
+  vad_ = CreateSileroVad(vad_model_path, cache_config_.sample_rate, threshold);
+}
+
+void NemotronStreamingProcessor::DisableVad() {
+  vad_.reset();
+}
+
+void NemotronStreamingProcessor::SetVadThreshold(float threshold) {
+  if (vad_) {
+    vad_->SetThreshold(threshold);
+  }
+}
+
+bool NemotronStreamingProcessor::IsVadEnabled() const {
+  return vad_ != nullptr;
 }
 
 }  // namespace Generators

@@ -29,6 +29,15 @@ Console.WriteLine($"Audio: {audio.Length / (double)sampleRate:F1}s ({audio.Lengt
 using var config = Common.GetConfig(path: modelPath, ep: executionProvider, null, new GeneratorParamsArgs());
 using var model = new Model(config);
 using var processor = new StreamingProcessor(model);
+
+// VAD is auto-enabled if silero_vad.onnx is in the model directory.
+// To disable: processor.DisableVad();
+// To adjust threshold: processor.SetVadThreshold(0.3f);
+if (processor.IsVadEnabled)
+    Console.WriteLine("  VAD: enabled");
+else
+    Console.WriteLine("  VAD: disabled (silero_vad.onnx not found in model dir)");
+
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
 using var genParams = new GeneratorParams(model);

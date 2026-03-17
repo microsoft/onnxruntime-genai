@@ -7,6 +7,7 @@
 #include "streaming_processor.h"
 #include "nemo_mel_spectrogram.h"
 #include "nemotron_speech.h"
+#include "silero_vad.h"
 
 namespace Generators {
 
@@ -18,6 +19,11 @@ struct NemotronStreamingProcessor : StreamingProcessor {
 
   std::unique_ptr<NamedTensors> Process(const float* audio_data, size_t num_samples) override;
   std::unique_ptr<NamedTensors> Flush() override;
+
+  void EnableVad(const char* vad_model_path, float threshold = 0.5f) override;
+  void DisableVad() override;
+  void SetVadThreshold(float threshold) override;
+  bool IsVadEnabled() const override;
 
   int GetChunkSamples() const { return cache_config_.chunk_samples; }
   int GetSampleRate() const { return cache_config_.sample_rate; }
@@ -35,6 +41,9 @@ struct NemotronStreamingProcessor : StreamingProcessor {
 
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
+
+  // Voice Activity Detection (auto-enabled if silero_vad.onnx found in model dir)
+  std::unique_ptr<SileroVad> vad_;
 
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
 };

@@ -47,7 +47,7 @@ def decode_tokens(generator, tokenizer_stream):
     return text
 
 
-def simulate_microphone(model_path, audio_path, execution_provider):
+def simulate_microphone(model_path, audio_path, execution_provider, disable_vad=False, vad_threshold=0.5):
     """Stream audio through Generator + StreamingProcessor API."""
     sample_rate, chunk_samples = load_config(model_path)
     audio = load_audio(audio_path, sample_rate)
@@ -56,6 +56,17 @@ def simulate_microphone(model_path, audio_path, execution_provider):
     config = get_config(model_path, execution_provider)
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
+
+    # VAD is auto-enabled if silero_vad.onnx is in the model directory.
+    # Override with --disable_vad or --vad_threshold.
+    if disable_vad:
+        processor.disable_vad()
+    elif processor.is_vad_enabled:
+        processor.set_vad_threshold(vad_threshold)
+        print(f"  VAD: enabled (threshold={vad_threshold})")
+    else:
+        print("  VAD: disabled (silero_vad.onnx not found in model dir)")
+
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
@@ -90,6 +101,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
+    parser.add_argument("--disable_vad", action="store_true",
+                        help="Disable Voice Activity Detection (VAD is enabled by default if silero_vad.onnx is in model dir).")
+    parser.add_argument("--vad_threshold", type=float, default=0.5,
+                        help="VAD speech probability threshold (default: 0.5).")
     parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
                         choices=["cpu", "cuda", "dml", "follow_config"],
                         help="Execution provider to run with. Defaults to follow_config.")
@@ -97,7 +112,8 @@ def main():
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
         sys.exit(1)
-    simulate_microphone(args.model_path, args.audio_file, args.execution_provider)
+    simulate_microphone(args.model_path, args.audio_file, args.execution_provider,
+                        disable_vad=args.disable_vad, vad_threshold=args.vad_threshold)
 
 
 if __name__ == "__main__":

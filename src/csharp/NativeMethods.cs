@@ -458,5 +458,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorFlush(IntPtr /* OgaStreamingProcessor* */ processor,
                                                                              out IntPtr /* OgaNamedTensors** */ out_named_tensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorEnableVad(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                  byte[] /* const char* */ vadModelPath,
+                                                                                  float threshold);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorDisableVad(IntPtr /* OgaStreamingProcessor* */ processor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorSetVadThreshold(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                        float threshold);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorIsVadEnabled(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                     out bool enabled);
     }
 }

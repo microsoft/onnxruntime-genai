@@ -1510,3 +1510,53 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   OgaDestroyStreamingProcessor(processor);
   OgaDestroyModel(model);
 }
+
+// Test VAD enable/disable on StreamingProcessor
+TEST(CAPITests, StreamingASRVadEnableDisable) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  // Disable and verify
+  processor->DisableVad();
+  ASSERT_FALSE(processor->IsVadEnabled());
+
+  // Re-enable with an explicit path (skip if we don't have the model)
+  std::string vad_path = std::string(STREAMING_ASR_PATH) + "/silero_vad.onnx";
+  if (std::filesystem::exists(vad_path)) {
+    processor->EnableVad(vad_path.c_str(), 0.5f);
+    ASSERT_TRUE(processor->IsVadEnabled());
+
+    // Set threshold
+    processor->SetVadThreshold(0.8f);
+    ASSERT_TRUE(processor->IsVadEnabled());
+
+    // Disable again
+    processor->DisableVad();
+    ASSERT_FALSE(processor->IsVadEnabled());
+  }
+  SUCCEED();
+}
+
+// Test that VAD filters silence when enabled
+TEST(CAPITests, StreamingASRVadFiltersSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+
+  std::string vad_path = std::string(STREAMING_ASR_PATH) + "/silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  processor->EnableVad(vad_path.c_str(), 0.5f);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // Silence should be filtered out by VAD (returns nullptr)
+  auto mel = processor->Process(silence.data(), silence.size());
+  ASSERT_EQ(mel, nullptr);
+  SUCCEED();
+}

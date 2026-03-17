@@ -46,6 +46,46 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
+        /// <summary>
+        /// Enable Voice Activity Detection. Chunks without speech will be skipped.
+        /// </summary>
+        /// <param name="vadModelPath">Path to the silero_vad.onnx model file.</param>
+        /// <param name="threshold">Speech probability threshold (default 0.5).</param>
+        public void EnableVad(string vadModelPath, float threshold = 0.5f)
+        {
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorEnableVad(
+                _processorHandle, System.Text.Encoding.UTF8.GetBytes(vadModelPath + '\0'), threshold));
+        }
+
+        /// <summary>
+        /// Disable Voice Activity Detection. All chunks will be processed.
+        /// </summary>
+        public void DisableVad()
+        {
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorDisableVad(_processorHandle));
+        }
+
+        /// <summary>
+        /// Set the VAD speech probability threshold.
+        /// </summary>
+        public void SetVadThreshold(float threshold)
+        {
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorSetVadThreshold(_processorHandle, threshold));
+        }
+
+        /// <summary>
+        /// Returns true if VAD is currently enabled.
+        /// </summary>
+        public bool IsVadEnabled
+        {
+            get
+            {
+                bool enabled;
+                Result.VerifySuccess(NativeMethods.OgaStreamingProcessorIsVadEnabled(_processorHandle, out enabled));
+                return enabled;
+            }
+        }
+
         ~StreamingProcessor()
         {
             Dispose(false);
