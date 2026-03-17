@@ -41,6 +41,12 @@ struct ModelType {
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
   }
 
+  inline static bool IsRNNT(const std::string& model_type) {
+    // RNNT models bypass the search/logits pipeline entirely.
+    static constexpr std::array<std::string_view, 1> rnnt_types = {"nemotron_speech"};
+    return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 1> MMM = {"phi4mm"};

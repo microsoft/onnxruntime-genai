@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <fstream>
 #include <numeric>
 #include <iostream>
@@ -1362,3 +1365,148 @@ TEST(CAPITests, SetGuidance) {
 #endif
 }
 #endif
+
+#ifndef STREAMING_ASR_PATH
+#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+
+// Helper: if mel is not null, set inputs and run the decode loop
+static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
+  if (mel) {
+    generator.SetInputs(*mel);
+    while (!generator.IsDone()) {
+      generator.GenerateNextToken();
+    }
+  }
+}
+
+// Test creating a Generator + StreamingProcessor from a nemotron_speech model
+TEST(CAPITests, StreamingASRCreate) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+// Test transcribing silence (all zeros) via GenerateNextToken
+TEST(CAPITests, StreamingASRTranscribeSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  auto mel = processor->Process(silence.data(), silence.size());
+  DecodeInputs(*generator, mel.get());
+  SUCCEED();
+}
+
+// Test feeding multiple chunks and decoding via GenerateNextToken
+TEST(CAPITests, StreamingASRMultipleChunks) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  for (int i = 0; i < 5; ++i) {
+    auto mel = processor->Process(silence.data(), silence.size());
+    DecodeInputs(*generator, mel.get());
+  }
+  SUCCEED();
+}
+
+// Test flush processes remaining buffered audio
+TEST(CAPITests, StreamingASRFlush) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+  processor->Process(silence.data(), silence.size());
+
+  auto mel = processor->Flush();
+  DecodeInputs(*generator, mel.get());
+  SUCCEED();
+}
+
+// Test transcribing a synthetic sine wave via GenerateNextToken
+TEST(CAPITests, StreamingASRSineWave) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  constexpr float sample_rate = 16000.0f;
+  constexpr float frequency = 440.0f;
+
+  std::vector<float> audio(chunk_samples);
+  for (size_t i = 0; i < chunk_samples; ++i) {
+    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    auto mel = processor->Process(audio.data(), audio.size());
+    ASSERT_NE(mel, nullptr);
+    DecodeInputs(*generator, mel.get());
+  }
+
+  auto flush_mel = processor->Flush();
+  DecodeInputs(*generator, flush_mel.get());
+  SUCCEED();
+}
+
+// Test raw C API for StreamingProcessor + Generator
+TEST(CAPITests, StreamingASRRawCAPI) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaStreamingProcessor* processor = nullptr;
+  ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
+  ASSERT_NE(processor, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  OgaNamedTensors* inputs = nullptr;
+  ASSERT_EQ(OgaStreamingProcessorProcess(processor, silence.data(), silence.size(), &inputs), nullptr);
+  ASSERT_NE(inputs, nullptr);
+  ASSERT_EQ(OgaGenerator_SetInputs(generator, inputs), nullptr);
+  while (!OgaGenerator_IsDone(generator)) {
+    ASSERT_EQ(OgaGenerator_GenerateNextToken(generator), nullptr);
+  }
+  OgaDestroyNamedTensors(inputs);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+  OgaDestroyStreamingProcessor(processor);
+  OgaDestroyModel(model);
+}
