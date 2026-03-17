@@ -886,3 +886,25 @@ inline int GetCurrentGpuDeviceId() {
 }
 
 }  // namespace Oga
+
+struct OgaStreamingProcessor : OgaAbstract {
+  static std::unique_ptr<OgaStreamingProcessor> Create(OgaModel& model) {
+    OgaStreamingProcessor* p;
+    OgaCheckResult(OgaCreateStreamingProcessor(&model, &p));
+    return std::unique_ptr<OgaStreamingProcessor>(p);
+  }
+
+  std::unique_ptr<OgaNamedTensors> Process(const float* audio_data, size_t num_samples) {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaStreamingProcessorProcess(this, audio_data, num_samples, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);  // May be nullptr if not enough audio
+  }
+
+  std::unique_ptr<OgaNamedTensors> Flush() {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaStreamingProcessorFlush(this, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);
+  }
+
+  static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
+};
