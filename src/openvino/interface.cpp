@@ -283,85 +283,81 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
     throw std::runtime_error("OpenVINO_AppendProviderOptions called with provider_options.name = " + provider_options.name);
   }
 
-#if USE_WINML
   // from the given provider options, select the right OVEP OrtDevice to use.
   auto openvino_ep_device = SelectEpDeviceFromProviderOptions(provider_options);
-  if (!openvino_ep_device) {
-    throw std::runtime_error("OpenVINO_AppendProviderOptions: Unable to find suitable OpenVINOExecutionProvider OrtEpDevice");
-  }
+  if (openvino_ep_device) {
+    // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU", "NPU", etc.)
+    auto selected_ov_device = GetOVDeviceStringFromOrtDevice(openvino_ep_device);
 
-  // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU", "NPU", etc.)
-  auto selected_ov_device = GetOVDeviceStringFromOrtDevice(openvino_ep_device);
+    std::vector<const char*> keys, values;
+    std::optional<std::string> cache_dir_option;
+    std::optional<std::string> load_config_option;
+    for (auto& option : provider_options.options) {
+      // device type isn't a supported provider option when using SessionOptionsAppendExecutionProvider_V2
+      // (It's set via the OrtDevice ptr which we selected above)
+      if (option.first == "device_type") {
+        continue;
+      }
 
-  std::vector<const char*> keys, values;
-  std::optional<std::string> cache_dir_option;
-  std::optional<std::string> load_config_option;
-  for (auto& option : provider_options.options) {
-    // device type isn't a supported provider option when using SessionOptionsAppendExecutionProvider_V2
-    // (It's set via the OrtDevice ptr which we selected above)
-    if (option.first == "device_type") {
-      continue;
+      // For load_config we won't add to keys/vals just yet..
+      if (option.first == "load_config") {
+        load_config_option = option.second;
+        continue;
+      }
+
+      // For cache_dir, we will perform some manipulation and pack into load_config,
+      // so don't set it either.
+      if (option.first == "cache_dir") {
+        cache_dir_option = option.second;
+        continue;
+      }
+
+      keys.emplace_back(option.first.c_str());
+      values.emplace_back(option.second.c_str());
     }
 
-    // For load_config we won't add to keys/vals just yet..
-    if (option.first == "load_config") {
-      load_config_option = option.second;
-      continue;
+    // if cache_dir option is set
+    if (cache_dir_option) {
+      // make it absolute
+      cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
+
+      // for SessionOptionsAppendExecutionProvider_V2, cache_dir isn't supported as a provider option,
+      // so add it to load_config.
+      load_config_option = AddCacheDirToLoadConfig(*cache_dir_option, load_config_option, selected_ov_device);
     }
 
-    // For cache_dir, we will perform some manipulation and pack into load_config,
-    // so don't set it either.
-    if (option.first == "cache_dir") {
-      cache_dir_option = option.second;
-      continue;
+    if (load_config_option.has_value()) {
+      keys.emplace_back("load_config");
+      values.emplace_back((*load_config_option).c_str());
     }
 
-    keys.emplace_back(option.first.c_str());
-    values.emplace_back(option.second.c_str());
-  }
+    std::vector<const OrtEpDevice*> ep_devices_ptrs = {openvino_ep_device};
+    Ort::api->SessionOptionsAppendExecutionProvider_V2(
+        &session_options,
+        &GetOrtEnv(),
+        ep_devices_ptrs.data(), ep_devices_ptrs.size(),
+        keys.data(), values.data(), keys.size());
 
-  // if cache_dir option is set
-  if (cache_dir_option) {
-    // make it absolute
-    cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
-
-    // for SessionOptionsAppendExecutionProvider_V2, cache_dir isn't supported as a provider option,
-    // so add it to load_config.
-    load_config_option = AddCacheDirToLoadConfig(*cache_dir_option, load_config_option, selected_ov_device);
-  }
-
-  if (load_config_option.has_value()) {
-    keys.emplace_back("load_config");
-    values.emplace_back((*load_config_option).c_str());
-  }
-
-  std::vector<const OrtEpDevice*> ep_devices_ptrs = {openvino_ep_device};
-  Ort::api->SessionOptionsAppendExecutionProvider_V2(
-      &session_options,
-      &GetOrtEnv(),
-      ep_devices_ptrs.data(), ep_devices_ptrs.size(),
-      keys.data(), values.data(), keys.size());
-
-#else
-  std::vector<const char*> keys, values;
-  std::optional<std::string> cache_dir_option;
-  for (auto& option : provider_options.options) {
-    // For cache_dir, we will perform some manipulation before setting.
-    if (option.first == "cache_dir") {
-      cache_dir_option = option.second;
-      continue;
+  } else {
+    std::vector<const char*> keys, values;
+    std::optional<std::string> cache_dir_option;
+    for (auto& option : provider_options.options) {
+      // For cache_dir, we will perform some manipulation before setting.
+      if (option.first == "cache_dir") {
+        cache_dir_option = option.second;
+        continue;
+      }
+      keys.emplace_back(option.first.c_str());
+      values.emplace_back(option.second.c_str());
     }
-    keys.emplace_back(option.first.c_str());
-    values.emplace_back(option.second.c_str());
-  }
 
-  if (cache_dir_option) {
-    cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
-    keys.emplace_back("cache_dir");
-    values.emplace_back((*cache_dir_option).c_str());
+    if (cache_dir_option) {
+      cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
+      keys.emplace_back("cache_dir");
+      values.emplace_back((*cache_dir_option).c_str());
+    }
+    session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
   }
-  session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
-#endif
 }
 
 }  // namespace Generators
