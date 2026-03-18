@@ -661,7 +661,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             return pybind11::none();
           },
           "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
-      .def("enable_vad",
+      .def(
+          "enable_vad",
           [](OgaStreamingProcessor& proc, const std::string& vad_model_path, float threshold) {
             proc.EnableVad(vad_model_path.c_str(), threshold);
           },
@@ -670,14 +671,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           "Enable Voice Activity Detection. Chunks without speech will be skipped.\n"
           "vad_model_path: Path to the silero_vad.onnx model file.\n"
           "threshold: Speech probability threshold (default 0.5).")
-      .def("disable_vad", [](OgaStreamingProcessor& proc) { proc.DisableVad(); },
-           "Disable Voice Activity Detection. All chunks will be processed.")
-      .def("set_vad_threshold",
+      .def(
+          "disable_vad", [](OgaStreamingProcessor& proc) { proc.DisableVad(); },
+          "Disable Voice Activity Detection. All chunks will be processed.")
+      .def(
+          "set_vad_threshold",
           [](OgaStreamingProcessor& proc, float threshold) { proc.SetVadThreshold(threshold); },
           pybind11::arg("threshold"),
           "Set the VAD speech probability threshold.")
-      .def_property_readonly("is_vad_enabled", [](OgaStreamingProcessor& proc) { return proc.IsVadEnabled(); },
-           "Returns True if VAD is currently enabled.");
+      .def_property_readonly(
+          "is_vad_enabled", [](OgaStreamingProcessor& proc) { return proc.IsVadEnabled(); },
+          "Returns True if VAD is currently enabled.");
 
   pybind11::class_<OgaSileroVad>(m, "SileroVad")
       .def(pybind11::init([](const std::string& model_path, int sample_rate, float threshold) {
@@ -713,18 +717,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("samples"),
           "Check if arbitrary-length audio contains speech. Returns True/False.")
-      .def("reset", [](OgaSileroVad& vad) { vad.Reset(); },
-           "Reset VAD state for a new utterance.")
-      .def("set_threshold", [](OgaSileroVad& vad, float threshold) { vad.SetThreshold(threshold); },
-           pybind11::arg("threshold"),
-           "Set the speech probability threshold.")
-      .def_property_readonly("window_size", [](OgaSileroVad&) -> int {
-             // These are fixed by the model; expose for convenience.
-             // We can't call GetWindowSize through the C API wrapper, so return the known values.
-             // 512 for 16kHz, 256 for 8kHz (default 16kHz).
-             return 512;  // TODO: expose via C API if needed
-           },
-           "VAD window size in samples.");
+      .def(
+          "reset", [](OgaSileroVad& vad) { vad.Reset(); },
+          "Reset VAD state for a new utterance.")
+      .def(
+          "set_threshold",
+          [](OgaSileroVad& vad, float threshold) { vad.SetThreshold(threshold); },
+          pybind11::arg("threshold"),
+          "Set the speech probability threshold.")
+      .def_property_readonly(
+          "window_size",
+          [](OgaSileroVad&) -> int {
+            // 512 for 16kHz, 256 for 8kHz (default 16kHz).
+            return 512;  // TODO: expose via C API if needed
+          },
+          "VAD window size in samples.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
