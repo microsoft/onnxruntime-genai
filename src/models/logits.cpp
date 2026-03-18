@@ -6,6 +6,7 @@
 #include "model.h"
 #include "logits.h"
 #include "../openvino/interface.h"
+
 namespace Generators {
 
 Logits::Logits(State& state)
