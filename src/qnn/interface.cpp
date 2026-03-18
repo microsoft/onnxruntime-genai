@@ -80,12 +80,16 @@ DeviceInterface* GetQNNInterface() {
 }
 
 bool IsQNNStatefulModel(const Model& model) {
+  // Check for both QNN and CPU device types
+  // When using QNN EP with genai_model=True, the model is stateful regardless of device type
+  // For QNN models with enable_htp_shared_memory_allocator=1, p_device_ will be QNN type
+  // For QNN models without shared memory allocator, p_device_ will be CPU type
+  // Both cases need to be handled the same way for stateful models where KV cache is managed internally
   if (model.p_device_->GetType() == DeviceType::QNN || model.p_device_->GetType() == DeviceType::CPU) {
     const auto& provider_options = model.config_->model.decoder.session_options.provider_options;
-    for (auto& po : provider_options) {
+    for (const auto& po : provider_options) {
       if (po.name == "QNN") {
-        const auto& qnn_options = po.options;
-        for (auto& option : qnn_options) {
+        for (const auto& option : po.options) {
           // For QNN, if session option 'genai_model' is set, the session will encapsulate
           // a stateful model, so KVCache will be managed internally.
           if (option.first == "genai_model" && option.second == "True") {
