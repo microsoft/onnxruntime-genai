@@ -210,8 +210,9 @@ struct Config {
 
       // Qwen VL specific vision config values
       int spatial_merge_size{2};
-      float tokens_per_second{2.0f};
       int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL/3.5 uses 16
+      int temporal_patch_size{2};
+      float tokens_per_second{2.0f};
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -285,6 +286,12 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      int rotary_embedding_dim{};
+      int linear_num_key_heads{};
+      int linear_num_value_heads{};
+      int linear_key_head_dim{};
+      int linear_value_head_dim{};
+      int linear_conv_kernel_dim{};
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -303,6 +310,8 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_conv_state_names;
+        std::string past_recurrent_state_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -327,6 +336,8 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_conv_state_names;
+        std::string present_recurrent_state_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};

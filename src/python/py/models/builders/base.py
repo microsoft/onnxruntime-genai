@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from huggingface_hub.errors import LocalTokenNotFoundError
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -50,12 +51,22 @@ def parse_hf_token(hf_token):
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        def _cfg_get(obj, key, default=None):
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        rope_scaling = _cfg_get(config, "rope_scaling")
+        original_max_position_embeddings = _cfg_get(config, "original_max_position_embeddings")
+        if original_max_position_embeddings is None:
+            original_max_position_embeddings = _cfg_get(rope_scaling, "original_max_position_embeddings")
+
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
-            config.original_max_position_embeddings
-            if hasattr(config, "original_max_position_embeddings")
-            else config.rope_scaling["original_max_position_embeddings"]
-            if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings")
+            original_max_position_embeddings
+            if original_max_position_embeddings is not None
             else self.context_length
         )
         self.window_size = (
@@ -198,6 +209,11 @@ class Model:
                 self.head_size,
             ],  # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
+        self.extra_decoder_state_specs = []
+        self.extra_decoder_input_name_templates = {}
+        self.extra_decoder_output_name_templates = {}
+        self.has_auxiliary_decoder_states = False
+        self.make_auxiliary_decoder_state_init(config)
         self.make_outputs_init()
 
         # Store names of nodes already created
@@ -257,13 +273,18 @@ class Model:
             if hasattr(config, "rope_embedding_base")
             else 10000
         )
+        rope_parameters = _cfg_get(config, "rope_parameters")
+        rope_interleaved = _cfg_get(config, "rope_interleaved")
+        if rope_interleaved is None:
+            rope_interleaved = _cfg_get(rope_parameters, "mrope_interleaved", False)
+
         self.rope_attrs = {
             "create_caches": True,  # Create cos/sin caches for rotary embeddings
             "save_caches": True,  # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,  # Cache length to use when creating cos/sin caches for rotary embeddings
             "theta": rope_theta,  # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
-            "interleaved": 0,  # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
+            "interleaved": 1 if rope_interleaved else 0,  # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": rotemb_dim,  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rescale_factors": 1,  # Rescale factors when calculating `inv_freq` in rotary embeddings
             "t_dtype": torch.int64,  # Torch dtype when calculating `t` in rotary embeddings
@@ -312,6 +333,8 @@ class Model:
             "sinks": False,  # Sink values for softmax in attention
         }
         self.make_attention_init()
+        if self.has_auxiliary_decoder_states:
+            self.past_present_share_buffer = False
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -556,6 +579,13 @@ class Model:
         config = AutoConfig.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
         )
+        # Flatten text_config attributes to top level for VLM-style models (e.g. Qwen3.5)
+        # so that decoder-specific attributes like linear_num_key_heads are accessible.
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            for key in text_config:
+                if not hasattr(config, key):
+                    setattr(config, key, getattr(text_config, key))
         try:
             # Override search attributes in config based on values in generation_config.json
             gen_config = GenerationConfig.from_pretrained(
@@ -584,6 +614,7 @@ class Model:
                 "past_value_names": "past_key_values.%d.value",
             }
         )
+        inputs.update(self.extra_decoder_input_name_templates)
         outputs = dict(zip(self.output_names, self.output_names, strict=False))
         outputs.update(
             {
@@ -591,19 +622,36 @@ class Model:
                 "present_value_names": "present.%d.value",
             }
         )
+        outputs.update(self.extra_decoder_output_name_templates)
         if "hidden_states" in outputs:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
             del outputs["hidden_states"]
 
-        bos_token_id = config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1
-        eos_token_id = config.eos_token_id
-        pad_token_id = (
-            config.pad_token_id
-            if hasattr(config, "pad_token_id") and config.pad_token_id is not None
-            else config.eos_token_id[0]
-            if isinstance(config.eos_token_id, list)
-            else config.eos_token_id
-        )
+        tokenizer = None
+
+        def ensure_tokenizer():
+            nonlocal tokenizer
+            if tokenizer is None:
+                tokenizer = self.load_tokenizer(model_name_or_path, extra_kwargs)
+            return tokenizer
+
+        def resolve_special_token_id(name):
+            value = getattr(config, name, None) if hasattr(config, name) else None
+            if value is not None:
+                return value
+            token_value = getattr(ensure_tokenizer(), name, None)
+            if token_value is not None:
+                return token_value
+            return None
+
+        bos_token_id = resolve_special_token_id("bos_token_id")
+        if bos_token_id is None:
+            bos_token_id = 1
+
+        eos_token_id = resolve_special_token_id("eos_token_id")
+        pad_token_id = resolve_special_token_id("pad_token_id")
+        if pad_token_id is None:
+            pad_token_id = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
         genai_config = {
             "model": {
                 "bos_token_id": bos_token_id,
@@ -649,6 +697,17 @@ class Model:
             },
         }
 
+        # Add optional decoder fields only when they have non-default values
+        decoder = genai_config["model"]["decoder"]
+        rotemb_dim = self.rope_attrs["rotary_embedding_dim"]
+        if rotemb_dim and rotemb_dim != self.head_size:
+            decoder["rotary_embedding_dim"] = rotemb_dim
+        for attr in ["linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim",
+                      "linear_value_head_dim", "linear_conv_kernel_dim"]:
+            val = getattr(config, attr, 0)
+            if val:
+                decoder[attr] = val
+
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
             layer_idxs = [
@@ -680,15 +739,112 @@ class Model:
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
+    def make_auxiliary_decoder_state_init(self, config):
+        required_attrs = [
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+            "linear_conv_kernel_dim",
+        ]
+        if not all(hasattr(config, attr) for attr in required_attrs):
+            return
+
+        linear_num_key_heads = getattr(config, "linear_num_key_heads", 0)
+        linear_num_value_heads = getattr(config, "linear_num_value_heads", 0)
+        linear_key_head_dim = getattr(config, "linear_key_head_dim", 0)
+        linear_value_head_dim = getattr(config, "linear_value_head_dim", 0)
+        linear_conv_kernel_dim = getattr(config, "linear_conv_kernel_dim", 0)
+
+        if min(
+            linear_num_key_heads,
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+            linear_conv_kernel_dim,
+        ) <= 0:
+            return
+
+        linear_conv_dim = linear_num_key_heads * linear_key_head_dim * 2 + linear_num_value_heads * linear_value_head_dim
+
+        self.input_types["past_conv_states"] = self.io_dtype
+        self.input_shapes["past_conv_states"] = ["batch_size", linear_conv_dim, linear_conv_kernel_dim]
+        self.output_types["present_conv_states"] = self.io_dtype
+        self.output_shapes["present_conv_states"] = ["batch_size", linear_conv_dim, linear_conv_kernel_dim]
+
+        self.input_types["past_recurrent_states"] = ir.DataType.FLOAT
+        self.input_shapes["past_recurrent_states"] = [
+            "batch_size",
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+        ]
+        self.output_types["present_recurrent_states"] = ir.DataType.FLOAT
+        self.output_shapes["present_recurrent_states"] = [
+            "batch_size",
+            linear_num_value_heads,
+            linear_key_head_dim,
+            linear_value_head_dim,
+        ]
+
+        self.extra_decoder_state_specs = [
+            {
+                "input_key": "past_conv_states",
+                "output_key": "present_conv_states",
+                "input_template_key": "past_conv_state_names",
+                "output_template_key": "present_conv_state_names",
+                "input_template": "past_conv_states.%d",
+                "output_template": "present_conv_states.%d",
+            },
+            {
+                "input_key": "past_recurrent_states",
+                "output_key": "present_recurrent_states",
+                "input_template_key": "past_recurrent_state_names",
+                "output_template_key": "present_recurrent_state_names",
+                "input_template": "past_recurrent_states.%d",
+                "output_template": "present_recurrent_states.%d",
+            },
+        ]
+        self.extra_decoder_input_name_templates = {
+            spec["input_template_key"]: spec["input_template"] for spec in self.extra_decoder_state_specs
+        }
+        self.extra_decoder_output_name_templates = {
+            spec["output_template_key"]: spec["output_template"] for spec in self.extra_decoder_state_specs
+        }
+        self.has_auxiliary_decoder_states = True
+
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-        )
+        tokenizer = self.load_tokenizer(model_name_or_path, extra_kwargs)
         # Overwrite model_max_length with the model's context_length so it is a normal integer
         # (HF often uses 1e30 for "no limit", which can serialize to a huge decimal in JSON)
         tokenizer.model_max_length = self.context_length
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
+
+        # Patch unsupported tokenizer_class values for onnxruntime-extensions compatibility
+        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
+        if os.path.isfile(tokenizer_config_path):
+            with open(tokenizer_config_path) as f:
+                tok_cfg = json.load(f)
+            if tok_cfg.get("tokenizer_class") == "TokenizersBackend":
+                tok_cfg["tokenizer_class"] = "PreTrainedTokenizer"
+                with open(tokenizer_config_path, "w") as f:
+                    json.dump(tok_cfg, f, indent=2)
+
+    def load_tokenizer(self, model_name_or_path, extra_kwargs):
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+            )
+        except LocalTokenNotFoundError:
+            if self.hf_token is True:
+                return AutoTokenizer.from_pretrained(
+                    model_name_or_path,
+                    token=None,
+                    trust_remote_code=self.hf_remote,
+                    **extra_kwargs,
+                )
+            raise
 
     def make_int4_algo_config(self, quant_method: str):
         customized_weight_config = {}
@@ -889,6 +1045,18 @@ class Model:
             value_name = f"present.{i}.value"
             value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
             outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
+
+        for spec in self.extra_decoder_state_specs:
+            for i in range(self.num_layers):
+                input_name = spec["input_template"] % i
+                input_shape = self.input_shapes[spec["input_key"]]
+                inputs.append(self.make_value(input_name, dtype=self.input_types[spec["input_key"]], shape=input_shape))
+
+                output_name = spec["output_template"] % i
+                output_shape = self.output_shapes[spec["output_key"]]
+                outputs.append(
+                    self.make_value(output_name, dtype=self.output_types[spec["output_key"]], shape=output_shape)
+                )
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.

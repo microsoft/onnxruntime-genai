@@ -304,6 +304,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_conv_state_names") {
+      v_.past_conv_state_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_state_names") {
+      v_.past_recurrent_state_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_names") {
       v_.past_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_past_key_names") {
@@ -357,6 +361,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_conv_state_names") {
+      v_.present_conv_state_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_state_names") {
+      v_.present_recurrent_state_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
@@ -592,6 +600,18 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "rotary_embedding_dim") {
+      v_.rotary_embedding_dim = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "linear_num_key_heads") {
+      v_.linear_num_key_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "linear_num_value_heads") {
+      v_.linear_num_value_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "linear_key_head_dim") {
+      v_.linear_key_head_dim = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "linear_value_head_dim") {
+      v_.linear_value_head_dim = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "linear_conv_kernel_dim") {
+      v_.linear_conv_kernel_dim = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -761,6 +781,10 @@ struct Vision_Element : JSON::Element {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
     } else if (name == "spatial_merge_size") {
       v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "patch_size") {
+      v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "temporal_patch_size") {
+      v_.temporal_patch_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "tokens_per_second") {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
