@@ -123,10 +123,13 @@ static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generat
 
   const std::string ep_name = "OpenVINOExecutionProvider";
   std::string chosen_ov_device;
+  bool any_ov_device_matched = false;
   for (size_t i = 0; i < num_devices; ++i) {
     // skip this device if it's not an OpenVINO device.
     if (Ort::api->EpDevice_EpName(device_ptrs[i]) != ep_name)
       continue;
+
+    any_ov_device_matched = true;
 
     const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
     const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
@@ -159,6 +162,12 @@ static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generat
     }
   }
 
+  // If any OpenVINO device was found but none matched the filtering criteria, throw an error.
+  // Otherwise, if no OpenVINO devices were found at all, return nullptr. Fallback
+  // to appending via provider bridge.
+  if (any_ov_device_matched) {
+    throw std::runtime_error("No OpenVINO device matched the filtering criteria specified in provider options.");
+  }
   return nullptr;
 }
 
