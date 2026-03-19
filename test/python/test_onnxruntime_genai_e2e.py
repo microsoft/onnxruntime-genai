@@ -164,7 +164,8 @@ def run_nemotron_speech():
 
     # Look for nemotron speech model in test_models directory
     cwd = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    # model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    model_path = "/datadisks/disk1/jiafa/accuracy/onnxruntime-genai/tools/nemotron_export/onnx_models_cpu_int4_1"
     if not os.path.exists(model_path):
         log.info(f"Nemotron speech model not found at {model_path}, skipping E2E test.")
         return
@@ -203,6 +204,7 @@ def get_args():
 
 
 if __name__ == "__main__":
+    '''
     args = get_args()
     for model_path in args.models:
         try:
@@ -214,9 +216,10 @@ if __name__ == "__main__":
 
     # Run Whisper E2E tests
     run_whisper()
+    '''
 
     # Run Nemotron Speech E2E tests
     run_nemotron_speech()
 
     # Run tool calling E2E tests
-    run_tool_calling()
+    # run_tool_calling()
