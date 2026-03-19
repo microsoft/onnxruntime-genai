@@ -912,7 +912,22 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
   auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+  try {
+    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+  } catch (const Ort::Exception& e) {
+    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
+    // Try the old name before giving up.
+    if (type == DeviceType::WEBGPU) {
+      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      try {
+        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
+      } catch (const Ort::Exception&) {
+        throw std::runtime_error("Failed to create allocator for WebGPU: " + std::string(e.what()));
+      }
+    } else {
+      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
+    }
+  }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
