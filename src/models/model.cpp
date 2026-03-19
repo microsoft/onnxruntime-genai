@@ -601,7 +601,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     } else if (provider_options.name == "NvTensorRtRtx") {
       // Configure NvTensorRT-specific settings (needed for both pre-registered and built-in paths)
       bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-      Generators::NvTensorRtRtxExecutionProvider::ConfigureNvTensorRtRtxProfile(
+      Generators::NvTensorRtRtxExecutionProvider::ConfigureProfile(
           config, session_options, is_multi_profile_enabled);
       if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
         session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
