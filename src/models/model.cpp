@@ -431,10 +431,24 @@ std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptio
   }
 
   if (filtered_devices.empty()) {
-    if (g_log.enabled) {
-      Log("warning", "No devices matched the filtering criteria for provider: " + provider_options.name);
+    std::string error_msg = "No devices matched the filtering criteria specified in provider options. Filter criteria:";
+    if (provider_options.device_filtering_options->hardware_device_id) {
+      error_msg += " hardware_device_id=" + std::to_string(*provider_options.device_filtering_options->hardware_device_id);
     }
-    return devices;  // Return original devices if no devices matched the filtering criteria
+    if (provider_options.device_filtering_options->hardware_vendor_id) {
+      error_msg += " hardware_vendor_id=" + std::to_string(*provider_options.device_filtering_options->hardware_vendor_id);
+    }
+    if (provider_options.device_filtering_options->hardware_device_type) {
+      error_msg += " hardware_device_type=" + std::to_string(static_cast<int>(*provider_options.device_filtering_options->hardware_device_type));
+    }
+    error_msg += ". Available devices:";
+    for (const auto* device : devices) {
+      error_msg += " [device_id=" + std::to_string(device->Device()->DeviceId()) +
+                   ", vendor_id=" + std::to_string(device->Device()->VendorId()) +
+                   ", type=" + std::to_string(static_cast<int>(device->Device()->Type())) + "]";
+    }
+    error_msg += ". Verify that the device filtering options in genai_config.json match an available device.";
+    throw std::runtime_error(error_msg);
   }
   return filtered_devices;
 }
@@ -694,7 +708,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                         /* is_primary_session_options */ false, p_device)) {
         continue;
       } else {
-        throw std::runtime_error("Unsupported provider: " + provider_options.name);
+        AppendGenericExecutionProvider(session_options, provider_options);
       }
     }
   }

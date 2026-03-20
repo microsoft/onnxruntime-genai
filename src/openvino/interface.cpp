@@ -122,7 +122,6 @@ static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generat
   Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
 
   const std::string ep_name = "OpenVINOExecutionProvider";
-  std::string chosen_ov_device;
   bool any_ov_device_matched = false;
   for (size_t i = 0; i < num_devices; ++i) {
     // skip this device if it's not an OpenVINO device.
@@ -166,7 +165,31 @@ static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generat
   // Otherwise, if no OpenVINO devices were found at all, return nullptr. Fallback
   // to appending via provider bridge.
   if (any_ov_device_matched) {
-    throw std::runtime_error("No OpenVINO device matched the filtering criteria specified in provider options.");
+    std::string error_msg = "No OpenVINO devices matched the filtering criteria specified in provider options. Filter criteria:";
+    if (config_device_id.has_value()) {
+      error_msg += " hardware_device_id=" + std::to_string(*config_device_id);
+    }
+    if (config_vendor_id.has_value()) {
+      error_msg += " hardware_vendor_id=" + std::to_string(*config_vendor_id);
+    }
+    if (config_device_type_enum.has_value()) {
+      error_msg += " hardware_device_type=" + std::to_string(static_cast<int>(*config_device_type_enum));
+    }
+    if (config_ov_device_type.has_value()) {
+      error_msg += " device_type=" + *config_ov_device_type;
+    }
+    error_msg += ". Available OpenVINO devices:";
+    for (size_t i = 0; i < num_devices; ++i) {
+      if (Ort::api->EpDevice_EpName(device_ptrs[i]) != ep_name)
+        continue;
+      const OrtHardwareDevice* hw = Ort::api->EpDevice_Device(device_ptrs[i]);
+      error_msg += " [device_id=" + std::to_string(Ort::api->HardwareDevice_DeviceId(hw)) +
+                   ", vendor_id=" + std::to_string(Ort::api->HardwareDevice_VendorId(hw)) +
+                   ", type=" + std::to_string(static_cast<int>(Ort::api->HardwareDevice_Type(hw))) +
+                   ", ov_device=" + GetOVDeviceStringFromOrtDevice(device_ptrs[i]) + "]";
+    }
+    error_msg += ". Verify that the device filtering options in genai_config.json match an available device.";
+    throw std::runtime_error(error_msg);
   }
   return nullptr;
 }
