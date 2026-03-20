@@ -460,19 +460,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                              out IntPtr /* OgaNamedTensors** */ out_named_tensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorEnableVad(IntPtr /* OgaStreamingProcessor* */ processor,
-                                                                                  byte[] /* const char* */ vadModelPath,
-                                                                                  float threshold);
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorSetOption(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                  byte[] /* const char* */ key,
+                                                                                  byte[] /* const char* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorDisableVad(IntPtr /* OgaStreamingProcessor* */ processor);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorSetVadThreshold(IntPtr /* OgaStreamingProcessor* */ processor,
-                                                                                        float threshold);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorIsVadEnabled(IntPtr /* OgaStreamingProcessor* */ processor,
-                                                                                     out bool enabled);
+        public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorGetOption(IntPtr /* OgaStreamingProcessor* */ processor,
+                                                                                  byte[] /* const char* */ key,
+                                                                                  out IntPtr /* const char** */ value);
     }
 }

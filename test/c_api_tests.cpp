@@ -1511,36 +1511,38 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   OgaDestroyModel(model);
 }
 
-// Test VAD enable/disable on StreamingProcessor
-TEST(CAPITests, StreamingASRVadEnableDisable) {
+// Test VAD set_option/get_option on StreamingProcessor
+TEST(CAPITests, StreamingASRVadSetGetOption) {
   if (!std::filesystem::exists(STREAMING_ASR_PATH))
     GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // Disable and verify
-  processor->DisableVad();
-  ASSERT_FALSE(processor->IsVadEnabled());
+  // Default: VAD disabled
+  ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
 
-  // Re-enable with an explicit path (skip if we don't have the model)
+  // Set and get threshold
+  processor->SetOption("vad_min_silence_chunks", "10");
+  ASSERT_EQ(std::string(processor->GetOption("vad_min_silence_chunks")), "10");
+
+  // Enable VAD if silero_vad.onnx is available
   std::string vad_path = std::string(STREAMING_ASR_PATH) + "/silero_vad.onnx";
   if (std::filesystem::exists(vad_path)) {
-    processor->EnableVad(vad_path.c_str(), 0.5f);
-    ASSERT_TRUE(processor->IsVadEnabled());
+    processor->SetOption("vad_enabled", "true");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
 
-    // Set threshold
-    processor->SetVadThreshold(0.8f);
-    ASSERT_TRUE(processor->IsVadEnabled());
+    processor->SetOption("vad_threshold", "0.8");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
 
-    // Disable again
-    processor->DisableVad();
-    ASSERT_FALSE(processor->IsVadEnabled());
+    // Disable
+    processor->SetOption("vad_enabled", "false");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
   }
   SUCCEED();
 }
 
-// Test that VAD filters silence when enabled
-TEST(CAPITests, StreamingASRVadFiltersSilence) {
+// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
+TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   if (!std::filesystem::exists(STREAMING_ASR_PATH))
     GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
 
@@ -1550,13 +1552,21 @@ TEST(CAPITests, StreamingASRVadFiltersSilence) {
 
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
-  processor->EnableVad(vad_path.c_str(), 0.5f);
+  processor->SetOption("vad_enabled", "true");
+  processor->SetOption("vad_min_silence_chunks", "2");  // Start dropping after 2 consecutive
 
   constexpr size_t chunk_samples = 8960;
   std::vector<float> silence(chunk_samples, 0.0f);
 
-  // Silence should be filtered out by VAD (returns nullptr)
-  auto mel = processor->Process(silence.data(), silence.size());
-  ASSERT_EQ(mel, nullptr);
+  // First 2 silence chunks should still be processed (not dropped)
+  auto mel1 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+
+  auto mel2 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+
+  // Third silence chunk should be dropped (> min_silence_chunks)
+  auto mel3 = processor->Process(silence.data(), silence.size());
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
 }

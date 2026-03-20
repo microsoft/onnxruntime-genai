@@ -14,26 +14,23 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
 
   /// Feed raw data.
   /// Returns a NamedTensors when a full chunk is ready, or nullptr if more data is needed.
-  /// When VAD is enabled, returns nullptr for chunks that contain no speech.
+  /// When VAD is enabled, returns nullptr for chunks detected as silence.
   virtual std::unique_ptr<NamedTensors> Process(const float* data, size_t num_samples) = 0;
 
   /// Flush remaining buffered data.
   /// Returns final NamedTensors, or nullptr if buffer is empty.
   virtual std::unique_ptr<NamedTensors> Flush() = 0;
 
-  /// Enable Voice Activity Detection. Chunks without speech will be skipped.
-  /// @param vad_model_path Path to the silero_vad.onnx model file.
-  /// @param threshold Speech probability threshold (default 0.5).
-  virtual void EnableVad(const char* vad_model_path, float threshold = 0.5f) = 0;
+  /// Set a processor option as a key-value pair.
+  /// Supported keys:
+  ///   "vad_enabled"             - "true" or "false" (default: "false")
+  ///   "vad_threshold"           - float as string, e.g. "0.5"
+  ///   "vad_min_silence_chunks"  - int as string, consecutive silence chunks before dropping (default: "5")
+  ///   "vad_model_path"          - path to silero_vad.onnx (overrides config filename)
+  virtual void SetOption(const char* key, const char* value) = 0;
 
-  /// Disable Voice Activity Detection. All chunks will be processed.
-  virtual void DisableVad() = 0;
-
-  /// Set the VAD speech probability threshold.
-  virtual void SetVadThreshold(float threshold) = 0;
-
-  /// Returns true if VAD is currently enabled.
-  virtual bool IsVadEnabled() const = 0;
+  /// Get a processor option value by key. Returns the value as a string.
+  virtual std::string GetOption(const char* key) const = 0;
 };
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model);

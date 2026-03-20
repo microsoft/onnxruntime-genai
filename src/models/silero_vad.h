@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// SileroVad: Voice Activity Detection using the Silero VAD ONNX model.
+// SileroVad: Voice Activity Detection using the Silero VAD ONNX model,
+// integrated with GenAI's session and run-options infrastructure.
 // See https://github.com/snakers4/silero-vad for model details.
 #pragma once
 
@@ -15,9 +16,8 @@ namespace Generators {
 
 /// Wraps the Silero VAD ONNX model for streaming voice activity detection.
 ///
-/// The model is stateful: it maintains hidden state (`state_`) and a context
-/// buffer (`context_`) that carry information across consecutive windows.
-/// Call Reset() to start a new utterance.
+/// Uses GenAI's Model infrastructure for session creation (inheriting provider
+/// options and session options from genai_config.json) and OrtRunOptions.
 ///
 /// Silero VAD model I/O:
 ///   Inputs:  input  [1, window_size + context_size] float32  (PCM audio with context prepended)
@@ -26,11 +26,13 @@ namespace Generators {
 ///   Outputs: output [1, 1]                           float32  (speech probability)
 ///            stateN [2, 1, 128]                      float32  (updated hidden state)
 struct SileroVad : LeakChecked<SileroVad> {
-  /// Construct a SileroVad instance.
-  /// @param model_path  Path to the silero_vad.onnx file.
-  /// @param sample_rate 16000 or 8000.
-  /// @param threshold   Speech probability threshold (default 0.5).
+  /// Construct from a Model reference (uses config for session/run options).
+  /// The VAD model file is resolved relative to the model's config directory.
+  SileroVad(Model& model);
+
+  /// Construct with an explicit model path and options (programmatic override).
   SileroVad(const char* model_path, int sample_rate = 16000, float threshold = 0.5f);
+
   ~SileroVad();
 
   /// Process a single VAD window of audio.
@@ -58,8 +60,11 @@ struct SileroVad : LeakChecked<SileroVad> {
   int GetSampleRate() const { return sample_rate_; }
 
  private:
+  void Initialize(int sample_rate, float threshold);
+
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtRunOptions> run_options_;
   std::unique_ptr<OrtMemoryInfo> memory_info_;
 
   int sample_rate_;
@@ -78,6 +83,7 @@ struct SileroVad : LeakChecked<SileroVad> {
   int64_t sr_value_{};
 };
 
+std::unique_ptr<SileroVad> CreateSileroVad(Model& model);
 std::unique_ptr<SileroVad> CreateSileroVad(const char* model_path, int sample_rate, float threshold);
 
 }  // namespace Generators

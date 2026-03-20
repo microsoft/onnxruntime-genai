@@ -30,13 +30,15 @@ using var config = Common.GetConfig(path: modelPath, ep: executionProvider, null
 using var model = new Model(config);
 using var processor = new StreamingProcessor(model);
 
-// VAD is auto-enabled if silero_vad.onnx is in the model directory.
-// To disable: processor.DisableVad();
-// To adjust threshold: processor.SetVadThreshold(0.3f);
-if (processor.IsVadEnabled)
+// VAD is disabled by default. Enable via genai_config.json ("vad": {"enabled": true})
+// or programmatically:
+// processor.SetOption("vad_enabled", "true");
+// processor.SetOption("vad_threshold", "0.3");
+// processor.SetOption("vad_min_silence_chunks", "5");
+if (processor.GetOption("vad_enabled") == "true")
     Console.WriteLine("  VAD: enabled");
 else
-    Console.WriteLine("  VAD: disabled (silero_vad.onnx not found in model dir)");
+    Console.WriteLine("  VAD: disabled");
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();

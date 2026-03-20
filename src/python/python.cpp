@@ -662,26 +662,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
       .def(
-          "enable_vad",
-          [](OgaStreamingProcessor& proc, const std::string& vad_model_path, float threshold) {
-            proc.EnableVad(vad_model_path.c_str(), threshold);
+          "set_option",
+          [](OgaStreamingProcessor& proc, const std::string& key, const std::string& value) {
+            proc.SetOption(key.c_str(), value.c_str());
           },
-          pybind11::arg("vad_model_path"),
-          pybind11::arg("threshold") = 0.5f,
-          "Enable Voice Activity Detection. Chunks without speech will be skipped.\n"
-          "vad_model_path: Path to the silero_vad.onnx model file.\n"
-          "threshold: Speech probability threshold (default 0.5).")
+          pybind11::arg("key"),
+          pybind11::arg("value"),
+          "Set a processor option. Keys: 'vad_enabled', 'vad_threshold', 'vad_min_silence_chunks', 'vad_model_path'.")
       .def(
-          "disable_vad", [](OgaStreamingProcessor& proc) { proc.DisableVad(); },
-          "Disable Voice Activity Detection. All chunks will be processed.")
-      .def(
-          "set_vad_threshold",
-          [](OgaStreamingProcessor& proc, float threshold) { proc.SetVadThreshold(threshold); },
-          pybind11::arg("threshold"),
-          "Set the VAD speech probability threshold.")
-      .def_property_readonly(
-          "is_vad_enabled", [](OgaStreamingProcessor& proc) { return proc.IsVadEnabled(); },
-          "Returns True if VAD is currently enabled.");
+          "get_option",
+          [](OgaStreamingProcessor& proc, const std::string& key) {
+            return std::string(proc.GetOption(key.c_str()));
+          },
+          pybind11::arg("key"),
+          "Get a processor option value by key.");
 
   pybind11::class_<OgaSileroVad>(m, "SileroVad")
       .def(pybind11::init([](const std::string& model_path, int sample_rate, float threshold) {

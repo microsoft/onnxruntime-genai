@@ -20,10 +20,8 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   std::unique_ptr<NamedTensors> Process(const float* audio_data, size_t num_samples) override;
   std::unique_ptr<NamedTensors> Flush() override;
 
-  void EnableVad(const char* vad_model_path, float threshold = 0.5f) override;
-  void DisableVad() override;
-  void SetVadThreshold(float threshold) override;
-  bool IsVadEnabled() const override;
+  void SetOption(const char* key, const char* value) override;
+  std::string GetOption(const char* key) const override;
 
   int GetChunkSamples() const { return cache_config_.chunk_samples; }
   int GetSampleRate() const { return cache_config_.sample_rate; }
@@ -42,8 +40,13 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
 
-  // Voice Activity Detection (auto-enabled if silero_vad.onnx found in model dir)
+  // Voice Activity Detection
   std::unique_ptr<SileroVad> vad_;
+  int consecutive_silence_chunks_{0};  // Counter for consecutive silent chunks
+  int min_silence_chunks_{5};          // Start dropping after this many consecutive silence chunks
+
+  void EnableVad(const char* vad_model_path, float threshold);
+  void EnableVadFromConfig();
 
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
 };

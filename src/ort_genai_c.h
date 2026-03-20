@@ -1182,37 +1182,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProces
 OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
 
 /**
- * \brief Enable Voice Activity Detection on a StreamingProcessor.
- *        When enabled, chunks without speech are skipped (Process returns nullptr).
+ * \brief Set a processor option as a key-value pair.
+ *        Supported keys: "vad_enabled", "vad_threshold", "vad_min_silence_chunks", "vad_model_path".
  * \param[in] processor The StreamingProcessor instance.
- * \param[in] vad_model_path Path to the silero_vad.onnx model file.
- * \param[in] threshold Speech probability threshold (0.0 to 1.0).
+ * \param[in] key Option name.
+ * \param[in] value Option value as string.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorEnableVad(OgaStreamingProcessor* processor, const char* vad_model_path, float threshold);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value);
 
 /**
- * \brief Disable Voice Activity Detection on a StreamingProcessor.
+ * \brief Get a processor option value by key.
  * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[out] value Pointer to store the value string. Caller must free with OgaDestroyString.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorDisableVad(OgaStreamingProcessor* processor);
-
-/**
- * \brief Set the VAD speech probability threshold on a StreamingProcessor.
- * \param[in] processor The StreamingProcessor instance.
- * \param[in] threshold New threshold value.
- * \return OgaResult on error, nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetVadThreshold(OgaStreamingProcessor* processor, float threshold);
-
-/**
- * \brief Check if VAD is currently enabled on a StreamingProcessor.
- * \param[in] processor The StreamingProcessor instance.
- * \param[out] enabled Set to true if VAD is enabled.
- * \return OgaResult on error, nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorIsVadEnabled(OgaStreamingProcessor* processor, bool* enabled);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value);
 
 /**
  * \brief Creates a SileroVad instance for voice activity detection.

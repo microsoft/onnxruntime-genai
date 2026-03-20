@@ -906,22 +906,14 @@ struct OgaStreamingProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(out);
   }
 
-  void EnableVad(const char* vad_model_path, float threshold = 0.5f) {
-    OgaCheckResult(OgaStreamingProcessorEnableVad(this, vad_model_path, threshold));
+  void SetOption(const char* key, const char* value) {
+    OgaCheckResult(OgaStreamingProcessorSetOption(this, key, value));
   }
 
-  void DisableVad() {
-    OgaCheckResult(OgaStreamingProcessorDisableVad(this));
-  }
-
-  void SetVadThreshold(float threshold) {
-    OgaCheckResult(OgaStreamingProcessorSetVadThreshold(this, threshold));
-  }
-
-  bool IsVadEnabled() {
-    bool enabled;
-    OgaCheckResult(OgaStreamingProcessorIsVadEnabled(this, &enabled));
-    return enabled;
+  OgaString GetOption(const char* key) {
+    const char* value;
+    OgaCheckResult(OgaStreamingProcessorGetOption(this, key, &value));
+    return OgaString(value);
   }
 
   static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }

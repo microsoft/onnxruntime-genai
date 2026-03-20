@@ -11,9 +11,11 @@
 
 namespace Generators {
 
-SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold)
-    : sample_rate_{sample_rate},
-      threshold_{threshold} {
+// Shared initialization for both constructors
+void SileroVad::Initialize(int sample_rate, float threshold) {
+  sample_rate_ = sample_rate;
+  threshold_ = threshold;
+
   if (sample_rate != 16000 && sample_rate != 8000) {
     throw std::runtime_error("SileroVad only supports sample rates 16000 and 8000. Got: " +
                              std::to_string(sample_rate));
@@ -22,16 +24,53 @@ SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold)
   window_size_ = (sample_rate == 16000) ? 512 : 256;
   context_size_ = (sample_rate == 16000) ? 64 : 32;
 
-  // Create lightweight session options for the small VAD model
+  memory_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  state_.assign(kStateSize, 0.0f);
+  context_.assign(static_cast<size_t>(context_size_), 0.0f);
+}
+
+// Constructor from Model — uses GenAI's session creation infrastructure
+SileroVad::SileroVad(Model& model) {
+  auto& vad_config = model.config_->model.vad;
+
+  // Use the model's existing session options (inherits provider options, thread settings, etc.)
+  // VAD is a lightweight model that doesn't need its own provider configuration.
+  OrtSessionOptions* session_opts = model.session_options_.get();
+
+  // If VAD-specific session options are provided in config, create dedicated options
+  if (vad_config.session_options.has_value()) {
+    session_options_ = OrtSessionOptions::Create();
+    session_options_->SetIntraOpNumThreads(1);
+    session_options_->SetInterOpNumThreads(1);
+    session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_opts = session_options_.get();
+  }
+
+  // Load session through Model::CreateSession (handles model data spans, path resolution)
+  std::string filename = vad_config.filename;
+  if (filename.empty()) filename = "silero_vad.onnx";
+  session_ = model.CreateSession(GetOrtEnv(), filename, session_opts);
+
+  // Create run options from config if specified
+  if (vad_config.run_options.has_value()) {
+    run_options_ = OrtRunOptions::Create();
+    for (const auto& [key, value] : vad_config.run_options.value()) {
+      run_options_->AddConfigEntry(key.c_str(), value.c_str());
+    }
+  }
+
+  Initialize(model.config_->model.sample_rate, vad_config.threshold);
+}
+
+// Constructor with explicit path — standalone/programmatic usage
+SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold) {
   session_options_ = OrtSessionOptions::Create();
   session_options_->SetIntraOpNumThreads(1);
   session_options_->SetInterOpNumThreads(1);
   session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-  // Load the ONNX model
   auto& ort_env = GetOrtEnv();
 #ifdef _WIN32
-  // Convert to wide string on Windows
   std::wstring wide_path;
   int len = MultiByteToWideChar(CP_UTF8, 0, model_path, -1, nullptr, 0);
   wide_path.resize(len - 1);
@@ -41,12 +80,7 @@ SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold)
   session_ = OrtSession::Create(ort_env, model_path, session_options_.get());
 #endif
 
-  // Create CPU memory info (kept for lifetime of this object)
-  memory_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-
-  // Initialize state and context to zeros
-  state_.assign(kStateSize, 0.0f);
-  context_.assign(static_cast<size_t>(context_size_), 0.0f);
+  Initialize(sample_rate, threshold);
 }
 
 SileroVad::~SileroVad() = default;
@@ -68,7 +102,7 @@ float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
   std::memcpy(input_data.data(), context_.data(), context_size_ * sizeof(float));
   std::memcpy(input_data.data() + context_size_, samples, window_size_ * sizeof(float));
 
-  // Create input tensors using the project's ORT wrappers
+  // Create input tensors using GenAI's ORT wrappers
   int64_t input_shape[] = {1, effective_size};
   auto input_tensor = OrtValue::CreateTensor<float>(
       *memory_info_, std::span<float>(input_data), std::span<const int64_t>(input_shape, 2));
@@ -82,16 +116,13 @@ float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
   auto sr_tensor = OrtValue::CreateTensor<int64_t>(
       *memory_info_, std::span<int64_t>(&sr_value_, 1), std::span<const int64_t>(sr_shape, 1));
 
-  // Input/output names
   const char* input_names[] = {"input", "state", "sr"};
   const char* output_names[] = {"output", "stateN"};
-
-  // Set up input pointers
   OrtValue* inputs[] = {input_tensor.get(), state_tensor.get(), sr_tensor.get()};
 
-  // Run inference (ORT allocates outputs)
+  // Run inference through the session with proper run options
   auto ort_outputs = session_->Run(
-      nullptr,  // default run options
+      run_options_ ? run_options_.get() : nullptr,
       input_names, inputs, 3,
       output_names, 2);
 
@@ -131,6 +162,10 @@ bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
   }
 
   return false;
+}
+
+std::unique_ptr<SileroVad> CreateSileroVad(Model& model) {
+  return std::make_unique<SileroVad>(model);
 }
 
 std::unique_ptr<SileroVad> CreateSileroVad(const char* model_path, int sample_rate, float threshold) {

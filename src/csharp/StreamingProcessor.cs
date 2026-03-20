@@ -47,43 +47,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
-        /// Enable Voice Activity Detection. Chunks without speech will be skipped.
+        /// Set a processor option as a key-value pair.
+        /// Supported keys: "vad_enabled", "vad_threshold", "vad_min_silence_chunks", "vad_model_path".
         /// </summary>
-        /// <param name="vadModelPath">Path to the silero_vad.onnx model file.</param>
-        /// <param name="threshold">Speech probability threshold (default 0.5).</param>
-        public void EnableVad(string vadModelPath, float threshold = 0.5f)
+        public void SetOption(string key, string value)
         {
-            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorEnableVad(
-                _processorHandle, System.Text.Encoding.UTF8.GetBytes(vadModelPath + '\0'), threshold));
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorSetOption(
+                _processorHandle,
+                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
+                System.Text.Encoding.UTF8.GetBytes(value + '\0')));
         }
 
         /// <summary>
-        /// Disable Voice Activity Detection. All chunks will be processed.
+        /// Get a processor option value by key.
         /// </summary>
-        public void DisableVad()
+        public string GetOption(string key)
         {
-            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorDisableVad(_processorHandle));
-        }
-
-        /// <summary>
-        /// Set the VAD speech probability threshold.
-        /// </summary>
-        public void SetVadThreshold(float threshold)
-        {
-            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorSetVadThreshold(_processorHandle, threshold));
-        }
-
-        /// <summary>
-        /// Returns true if VAD is currently enabled.
-        /// </summary>
-        public bool IsVadEnabled
-        {
-            get
-            {
-                bool enabled;
-                Result.VerifySuccess(NativeMethods.OgaStreamingProcessorIsVadEnabled(_processorHandle, out enabled));
-                return enabled;
-            }
+            IntPtr valuePtr;
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorGetOption(
+                _processorHandle,
+                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
+                out valuePtr));
+            string result = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(valuePtr) ?? "";
+            NativeMethods.OgaDestroyString(valuePtr);
+            return result;
         }
 
         ~StreamingProcessor()

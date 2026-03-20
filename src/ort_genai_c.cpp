@@ -1130,30 +1130,17 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* proces
 
 void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
 
-OgaResult* OGA_API_CALL OgaStreamingProcessorEnableVad(OgaStreamingProcessor* processor, const char* vad_model_path, float threshold) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value) {
   OGA_TRY
-  processor->EnableVad(vad_model_path, threshold);
+  processor->SetOption(key, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaStreamingProcessorDisableVad(OgaStreamingProcessor* processor) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value) {
   OGA_TRY
-  processor->DisableVad();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStreamingProcessorSetVadThreshold(OgaStreamingProcessor* processor, float threshold) {
-  OGA_TRY
-  processor->SetVadThreshold(threshold);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStreamingProcessorIsVadEnabled(OgaStreamingProcessor* processor, bool* enabled) {
-  OGA_TRY
-  *enabled = processor->IsVadEnabled();
+  auto result = processor->GetOption(key);
+  *value = AllocOgaString(result);
   return nullptr;
   OGA_CATCH
 }
