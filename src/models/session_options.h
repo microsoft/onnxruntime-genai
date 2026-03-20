@@ -16,7 +16,7 @@ void AppendExecutionProvider(
     DeviceInterface*& p_device,
     std::unique_ptr<OrtArenaCfg>& arena_cfg);
 
-}
+}  // namespace CUDAExecutionProvider
 
 namespace NvTensorRtRtxExecutionProvider {
 

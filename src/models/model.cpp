@@ -781,8 +781,12 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
       auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
       try {
         allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
-      } catch (const Ort::Exception&) {
-        throw std::runtime_error("Failed to create allocator for WebGPU: " + std::string(e.what()));
+      } catch (const Ort::Exception& fallback_e) {
+        throw std::runtime_error(
+            "Failed to create allocator for WebGPU. "
+            "Primary name '" +
+            std::string(name) + "' error: " + std::string(e.what()) +
+            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
       }
     } else {
       throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));

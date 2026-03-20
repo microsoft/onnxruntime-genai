@@ -321,7 +321,7 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
     // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU", "NPU", etc.)
     auto selected_ov_device = GetOVDeviceStringFromOrtDevice(openvino_ep_device);
 
-    std::vector<const char*> keys, values;
+    std::unordered_map<std::string, std::string> options;
     std::optional<std::string> cache_dir_option;
     std::optional<std::string> load_config_option;
     for (auto& option : provider_options.options) {
@@ -344,8 +344,7 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
         continue;
       }
 
-      keys.emplace_back(option.first.c_str());
-      values.emplace_back(option.second.c_str());
+      options.insert(option);
     }
 
     // if cache_dir option is set
@@ -359,17 +358,11 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
     }
 
     if (load_config_option.has_value()) {
-      keys.emplace_back("load_config");
-      values.emplace_back((*load_config_option).c_str());
+      options["load_config"] = *load_config_option;
     }
 
     std::vector<const OrtEpDevice*> ep_devices_ptrs = {openvino_ep_device};
-    Ort::api->SessionOptionsAppendExecutionProvider_V2(
-        &session_options,
-        &GetOrtEnv(),
-        ep_devices_ptrs.data(), ep_devices_ptrs.size(),
-        keys.data(), values.data(), keys.size());
-
+    session_options.AppendExecutionProvider_V2(GetOrtEnv(), ep_devices_ptrs, options);
   } else {
     std::vector<const char*> keys, values;
     std::optional<std::string> cache_dir_option;
