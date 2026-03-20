@@ -30,7 +30,13 @@ void AppendExecutionProvider(
       values.emplace_back(option.second.c_str());
     } else {
       size_t idx = std::distance(std::begin(arena_keys), it);
-      arena_values[idx] = static_cast<size_t>(std::stoull(option.second));
+      long long parsed_value = std::stoll(option.second);
+      if (parsed_value < -1) {
+        throw std::out_of_range("Arena configuration option value is out of range");
+      }
+      arena_values[idx] = (parsed_value == -1)
+                              ? static_cast<size_t>(-1)
+                              : static_cast<size_t>(parsed_value);
       use_arena_management = true;
     }
   }

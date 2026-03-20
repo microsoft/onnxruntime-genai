@@ -649,6 +649,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                         is_primary_session_options, p_device)) {
         continue;
       } else {
+        if (is_primary_session_options) {
+          p_device = GetDeviceInterface(DeviceType::WEBGPU);
+        }
         AppendGenericExecutionProvider(session_options, provider_options);
       }
     } else if (provider_options.name == "QNN") {
