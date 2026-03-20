@@ -492,7 +492,7 @@ bool AppendPluginExecutionProvider(
       void* stream_ptr = p_device->GetCudaStream();
       std::stringstream stream_value;
       stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-      options.insert({"user_compute_stream", stream_value.str()});
+      options["user_compute_stream"] = stream_value.str();
     }
   }
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);

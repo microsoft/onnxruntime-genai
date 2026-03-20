@@ -47,7 +47,7 @@ void AppendExecutionProvider(
 
   // Use fine-grained memory management of BFC Arena
   if (use_arena_management) {
-    if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, 5);
+    if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
     ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
   }
 
