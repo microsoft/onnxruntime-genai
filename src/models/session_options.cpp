@@ -2,192 +2,199 @@
 // Licensed under the MIT License.
 
 #include "session_options.h"
-#include "kv_cache.h"
+
+#include <functional>
+#include <unordered_map>
+
+#include "../cuda/session_options.h"
+#include "../dml/session_options.h"
+#include "../nvtrtrtx/session_options.h"
+#include "../openvino/session_options.h"
+#include "../qnn/session_options.h"
+#include "../ryzenai/session_options.h"
+#include "../vitisai/session_options.h"
+#include "../webgpu/session_options.h"
 
 namespace Generators {
 
-namespace CUDAExecutionProvider {
+// Each execution provider has a dedicated AppendExecutionProvider function in its
+// own src/<provider>/session_options.cpp file. The dispatch table in
+// SetProviderSessionOptions (below) maps provider names to these functions.
+// Providers that are not in the dispatch table are treated as generic and
+// attempted via V2 (plugin) then V1 (legacy) API paths.
 
-void AppendExecutionProvider(
+std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptions& provider_options,
+                                                     const std::vector<const OrtEpDevice*>& devices) {
+  const auto& filtering_options = provider_options.device_filtering_options;
+  if (!filtering_options ||
+      (!filtering_options->hardware_device_id &&
+       !filtering_options->hardware_vendor_id &&
+       !filtering_options->hardware_device_type)) {
+    return devices;
+  }
+
+  std::vector<const OrtEpDevice*> filtered_devices;
+
+  for (const auto* device : devices) {
+    bool match = true;
+    auto* ort_device = device->Device();
+
+    if (filtering_options->hardware_device_id &&
+        ort_device->DeviceId() != *filtering_options->hardware_device_id) {
+      match = false;
+    }
+
+    if (filtering_options->hardware_vendor_id &&
+        ort_device->VendorId() != *filtering_options->hardware_vendor_id) {
+      match = false;
+    }
+
+    if (filtering_options->hardware_device_type &&
+        ort_device->Type() != *filtering_options->hardware_device_type) {
+      match = false;
+    }
+
+    if (match) {
+      filtered_devices.push_back(device);
+    }
+  }
+
+  if (filtered_devices.empty()) {
+    std::string error_msg = "No devices matched the filtering criteria specified in provider options. Filter criteria:";
+    if (filtering_options->hardware_device_id) {
+      error_msg += " hardware_device_id=" + std::to_string(*filtering_options->hardware_device_id);
+    }
+    if (filtering_options->hardware_vendor_id) {
+      error_msg += " hardware_vendor_id=" + std::to_string(*filtering_options->hardware_vendor_id);
+    }
+    if (filtering_options->hardware_device_type) {
+      error_msg += " hardware_device_type=" + std::to_string(static_cast<int>(*filtering_options->hardware_device_type));
+    }
+    error_msg += ". Available devices:";
+    for (const auto* device : devices) {
+      auto* ort_device = device->Device();
+      error_msg += " [device_id=" + std::to_string(ort_device->DeviceId()) +
+                   ", vendor_id=" + std::to_string(ort_device->VendorId()) +
+                   ", type=" + std::to_string(static_cast<int>(ort_device->Type())) + "]";
+    }
+    error_msg += ". Verify that the device filtering options in genai_config.json match an available device.";
+    throw std::runtime_error(error_msg);
+  }
+  return filtered_devices;
+}
+
+// Helper to check if a provider is registered and get all matching EP devices
+std::vector<const OrtEpDevice*> FindRegisteredEpDevices(const std::string& ep_name) {
+  auto device_ptrs = GetOrtEnv().GetEpDevices();
+  std::vector<const OrtEpDevice*> ep_devices_ptrs;
+  for (auto* device : device_ptrs) {
+    if (device->Name() == ep_name) {
+      ep_devices_ptrs.push_back(device);
+    }
+  }
+  return ep_devices_ptrs;
+}
+
+// If an execution provider is plugged-in via the registered plugin mechanism,
+// this function appends the provider using the V2 API.
+// Returns true if the provider was appended via the plugin path, false if the
+// provider is not registered.
+bool AppendExecutionProviderV2(
     OrtSessionOptions& session_options,
     const Config::ProviderOptions& provider_options,
-    bool is_primary_session_options,
-    DeviceInterface*& p_device,
-    std::unique_ptr<OrtArenaCfg>& arena_cfg) {
-  auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
-  std::vector<const char*> keys, values;
+    DeviceType device_type,
+    const std::string& ep_name) {
+  auto ep_devices_ptrs = FindRegisteredEpDevices(ep_name);
+  if (ep_devices_ptrs.empty()) return false;  // Not registered
 
-  // Memory management settings
-  const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
-  size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
-  bool use_arena_management = false;
-
+  std::unordered_map<std::string, std::string> options;
   for (auto& option : provider_options.options) {
-    auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
-
-    if (it == std::end(arena_keys)) {
-      keys.emplace_back(option.first.c_str());
-      values.emplace_back(option.second.c_str());
-    } else {
-      size_t idx = std::distance(std::begin(arena_keys), it);
-      long long parsed_value = std::stoll(option.second);
-      if (parsed_value < -1) {
-        throw std::out_of_range("Arena configuration option value is out of range");
-      }
-      arena_values[idx] = (parsed_value == -1)
-                              ? static_cast<size_t>(-1)
-                              : static_cast<size_t>(parsed_value);
-      use_arena_management = true;
-    }
-  }
-  ort_provider_options->Update(keys.data(), values.data(), keys.size());
-
-  // Device type determines the scoring device.
-  // Only use the primary session options to determine the device type
-  if (is_primary_session_options) {
-    p_device = GetDeviceInterface(DeviceType::CUDA);
-
-    // Create and set our cudaStream_t
-    ort_provider_options->UpdateValue("user_compute_stream", p_device->GetCudaStream());
+    options.insert(option);
   }
 
-  // Use fine-grained memory management of BFC Arena
-  if (use_arena_management) {
-    if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
-    ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
+  auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
+  if (device_type == DeviceType::WEBGPU) {
+    // WebGPU EP factory currently only supports one device at a time
+    filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
   }
 
-  session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+  session_options.AppendExecutionProvider_V2(GetOrtEnv(), filtered_ep_device_ptrs, options);
+  return true;
 }
 
-}  // namespace CUDAExecutionProvider
+void AppendExecutionProviderV1(OrtSessionOptions& session_options,
+                               const Config::ProviderOptions& provider_options) {
+  std::vector<const char*> keys, values;
+  for (auto& option : provider_options.options) {
+    keys.emplace_back(option.first.c_str());
+    values.emplace_back(option.second.c_str());
+  }
+  session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(),
+                                          values.data(), keys.size());
+}
 
-namespace NvTensorRtRtxExecutionProvider {
+DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
+                                           const std::vector<std::string>& providers,
+                                           const std::vector<Config::ProviderOptions>& provider_options_list,
+                                           bool is_primary_session_options,
+                                           const Config& config,
+                                           bool disable_graph_capture) {
+  using AppendExecutionProviderFn = DeviceInterface* (*)(OrtSessionOptions&,
+                                                         const Config::ProviderOptions&,
+                                                         const Config&,
+                                                         bool);
 
-void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
-  // Get model parameters from decoder config
-  const int num_layers = config.model.decoder.num_hidden_layers;
-  const int num_kv_heads = config.model.decoder.num_key_value_heads;
-  const int head_dim = config.model.decoder.head_size;
-  const int batch_size = config.search.batch_size * config.search.num_beams;
-
-  // Get max context length from config
-  const int max_context_len = config.model.context_length;
-
-  // Extract KV cache name patterns from decoder config
-  std::string_view past_key_pattern = config.model.decoder.inputs.past_key_names;
-  std::string_view past_value_pattern = config.model.decoder.inputs.past_value_names;
-
-  // Helper function to add KV cache with sequence length
-  const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                             int batch_size,
-                                             std::string_view key_pattern,
-                                             std::string_view value_pattern,
-                                             int seq_len,
-                                             int num_layers,
-                                             int num_kv_heads,
-                                             int head_dim) {
-    for (int i = 0; i < num_layers; i++) {
-      // Use the existing function to format the key/value names
-      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-      shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-      shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-    }
+  // Dispatch table: maps provider name (as it appears in genai_config.json) to
+  // the corresponding provider-specific AppendExecutionProvider function.
+  static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
+      {"DML", DMLExecutionProvider::AppendExecutionProvider},
+      {"NvTensorRtRtx", NvTensorRtRtxExecutionProvider::AppendExecutionProvider},
+      {"OpenVINO", OpenVINOExecutionProvider::AppendExecutionProvider},
+      {"RyzenAI", RyzenAIExecutionProvider::AppendExecutionProvider},
+      {"QNN", QNNExecutionProvider::AppendExecutionProvider},
+      {"VitisAI", VitisAIExecutionProvider::AppendExecutionProvider},
+      {"WebGPU", WebGPUExecutionProvider::AppendExecutionProvider},
   };
 
-  if (is_multi_profile_enabled) {
-    // Multi-profile mode: existing logic for context and generation phases
-    const int opt_context_len = config.model.context_length / 2;
-    const int min_seq_len = 1;
+  DeviceInterface* device{};
 
-    // Helper function to add input shapes (input_ids, attention_mask, position_ids)
-    const auto add_input_shapes = [](std::ostringstream& shapes, int batch_size, int seq_len, bool append = false) {
-      if (append) shapes << ",";
-      shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << seq_len << ","
-             << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << seq_len;
-    };
-
-    // Helper function to add generation phase input shapes
-    const auto add_generation_input_shapes = [](std::ostringstream& shapes, int batch_size, int context_len) {
-      shapes << "," << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << context_len << ","
-             << Config::Defaults::InputIdsName << ":" << batch_size << "x1";
-    };
-
-    // Helper function to add empty KV cache shapes for all layers
-    const auto add_empty_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                                     int batch_size,
-                                                     std::string_view key_pattern,
-                                                     std::string_view value_pattern,
-                                                     int num_layers,
-                                                     int num_kv_heads,
-                                                     int head_dim) {
-      for (int i = 0; i < num_layers; i++) {
-        // Use the existing function to format the key/value names
-        const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-        const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-        shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x0x" << head_dim;
-        shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x0x" << head_dim;
+  auto providers_list = providers;
+  if (!is_primary_session_options) {
+    // Providers specified in a non-primary provider options list are added
+    // to the primary providers. They are considered immutable and implicitly
+    // added as providers.
+    for (const auto& provider_options : provider_options_list) {
+      if (std::find(providers_list.begin(), providers_list.end(), provider_options.name) == providers_list.end()) {
+        providers_list.push_back(provider_options.name);
       }
-    };
-
-    std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-    // MIN SHAPES (context phase and first token generation)
-    add_input_shapes(min_shapes, batch_size, min_seq_len);
-    add_empty_key_value_cache_shapes(min_shapes, batch_size, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(min_shapes, batch_size, min_seq_len);
-    add_key_value_cache_shapes(min_shapes, batch_size, past_key_pattern, past_value_pattern, min_seq_len, num_layers, num_kv_heads, head_dim);
-
-    // OPT SHAPES (prefill with medium context and generation after medium context)
-    add_input_shapes(opt_shapes, batch_size, opt_context_len);
-    add_empty_key_value_cache_shapes(opt_shapes, batch_size, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(opt_shapes, batch_size, opt_context_len);
-    add_key_value_cache_shapes(opt_shapes, batch_size, past_key_pattern, past_value_pattern, opt_context_len - 1, num_layers, num_kv_heads, head_dim);
-
-    // MAX SHAPES (prefill with maximum context and generation after maximum context)
-    add_input_shapes(max_shapes, batch_size, max_context_len);
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(max_shapes, batch_size, max_context_len);
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
-
-    // Add the constructed profiles to session options
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
-  } else {
-    // Single profile mode: simple shapes with batch_dim=[1,1,batch_size] and seq_dim=[1,1024,max_context_len]
-    std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-    // MIN SHAPES: batch_dim=1, seq_dim=1
-    constexpr int min_context_len = 1;
-    constexpr int min_batch_size = 1;
-    min_shapes << Config::Defaults::InputIdsName << ":" << min_batch_size << "x" << min_context_len << ","
-               << Config::Defaults::AttentionMaskName << ":" << min_batch_size << "x" << min_context_len;
-    add_key_value_cache_shapes(min_shapes, min_batch_size, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
-
-    // OPT SHAPES: batch_dim=1, seq_dim=1024
-    const int opt_context_len = std::min(max_context_len / 2, 1024);  // Use a reasonable opt context length
-    constexpr int opt_batch_size = 1;                                 // Use a opt batch size of 1
-    // keeping seq length to 1 as optimizing for the gen phase
-    opt_shapes << Config::Defaults::InputIdsName << ":" << opt_batch_size << "x" << 1 << ","
-               << Config::Defaults::AttentionMaskName << ":" << opt_batch_size << "x" << opt_context_len;
-    add_key_value_cache_shapes(opt_shapes, opt_batch_size, past_key_pattern, past_value_pattern, opt_context_len, num_layers, num_kv_heads, head_dim);
-
-    // MAX SHAPES: seq_dim=max_context_len
-    max_shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << max_context_len << ","
-               << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << max_context_len;
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len, num_layers, num_kv_heads, head_dim);
-
-    // Add the constructed profiles to session options
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+    }
   }
-}
 
-}  // namespace NvTensorRtRtxExecutionProvider
+  for (const auto& provider : providers_list) {
+    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
+                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
+
+    if (provider_options_it == provider_options_list.end()) {
+      throw std::runtime_error("Provider options not found for provider: " + provider);
+    }
+    const auto& provider_options = *provider_options_it;
+
+    const auto append_provider_it = append_execution_provider.find(provider_options.name);
+    if (append_provider_it != append_execution_provider.end()) {
+      auto session_device = append_provider_it->second(session_options, provider_options, config, disable_graph_capture);
+      if (session_device && !device) {
+        device = session_device;  // Set the device if not already set by a previous provider
+      }
+    } else {
+      if (!AppendExecutionProviderV2(session_options, provider_options,
+                                     DeviceType::CPU, provider_options.name)) {
+        AppendExecutionProviderV1(session_options, provider_options);
+      }
+    }
+  }
+
+  return device;
+}
 
 }  // namespace Generators

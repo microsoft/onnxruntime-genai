@@ -129,19 +129,19 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
 
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true, false);
+                                 *decoder_session_options_, true);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   }
 
   // Load the three ONNX models

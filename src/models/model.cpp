@@ -393,331 +393,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-namespace {
-
-std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptions& provider_options,
-                                                     const std::vector<const OrtEpDevice*>& devices) {
-  if (!provider_options.device_filtering_options) {
-    return devices;
-  } else if (!provider_options.device_filtering_options->hardware_device_id &&
-             !provider_options.device_filtering_options->hardware_vendor_id &&
-             !provider_options.device_filtering_options->hardware_device_type) {
-    return devices;
-  }
-
-  std::vector<const OrtEpDevice*> filtered_devices;
-
-  for (const auto* device : devices) {
-    bool match = true;
-
-    if (provider_options.device_filtering_options->hardware_device_id &&
-        device->Device()->DeviceId() != *provider_options.device_filtering_options->hardware_device_id) {
-      match = false;
-    }
-
-    if (provider_options.device_filtering_options->hardware_vendor_id &&
-        device->Device()->VendorId() != *provider_options.device_filtering_options->hardware_vendor_id) {
-      match = false;
-    }
-
-    if (provider_options.device_filtering_options->hardware_device_type &&
-        device->Device()->Type() != *provider_options.device_filtering_options->hardware_device_type) {
-      match = false;
-    }
-
-    if (match) {
-      filtered_devices.push_back(device);
-    }
-  }
-
-  if (filtered_devices.empty()) {
-    std::string error_msg = "No devices matched the filtering criteria specified in provider options. Filter criteria:";
-    if (provider_options.device_filtering_options->hardware_device_id) {
-      error_msg += " hardware_device_id=" + std::to_string(*provider_options.device_filtering_options->hardware_device_id);
-    }
-    if (provider_options.device_filtering_options->hardware_vendor_id) {
-      error_msg += " hardware_vendor_id=" + std::to_string(*provider_options.device_filtering_options->hardware_vendor_id);
-    }
-    if (provider_options.device_filtering_options->hardware_device_type) {
-      error_msg += " hardware_device_type=" + std::to_string(static_cast<int>(*provider_options.device_filtering_options->hardware_device_type));
-    }
-    error_msg += ". Available devices:";
-    for (const auto* device : devices) {
-      error_msg += " [device_id=" + std::to_string(device->Device()->DeviceId()) +
-                   ", vendor_id=" + std::to_string(device->Device()->VendorId()) +
-                   ", type=" + std::to_string(static_cast<int>(device->Device()->Type())) + "]";
-    }
-    error_msg += ". Verify that the device filtering options in genai_config.json match an available device.";
-    throw std::runtime_error(error_msg);
-  }
-  return filtered_devices;
-}
-
-// Helper to check if a provider is registered and get all matching EP devices
-std::vector<const OrtEpDevice*> FindRegisteredEpDevices(const std::string& ep_name) {
-  auto device_ptrs = GetOrtEnv().GetEpDevices();
-  std::vector<const OrtEpDevice*> ep_devices_ptrs;
-  for (auto* device : device_ptrs) {
-    if (device->Name() == ep_name) {
-      ep_devices_ptrs.push_back(device);
-    }
-  }
-  return ep_devices_ptrs;
-}
-
-// If an execution provider is plugged-in via the registered plugin mechanism,
-// this function appends the provider using the V2 API and sets the device interface
-// if applicable.
-// Returns true if the provider was appended via the plugin path, false if the provider
-// is not registered
-bool AppendPluginExecutionProvider(
-    OrtSessionOptions& session_options,
-    const Config::ProviderOptions& provider_options,
-    DeviceType device_type,
-    const std::string& ep_name,
-    bool is_primary_session_options,
-    DeviceInterface*& p_device) {
-  auto ep_devices_ptrs = FindRegisteredEpDevices(ep_name);
-  if (ep_devices_ptrs.empty()) return false;  // Not registered
-
-  std::unordered_map<std::string, std::string> options;
-  for (auto& option : provider_options.options) {
-    options.insert(option);
-  }
-
-  if (is_primary_session_options) {
-    p_device = GetDeviceInterface(device_type);
-    if (p_device && (device_type == DeviceType::CUDA ||
-                     device_type == DeviceType::NvTensorRtRtx)) {
-      void* stream_ptr = p_device->GetCudaStream();
-      std::stringstream stream_value;
-      stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-      options["user_compute_stream"] = stream_value.str();
-    }
-  }
-  auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
-  if (device_type == DeviceType::WEBGPU) {
-    // WebGPU EP factory currently only supports one device at a time
-    filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
-  }
-
-  session_options.AppendExecutionProvider_V2(GetOrtEnv(), filtered_ep_device_ptrs, options);
-  return true;
-}
-
-void AppendGenericExecutionProvider(
-    OrtSessionOptions& session_options,
-    const Config::ProviderOptions& provider_options) {
-  std::vector<const char*> keys, values;
-  for (auto& option : provider_options.options) {
-    keys.emplace_back(option.first.c_str());
-    values.emplace_back(option.second.c_str());
-  }
-  session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(),
-                                          values.data(), keys.size());
-}
-
-}  // namespace
-
-DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
-                                           const std::vector<std::string>& providers,
-                                           const std::vector<Config::ProviderOptions>& provider_options_list,
-                                           bool is_primary_session_options,
-                                           bool disable_graph_capture,
-                                           const Config& config,
-                                           std::unique_ptr<OrtArenaCfg>& arena_cfg) {
-  DeviceInterface* p_device{};
-
-  auto providers_list = providers;
-  if (!is_primary_session_options) {
-    // Providers specified in a non-primary provider options list are added
-    // to the primary providers. They are considered immutable and implicitly
-    // added as providers.
-    std::transform(provider_options_list.begin(), provider_options_list.end(), std::back_inserter(providers_list),
-                   [](const auto& provider_options) { return provider_options.name; });
-  }
-
-  for (auto& provider : providers_list) {
-    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
-                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
-
-    if (provider_options_it == provider_options_list.end()) {
-      throw std::runtime_error("Provider options not found for provider: " + provider);
-    }
-    const auto& provider_options = *provider_options_it;
-
-    if (provider_options.name == "cuda") {
-      // Try pre-registered plugin path first
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::CUDA, "CUDAExecutionProvider",
-                                        is_primary_session_options, p_device)) {
-        continue;
-      } else {
-        // Register the CUDA execution provider as a provider-bridge provider.
-        Generators::CUDAExecutionProvider::AppendExecutionProvider(session_options, provider_options,
-                                                                   is_primary_session_options, p_device,
-                                                                   arena_cfg);
-      }
-    } else if (provider_options.name == "rocm") {
-      OrtROCMProviderOptions ort_provider_options;
-
-      std::vector<const char*> keys, values;
-      for (auto& option : provider_options.options) {
-        keys.emplace_back(option.first.c_str());
-        values.emplace_back(option.second.c_str());
-      }
-
-      Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
-      session_options.AppendExecutionProvider_ROCM(ort_provider_options);
-    } else if (provider_options.name == "DML") {
-#if USE_DML
-      if (!GetDmlInterface()) {
-        LUID device_luid{};
-        LUID* p_device_luid{};
-        uint32_t device_index{};
-        uint32_t* p_device_index{};
-        for (const auto& [name, value] : provider_options.options) {
-          if (name == "luid") {
-            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
-              device_luid.HighPart = std::stol(value.substr(0, separator_position));
-              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
-              p_device_luid = &device_luid;
-            }
-          } else if (name == "device_index") {
-            device_index = std::stoi(value);
-            p_device_index = &device_index;
-          }
-        }
-
-        InitDmlInterface(p_device_luid, p_device_index);
-      }
-
-      if (!disable_graph_capture) {
-        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      }
-
-      SetDmlProvider(session_options);
-
-      if (is_primary_session_options)
-        p_device = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
-#else
-      throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
-#endif
-    } else if (provider_options.name == "OpenVINO") {
-      p_device = GetDeviceInterface(DeviceType::OpenVINO);
-      OpenVINO_AppendProviderOptions(session_options, config, provider_options);
-    } else if (provider_options.name == "RyzenAI") {
-      p_device = GetDeviceInterface(DeviceType::RyzenAI);
-
-      session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
-
-      GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
-    } else if (provider_options.name == "NvTensorRtRtx") {
-      // Configure NvTensorRT-specific settings (needed for both pre-registered and built-in paths)
-      bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-      Generators::NvTensorRtRtxExecutionProvider::ConfigureProfile(
-          config, session_options, is_multi_profile_enabled);
-      if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
-      }
-
-      // Try pre-registered plugin path first
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::NvTensorRtRtx, "NvTensorRTRTXExecutionProvider",
-                                        is_primary_session_options, p_device)) {
-        continue;
-      } else {
-        // Built-in path: Configure stream via config entry (generic AppendExecutionProvider will be called below)
-        if (is_primary_session_options) {
-          p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
-          if (p_device) {
-            void* stream_ptr = p_device->GetCudaStream();
-            std::stringstream stream_value;
-            stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-            std::string stream_value_str = stream_value.str();
-            session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
-          }
-        }
-
-        // Fallback to legacy API for built-in NvTensorRtRtx when no pre-registered device found
-        // This handles the case when using the built-in provider (not loaded as a plugin)
-        AppendGenericExecutionProvider(session_options, provider_options);
-      }
-    } else if (provider_options.name == "WebGPU") {
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::WEBGPU, "WebGpuExecutionProvider",
-                                        is_primary_session_options, p_device)) {
-        continue;
-      } else {
-        if (is_primary_session_options) {
-          p_device = GetDeviceInterface(DeviceType::WEBGPU);
-        }
-        AppendGenericExecutionProvider(session_options, provider_options);
-      }
-    } else if (provider_options.name == "QNN") {
-      session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-      if (const auto opt_it = std::find_if(
-              provider_options.options.begin(), provider_options.options.end(),
-              [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
-          opt_it != provider_options.options.end() && opt_it->second == "1") {
-        p_device = GetDeviceInterface(DeviceType::QNN);
-      }
-      // is_primary_session_options is set to false because the p_device is set based on
-      // the presence of the "enable_htp_shared_memory_allocator" option,
-      // not based on whether this is the primary session options or not.
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::QNN, "QNNExecutionProvider",
-                                        /* is_primary_session_options */ false, p_device)) {
-        continue;
-      } else {
-        AppendGenericExecutionProvider(session_options, provider_options);
-      }
-    } else if (provider_options.name == "VitisAI") {
-      session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
-      session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-      session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
-
-      // VitisAI does not have a device type specific allocator, so we use CPU
-      // as the device type.
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::CPU, "VitisAIExecutionProvider",
-                                        /* is_primary_session_options */ false, p_device)) {
-        continue;
-      } else {
-        AppendGenericExecutionProvider(session_options, provider_options);
-      }
-
-#if defined(_WIN32)
-      if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                           [](const auto& pair) { return pair.first == "external_ep_libray"; });
-          opt_it != provider_options.options.end()) {
-        auto lib_name = opt_it->second;
-        auto lib = LoadLibrary(lib_name.c_str());
-        if (const auto func = (void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*))GetProcAddress(lib, "CreateEpFactories")) {
-          OrtEpFactory* factory = nullptr;
-          size_t num = 1;
-
-          func(nullptr, OrtGetApiBase(), nullptr, &factory, num, &num);
-        }
-        fs::path custom_ops_lib_path(lib_name);
-        session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
-      }
-#endif  // WIN32
-    } else {
-      // If a custom execution provider has been registered as a plugin execution provider,
-      // try appending it to the session options.
-      if (AppendPluginExecutionProvider(session_options, provider_options,
-                                        DeviceType::CPU, provider_options.name,
-                                        /* is_primary_session_options */ false, p_device)) {
-        continue;
-      } else {
-        AppendGenericExecutionProvider(session_options, provider_options);
-      }
-    }
-  }
-  return p_device;
-}
-
 // Trivial ONNX model that just returns a single float constant. Used below to create an OrtSession that
 // lets us get a device Ort::Allocator for each device type. This is necessary because the Ort::Allocator
 // needs to persist and is valid for the lifetime of this OrtSession.
@@ -733,7 +408,7 @@ static const uint8_t g_trivial_model[] = {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::unique_ptr<OrtArenaCfg>& arena_cfg) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -763,7 +438,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
     provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
   }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
-  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config, arena_cfg);
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -882,7 +557,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, *config_, arena_cfg_);
+  EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
@@ -904,7 +579,6 @@ Model::~Model() {
     allocator.session_.reset();
     allocator.allocator_.reset();
     session_options_.reset();
-    arena_cfg_.reset();
     // DML objects are globally scoped and launch background threads that retain hardware resources.
     // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
     // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
@@ -1043,7 +717,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
-                                                  disable_graph_capture, *config_, arena_cfg_);
+                                                  *config_, disable_graph_capture);
 
   if (!p_device_) {
     p_device_ = session_device;
@@ -1056,12 +730,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
     }
   }
 
