@@ -276,10 +276,10 @@ struct Config {
     } joiner;
 
     struct Vad {
-      bool enabled{false};          // Disabled by default; set to true in genai_config.json to enable
+      bool enabled{false};  // Disabled by default; set to true in genai_config.json to enable
       std::string filename{"silero_vad.onnx"};  // VAD model filename, relative to model directory
-      float threshold{0.5f};        // Speech probability threshold (0.0 to 1.0)
-      int min_silence_chunks{5};    // Consecutive silence chunks before dropping (default: 5)
+      float threshold{0.5f};  // Speech probability threshold (0.0 to 1.0)
+      int min_silence_chunks{5};  // Consecutive silence chunks before dropping (default: 5)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;
