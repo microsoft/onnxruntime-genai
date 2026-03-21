@@ -6,6 +6,7 @@
 #include "generators.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/silero_vad.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"

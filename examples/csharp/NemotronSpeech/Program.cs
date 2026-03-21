@@ -29,6 +29,17 @@ Console.WriteLine($"Audio: {audio.Length / (double)sampleRate:F1}s ({audio.Lengt
 using var config = Common.GetConfig(path: modelPath, ep: executionProvider, null, new GeneratorParamsArgs());
 using var model = new Model(config);
 using var processor = new StreamingProcessor(model);
+
+// VAD is disabled by default. Enable via genai_config.json ("vad": {"enabled": true})
+// or programmatically:
+// processor.SetOption("vad_enabled", "true");
+// processor.SetOption("vad_threshold", "0.3");
+// processor.SetOption("vad_min_silence_chunks", "5");
+if (processor.GetOption("vad_enabled") == "true")
+    Console.WriteLine("  VAD: enabled");
+else
+    Console.WriteLine("  VAD: disabled");
+
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
 using var genParams = new GeneratorParams(model);

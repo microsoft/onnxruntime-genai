@@ -275,6 +275,16 @@ struct Config {
       } outputs;
     } joiner;
 
+    struct Vad {
+      bool enabled{false};
+      std::string filename{"silero_vad.onnx"};
+      float threshold{0.5f};
+      int min_silence_chunks{5};
+      int sample_rate{0};  // 0 = use model's sample_rate
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } vad;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
@@ -319,6 +329,7 @@ struct Config {
 
         // RNNT decoder inputs
         std::string targets;
+        std::string target_length;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } inputs;
@@ -333,6 +344,7 @@ struct Config {
 
         // RNNT decoder outputs
         std::string outputs;
+        std::string prednet_lengths;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } outputs;

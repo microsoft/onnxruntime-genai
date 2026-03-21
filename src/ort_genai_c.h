@@ -79,6 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaSileroVad OgaSileroVad;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 //! @}
@@ -1179,6 +1180,76 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProces
  * \param[in] processor The StreamingProcessor instance to destroy.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
+
+/**
+ * \brief Set a processor option as a key-value pair.
+ *        Supported keys: "vad_enabled", "vad_threshold", "vad_min_silence_chunks", "vad_model_path".
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[in] value Option value as string.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value);
+
+/**
+ * \brief Get a processor option value by key.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[out] value Pointer to store the value string. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value);
+
+/**
+ * \brief Creates a SileroVad instance for voice activity detection.
+ * \param[in] model_path Path to the silero_vad.onnx model file.
+ * \param[in] sample_rate Audio sample rate (16000 or 8000).
+ * \param[in] threshold Speech probability threshold (0.0 to 1.0).
+ * \param[out] out Pointer to store the created SileroVad instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateSileroVad(const char* model_path, int32_t sample_rate, float threshold, OgaSileroVad** out);
+
+/**
+ * \brief Process a single VAD window and return the speech probability.
+ * \param[in] vad The SileroVad instance.
+ * \param[in] samples Pointer to float32 PCM audio samples.
+ * \param[in] num_samples Number of samples (must equal window size: 512 for 16kHz, 256 for 8kHz).
+ * \param[out] speech_prob Output speech probability in [0.0, 1.0].
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSileroVadProcessWindow(OgaSileroVad* vad, const float* samples, size_t num_samples, float* speech_prob);
+
+/**
+ * \brief Check if arbitrary-length audio contains speech.
+ * \param[in] vad The SileroVad instance.
+ * \param[in] samples Pointer to float32 PCM audio samples.
+ * \param[in] num_samples Number of samples.
+ * \param[out] contains_speech Set to true if any window exceeds the threshold.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSileroVadContainsSpeech(OgaSileroVad* vad, const float* samples, size_t num_samples, bool* contains_speech);
+
+/**
+ * \brief Reset VAD state for a new utterance.
+ * \param[in] vad The SileroVad instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSileroVadReset(OgaSileroVad* vad);
+
+/**
+ * \brief Set the speech probability threshold.
+ * \param[in] vad The SileroVad instance.
+ * \param[in] threshold New threshold value.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSileroVadSetThreshold(OgaSileroVad* vad, float threshold);
+
+/**
+ * \brief Destroy a SileroVad instance.
+ * \param[in] vad The SileroVad instance to destroy.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroySileroVad(OgaSileroVad* vad);
 
 #ifdef __cplusplus
 }

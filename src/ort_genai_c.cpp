@@ -15,6 +15,7 @@
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/silero_vad.h"
 
 namespace Generators {
 
@@ -62,6 +63,7 @@ struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
+struct OgaSileroVad : Generators::SileroVad, OgaAbstract {};
 struct OgaStreamingProcessor : Generators::StreamingProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
@@ -1127,5 +1129,58 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* proces
 }
 
 void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value) {
+  OGA_TRY
+  processor->SetOption(key, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value) {
+  OGA_TRY
+  auto result = processor->GetOption(key);
+  *value = AllocOgaString(result);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateSileroVad(const char* model_path, int32_t sample_rate, float threshold, OgaSileroVad** out) {
+  OGA_TRY
+  auto vad = Generators::CreateSileroVad(model_path, sample_rate, threshold);
+  *out = ReturnUnique<OgaSileroVad>(std::move(vad));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSileroVadProcessWindow(OgaSileroVad* vad, const float* samples, size_t num_samples, float* speech_prob) {
+  OGA_TRY
+  *speech_prob = vad->ProcessWindow(samples, num_samples);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSileroVadContainsSpeech(OgaSileroVad* vad, const float* samples, size_t num_samples, bool* contains_speech) {
+  OGA_TRY
+  *contains_speech = vad->ContainsSpeech(samples, num_samples);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSileroVadReset(OgaSileroVad* vad) {
+  OGA_TRY
+  vad->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSileroVadSetThreshold(OgaSileroVad* vad, float threshold) {
+  OGA_TRY
+  vad->SetThreshold(threshold);
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroySileroVad(OgaSileroVad* p) { delete p; }
 
 }  // extern "C"

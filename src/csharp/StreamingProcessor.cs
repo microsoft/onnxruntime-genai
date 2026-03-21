@@ -46,6 +46,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return outHandle != IntPtr.Zero ? new NamedTensors(outHandle) : null;
         }
 
+        /// <summary>
+        /// Set a processor option as a key-value pair.
+        /// Supported keys: "vad_enabled", "vad_threshold", "vad_min_silence_chunks", "vad_model_path".
+        /// </summary>
+        public void SetOption(string key, string value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorSetOption(
+                _processorHandle,
+                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
+                System.Text.Encoding.UTF8.GetBytes(value + '\0')));
+        }
+
+        /// <summary>
+        /// Get a processor option value by key.
+        /// </summary>
+        public string GetOption(string key)
+        {
+            IntPtr valuePtr;
+            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorGetOption(
+                _processorHandle,
+                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
+                out valuePtr));
+            string result = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(valuePtr) ?? "";
+            NativeMethods.OgaDestroyString(valuePtr);
+            return result;
+        }
+
         ~StreamingProcessor()
         {
             Dispose(false);

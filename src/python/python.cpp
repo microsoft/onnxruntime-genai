@@ -660,7 +660,72 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             }
             return pybind11::none();
           },
-          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.");
+          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
+      .def(
+          "set_option",
+          [](OgaStreamingProcessor& proc, const std::string& key, const std::string& value) {
+            proc.SetOption(key.c_str(), value.c_str());
+          },
+          pybind11::arg("key"),
+          pybind11::arg("value"),
+          "Set a processor option. Keys: 'vad_enabled', 'vad_threshold', 'vad_min_silence_chunks', 'vad_model_path'.")
+      .def(
+          "get_option",
+          [](OgaStreamingProcessor& proc, const std::string& key) {
+            return std::string(proc.GetOption(key.c_str()));
+          },
+          pybind11::arg("key"),
+          "Get a processor option value by key.");
+
+  pybind11::class_<OgaSileroVad>(m, "SileroVad")
+      .def(pybind11::init([](const std::string& model_path, int sample_rate, float threshold) {
+             return OgaSileroVad::Create(model_path.c_str(), sample_rate, threshold);
+           }),
+           pybind11::arg("model_path"),
+           pybind11::arg("sample_rate") = 16000,
+           pybind11::arg("threshold") = 0.5f,
+           "Create a SileroVad instance for voice activity detection.\n"
+           "model_path: Path to the silero_vad.onnx model file.\n"
+           "sample_rate: 16000 or 8000 (default 16000).\n"
+           "threshold: Speech probability threshold (default 0.5).")
+      .def(
+          "process_window",
+          [](OgaSileroVad& vad, pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast> samples) {
+            auto buf = samples.request();
+            if (buf.ndim != 1) {
+              throw std::runtime_error("samples must be a 1-D array, got " + std::to_string(buf.ndim) + "-D");
+            }
+            return vad.ProcessWindow(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
+          },
+          pybind11::arg("samples"),
+          "Process a single VAD window. Returns speech probability [0.0, 1.0].\n"
+          "samples must have exactly window_size samples (512 for 16kHz, 256 for 8kHz).")
+      .def(
+          "contains_speech",
+          [](OgaSileroVad& vad, pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast> samples) {
+            auto buf = samples.request();
+            if (buf.ndim != 1) {
+              throw std::runtime_error("samples must be a 1-D array, got " + std::to_string(buf.ndim) + "-D");
+            }
+            return vad.ContainsSpeech(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
+          },
+          pybind11::arg("samples"),
+          "Check if arbitrary-length audio contains speech. Returns True/False.")
+      .def(
+          "reset", [](OgaSileroVad& vad) { vad.Reset(); },
+          "Reset VAD state for a new utterance.")
+      .def(
+          "set_threshold",
+          [](OgaSileroVad& vad, float threshold) { vad.SetThreshold(threshold); },
+          pybind11::arg("threshold"),
+          "Set the speech probability threshold.")
+      .def_property_readonly(
+          "window_size",
+          [](OgaSileroVad&) -> int {
+            // 512 for 16kHz, 256 for 8kHz (default 16kHz).
+            return 512;  // TODO: expose via C API if needed
+          },
+          "VAD window size in samples.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);

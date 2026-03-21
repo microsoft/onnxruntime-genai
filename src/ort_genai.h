@@ -906,5 +906,45 @@ struct OgaStreamingProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(out);
   }
 
+  void SetOption(const char* key, const char* value) {
+    OgaCheckResult(OgaStreamingProcessorSetOption(this, key, value));
+  }
+
+  OgaString GetOption(const char* key) {
+    const char* value;
+    OgaCheckResult(OgaStreamingProcessorGetOption(this, key, &value));
+    return OgaString(value);
+  }
+
   static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
+};
+
+struct OgaSileroVad : OgaAbstract {
+  static std::unique_ptr<OgaSileroVad> Create(const char* model_path, int sample_rate = 16000, float threshold = 0.5f) {
+    OgaSileroVad* p;
+    OgaCheckResult(OgaCreateSileroVad(model_path, sample_rate, threshold, &p));
+    return std::unique_ptr<OgaSileroVad>(p);
+  }
+
+  float ProcessWindow(const float* samples, size_t num_samples) {
+    float prob;
+    OgaCheckResult(OgaSileroVadProcessWindow(this, samples, num_samples, &prob));
+    return prob;
+  }
+
+  bool ContainsSpeech(const float* samples, size_t num_samples) {
+    bool result;
+    OgaCheckResult(OgaSileroVadContainsSpeech(this, samples, num_samples, &result));
+    return result;
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaSileroVadReset(this));
+  }
+
+  void SetThreshold(float threshold) {
+    OgaCheckResult(OgaSileroVadSetThreshold(this, threshold));
+  }
+
+  static void operator delete(void* p) { OgaDestroySileroVad(reinterpret_cast<OgaSileroVad*>(p)); }
 };
