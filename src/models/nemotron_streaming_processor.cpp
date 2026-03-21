@@ -36,11 +36,8 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
   cache_pos_ = 0;
 
-  // Enable VAD if configured in genai_config.json (disabled by default)
-  if (model.config_->model.vad.enabled) {
-    EnableVadFromConfig();
-    min_silence_chunks_ = model.config_->model.vad.min_silence_chunks;
-  }
+  // Initialize VAD from config (disabled by default)
+  InitVadFromConfig(model);
 }
 
 NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
@@ -55,23 +52,11 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
   if (audio_buffer_.size() >= chunk_size) {
     const float* chunk_data = audio_buffer_.data();
 
-    // VAD check with consecutive silence tracking:
-    // Only start dropping chunks after min_silence_chunks_ consecutive silent chunks.
-    // This preserves natural pauses between words/sentences.
-    if (vad_) {
-      bool has_speech = vad_->ContainsSpeech(chunk_data, chunk_size);
-      if (has_speech) {
-        consecutive_silence_chunks_ = 0;  // Reset on speech
-      } else {
-        consecutive_silence_chunks_++;
-        if (consecutive_silence_chunks_ > min_silence_chunks_) {
-          // Enough consecutive silence — drop this chunk
-          audio_buffer_.erase(audio_buffer_.begin(),
-                              audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
-          return nullptr;
-        }
-        // Not enough consecutive silence yet — still process to preserve context
-      }
+    // VAD check: drop chunk if prolonged silence detected
+    if (ShouldDropChunk(chunk_data, chunk_size)) {
+      audio_buffer_.erase(audio_buffer_.begin(),
+                          audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+      return nullptr;
     }
 
     auto mel = BuildMelTensor(chunk_data, chunk_size);
@@ -160,62 +145,6 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
   return std::make_unique<NemotronStreamingProcessor>(model);
-}
-
-void NemotronStreamingProcessor::EnableVad(const char* vad_model_path, float threshold) {
-  vad_ = CreateSileroVad(vad_model_path, cache_config_.sample_rate, threshold);
-  consecutive_silence_chunks_ = 0;
-}
-
-void NemotronStreamingProcessor::EnableVadFromConfig() {
-  vad_ = CreateSileroVad(model_);
-  consecutive_silence_chunks_ = 0;
-}
-
-void NemotronStreamingProcessor::SetOption(const char* key, const char* value) {
-  std::string_view k{key};
-
-  if (k == "vad_enabled") {
-    std::string_view v{value};
-    if (v == "true" || v == "1") {
-      if (!vad_) {
-        EnableVadFromConfig();
-      }
-    } else if (v == "false" || v == "0") {
-      vad_.reset();
-      consecutive_silence_chunks_ = 0;
-    } else {
-      throw std::runtime_error("Invalid value for vad_enabled: '" + std::string(value) + "'. Expected 'true' or 'false'.");
-    }
-  } else if (k == "vad_threshold") {
-    float threshold = std::stof(value);
-    if (vad_) {
-      vad_->SetThreshold(threshold);
-    }
-  } else if (k == "vad_min_silence_chunks") {
-    min_silence_chunks_ = std::stoi(value);
-  } else if (k == "vad_model_path") {
-    float threshold = vad_ ? vad_->GetThreshold() : 0.5f;
-    EnableVad(value, threshold);
-  } else {
-    throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
-  }
-}
-
-std::string NemotronStreamingProcessor::GetOption(const char* key) const {
-  std::string_view k{key};
-
-  if (k == "vad_enabled") {
-    return vad_ ? "true" : "false";
-  } else if (k == "vad_threshold") {
-    return std::to_string(vad_ ? vad_->GetThreshold() : 0.5f);
-  } else if (k == "vad_min_silence_chunks") {
-    return std::to_string(min_silence_chunks_);
-  } else if (k == "vad_model_path") {
-    return "";  // Not stored; resolved from config at enable time
-  } else {
-    throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
-  }
 }
 
 }  // namespace Generators

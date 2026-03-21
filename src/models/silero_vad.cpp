@@ -21,8 +21,9 @@ void SileroVad::Initialize(int sample_rate, float threshold) {
                              std::to_string(sample_rate));
   }
 
-  window_size_ = (sample_rate == 16000) ? 512 : 256;
-  context_size_ = (sample_rate == 16000) ? 64 : 32;
+  const int factor = sample_rate / 8000;
+  window_size_ = 256 * factor;
+  context_size_ = 32 * factor;
 
   memory_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   state_.assign(kStateSize, 0.0f);
@@ -40,6 +41,9 @@ SileroVad::SileroVad(Model& model) {
   // If VAD-specific session options are provided in config, create dedicated options
   if (vad_config.session_options.has_value()) {
     session_options_ = OrtSessionOptions::Create();
+    // Silero VAD is a ~2MB model with minimal compute (<1ms per window).
+    // Single-threaded execution avoids thread pool overhead which would exceed
+    // the inference time itself, and prevents contention with the main ASR model.
     session_options_->SetIntraOpNumThreads(1);
     session_options_->SetInterOpNumThreads(1);
     session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -59,12 +63,17 @@ SileroVad::SileroVad(Model& model) {
     }
   }
 
-  Initialize(model.config_->model.sample_rate, vad_config.threshold);
+  // Use VAD-specific sample_rate if configured, otherwise fall back to model's sample_rate
+  int sr = vad_config.sample_rate > 0 ? vad_config.sample_rate : model.config_->model.sample_rate;
+  Initialize(sr, vad_config.threshold);
 }
 
 // Constructor with explicit path — standalone/programmatic usage
 SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold) {
   session_options_ = OrtSessionOptions::Create();
+  // Silero VAD is a ~2MB model with minimal compute (<1ms per window).
+  // Single-threaded execution avoids thread pool overhead which would exceed
+  // the inference time itself, and prevents contention with the main ASR model.
   session_options_->SetIntraOpNumThreads(1);
   session_options_->SetInterOpNumThreads(1);
   session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -143,6 +152,9 @@ float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
 bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
   const size_t window = static_cast<size_t>(window_size_);
 
+  // Process audio in non-overlapping windows of window_size_ samples (e.g. 512 for 16kHz).
+  // Returns true as soon as any window exceeds the speech probability threshold,
+  // allowing early exit without processing the entire chunk.
   for (size_t offset = 0; offset + window <= num_samples; offset += window) {
     float prob = ProcessWindow(samples + offset, window);
     if (prob >= threshold_) {
@@ -150,7 +162,9 @@ bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
     }
   }
 
-  // Handle remainder: if there are leftover samples, pad with zeros and check
+  // Handle leftover samples that don't fill a complete window.
+  // Pad with silence (zeros) to reach window_size_ and check for speech.
+  // This ensures no audio at the end of a chunk is silently ignored.
   size_t processed = (num_samples / window) * window;
   if (processed < num_samples) {
     std::vector<float> padded(window, 0.0f);

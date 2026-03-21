@@ -978,6 +978,8 @@ struct Vad_Element : JSON::Element {
       v_.threshold = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "min_silence_chunks") {
       v_.min_silence_chunks = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sample_rate") {
+      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
