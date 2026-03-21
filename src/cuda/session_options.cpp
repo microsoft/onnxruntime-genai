@@ -54,9 +54,12 @@ void AppendProviderBridgeExecutionProvider(
   // Create and set our cudaStream_t
   ort_provider_options->UpdateValue("user_compute_stream", device->GetCudaStream());
 
-  // Use fine-grained memory management of BFC Arena
+  // Use fine-grained memory management of BFC Arena.
+  // The arena_cfg must outlive the AppendExecutionProvider_CUDA_V2 call below,
+  // so it is declared outside the if block.
+  std::unique_ptr<OrtArenaCfg> arena_cfg;
   if (use_arena_management) {
-    auto arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
+    arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
     ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
   }
 

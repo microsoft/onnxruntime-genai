@@ -86,6 +86,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/nvtrtrtx/*.cpp"
   "${GENERATORS_ROOT}/vitisai/*.h"
   "${GENERATORS_ROOT}/vitisai/*.cpp"
+  "${GENERATORS_ROOT}/rocm/session_options.h"
+  "${GENERATORS_ROOT}/rocm/session_options.cpp"
   "${GENERATORS_ROOT}/dml/session_options.h"
   "${GENERATORS_ROOT}/dml/session_options.cpp"
   "${MODELS_ROOT}/*.h"

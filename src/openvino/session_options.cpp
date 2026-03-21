@@ -3,6 +3,8 @@
 
 #include "session_options.h"
 
+#include <cctype>
+
 namespace Generators::OpenVINOExecutionProvider {
 
 static inline std::string GetOVDeviceStringFromOrtDevice(const OrtEpDevice* device_ptr) {
