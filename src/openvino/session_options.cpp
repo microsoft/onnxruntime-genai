@@ -255,7 +255,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          bool /*disable_graph_capture*/) {
   auto device = GetDeviceInterface(DeviceType::OpenVINO);
   if (provider_options.name != "OpenVINO") {
-    throw std::runtime_error("OpenVINOExecutionProvider::AppendProviderOptions called with provider_options.name = " + provider_options.name);
+    throw std::runtime_error("OpenVINOExecutionProvider::AppendExecutionProvider called with provider_options.name = " + provider_options.name);
   }
 
   // from the given provider options, select the right OVEP OrtDevice to use.
