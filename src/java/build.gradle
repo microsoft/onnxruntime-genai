@@ -30,7 +30,7 @@ def mavenPwd = System.properties['mavenPwd']
 def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def onnxruntimeArtifactId = useCUDA == null ? "onnxruntime" : "onnxruntime_gpu"
-def onnxruntimeVersion = "1.24.3"
+def onnxruntimeVersion = System.properties["ONNXRUNTIME_VERSION"] ?: "1.24.3"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
 
