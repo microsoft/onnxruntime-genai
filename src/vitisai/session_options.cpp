@@ -29,8 +29,15 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                        [](const auto& pair) { return pair.first == "external_ep_libray"; });
       opt_it != provider_options.options.end()) {
     auto lib_name = opt_it->second;
-    auto lib = LoadLibrary(lib_name.c_str());
-    if (const auto func = (void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*))GetProcAddress(lib, "CreateEpFactories")) {
+    HMODULE lib = LoadLibrary(lib_name.c_str());
+    if (!lib) {
+      throw std::runtime_error("Failed to load external EP library: " + lib_name);
+    }
+    // The library must remain loaded for the lifetime of the process since it
+    // provides the EP factory and custom ops used by the ORT session.
+    using CreateEpFactoriesFunc = void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*);
+    if (const auto func = reinterpret_cast<CreateEpFactoriesFunc>(
+            GetProcAddress(lib, "CreateEpFactories"))) {
       OrtEpFactory* factory = nullptr;
       size_t num = 1;
 
