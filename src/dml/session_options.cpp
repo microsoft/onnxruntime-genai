@@ -4,6 +4,9 @@
 #include "session_options.h"
 #include "../models/session_options.h"
 
+#if USE_DML
+#include "../dml/interface.h"
+#endif
 namespace Generators::DMLExecutionProvider {
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
