@@ -484,19 +484,18 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     joiner_state_->Run(0, dummy_tokens);
 
     // Argmax over logits
-    float* logits = joiner_state_->outputs_[0]->GetTensorMutableData<float>();
+    const float* logits = joiner_state_->outputs_[0]->GetTensorData<float>();
     auto logits_shape = joiner_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
-    // Apply blank penalty: positive values discourage blanks, negative values encourage them
-    logits[nemotron_config_.blank_id] -= nemotron_config_.blank_penalty;
-
+    // Apply blank penalty virtually during argmax to avoid mutating ORT output buffer
     int best_token = 0;
-    float best_score = logits[0];
+    float best_score = logits[0] - (nemotron_config_.blank_id == 0 ? nemotron_config_.blank_penalty : 0.0f);
     for (int i = 1; i < total_logits; ++i) {
-      if (logits[i] > best_score) {
-        best_score = logits[i];
+      float score = (i == nemotron_config_.blank_id) ? logits[i] - nemotron_config_.blank_penalty : logits[i];
+      if (score > best_score) {
+        best_score = score;
         best_token = i;
       }
     }
