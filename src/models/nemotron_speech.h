@@ -56,11 +56,9 @@ struct NemotronCacheConfig {
 
   // Decoder (prediction network) I/O names
   std::string dec_in_targets;
-  std::string dec_in_target_length;
   std::string dec_in_lstm_hidden;
   std::string dec_in_lstm_cell;
   std::string dec_out_outputs;
-  std::string dec_out_prednet_lengths;
   std::string dec_out_lstm_hidden;
   std::string dec_out_lstm_cell;
 
@@ -130,6 +128,9 @@ struct NemotronEncoderSubState : State {
   NemotronEncoderCache cache_;
   std::unique_ptr<OrtValue> signal_length_;
 
+  // Whether the encoder model has a "length" input
+  bool has_length_input_{};
+
   // Indices into inputs_/outputs_ vectors
   size_t mel_input_idx_{};
   size_t length_input_idx_{};
@@ -154,10 +155,8 @@ struct NemotronPredictionSubState : State {
   const NemotronSpeechModel& model_;
   NemotronDecoderState lstm_state_;
   std::unique_ptr<OrtValue> targets_;
-  std::unique_ptr<OrtValue> target_length_;
 
   size_t targets_input_idx_{};
-  size_t target_length_input_idx_{};
   size_t lstm_hidden_input_idx_{};
   size_t lstm_cell_input_idx_{};
 };
