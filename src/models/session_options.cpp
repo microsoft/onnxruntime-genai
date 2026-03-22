@@ -8,7 +8,7 @@
 
 #include "../cuda/session_options.h"
 #include "../dml/session_options.h"
-#include "../nvtrtrtx/session_options.h"
+#include "../nvtensorrtrtx/session_options.h"
 #include "../openvino/session_options.h"
 #include "../qnn/session_options.h"
 #include "../rocm/session_options.h"
