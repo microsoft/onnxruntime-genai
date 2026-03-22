@@ -331,4 +331,3 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
 }
 
 }  // namespace Generators::OpenVINOExecutionProvider
-
