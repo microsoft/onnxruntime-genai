@@ -185,7 +185,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     const auto append_provider_it = append_execution_provider.find(provider_options.name);
     if (append_provider_it != append_execution_provider.end()) {
       auto session_device = append_provider_it->second(session_options, provider_options, config, disable_graph_capture);
-      if (session_device && !device) {
+      if (is_primary_session_options && session_device && !device) {
         device = session_device;  // Set the device if not already set by a previous provider
       }
     } else {
