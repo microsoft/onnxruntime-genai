@@ -11,7 +11,7 @@
 
 namespace Generators {
 
-void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
+void NemotronConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
   const auto& dec = config.model.decoder;
   const auto& jo = config.model.joiner;
@@ -39,6 +39,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
+  blank_penalty = config.model.blank_penalty;
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
@@ -71,7 +72,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   dec_out_lstm_cell = dec.outputs.lstm_cell_state;
 }
 
-void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronEncoderCache::Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
   auto cache_channel_type = session_info.GetInputDataType(cfg.enc_in_cache_channel);
   auto cache_time_type = session_info.GetInputDataType(cfg.enc_in_cache_time);
   auto cache_channel_len_type = session_info.GetInputDataType(cfg.enc_in_cache_channel_len);
@@ -92,11 +93,11 @@ void NemotronEncoderCache::Initialize(const NemotronCacheConfig& cfg, const Sess
   *cache_last_channel_len->GetTensorMutableData<int64_t>() = 0;
 }
 
-void NemotronEncoderCache::Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronEncoderCache::Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
   Initialize(cfg, session_info, allocator, device);
 }
 
-void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronDecoderState::Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
   auto lstm_hidden_type = session_info.GetInputDataType(cfg.dec_in_lstm_hidden);
   auto lstm_cell_type = session_info.GetInputDataType(cfg.dec_in_lstm_cell);
 
@@ -111,14 +112,14 @@ void NemotronDecoderState::Initialize(const NemotronCacheConfig& cfg, const Sess
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
 
-void NemotronDecoderState::Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronDecoderState::Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
   Initialize(cfg, session_info, allocator, device);
 }
 
 NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  cache_config_ = NemotronCacheConfig{};
-  cache_config_.PopulateFromConfig(*config_);
+  nemotron_config_ = NemotronConfig{};
+  nemotron_config_.PopulateFromConfig(*config_);
 
   // Create session options
   encoder_session_options_ = OrtSessionOptions::Create();
@@ -169,7 +170,7 @@ std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> /*se
 NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
-  auto& cfg = model_.cache_config_;
+  auto& cfg = model_.nemotron_config_;
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
 
@@ -250,7 +251,7 @@ DeviceSpan<float> NemotronEncoderSubState::Run(int /*total_length*/, DeviceSpan<
 NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
-  auto& cfg = model_.cache_config_;
+  auto& cfg = model_.nemotron_config_;
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
 
@@ -304,7 +305,7 @@ DeviceSpan<float> NemotronPredictionSubState::Run(int /*total_length*/, DeviceSp
 NemotronJoinerSubState::NemotronJoinerSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
-  auto& cfg = model_.cache_config_;
+  auto& cfg = model_.nemotron_config_;
 
   // Register inputs
   encoder_input_idx_ = inputs_.size();
@@ -339,15 +340,15 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
                                          const GeneratorParams& params)
     : State{params, model},
       nemotron_model_{model} {
-  cache_config_ = model.cache_config_;
+  nemotron_config_ = model.nemotron_config_;
 
   encoder_state_ = std::make_unique<NemotronEncoderSubState>(model, params);
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
   joiner_state_ = std::make_unique<NemotronJoinerSubState>(model, params);
 
   // Pre-allocate encoder frame for joiner input
-  auto enc_out_type = model_.session_info_.GetOutputDataType(cache_config_.enc_out_encoded);
-  auto frame_shape = std::array<int64_t, 3>{1, 1, cache_config_.hidden_dim};
+  auto enc_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded);
+  auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
   encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, enc_out_type);
 }
 
@@ -363,7 +364,7 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
 
 void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::AudioFeaturesName || input.name == cache_config_.enc_in_audio) {
+    if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
       current_mel_ = input.tensor;
       need_encoder_run_ = true;
       chunk_done_ = false;
@@ -389,11 +390,11 @@ void NemotronSpeechState::ResetStreamingState() {
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
 
-  encoder_state_->cache_.Reset(cache_config_, model_.session_info_, allocator, device);
+  encoder_state_->cache_.Reset(nemotron_config_, model_.session_info_, allocator, device);
   encoder_state_->UpdateCacheInputs();
   encoder_state_->first_run_ = true;
 
-  prediction_state_->lstm_state_.Reset(cache_config_, model_.session_info_, allocator, device);
+  prediction_state_->lstm_state_.Reset(nemotron_config_, model_.session_info_, allocator, device);
   prediction_state_->UpdateInputs();
   prediction_state_->first_run_ = true;
 
@@ -473,7 +474,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]
     auto dec_out_shape = prediction_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
     auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
-    auto dec_out_type = model_.session_info_.GetOutputDataType(cache_config_.dec_out_outputs);
+    auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
     auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, dec_out_type);
     ByteWrapTensor(*model_.p_device_, *decoder_frame)
         .CopyFrom(ByteWrapTensor(*model_.p_device_, *prediction_state_->outputs_[0]));
@@ -483,21 +484,23 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     joiner_state_->Run(0, dummy_tokens);
 
     // Argmax over logits
-    const float* logits_data = joiner_state_->outputs_[0]->GetTensorData<float>();
+    const float* logits = joiner_state_->outputs_[0]->GetTensorData<float>();
     auto logits_shape = joiner_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
+    // Apply blank penalty virtually during argmax to avoid mutating ORT output buffer
     int best_token = 0;
-    float best_score = logits_data[0];
+    float best_score = logits[0] - (nemotron_config_.blank_id == 0 ? nemotron_config_.blank_penalty : 0.0f);
     for (int i = 1; i < total_logits; ++i) {
-      if (logits_data[i] > best_score) {
-        best_score = logits_data[i];
+      float score = (i == nemotron_config_.blank_id) ? logits[i] - nemotron_config_.blank_penalty : logits[i];
+      if (score > best_score) {
+        best_score = score;
         best_token = i;
       }
     }
 
-    if (best_token == cache_config_.blank_id) {
+    if (best_token == nemotron_config_.blank_id) {
       time_step_++;
       symbol_step_ = 0;
       continue;
@@ -511,7 +514,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     prediction_state_->outputs_[2] = nullptr;
 
     symbol_step_++;
-    if (symbol_step_ >= cache_config_.max_symbols_per_step) {
+    if (symbol_step_ >= nemotron_config_.max_symbols_per_step) {
       time_step_++;
       symbol_step_ = 0;
     }
