@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-struct NemotronCacheConfig {
+struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
   int num_encoder_layers{};
   int hidden_dim{};
@@ -77,8 +77,8 @@ struct NemotronEncoderCache {
   std::unique_ptr<OrtValue> cache_last_time;
   std::unique_ptr<OrtValue> cache_last_channel_len;
 
-  void Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
-  void Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 /// Holds the RNNT decoder LSTM hidden states between decoding steps.
@@ -87,8 +87,8 @@ struct NemotronDecoderState {
   std::unique_ptr<OrtValue> lstm_cell_state;
   int last_token{0};  // Last emitted non-blank token (for autoregressive feedback)
 
-  void Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
-  void Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 struct NemotronSpeechModel : Model {
@@ -106,7 +106,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
   std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
-  NemotronCacheConfig cache_config_;
+  NemotronConfig nemotron_config_;
 };
 
 /// Sub-state for the streaming encoder.
@@ -202,7 +202,7 @@ struct NemotronSpeechState : State {
 
  private:
   const NemotronSpeechModel& nemotron_model_;
-  NemotronCacheConfig cache_config_;
+  NemotronConfig nemotron_config_;
 
   std::unique_ptr<NemotronEncoderSubState> encoder_state_;
   std::unique_ptr<NemotronPredictionSubState> prediction_state_;
