@@ -23,6 +23,7 @@ struct NemotronCacheConfig {
   // Vocabulary
   int vocab_size{};
   int blank_id{};
+  float blank_penalty{};
 
   // Streaming chunk config
   int chunk_frames{};

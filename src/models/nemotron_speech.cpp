@@ -39,6 +39,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
+  blank_penalty = config.model.blank_penalty;
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
@@ -483,16 +484,19 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     joiner_state_->Run(0, dummy_tokens);
 
     // Argmax over logits
-    const float* logits_data = joiner_state_->outputs_[0]->GetTensorData<float>();
+    float* logits = joiner_state_->outputs_[0]->GetTensorMutableData<float>();
     auto logits_shape = joiner_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
+    // Apply blank penalty: positive values discourage blanks, negative values encourage them
+    logits[cache_config_.blank_id] -= cache_config_.blank_penalty;
+
     int best_token = 0;
-    float best_score = logits_data[0];
+    float best_score = logits[0];
     for (int i = 1; i < total_logits; ++i) {
-      if (logits_data[i] > best_score) {
-        best_score = logits_data[i];
+      if (logits[i] > best_score) {
+        best_score = logits[i];
         best_token = i;
       }
     }
