@@ -4,8 +4,6 @@
 if(USE_WINML)
   message(STATUS "----- Building with WinML support ----- ")
 
-  add_compile_definitions(USE_WINML=1)
-
   if(NOT DEFINED WINML_SDK_VERSION OR WINML_SDK_VERSION STREQUAL "")
     #set(WINML_SDK_VERSION "1.8.1065-experimental")
     # message(STATUS "WINML_SDK_VERSION not set, defaulting to ${WINML_SDK_VERSION}")
@@ -17,7 +15,7 @@ if(USE_WINML)
   elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64X" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64EC")
       set(ORT_PLATFORM "win-arm64")
   else()
-      message(FATACMAKE_GENERATOR_PLATFORML_ERROR "Unsupported platform for GenAI: ${CMAKE_GENERATOR_PLATFORM}")
+      message(FATAL_ERROR "Unsupported platform for GenAI: ${CMAKE_GENERATOR_PLATFORM}")
       return()
   endif()
 
@@ -53,8 +51,6 @@ if(USE_WINML)
   file(COPY ${ORT_LIBS_1} DESTINATION "${ORT_HOME}/lib")
 
   message(STATUS "USE_WINML: ORT_HOME set to: ${ORT_HOME}")
-else()
-  add_compile_definitions(USE_WINML=0)
 endif()
 
 if(ORT_HOME)

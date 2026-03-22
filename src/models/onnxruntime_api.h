@@ -459,9 +459,20 @@ struct OrtStatus {
   Ort::Abstract make_abstract;
 };
 
+struct OrtHardwareDevice {
+  OrtHardwareDeviceType Type() const;
+  uint32_t VendorId() const;
+  uint32_t DeviceId() const;
+  std::string Vendor() const;
+  const OrtKeyValuePairs* Metadata() const;
+
+  Ort::Abstract make_abstract;
+};
+
 struct OrtEpDevice {
   std::string Name() const;
   std::string Vendor() const;
+  const OrtHardwareDevice* Device() const;
 
   Ort::Abstract make_abstract;
 };
