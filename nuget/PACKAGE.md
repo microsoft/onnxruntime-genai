@@ -37,7 +37,6 @@ string prompt = "public static bool IsPrime(int number)";
 var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
 
 using GeneratorParams generatorParams = new GeneratorParams(model);
-generatorParams.SetSearchOption("max_length", 512);
 
 using var generator = new Generator(model, generatorParams);
 generator.AppendTokenSequences(sequences);

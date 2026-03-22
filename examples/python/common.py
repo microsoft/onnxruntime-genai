@@ -111,7 +111,6 @@ def get_search_options(args: argparse.Namespace):
     names = [
         "batch_size",
         "do_sample",
-        "max_length",
         "min_length",
         "num_beams",
         "num_return_sequences",
@@ -119,6 +118,8 @@ def get_search_options(args: argparse.Namespace):
         "temperature",
         "top_k",
         "top_p",
+        "initial_cache_length",
+        "kv_cache_growth_factor",
     ]
     for name in names:
         if name in args:
@@ -522,13 +523,14 @@ def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
     generator_params.add_argument('-c', '--chunk_size', type=int, default=0, help="Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)")
     generator_params.add_argument('-s', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     generator_params.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
-    generator_params.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     generator_params.add_argument('-b', '--num_beams', type=int, default=1, help='Number of beams to create')
     generator_params.add_argument('-rs', '--num_return_sequences', type=int, default=1, help='Number of return sequences to produce')
     generator_params.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     generator_params.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     generator_params.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     generator_params.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
+    generator_params.add_argument('--initial_cache_length', type=int, help='Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.')
+    generator_params.add_argument('--kv_cache_growth_factor', type=float, default=2.0, help='Growth factor when dynamically expanding the KV cache buffer (default: 2.0)')
 
 def get_guidance_args(parser: argparse.ArgumentParser) -> None:
     """

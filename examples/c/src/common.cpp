@@ -139,11 +139,12 @@ void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a) {
   if (a.chunk_size != 0) j["chunk_size"] = a.chunk_size;
   if (a.do_sample) j["do_sample"] = a.do_sample.value();
   if (a.min_length) j["min_length"] = a.min_length.value();
-  if (a.max_length) j["max_length"] = a.max_length.value();
   if (a.repetition_penalty) j["repetition_penalty"] = a.repetition_penalty.value();
   if (a.temperature) j["temperature"] = a.temperature.value();
   if (a.top_k) j["top_k"] = a.top_k.value();
   if (a.top_p) j["top_p"] = a.top_p.value();
+  if (a.initial_cache_length) j["initial_cache_length"] = a.initial_cache_length.value();
+  if (a.kv_cache_growth_factor) j["kv_cache_growth_factor"] = a.kv_cache_growth_factor.value();
 }
 
 void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
@@ -151,13 +152,14 @@ void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
   if (j.contains("chunk_size")) j.at("chunk_size").get_to(a.chunk_size);
   if (j.contains("do_sample")) j.at("do_sample").get_to(a.do_sample);
   if (j.contains("min_length")) j.at("min_length").get_to(a.min_length);
-  if (j.contains("max_length")) j.at("max_length").get_to(a.max_length);
   if (j.contains("num_beams")) j.at("num_beams").get_to(a.num_beams);
   if (j.contains("num_return_sequences")) j.at("num_return_sequences").get_to(a.num_return_sequences);
   if (j.contains("repetition_penalty")) j.at("repetition_penalty").get_to(a.repetition_penalty);
   if (j.contains("temperature")) j.at("temperature").get_to(a.temperature);
   if (j.contains("top_k")) j.at("top_k").get_to(a.top_k);
   if (j.contains("top_p")) j.at("top_p").get_to(a.top_p);
+  if (j.contains("initial_cache_length")) j.at("initial_cache_length").get_to(a.initial_cache_length);
+  if (j.contains("kv_cache_growth_factor")) j.at("kv_cache_growth_factor").get_to(a.kv_cache_growth_factor);
 }
 
 bool ParseArgs(
@@ -186,13 +188,14 @@ bool ParseArgs(
   app.add_option("-c,--chunk_size", generator_params_args.chunk_size, "Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)")->group(generator_params);
   app.add_option("-s,--do_sample", generator_params_args.do_sample, "Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false")->group(generator_params);
   app.add_option("-i,--min_length", generator_params_args.min_length, "Min number of tokens to generate including the prompt")->group(generator_params);
-  app.add_option("-l,--max_length", generator_params_args.max_length, "Max number of tokens to generate including the prompt")->group(generator_params);
   app.add_option("-n,--num_beams", generator_params_args.num_beams, "Number of beams to create")->group(generator_params);
   app.add_option("-q,--num_return_sequences", generator_params_args.num_return_sequences, "Number of return sequences to produce")->group(generator_params);
   app.add_option("-r,--repetition_penalty", generator_params_args.repetition_penalty, "Repetition penalty to sample with")->group(generator_params);
   app.add_option("-t,--temperature", generator_params_args.temperature, "Temperature to sample with")->group(generator_params);
   app.add_option("-k,--top_k", generator_params_args.top_k, "Top k tokens to sample from")->group(generator_params);
   app.add_option("-p,--top_p", generator_params_args.top_p, "Top p probability to sample with")->group(generator_params);
+  app.add_option("--initial_cache_length", generator_params_args.initial_cache_length, "Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.")->group(generator_params);
+  app.add_option("--kv_cache_growth_factor", generator_params_args.kv_cache_growth_factor, "Growth factor when dynamically expanding the KV cache buffer (default: 2.0)")->group(generator_params);
 
   app.add_option("--response_format", guidance_args.response_format, "Provide response format for the model")->group(guidance);
   app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json")->group(guidance);

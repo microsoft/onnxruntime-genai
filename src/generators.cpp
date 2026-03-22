@@ -320,6 +320,10 @@ double GeneratorParams::GetSearchNumber(std::string_view name) const {
     return static_cast<double>(search.top_k);
   } else if (name == "top_p") {
     return search.top_p;
+  } else if (name == "initial_cache_length") {
+    return static_cast<double>(search.initial_cache_length);
+  } else if (name == "kv_cache_growth_factor") {
+    return static_cast<double>(search.kv_cache_growth_factor);
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
   }
@@ -355,10 +359,6 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     return;
   }
 
-  if (params.search.max_length == 0)
-    throw std::runtime_error("search max_length is 0");
-  if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
   if (params.search.batch_size < 1)
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.search.batch_size));
   if (params.config.model.vocab_size < 1)
@@ -401,8 +401,6 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 

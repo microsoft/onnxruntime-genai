@@ -325,12 +325,6 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   sequences_.GetSequences().CopyCpuToDevice();
 
   sequences_.AfterAppendNextTokens(next_tokens_ptr_, batch_beam_size);
-
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
-      Log("hit_max_length", "greedy cpu hit");
-    done_ = true;
-  }
 }
 
 void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
@@ -367,7 +361,7 @@ void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
   if (tokens_count_per_batch > sequences_.max_length_) {
-    throw std::runtime_error("User-defined tokens exceed max_length.");
+    throw std::runtime_error("User-defined tokens exceed the sequence buffer capacity.");
   }
 
   auto next_sequences_span = sequences_.GetNextSequences().Span();
@@ -382,8 +376,6 @@ void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 
 bool BeamSearch_Cpu::IsDone() const {
   if (beam_scorer_->IsDone()) {
-    return true;
-  } else if (sequences_.GetSequenceLength() == params_->search.max_length) {
     return true;
   }
   return false;
@@ -410,12 +402,6 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
   auto next_tokens_device = beam_scorer_->GetNextTokens();
   sequences_.GetNextSequences().CopyCpuToDevice();
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
-
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
-      Log("hit_max_length", "beam cpu hit");
-    done_ = true;
-  }
 }
 
 void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {

@@ -50,7 +50,6 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("batch_size", static_cast<double>(batch_size));
-    params->SetSearchOption("max_length", 448);
     params->SetSearchOptionBool("do_sample", false);
     params->SetSearchOption("num_beams", num_beams);
     params->SetSearchOption("num_return_sequences", num_beams);
@@ -138,7 +137,6 @@ void C_API(const char* model_path, int32_t num_beams) {
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "batch_size", static_cast<double>(batch_size)));
-    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 448));
     CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_beams", num_beams));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_return_sequences", num_beams));

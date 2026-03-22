@@ -62,12 +62,6 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   if (tokens.size() == 0)
     throw std::runtime_error("Expected at least one token for generation. Received 0.");
 
-  if (tokens.size() + CurrentSequenceLength() > params_->search.max_length)
-    throw std::runtime_error("Input tokens size (" +
-                             std::to_string(tokens.size()) +
-                             ") exceeds the max length (" +
-                             std::to_string(params_->search.max_length) + ")");
-
   if (status_ == RequestStatus::Unassigned) {
     std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
   } else if (status_ == RequestStatus::InProgress) {

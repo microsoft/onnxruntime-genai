@@ -24,7 +24,6 @@ class ClientRequest:
         self.params = og.GeneratorParams(model)
         self.params.set_search_options(
             do_sample=False,
-            max_length=256,
         )
 
         messages = [

@@ -215,17 +215,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
-    const int max_length = state_.params_->search.max_length;
+    const int context_length = model_.config_->model.context_length;
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
       // Use per-layer allocation based on sliding window layer indices
       layer_shapes_.resize(layer_count_);
 
-      // Initialize all layers with base shape and max_length
+      // Initialize all layers with base shape and context_length
       for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
         layer_shapes_[layer_idx] = shape_;
-        layer_shapes_[layer_idx][2] = max_length;
+        layer_shapes_[layer_idx][2] = context_length;
       }
 
       // Build model-layer-index to cache-slot-index mapping for sparse KV layouts
@@ -239,17 +239,44 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
-          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+          layer_shapes_[it->second][2] = std::min(context_length, sliding_window_size);
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
-      shape_[2] = max_length;
+      shape_[2] = context_length;
     } else {
       // Uniform sliding window allocation (backward compatibility)
-      shape_[2] = std::min(max_length, sliding_window_size);
+      shape_[2] = std::min(context_length, sliding_window_size);
     }
   } else if (past_present_share_buffer_) {
-    shape_[2] = state_.params_->search.max_length;
+    shape_[2] = model_.config_->model.context_length;
+  }
+
+  // Initialize dynamic KV cache growth if initial_cache_length is set
+  const int initial_cache_length = state_.params_->search.initial_cache_length;
+  if (initial_cache_length > 0) {
+    dynamic_cache_enabled_ = true;
+    growth_factor_ = state_.params_->search.kv_cache_growth_factor;
+    if (growth_factor_ <= 1.0f)
+      throw std::runtime_error("kv_cache_growth_factor must be greater than 1.0, got " + std::to_string(growth_factor_));
+    cache_capacity_ = initial_cache_length;
+
+    // For shared buffers with uniform shape, override to use initial_cache_length
+    if (past_present_share_buffer_ && layer_shapes_.empty()) {
+      shape_[2] = initial_cache_length;
+    }
+
+    if (state_.params_->use_graph_capture) {
+      throw std::runtime_error(
+          "Dynamic KV cache growth is not compatible with graph capture. "
+          "Disable graph capture or remove initial_cache_length.");
+    }
+
+    if (g_log.enabled) {
+      Log("info", "DefaultKeyValueCache: Dynamic KV cache enabled with initial_cache_length=" +
+                      std::to_string(initial_cache_length) + ", growth_factor=" + std::to_string(growth_factor_) +
+                      ", past_present_share_buffer=" + std::string(past_present_share_buffer_ ? "true" : "false"));
+    }
   }
 
   try {
@@ -259,9 +286,11 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     for (int i = 0; i < layer_count_ * 2; ++i) {
       std::array<int64_t, 4> tensor_shape = shape_;
       if (!layer_shapes_.empty()) {
-        // Per-layer allocation: use layer-specific shape
-        // i/2 gives us the layer index since we have 2 tensors per layer
         tensor_shape = layer_shapes_[i / 2];
+        // For dynamic cache, start with initial_cache_length to avoid large upfront allocation
+        if (dynamic_cache_enabled_) {
+          tensor_shape[2] = std::min(tensor_shape[2], static_cast<int64_t>(initial_cache_length));
+        }
       }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
@@ -273,9 +302,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     std::ostringstream oss;
     oss << "Could not allocate the key-value cache buffer of shape: ["
         << "batch_size (" << shape_[0] << "), num_key_value_heads ("
-        << shape_[1] << "), max_length (" << shape_[2] << "), head_size ("
+        << shape_[1] << "), sequence_length (" << shape_[2] << "), head_size ("
         << shape_[3] << ")] for " << layer_count_ << " layers. "
-        << "Try reducing the max_length requested or reducing the batch size.";
+        << "Try reducing the initial_cache_length or reducing the batch size.";
     throw std::runtime_error(oss.str());
   }
 }
@@ -300,6 +329,30 @@ void DefaultKeyValueCache::Add() {
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  // Dynamic cache growth for shared buffers: grow capacity if needed, reallocate and copy
+  if (past_present_share_buffer_ && dynamic_cache_enabled_) {
+    if (total_length > cache_capacity_) {
+      GrowCacheIfNeeded(total_length);
+
+      // Re-allocate presents with new capacity and copy existing data
+      if (type_ == Ort::TypeToTensorType<float>) {
+        CopyPresentsToPadded<float>(presents_);
+      } else {
+        CopyPresentsToPadded<Ort::Float16_t>(presents_);
+      }
+      if (layer_shapes_.empty()) {
+        shape_[2] = cache_capacity_;
+      }
+
+      // Re-link input/output pointers to the new buffers
+      for (int i = 0; i < layer_count_ * 2; ++i) {
+        state_.inputs_[input_index_ + i] = presents_[i].get();
+        state_.outputs_[output_index_ + i] = presents_[i].get();
+      }
+    }
+    return;
+  }
+
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -342,6 +395,64 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   is_first_update_ = false;
 }
 
+void DefaultKeyValueCache::GrowCacheIfNeeded(int total_length) {
+  if (total_length <= cache_capacity_)
+    return;
+
+  // Compute new capacity using the growth factor
+  int new_capacity = static_cast<int>(static_cast<float>(cache_capacity_) * growth_factor_);
+  // Ensure we grow at least enough for the current request
+  if (new_capacity < total_length)
+    new_capacity = total_length;
+
+  if (g_log.enabled) {
+    Log("info", "DefaultKeyValueCache: Growing KV cache capacity from " +
+                    std::to_string(cache_capacity_) + " to " + std::to_string(new_capacity));
+  }
+
+  cache_capacity_ = new_capacity;
+}
+
+template <typename T>
+void DefaultKeyValueCache::CopyPresentsToPadded(std::vector<std::unique_ptr<OrtValue>>& tensors) {
+  for (int i = 0; i < layer_count_ * 2; i++) {
+    if (!tensors[i])
+      continue;
+
+    // Determine the new target shape for this tensor
+    std::array<int64_t, 4> new_shape;
+    if (!layer_shapes_.empty()) {
+      new_shape = layer_shapes_[i / 2];
+      // Cap at the layer's maximum capacity, but grow up to cache_capacity_
+      new_shape[2] = std::min(static_cast<int64_t>(cache_capacity_), layer_shapes_[i / 2][2]);
+    } else {
+      new_shape = shape_;
+      new_shape[2] = cache_capacity_;
+    }
+
+    // Read actual old length from the existing tensor
+    auto old_tensor_shape = tensors[i]->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto old_length = static_cast<int>(old_tensor_shape[2]);
+    const auto batch_x_num_heads = new_shape[0] * new_shape[1];
+    const auto old_length_x_head_size = old_length * new_shape[3];
+    const auto new_length_x_head_size = new_shape[2] * new_shape[3];
+
+    auto old_span = WrapTensor<T>(Device(), *tensors[i]);
+    std::unique_ptr<OrtValue> new_tensor = OrtValue::CreateTensor(Allocator(), new_shape, type_);
+    if (Device().GetType() != DeviceType::WEBGPU) {
+      ByteWrapTensor(Device(), *new_tensor).Zero();
+    }
+    auto new_span = WrapTensor<T>(Device(), *new_tensor);
+
+    for (int j = 0; j < batch_x_num_heads; j++) {
+      auto src = old_span.subspan(j * old_length_x_head_size, old_length_x_head_size);
+      auto dst = new_span.subspan(j * new_length_x_head_size, old_length_x_head_size);
+      dst.CopyFrom(src);
+    }
+    tensors[i] = std::move(new_tensor);
+  }
+}
+
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;
@@ -368,10 +479,10 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   if (!layer_shapes_.empty()) {
     // Handle per-layer shapes
-    // First validate that index doesn't exceed the global max_length
-    int max_length = static_cast<int>(shape_[2]);  // Set to max_length in constructor
-    if (static_cast<int>(index) > max_length) {
-      throw std::runtime_error("Requested rewind length exceeds max_length.");
+    // First validate that index doesn't exceed the allocated cache size
+    int allocated_length = static_cast<int>(shape_[2]);
+    if (static_cast<int>(index) > allocated_length) {
+      throw std::runtime_error("Requested rewind length exceeds allocated cache size.");
     }
 
     for (int i = 0; i < layer_count_ * 2; i++) {

@@ -83,7 +83,6 @@ def run_model(args):
     # Override any default search options in `genai_config.json`
     search_options = {
         "min_length": 1,
-        "max_length": 2048,
     }
 
     while True:

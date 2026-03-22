@@ -30,7 +30,6 @@ def run(args: argparse.Namespace):
         params = og.GeneratorParams(model)
         params.set_search_options(
             do_sample=False,
-            max_length=1024,
         )
 
         request = og.Request(params)

@@ -762,15 +762,6 @@ namespace CommonUtils
                 Description = "Min number of tokens to generate including the prompt"
             };
 
-            var max_length = new Option<int?>(
-                name: "max_length",
-                aliases: ["-l", "--max_length"]
-            )
-            {
-                Arity = ArgumentArity.ExactlyOne,
-                Description = "Max number of tokens to generate including the prompt"
-            };
-
             var num_beams = new Option<int>(
                 name: "num_beams",
                 aliases: ["-nb", "--num_beams"]
@@ -831,13 +822,33 @@ namespace CommonUtils
             parser.Add(chunk_size);
             parser.Add(do_sample);
             parser.Add(min_length);
-            parser.Add(max_length);
             parser.Add(num_beams);
             parser.Add(num_return_sequences);
             parser.Add(repetition_penalty);
             parser.Add(temperature);
             parser.Add(top_k);
             parser.Add(top_p);
+
+            var initial_cache_length = new Option<int?>(
+                name: "initial_cache_length",
+                aliases: ["--initial_cache_length"]
+            )
+            {
+                Arity = ArgumentArity.ExactlyOne,
+                Description = "Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length."
+            };
+
+            var kv_cache_growth_factor = new Option<double?>(
+                name: "kv_cache_growth_factor",
+                aliases: ["--kv_cache_growth_factor"]
+            )
+            {
+                Arity = ArgumentArity.ExactlyOne,
+                Description = "Growth factor when dynamically expanding the KV cache buffer (default: 2.0)"
+            };
+
+            parser.Add(initial_cache_length);
+            parser.Add(kv_cache_growth_factor);
         }
 
         /// <summary>
@@ -957,13 +968,14 @@ namespace CommonUtils
                 chunk_size = parseResult.GetValue<int>("chunk_size"),
                 do_sample = parseResult.GetValue<bool>("do_sample"),
                 min_length = parseResult.GetValue<int?>("min_length"),
-                max_length = parseResult.GetValue<int?>("max_length"),
                 num_beams = parseResult.GetValue<int>("num_beams"),
                 num_return_sequences = parseResult.GetValue<int>("num_return_sequences"),
                 repetition_penalty = parseResult.GetValue<double?>("repetition_penalty"),
                 temperature = parseResult.GetValue<double?>("temperature"),
                 top_k = parseResult.GetValue<int?>("top_k"),
-                top_p = parseResult.GetValue<double?>("top_p")
+                top_p = parseResult.GetValue<double?>("top_p"),
+                initial_cache_length = parseResult.GetValue<int?>("initial_cache_length"),
+                kv_cache_growth_factor = parseResult.GetValue<double?>("kv_cache_growth_factor")
             };
 
             GuidanceArgs guidanceArgs = new GuidanceArgs
@@ -1063,7 +1075,6 @@ namespace CommonUtils
         public int chunk_size { get; set; } = 0;
         public bool? do_sample { get; set; }
         public int? min_length { get; set; }
-        public int? max_length { get; set; }
         // In case the user doesn't provide the number of beams, set it to 1
         public int num_beams { get; set; } = 1;
         // In case the user doesn't provide the number of return sequences, set it to 1
@@ -1072,6 +1083,10 @@ namespace CommonUtils
         public double? temperature { get; set; }
         public int? top_k { get; set; }
         public double? top_p { get; set; }
+        /// <summary>Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.</summary>
+        public int? initial_cache_length { get; set; }
+        /// <summary>Growth factor when dynamically expanding the KV cache buffer (default: 2.0).</summary>
+        public double? kv_cache_growth_factor { get; set; }
     }
 
     /// <summary>

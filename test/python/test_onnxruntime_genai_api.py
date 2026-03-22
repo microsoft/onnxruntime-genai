@@ -178,6 +178,44 @@ def test_greedy_search(test_data_path, relative_model_path):
 
 @pytest.mark.parametrize(
     "relative_model_path",
+    [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"],
+)
+def test_dynamic_kv_cache_growth(test_data_path, relative_model_path):
+    """Test that dynamic KV cache growth produces the same output as static allocation."""
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+    model = og.Model(model_path)
+
+    # Baseline: standard pre-allocated KV cache
+    params_baseline = og.GeneratorParams(model)
+    params_baseline.set_search_options(do_sample=False, max_length=15, batch_size=1)
+    gen_baseline = og.Generator(model, params_baseline)
+    gen_baseline.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    while not gen_baseline.is_done():
+        gen_baseline.generate_next_token()
+    baseline_seq = gen_baseline.get_sequence(0)
+
+    # Dynamic KV cache: small initial capacity to trigger growth
+    params_dynamic = og.GeneratorParams(model)
+    params_dynamic.set_search_options(
+        do_sample=False, max_length=15, batch_size=1,
+        initial_cache_length=6, kv_cache_growth_factor=2.0
+    )
+    assert int(params_dynamic.get_search_options()["initial_cache_length"]) == 6
+    assert params_dynamic.get_search_options()["kv_cache_growth_factor"] == 2.0
+
+    gen_dynamic = og.Generator(model, params_dynamic)
+    gen_dynamic.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    while not gen_dynamic.is_done():
+        gen_dynamic.generate_next_token()
+    dynamic_seq = gen_dynamic.get_sequence(0)
+
+    # Output should be identical regardless of KV cache growth strategy
+    assert np.array_equal(baseline_seq, dynamic_seq)
+
+
+@pytest.mark.parametrize(
+    "relative_model_path",
     (
         [
             Path("hf-internal-testing") / "tiny-random-gpt2-fp32",

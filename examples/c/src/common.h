@@ -176,13 +176,14 @@ struct GeneratorParamsArgs {
   int chunk_size = 0;
   std::optional<bool> do_sample;
   std::optional<int> min_length;
-  std::optional<int> max_length;
   int num_beams = 1;
   int num_return_sequences = 1;
   std::optional<double> repetition_penalty;
   std::optional<double> temperature;
   std::optional<int> top_k;
   std::optional<double> top_p;
+  std::optional<int> initial_cache_length;       // Initial KV cache buffer length (enables dynamic growth)
+  std::optional<double> kv_cache_growth_factor;  // Growth factor for KV cache expansion (default: 2.0)
 };
 
 /**

@@ -286,6 +286,48 @@ TEST(CAPITests, MaxLength) {
 #endif
 }
 
+TEST(CAPITests, DynamicKVCacheGrowth) {
+  // Test that dynamic KV cache growth works correctly by setting initial_cache_length
+  // to a small value and generating tokens beyond the initial capacity.
+  std::vector<int32_t> input_ids{0, 0, 0, 52};
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("initial_cache_length", 6);    // Start small to trigger growth
+  params->SetSearchOption("kv_cache_growth_factor", 2);  // 2x growth
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate tokens beyond the initial cache capacity (6) to trigger dynamic growth
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify that generation completed successfully and produced the expected number of tokens
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, 0u);
+  ASSERT_LE(sequence_length, 20u);
+
+  // Verify the output matches the non-dynamic case (output should be deterministic)
+  auto params_baseline = OgaGeneratorParams::Create(*model);
+  params_baseline->SetSearchOption("max_length", 20);
+
+  auto generator_baseline = OgaGenerator::Create(*model, *params_baseline);
+  generator_baseline->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator_baseline->IsDone()) {
+    generator_baseline->GenerateNextToken();
+  }
+
+  const auto baseline_length = generator_baseline->GetSequenceCount(0);
+  ASSERT_EQ(sequence_length, baseline_length);
+
+  const auto* seq_data = generator->GetSequenceData(0);
+  const auto* baseline_data = generator_baseline->GetSequenceData(0);
+  EXPECT_TRUE(0 == std::memcmp(seq_data, baseline_data, sequence_length * sizeof(int32_t)));
+}
+
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, MaxLength) {
   std::vector<int32_t> input_ids{1, 2, 3, 5, 8, 2, 1, 4, 5, 7};

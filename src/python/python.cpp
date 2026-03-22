@@ -204,7 +204,6 @@ struct PyGeneratorParams {
     d["do_sample"] = params_->GetSearchBool("do_sample");
     d["early_stopping"] = params_->GetSearchBool("early_stopping");
     d["length_penalty"] = params_->GetSearchNumber("length_penalty");
-    d["max_length"] = params_->GetSearchNumber("max_length");
     d["min_length"] = params_->GetSearchNumber("min_length");
     d["no_repeat_ngram_size"] = params_->GetSearchNumber("no_repeat_ngram_size");
     d["num_beams"] = params_->GetSearchNumber("num_beams");
@@ -215,6 +214,8 @@ struct PyGeneratorParams {
     d["temperature"] = params_->GetSearchNumber("temperature");
     d["top_k"] = params_->GetSearchNumber("top_k");
     d["top_p"] = params_->GetSearchNumber("top_p");
+    d["initial_cache_length"] = params_->GetSearchNumber("initial_cache_length");
+    d["kv_cache_growth_factor"] = params_->GetSearchNumber("kv_cache_growth_factor");
     return d;
   }
 

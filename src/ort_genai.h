@@ -27,7 +27,6 @@
  * tokenizer->Encode("A great recipe for Kung Pao chicken is ", *sequences);
  *
  * auto params = OgaGeneratorParams::Create(*model);
- * params->SetSearchOption("max_length", 200);
  * params->SetSearchOption("batch_size", 1);
  *
  * auto generator = OgaGenerator::Create(*model, *params);

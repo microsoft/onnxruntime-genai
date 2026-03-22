@@ -170,23 +170,12 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
     cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
-
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
-  }
 }
 
 bool BeamSearch_Cuda::IsDone() const {
   if (beam_scorer_->IsDoneLater())
     return true;
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "beam cuda hit");
-    return true;
-  }
   return false;
 }
 
@@ -226,13 +215,6 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
 
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
-    return;
-  }
-
   ResetDone();
 }
 
@@ -267,7 +249,7 @@ void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
 
   cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().Span().data(),
                                          GetScores().data(), params_->search.batch_size, params_->search.num_beams, params_->config.model.vocab_size,
-                                         params_->search.max_length, GetSequenceLength(), penalty, GetStream());
+                                         sequences_.max_length_, GetSequenceLength(), penalty, GetStream());
 }
 
 }  // namespace Generators

@@ -1202,6 +1202,10 @@ struct Search_Element : JSON::Element {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
+    } else if (name == "initial_cache_length") {
+      v_.initial_cache_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "kv_cache_growth_factor") {
+      v_.kv_cache_growth_factor = static_cast<float>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

@@ -83,6 +83,13 @@ struct DefaultKeyValueCache : KeyValueCache {
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
+  // Grow the KV cache capacity using the growth factor when total_length exceeds current capacity
+  void GrowCacheIfNeeded(int total_length);
+
+  // Copy data from existing present tensors into newly allocated (larger) present tensors
+  template <typename T>
+  void CopyPresentsToPadded(std::vector<std::unique_ptr<OrtValue>>& presents);
+
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
   Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 
@@ -102,6 +109,11 @@ struct DefaultKeyValueCache : KeyValueCache {
 
   // Support for per-layer KV cache shapes (for models with alternating attention patterns)
   std::vector<std::array<int64_t, 4>> layer_shapes_;
+
+  // Dynamic KV cache growth support
+  bool dynamic_cache_enabled_{false};  // True when initial_cache_length > 0
+  int cache_capacity_{};               // Current allocated cache capacity (sequence length dimension)
+  float growth_factor_{2.0f};          // Multiplicative growth factor for reallocation
 
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;

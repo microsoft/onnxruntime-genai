@@ -53,11 +53,12 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
    tokenizer = og.Tokenizer(model)
    stream = tokenizer.create_stream()
     
-   # Set the max length to something sensible by default,
-   # since otherwise it will be set to the entire context length
+   # Enable dynamic KV cache growth for better memory efficiency.
+   # The KV cache starts small and grows as needed during generation.
    search_options = {}
-   search_options['max_length'] = 2048
    search_options['batch_size'] = 1
+   search_options['initial_cache_length'] = 128
+   search_options['kv_cache_growth_factor'] = 2.0  # default: 2x growth
 
    chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 

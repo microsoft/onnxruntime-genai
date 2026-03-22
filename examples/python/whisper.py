@@ -61,7 +61,6 @@ def run(args: argparse.Namespace):
             do_sample=False,
             num_beams=args.num_beams,
             num_return_sequences=args.num_beams,
-            max_length=448,
             batch_size=batch_size,
         )
 
