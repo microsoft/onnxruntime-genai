@@ -178,7 +178,11 @@ target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
 if(WIN32 OR ANDROID OR IOS)
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 else()
-  list(APPEND ortgenai_embed_libs "$<TARGET_SONAME_FILE:onnxruntime-genai>")
+  if (ENABLE_JAVA)
+    list(APPEND ortgenai_embed_libs "$<TARGET_LINKER_FILE:onnxruntime-genai>")
+  else()
+    list(APPEND ortgenai_embed_libs "$<TARGET_SONAME_FILE:onnxruntime-genai>")
+  endif()
 endif()
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
