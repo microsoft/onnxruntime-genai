@@ -776,11 +776,17 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     if not 'Visual Studio' in args.cmake_generator and not 'Multi-Config' in args.cmake_generator:
         build_dir = build_dir / args.config
 
-    if build_dir.exists():
-        log.info(f"Removing existing build directory: {build_dir}")
-        shutil.rmtree(build_dir)
-
-    build_dir.mkdir(parents=True)
+    # Removing the build directory will no longer work because of
+    # the FetchContent used in the examples. It creates the _deps/
+    # directory, which contains .git/ subdirectories. Removing those
+    # requires elevated privileges.
+    # if build_dir.exists():
+    #     log.info(f"Removing existing build directory: {build_dir}")
+    #     shutil.rmtree(build_dir)
+    #
+    # Rezone for commenting out see above.
+    # Do not need to create build dir manually. CMake will do that.
+    # build_dir.mkdir(parents=True)
 
     samples_to_build = [
         "-DMODEL_QA=ON",
@@ -789,7 +795,9 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DWHISPER=ON",
     ]
 
-    include_dir = REPO_ROOT / "src"
+    cmake_prefix_path = str(args.build_dir)
+    if args.ort_home:
+        cmake_prefix_path += ";" + str(args.ort_home / args.config)
 
     cmake_command = (
         [
@@ -803,8 +811,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ]
         + samples_to_build
         + [
-        	"-DCMAKE_PREFIX_PATH=" + str(args.build_dir),
-            "-DUSE_GUIDANCE=" + 'ON' if args.use_guidance else 'OFF',
+        	"-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
         ]
     )
 
@@ -814,7 +821,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         elif args.arm64ec:
             cmake_command += ["-A", "ARM64EC"]
 
-    if args.cmake_extra_defines != []:
+    if args.cmake_extra_defines:
         cmake_command += args.cmake_extra_defines
 
     util.run(cmake_command, env=env)

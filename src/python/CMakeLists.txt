@@ -52,7 +52,7 @@ if(BUILD_WHEEL)
 
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-    ${ortgenai_embed_libs} $<TARGET_FILE:python>
+    ${ortgenai_embed_libs} ${python_embed_libs} $<TARGET_FILE:python>
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
