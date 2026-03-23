@@ -71,7 +71,12 @@ steps:
     set -e -x
     cmake_extra_args=""
     if [ "$(ep)" = "cuda" ]; then
-      cmake_extra_args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"
+      if [[ "$(cuda_version)" == 13.* ]]; then
+        cuda_archs="75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
+      else
+        cuda_archs="60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120"
+      fi
+      cmake_extra_args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=\\\"${cuda_archs}\\\""
     fi
     echo "##vso[task.setvariable variable=CMAKE_EXTRA_ARGS;]$cmake_extra_args"
   displayName: 'Set CMake Extra Args'

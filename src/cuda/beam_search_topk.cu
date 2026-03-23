@@ -5,6 +5,7 @@
 #include <cub/cub.cuh>
 #include <limits>
 #include "beam_search_topk.h"
+#include "cuda_common.h"
 
 namespace Generators {
 namespace cuda {
@@ -124,17 +125,20 @@ void LaunchBeamSearchOnlineTopKStage2Kernel(
   if (parts_per_beam <= 32) {
     BeamSearchOnlineTopKStage2Kernel<T, max_k, 32><<<batch_beam_size, 32, smem_stage2_size, stream>>>(
         topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
+    CUDA_CHECK_LAUNCH();
     return;
   }
 
   if (parts_per_beam <= 64) {
     BeamSearchOnlineTopKStage2Kernel<T, max_k, 64><<<batch_beam_size, 64, smem_stage2_size, stream>>>(
         topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
+    CUDA_CHECK_LAUNCH();
     return;
   }
 
   BeamSearchOnlineTopKStage2Kernel<T, max_k, 128><<<batch_beam_size, 128, smem_stage2_size, stream>>>(
       topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
+  CUDA_CHECK_LAUNCH();
   return;
 }
 
@@ -160,12 +164,13 @@ void TopKLauncherMaxK(
 
   dim3 grid(batch_beam_size, voc_parts);
 
-  cudaFuncSetAttribute(BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>,
-                       cudaFuncAttributePreferredSharedMemoryCarveout,
-                       cudaSharedmemCarveoutMaxL1);
+  CUDA_CHECK(cudaFuncSetAttribute(BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>,
+                                  cudaFuncAttributePreferredSharedMemoryCarveout,
+                                  cudaSharedmemCarveoutMaxL1));
 
   BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>
       <<<grid, kThreadBlockSize, 0, stream>>>(input, K, vocab_size, (vocab_size + voc_parts - 1) / voc_parts, output_values_tmp, output_indices_tmp);
+  CUDA_CHECK_LAUNCH();
 
   LaunchBeamSearchOnlineTopKStage2Kernel<T, max_k>(
       output_values_tmp,
@@ -242,6 +247,7 @@ void LaunchBatchTopKKernel(const T* topk_scores,
   } else {
     BatchTopKKernelLauncher(64);
   }
+  CUDA_CHECK_LAUNCH();
 }
 
 template void LaunchBatchTopKKernel(const float* topk_scores,

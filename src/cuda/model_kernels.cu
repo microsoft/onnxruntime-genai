@@ -7,6 +7,7 @@
 #include <limits>
 #include <assert.h>
 #include <stdio.h>
+#include "cuda_common.h"
 
 namespace Generators {
 namespace cuda {
@@ -36,6 +37,7 @@ void Launch_UpdatePositionIds(T* positions, int batch_beam_size, int total_lengt
     // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
     UpdatePositionIds<T><<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(positions, batch_beam_size);
   }
+  CUDA_CHECK_LAUNCH();
 }
 
 template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream);
@@ -77,6 +79,7 @@ void Launch_UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_
     int blocks = (batch_beam_size * total_length + threads - 1) / threads;
     CopyAndUpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(next_mask_data, mask_data, batch_beam_size, new_kv_length, total_length);
   }
+  CUDA_CHECK_LAUNCH();
 }
 
 template void Launch_UpdateAttentionMask(int32_t* next_mask_data, int32_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
@@ -96,6 +99,7 @@ void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_siz
   int block_size = 256;
   int num_blocks = (batch_beam_size * vocab_size + block_size - 1) / block_size;
   AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, logits_mask);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
@@ -108,6 +112,7 @@ void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertFp16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const half*>(fp16), fp32, count);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void ConvertFp32ToFp16(const float* src, half* dst, int count) {
@@ -120,6 +125,7 @@ void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertFp32ToFp16<<<num_blocks, block_size, 0, stream>>>(fp32, reinterpret_cast<half*>(fp16), count);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void ConvertInt32ToInt64(const int32_t* src, int64_t* dst, int count) {
@@ -133,6 +139,7 @@ void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
+  CUDA_CHECK_LAUNCH();
 }
 
 namespace {
@@ -197,6 +204,7 @@ void ReorderPastStatesKernelLauncher(void* out_buffer,
                                                         num_heads,
                                                         max_length,
                                                         chunked_head_size);
+    CUDA_CHECK_LAUNCH();
   }
 }
 
@@ -258,6 +266,7 @@ void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
                                                            input_seq_length,
                                                            max_seq_length,
                                                            current_length);
+  CUDA_CHECK_LAUNCH();
 }
 
 template <typename T>
@@ -325,6 +334,7 @@ void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                                                   max_length,
                                                                   sequence_length);
   }
+  CUDA_CHECK_LAUNCH();
 }
 
 template void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
@@ -419,6 +429,7 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
                                                                  cross_qk_output,
                                                                  cache_indir_data);
   }
+  CUDA_CHECK_LAUNCH();
 }
 
 template void LaunchFinalizeCrossQK(cudaStream_t stream,

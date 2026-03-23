@@ -8,7 +8,7 @@ import os
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import get_ci_data_path, run_subprocess
+from _test_utils import download_model, get_ci_data_path, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -52,29 +52,35 @@ def run_whisper():
     )
 
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
-        if execution_provider == "cuda" and not og.is_cuda_available():
-            continue
+        # Generate model via model builder
+        built_model = os.path.join(cwd, "..", "test_models", f"whisper-tiny-{precision}-{execution_provider}")
+        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision, device=execution_provider, one_layer=False)
 
-        model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
-        if not os.path.exists(model):
-            continue
+        # Get prebuilt model from CI
+        ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
+        for model in [built_model, ci_model]:
+            # Conditions for skipping test
+            if execution_provider == "cuda" and not og.is_cuda_available():
+                continue
+            if not os.path.exists(model):
+                continue
 
-        command = [
-            sys.executable,
-            os.path.join(cwd, "..", "..", "examples", "python", "whisper.py"),
-            "-m",
-            model,
-            "-e",
-            execution_provider,
-            "-b",
-            str(num_beams),
-            "-a",
-            audio_path,
-            "-o",
-            expected_transcription,
-            "--non_interactive",
-        ]
-        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+            command = [
+                sys.executable,
+                os.path.join(cwd, "..", "..", "examples", "python", "whisper.py"),
+                "-m",
+                model,
+                "-e",
+                execution_provider,
+                "-b",
+                str(num_beams),
+                "-a",
+                audio_path,
+                "-o",
+                expected_transcription,
+                "--non_interactive",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def run_tool_calling():
@@ -158,6 +164,34 @@ def run_tool_calling():
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_nemotron_speech():
+    """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_speech.py example."""
+    log.debug("Running Nemotron Speech Python E2E Test")
+
+    # Look for nemotron speech model in test_models directory
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    if not os.path.exists(model_path):
+        log.info(f"Nemotron speech model not found at {model_path}, skipping E2E test.")
+        return
+
+    # Look for a test audio file
+    audio_path = os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3")
+    if not os.path.exists(audio_path):
+        log.info(f"Test audio file not found at {audio_path}, skipping E2E test.")
+        return
+
+    command = [
+        sys.executable,
+        os.path.join(cwd, "..", "..", "examples", "python", "nemotron_speech.py"),
+        "--model_path",
+        model_path,
+        "--audio_file",
+        audio_path,
+    ]
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -186,6 +220,9 @@ if __name__ == "__main__":
 
     # Run Whisper E2E tests
     run_whisper()
+
+    # Run Nemotron Speech E2E tests
+    run_nemotron_speech()
 
     # Run tool calling E2E tests
     run_tool_calling()

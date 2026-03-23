@@ -4,6 +4,7 @@
 #include "generators.h"
 #include "search.h"
 #include "search_cuda.h"
+#include "cuda_common.h"
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 #include "interface.h"
@@ -22,7 +23,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters, 
   state_cpu_->not_done_count_ = parameters.search.batch_size;
   state_cpu_->hypothesis_buffer_used_ = 0;
   state_gpu_ = CudaMallocArray<cuda::BeamScorerState>(1);
-  cudaMemcpyAsync(state_gpu_.get(), state_cpu_.get(), sizeof(cuda::BeamScorerState), ::cudaMemcpyHostToDevice, stream_);
+  CUDA_CHECK(cudaMemcpyAsync(state_gpu_.get(), state_cpu_.get(), sizeof(cuda::BeamScorerState), ::cudaMemcpyHostToDevice, stream_));
 
   size_t batch_beam_size = state_cpu_->batch_size_ * state_cpu_->num_beams_;
 
@@ -63,7 +64,7 @@ void BeamSearchScorer_Cuda::Process(Sequences& sequences,
                                        next_tokens,
                                        next_indices,
                                        stream_);
-  cudaEventRecord(event_process_complete_, stream_);
+  CUDA_CHECK(cudaEventRecord(event_process_complete_, stream_));
 
   cuda::LaunchBeamSearchScorer_AppendNextTokenToSequences(*state_cpu_,
                                                           *state_gpu_,
@@ -76,7 +77,7 @@ void BeamSearchScorer_Cuda::Process(Sequences& sequences,
 }
 
 bool BeamSearchScorer_Cuda::IsDoneLater() const {
-  cudaEventSynchronize(event_process_complete_);
+  CUDA_CHECK(cudaEventSynchronize(event_process_complete_));
   return state_cpu_->not_done_count_ == 0;
 }
 
@@ -90,7 +91,7 @@ DeviceSpan<int32_t> BeamSearchScorer_Cuda::GetBeamHypothesis(size_t batch_id, si
   cuda_host_unique_ptr<int> hypothesis_length = CudaMallocHostArray<int>(1);
   cuda_host_unique_ptr<float> hypothesis_score = CudaMallocHostArray<float>(1);
   cuda::LaunchBeamSearchScorer_GetHypothesisPtr(batch_id, beam_id, beam_hyps_, hypothesis_ptr.get(), hypothesis_length.get(), hypothesis_score.get(), stream_);
-  CudaCheck() == cudaStreamSynchronize(stream_);
+  CUDA_CHECK(cudaStreamSynchronize(stream_));
   std::span<int32_t> hypothesis(*hypothesis_ptr.get(), *hypothesis_length.get());
   // Translate the hypothesis span back to the original device buffer span
   return hypothesis_buffer_.subspan(hypothesis.data() - hypothesis_buffer_.Span().data(), hypothesis.size());

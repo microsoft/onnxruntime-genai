@@ -274,8 +274,8 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
         audio_tags = "".join([f"<|audio_{i + 1}|>\n" for i in range(num_audios)])
         content = image_tags + audio_tags + prompt
-    elif model_type in {"qwen2_5_vl", "fara"}:
-        # Qwen-2.5 VL, Fara
+    elif model_type in {"qwen2_5_vl", "qwen3_vl", "fara"}:
+        # Qwen-2.5 VL, Qwen-3 VL, Fara
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
     else:

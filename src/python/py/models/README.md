@@ -18,6 +18,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Hugging Face Remote Code](#hugging-face-remote-code)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
+    - [Prune Language Modeling Head](@prune-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
@@ -48,7 +49,7 @@ The tool currently supports the following model architectures.
 - Phi
 - Qwen
 - SmolLM3
-
+- Whisper
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
@@ -60,10 +61,10 @@ For all available options, please use the `-h/--help` flag.
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder --help
+python -m onnxruntime_genai.models.builder --help
 
 # From source:
-python3 builder.py --help
+python builder.py --help
 ```
 
 ### Original PyTorch Model from Hugging Face
@@ -72,10 +73,10 @@ This scenario is where your PyTorch model is not downloaded locally (either in t
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_save_hf_files
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_save_hf_files
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_save_hf_files
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_save_hf_files
 ```
 
 ### Original PyTorch Model from Disk
@@ -84,10 +85,10 @@ This scenario is where your PyTorch model is already downloaded locally (either 
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
 
 ### Customized or Finetuned PyTorch Model
@@ -96,10 +97,10 @@ This scenario is where your PyTorch model has been customized or finetuned for o
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
 ### Quantized PyTorch Model
@@ -108,10 +109,10 @@ This scenario is where your PyTorch model is one of the currently supported mode
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
 ### GGUF Model
@@ -120,10 +121,10 @@ This scenario is where your float16/float32 GGUF model is already on disk.
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
+python -m onnxruntime_genai.models.builder -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
 
 # From source:
-python3 builder.py -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
+python builder.py -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
 ```
 
 ### Extra Options
@@ -132,10 +133,10 @@ This scenario is for when you want to have control over some specific settings. 
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options filename=decoder.onnx
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options filename=decoder.onnx
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options filename=decoder.onnx
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options filename=decoder.onnx
 ```
 
 To see all available options through `--extra_options`, please use the `help` commands in the `Full Usage` section above.
@@ -146,10 +147,10 @@ This scenario is for when you already have your optimized and/or quantized ONNX 
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
 ```
 
 Afterwards, please open the `genai_config.json` file in the output folder and modify the fields as needed for your model. You should store your ONNX model in the output folder as well.
@@ -160,10 +161,10 @@ This scenario is for when you need to disable the Hugging Face authentication or
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
 ```
 
 #### Hugging Face Remote Code
@@ -172,10 +173,10 @@ This scenario is for when you need to disable trusting remote code from a Huggin
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
 ```
 
 #### Exclude Embedding Layer
@@ -184,10 +185,10 @@ This scenario is for when you want to exclude the embedding layer from your ONNX
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_embeds=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_embeds=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_embeds=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_embeds=true
 ```
 
 #### Exclude Language Modeling Head
@@ -196,10 +197,22 @@ This scenario is for when you want to exclude the language modeling head from yo
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
+```
+
+#### Prune Language Modeling Head
+
+This scenario is for when you want to prune the language modeling head to only compute the last token's logits.
+
+```
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options prune_lm_head=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options prune_lm_head=true
 ```
 
 #### Include Last Hidden States Output
@@ -208,10 +221,10 @@ This scenario is for when you want to include the last hidden states as an outpu
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
 ```
 
 Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
@@ -223,37 +236,37 @@ This scenario is for when you want to enable weight sharing between the embeddin
 ##### Option 1: INT4 (for RTN and K-Quant)
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
 ```
 
 ##### Option 2: INT4 + INT8 embeddings (for RTN Last and K-Quant Last)
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
 ```
 
 ##### Option 3: INT4 embeddings + FP16 embeddings
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
 ```
 
 ##### Option 4: FP16 embeddings
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
+python builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
 ```
 
 #### Disable QKV Projections Fusion
@@ -262,10 +275,10 @@ This scenario is for when you want to keep Q/K/V projections in the attention la
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 ```
 
 #### Enable CUDA Graph
@@ -274,10 +287,10 @@ This scenario is for when you want to enable CUDA graph for your ONNX model.
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 ```
 
 #### Use 8 Bits Quantization in QMoE
@@ -286,10 +299,10 @@ This scenario is for when you want to use 8-bit quantization for MoE layers. Def
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
 ```
 
 #### Use QDQ Pattern for Quantization
@@ -298,10 +311,10 @@ This scenario is for when you want to use the QDQ pattern when quantizing the mo
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 ```
 
 #### LoRA Models
@@ -310,10 +323,10 @@ This scenario is where you have a finetuned model with LoRA adapters and your mo
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
 ```
 
 Base weights should be located in `path_to_local_folder_on_disk` and adapter weights should be located in `path_to_adapter_files`.
@@ -341,10 +354,10 @@ This option is the simplest but it will download another copy of the PyTorch mod
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
 ```
 
 #### Option 2: Edit the config.json file on disk and then run the model builder
@@ -355,10 +368,10 @@ python3 builder.py -m model_name -o path_to_output_folder -p precision -e execut
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
 
 ## Design

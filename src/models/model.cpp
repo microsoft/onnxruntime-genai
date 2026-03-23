@@ -16,6 +16,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
@@ -174,6 +175,7 @@ void State::SetRunOption(const char* key, const char* value) {
     }
     return;
   } else if (strcmp(key, "enable_profiling") == 0) {
+#if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
       run_options_->DisableProfiling();
     } else {
@@ -183,6 +185,9 @@ void State::SetRunOption(const char* key, const char* value) {
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
       run_options_->EnableProfiling(fs::path(prefix).c_str());
     }
+#else
+    throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
+#endif
     return;
   }
   run_options_->AddConfigEntry(key, value);
@@ -1026,6 +1031,14 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
 
+  // Search and sampling are performed on the CPU for all device types,
+  // except for CUDA and NvTensorRtRtx, where this is performed on the device.
+  if (p_device_->GetType() == DeviceType::CUDA ||
+      p_device_->GetType() == DeviceType::NvTensorRtRtx)
+    p_device_scoring_ = p_device_;
+  else
+    p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
+
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
 }
@@ -1268,12 +1281,14 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
-  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl") && !config->model.decoder.pipeline.empty())
+  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if (ModelType::IsRNNT(config->model.type))
+    return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -1367,7 +1382,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>}} {
+          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
+          {"qwen3_vl", Processor::Create<QwenImageProcessor>},
+          {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

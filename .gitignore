@@ -33,6 +33,12 @@ examples/csharp/ModelChat/models
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
 !test/test_models/grammars/
+!test/test_models/qwen-vision-preprocessing/
+!test/test_models/qwen-vision-preprocessing/*.onnx
+!test/test_models/qwen3-vl-vision-preprocessing/
+!test/test_models/qwen3-vl-vision-preprocessing/*.onnx
+!test/test_models/qwen35-hybrid-preprocessing/
+!test/test_models/qwen35-hybrid-preprocessing/*.onnx
 
 .ipynb_checkpoints/
 /src/java/.gradle

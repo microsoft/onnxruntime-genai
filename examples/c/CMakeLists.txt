@@ -33,6 +33,7 @@ option(MODEL_CHAT "Build the Model Chat example" OFF)
 option(MODEL_QA "Build the Model Q&A example" OFF)
 option(MODEL_MM "Build the Model Multimodal example" OFF)
 option(WHISPER "Build the Whisper example" OFF)
+option(NEMOTRON_SPEECH "Build the Nemotron Speech Streaming example" OFF)
 
 if(USE_CXX)
   add_compile_definitions(USE_CXX)
@@ -63,4 +64,10 @@ endif()
 
 if(WHISPER)
   genai_add_example(whisper ${EXAMPLES_SOURCE_DIR}/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
+endif()
+
+if(NEMOTRON_SPEECH)
+  add_executable(nemotron_speech ${EXAMPLES_SOURCE_DIR}/nemotron_speech.cpp)
+  prepare_executable(nemotron_speech)
+  target_link_libraries(nemotron_speech PRIVATE nlohmann_json::nlohmann_json)
 endif()

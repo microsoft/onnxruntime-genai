@@ -568,9 +568,11 @@ struct OrtRunOptions {
    */
   OrtRunOptions& UnsetTerminate();
 
-  OrtRunOptions& AddActiveLoraAdapter(const OrtLoraAdapter& adapter);    ///< Wraps OrtApi::RunOptionsSetActiveLoraAdapter
+  OrtRunOptions& AddActiveLoraAdapter(const OrtLoraAdapter& adapter);  ///< Wraps OrtApi::RunOptionsSetActiveLoraAdapter
+#if ORT_API_VERSION >= 25
   OrtRunOptions& EnableProfiling(const ORTCHAR_T* profile_file_prefix);  ///< Wraps OrtApi::RunOptionsEnableProfiling
   OrtRunOptions& DisableProfiling();                                     ///< Wraps OrtApi::RunOptionsDisableProfiling
+#endif
 
   static void operator delete(void* p) { Ort::api->ReleaseRunOptions(reinterpret_cast<OrtRunOptions*>(p)); }
   Ort::Abstract make_abstract;

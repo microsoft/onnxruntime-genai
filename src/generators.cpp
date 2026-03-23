@@ -4,9 +4,12 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "models/streaming_processor.h"
+#include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
@@ -268,7 +271,7 @@ GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
-      p_device{model.p_device_inputs_} {
+      p_device{model.p_device_scoring_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
   }
@@ -345,6 +348,13 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+  // RNNT models don't use the traditional search/logits pipeline,
+  // so skip the standard validations and just create the state.
+  if (ModelType::IsRNNT(model.config_->model.type)) {
+    state_ = model.CreateState({}, params);
+    return;
+  }
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -504,11 +514,20 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get()))
+    return speech_state->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
+    // Pending mel input means we haven't started processing this chunk yet
+    if (!extra_inputs_.empty()) return false;
+    return speech_state->IsChunkDone();
+  }
+
   if (computed_logits_) {
     return false;
   }
@@ -538,6 +557,15 @@ void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+
+  // RNNT models: yield one token per call from the decoder state machine
+  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
+    state_->SetExtraInputs(extra_inputs_);
+    extra_inputs_.clear();
+    speech_state->StepToken();
+    return;
+  }
+
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 

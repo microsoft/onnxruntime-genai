@@ -6,6 +6,7 @@
 #include <cassert>
 
 #include "cuda_topk.h"
+#include "cuda_common.h"
 #include "cuda_topk_benchmark_cache.h"
 #include "cuda_topk_benchmark.cuh"
 #include "cuda_topk_common.cuh"
@@ -153,6 +154,7 @@ void TopkDataCompact::CompactOutput(int batch_size, int k, cudaStream_t stream) 
   dim3 block(256);
   CompactStridedData<float><<<grid, block, 0, stream>>>(topk_scores, topk_scores_compact.get(), k, batch_size, topk_stride);
   CompactStridedData<int><<<grid, block, 0, stream>>>(topk_indices, topk_indices_compact.get(), k, batch_size, topk_stride);
+  CUDA_CHECK_LAUNCH();
 }
 
 // Main dispatcher for Top-K. It implements the caching and benchmarking logic to select and run the best algorithm.
