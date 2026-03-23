@@ -215,7 +215,7 @@ struct PyGeneratorParams {
     d["top_k"] = params_->GetSearchNumber("top_k");
     d["top_p"] = params_->GetSearchNumber("top_p");
     d["initial_cache_length"] = params_->GetSearchNumber("initial_cache_length");
-    d["kv_cache_growth_factor"] = params_->GetSearchNumber("kv_cache_growth_factor");
+    d["cache_growth_factor"] = params_->GetSearchNumber("cache_growth_factor");
     return d;
   }
 

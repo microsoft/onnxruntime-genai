@@ -119,7 +119,7 @@ def get_search_options(args: argparse.Namespace):
         "top_k",
         "top_p",
         "initial_cache_length",
-        "kv_cache_growth_factor",
+        "cache_growth_factor",
     ]
     for name in names:
         if name in args:
@@ -530,7 +530,7 @@ def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
     generator_params.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     generator_params.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
     generator_params.add_argument('--initial_cache_length', type=int, help='Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.')
-    generator_params.add_argument('--kv_cache_growth_factor', type=float, default=2.0, help='Growth factor when dynamically expanding the KV cache buffer (default: 2.0)')
+    generator_params.add_argument('--cache_growth_factor', type=float, default=2.0, help='Growth factor when dynamically expanding the KV cache buffer (default: 2.0)')
 
 def get_guidance_args(parser: argparse.ArgumentParser) -> None:
     """

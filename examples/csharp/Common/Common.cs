@@ -838,9 +838,9 @@ namespace CommonUtils
                 Description = "Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length."
             };
 
-            var kv_cache_growth_factor = new Option<double?>(
-                name: "kv_cache_growth_factor",
-                aliases: ["--kv_cache_growth_factor"]
+            var cache_growth_factor = new Option<double?>(
+                name: "cache_growth_factor",
+                aliases: ["--cache_growth_factor"]
             )
             {
                 Arity = ArgumentArity.ExactlyOne,
@@ -848,7 +848,7 @@ namespace CommonUtils
             };
 
             parser.Add(initial_cache_length);
-            parser.Add(kv_cache_growth_factor);
+            parser.Add(cache_growth_factor);
         }
 
         /// <summary>
@@ -975,7 +975,7 @@ namespace CommonUtils
                 top_k = parseResult.GetValue<int?>("top_k"),
                 top_p = parseResult.GetValue<double?>("top_p"),
                 initial_cache_length = parseResult.GetValue<int?>("initial_cache_length"),
-                kv_cache_growth_factor = parseResult.GetValue<double?>("kv_cache_growth_factor")
+                cache_growth_factor = parseResult.GetValue<double?>("cache_growth_factor")
             };
 
             GuidanceArgs guidanceArgs = new GuidanceArgs
@@ -1086,7 +1086,7 @@ namespace CommonUtils
         /// <summary>Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.</summary>
         public int? initial_cache_length { get; set; }
         /// <summary>Growth factor when dynamically expanding the KV cache buffer (default: 2.0).</summary>
-        public double? kv_cache_growth_factor { get; set; }
+        public double? cache_growth_factor { get; set; }
     }
 
     /// <summary>

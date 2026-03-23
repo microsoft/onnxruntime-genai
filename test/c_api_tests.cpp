@@ -294,8 +294,8 @@ TEST(CAPITests, DynamicKVCacheGrowth) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 20);
-  params->SetSearchOption("initial_cache_length", 6);    // Start small to trigger growth
-  params->SetSearchOption("kv_cache_growth_factor", 2);  // 2x growth
+  params->SetSearchOption("initial_cache_length", 6);  // Start small to trigger growth
+  params->SetSearchOption("cache_growth_factor", 2);   // 2x growth
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());

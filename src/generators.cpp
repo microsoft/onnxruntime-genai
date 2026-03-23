@@ -322,8 +322,8 @@ double GeneratorParams::GetSearchNumber(std::string_view name) const {
     return search.top_p;
   } else if (name == "initial_cache_length") {
     return static_cast<double>(search.initial_cache_length);
-  } else if (name == "kv_cache_growth_factor") {
-    return static_cast<double>(search.kv_cache_growth_factor);
+  } else if (name == "cache_growth_factor") {
+    return static_cast<double>(search.cache_growth_factor);
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
   }

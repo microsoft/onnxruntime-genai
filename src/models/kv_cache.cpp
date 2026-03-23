@@ -256,9 +256,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   const int initial_cache_length = state_.params_->search.initial_cache_length;
   if (initial_cache_length > 0) {
     dynamic_cache_enabled_ = true;
-    growth_factor_ = state_.params_->search.kv_cache_growth_factor;
+    growth_factor_ = state_.params_->search.cache_growth_factor;
     if (growth_factor_ <= 1.0f)
-      throw std::runtime_error("kv_cache_growth_factor must be greater than 1.0, got " + std::to_string(growth_factor_));
+      throw std::runtime_error("cache_growth_factor must be greater than 1.0, got " + std::to_string(growth_factor_));
     cache_capacity_ = initial_cache_length;
 
     // For shared buffers with uniform shape, override to use initial_cache_length

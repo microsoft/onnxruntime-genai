@@ -144,7 +144,7 @@ void to_json(nlohmann::ordered_json& j, const GeneratorParamsArgs& a) {
   if (a.top_k) j["top_k"] = a.top_k.value();
   if (a.top_p) j["top_p"] = a.top_p.value();
   if (a.initial_cache_length) j["initial_cache_length"] = a.initial_cache_length.value();
-  if (a.kv_cache_growth_factor) j["kv_cache_growth_factor"] = a.kv_cache_growth_factor.value();
+  if (a.cache_growth_factor) j["cache_growth_factor"] = a.cache_growth_factor.value();
 }
 
 void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
@@ -159,7 +159,7 @@ void from_json(const nlohmann::ordered_json& j, GeneratorParamsArgs& a) {
   if (j.contains("top_k")) j.at("top_k").get_to(a.top_k);
   if (j.contains("top_p")) j.at("top_p").get_to(a.top_p);
   if (j.contains("initial_cache_length")) j.at("initial_cache_length").get_to(a.initial_cache_length);
-  if (j.contains("kv_cache_growth_factor")) j.at("kv_cache_growth_factor").get_to(a.kv_cache_growth_factor);
+  if (j.contains("cache_growth_factor")) j.at("cache_growth_factor").get_to(a.cache_growth_factor);
 }
 
 bool ParseArgs(
@@ -195,7 +195,7 @@ bool ParseArgs(
   app.add_option("-k,--top_k", generator_params_args.top_k, "Top k tokens to sample from")->group(generator_params);
   app.add_option("-p,--top_p", generator_params_args.top_p, "Top p probability to sample with")->group(generator_params);
   app.add_option("--initial_cache_length", generator_params_args.initial_cache_length, "Initial KV cache buffer length. Enables dynamic cache growth instead of pre-allocating to max_length.")->group(generator_params);
-  app.add_option("--kv_cache_growth_factor", generator_params_args.kv_cache_growth_factor, "Growth factor when dynamically expanding the KV cache buffer (default: 2.0)")->group(generator_params);
+  app.add_option("--cache_growth_factor", generator_params_args.cache_growth_factor, "Growth factor when dynamically expanding the KV cache buffer (default: 2.0)")->group(generator_params);
 
   app.add_option("--response_format", guidance_args.response_format, "Provide response format for the model")->group(guidance);
   app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json")->group(guidance);

@@ -199,10 +199,10 @@ def test_dynamic_kv_cache_growth(test_data_path, relative_model_path):
     params_dynamic = og.GeneratorParams(model)
     params_dynamic.set_search_options(
         do_sample=False, max_length=15, batch_size=1,
-        initial_cache_length=6, kv_cache_growth_factor=2.0
+        initial_cache_length=6, cache_growth_factor=2.0
     )
     assert int(params_dynamic.get_search_options()["initial_cache_length"]) == 6
-    assert params_dynamic.get_search_options()["kv_cache_growth_factor"] == 2.0
+    assert params_dynamic.get_search_options()["cache_growth_factor"] == 2.0
 
     gen_dynamic = og.Generator(model, params_dynamic)
     gen_dynamic.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
