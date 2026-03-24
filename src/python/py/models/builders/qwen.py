@@ -2161,8 +2161,9 @@ class Qwen35Model(Model):
         g_bn_output = self._merge_batch_heads_2d(f"{scan_basename}/g", g_output, n_heads)
         beta_bn_output = self._merge_batch_heads_2d(f"{scan_basename}/beta", beta_output, n_heads)
 
-        # Build the Scan body subgraph
-        body = self._build_scan_body(hk, hv)
+        # Build the Scan body subgraph (names prefixed by layer for uniqueness)
+        layer_id = int(basename.split("layers.")[1].split("/")[0])
+        body = self._build_scan_body(layer_id, hk, hv)
 
         # Create Scan node
         # Scan carries: state [B*N, hk, hv]
@@ -2329,38 +2330,32 @@ class Qwen35Model(Model):
         self.make_reshape(rs_name, [input_3d, target_out], self.io_dtype, ["batch_heads", "sequence_length"])
         return rs_output
 
-    def _build_scan_body(self, hk, hv):
+    def _build_scan_body(self, layer_id, hk, hv):
         """Build the Scan body graph for one timestep of GatedDeltaNet.
 
-        Implements the gated delta rule:
+        Names are prefixed with the layer index so that each Scan body
+        has globally unique value and node names (required by Olive's
+        OnnxDAG which processes all subgraphs together).
 
         Carry input:  state [B*N, hk, hv]
         Scan inputs:  q_t [B*N, hk], k_t [B*N, hk], v_t [B*N, hv],
                       g_t [B*N], beta_t [B*N]
         Carry output: new_state [B*N, hk, hv]
         Scan output:  out_t [B*N, hv]
-
-        Body computation (gated delta rule):
-            decay = exp(unsqueeze(g_t, -1))          # [B*N, 1]
-            decayed_state = state * decay             # [B*N, hk, hv]
-            k_state = k_t @ decayed_state             # [B*N, hv]  (what state predicts for k)
-            delta_v = v_t - k_state                   # [B*N, hv]  (correction)
-            update = delta_v * beta_t                 # [B*N, hv]  (gated correction)
-            new_state = decayed_state + outer(k_t, update)  # [B*N, hk, hv]
-            out_t = q_t @ new_state                   # [B*N, hv]
         """
-        body = ir.Graph(inputs=(), outputs=(), nodes=(), name="gated_deltanet_body")
+        p = f"L{layer_id}"
+        body = ir.Graph(inputs=(), outputs=(), nodes=(), name=f"gated_deltanet_body_{layer_id}")
         io_dt = ir.DataType(self.io_dtype)
 
         def body_val(name, shape):
-            v = ir.Value(name=name)
+            v = ir.Value(name=f"{p}/{name}")
             v.dtype = io_dt
             v.shape = ir.Shape(shape)
             return v
 
-        axes_neg1 = self._make_body_const(body, "axes_neg1", [-1])
-        axes_neg2 = self._make_body_const(body, "axes_neg2", [-2])
-        axes_1 = self._make_body_const(body, "axes_1", [1])
+        axes_neg1 = self._make_body_const(body, f"{p}/axes_neg1", [-1])
+        axes_neg2 = self._make_body_const(body, f"{p}/axes_neg2", [-2])
+        axes_1 = self._make_body_const(body, f"{p}/axes_1", [1])
 
         # Define body inputs
         state_in = body_val("state_in", ["batch_heads", hk, hv])
@@ -2374,65 +2369,61 @@ class Qwen35Model(Model):
 
         # 1. decay = exp(unsqueeze(g_t, -1)): [B*N] -> [B*N, 1] -> broadcast
         g_unsq = body_val("g_unsq", ["batch_heads", 1])
-        body.append(ir.node("Unsqueeze", inputs=[g_t, axes_neg1], outputs=[g_unsq], name="body/g_unsq"))
+        body.append(ir.node("Unsqueeze", inputs=[g_t, axes_neg1], outputs=[g_unsq], name=f"{p}/g_unsq"))
 
         decay = body_val("decay", ["batch_heads", 1])
-        body.append(ir.node("Exp", inputs=[g_unsq], outputs=[decay], name="body/Exp"))
+        body.append(ir.node("Exp", inputs=[g_unsq], outputs=[decay], name=f"{p}/Exp"))
 
         # 2. decayed_state = state * decay: [B*N, hk, hv] * [B*N, 1, 1]
-        #    decay is [B*N, 1], need broadcast - state is [B*N, hk, hv]
-        #    Mul broadcasts [B*N, 1] against [B*N, hk, hv] along last 2 dims
-        #    Need to unsqueeze decay to [B*N, 1, 1]
         decay_2d = body_val("decay_2d", ["batch_heads", 1, 1])
-        body.append(ir.node("Unsqueeze", inputs=[decay, axes_neg1], outputs=[decay_2d], name="body/decay_2d"))
+        body.append(ir.node("Unsqueeze", inputs=[decay, axes_neg1], outputs=[decay_2d], name=f"{p}/decay_2d"))
 
         decayed_state = body_val("decayed_state", ["batch_heads", hk, hv])
-        body.append(ir.node("Mul", inputs=[state_in, decay_2d], outputs=[decayed_state], name="body/decay_mul"))
+        body.append(ir.node("Mul", inputs=[state_in, decay_2d], outputs=[decayed_state], name=f"{p}/decay_mul"))
 
-        # 3. k_state = k_t @ decayed_state: [B*N, 1, hk] @ [B*N, hk, hv] -> [B*N, 1, hv] -> squeeze -> [B*N, hv]
+        # 3. k_state = k_t @ decayed_state
         k_unsq = body_val("k_unsq", ["batch_heads", 1, hk])
-        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg2], outputs=[k_unsq], name="body/k_unsq"))
+        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg2], outputs=[k_unsq], name=f"{p}/k_unsq"))
 
         k_state_3d = body_val("k_state_3d", ["batch_heads", 1, hv])
-        body.append(ir.node("MatMul", inputs=[k_unsq, decayed_state], outputs=[k_state_3d], name="body/k_matmul"))
+        body.append(ir.node("MatMul", inputs=[k_unsq, decayed_state], outputs=[k_state_3d], name=f"{p}/k_matmul"))
 
         k_state = body_val("k_state", ["batch_heads", hv])
-        body.append(ir.node("Squeeze", inputs=[k_state_3d, axes_neg2], outputs=[k_state], name="body/k_squeeze"))
+        body.append(ir.node("Squeeze", inputs=[k_state_3d, axes_neg2], outputs=[k_state], name=f"{p}/k_squeeze"))
 
-        # 4. delta_v = v_t - k_state: [B*N, hv]
+        # 4. delta_v = v_t - k_state
         delta_v = body_val("delta_v", ["batch_heads", hv])
-        body.append(ir.node("Sub", inputs=[v_t, k_state], outputs=[delta_v], name="body/delta_v"))
+        body.append(ir.node("Sub", inputs=[v_t, k_state], outputs=[delta_v], name=f"{p}/delta_v"))
 
-        # 5. update = delta_v * beta_t: [B*N, hv] * [B*N, 1]
+        # 5. update = delta_v * beta_t
         beta_unsq = body_val("beta_unsq", ["batch_heads", 1])
-        body.append(ir.node("Unsqueeze", inputs=[beta_t, axes_neg1], outputs=[beta_unsq], name="body/beta_unsq"))
+        body.append(ir.node("Unsqueeze", inputs=[beta_t, axes_neg1], outputs=[beta_unsq], name=f"{p}/beta_unsq"))
 
         update = body_val("update", ["batch_heads", hv])
-        body.append(ir.node("Mul", inputs=[delta_v, beta_unsq], outputs=[update], name="body/update"))
+        body.append(ir.node("Mul", inputs=[delta_v, beta_unsq], outputs=[update], name=f"{p}/update"))
 
         # 6. new_state = decayed_state + outer(k_t, update)
-        #    outer(k_t, update) = k_t:[B*N, hk, 1] * update:[B*N, 1, hv] -> [B*N, hk, hv]
         k_col = body_val("k_col", ["batch_heads", hk, 1])
-        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg1], outputs=[k_col], name="body/k_col"))
+        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg1], outputs=[k_col], name=f"{p}/k_col"))
 
         update_row = body_val("update_row", ["batch_heads", 1, hv])
-        body.append(ir.node("Unsqueeze", inputs=[update, axes_neg2], outputs=[update_row], name="body/update_row"))
+        body.append(ir.node("Unsqueeze", inputs=[update, axes_neg2], outputs=[update_row], name=f"{p}/update_row"))
 
         kv_update = body_val("kv_update", ["batch_heads", hk, hv])
-        body.append(ir.node("MatMul", inputs=[k_col, update_row], outputs=[kv_update], name="body/kv_matmul"))
+        body.append(ir.node("MatMul", inputs=[k_col, update_row], outputs=[kv_update], name=f"{p}/kv_matmul"))
 
         new_state = body_val("new_state", ["batch_heads", hk, hv])
-        body.append(ir.node("Add", inputs=[decayed_state, kv_update], outputs=[new_state], name="body/state_add"))
+        body.append(ir.node("Add", inputs=[decayed_state, kv_update], outputs=[new_state], name=f"{p}/state_add"))
 
-        # 7. out_t = q_t @ new_state: [B*N, 1, hk] @ [B*N, hk, hv] -> [B*N, hv]
+        # 7. out_t = q_t @ new_state
         q_unsq = body_val("q_unsq", ["batch_heads", 1, hk])
-        body.append(ir.node("Unsqueeze", inputs=[q_t, axes_neg2], outputs=[q_unsq], name="body/q_unsq"))
+        body.append(ir.node("Unsqueeze", inputs=[q_t, axes_neg2], outputs=[q_unsq], name=f"{p}/q_unsq"))
 
         out_3d = body_val("out_3d", ["batch_heads", 1, hv])
-        body.append(ir.node("MatMul", inputs=[q_unsq, new_state], outputs=[out_3d], name="body/matmul"))
+        body.append(ir.node("MatMul", inputs=[q_unsq, new_state], outputs=[out_3d], name=f"{p}/matmul"))
 
         out_t = body_val("out_t", ["batch_heads", hv])
-        body.append(ir.node("Squeeze", inputs=[out_3d, axes_1], outputs=[out_t], name="body/squeeze"))
+        body.append(ir.node("Squeeze", inputs=[out_3d, axes_1], outputs=[out_t], name=f"{p}/squeeze"))
 
         body.outputs.extend([new_state, out_t])
         return body
@@ -2449,7 +2440,7 @@ class Qwen35Model(Model):
                 "Constant",
                 inputs=[],
                 outputs=[val],
-                name=f"body/{name}",
+                name=f"{name}/Constant",
                 attributes={"value": tensor},
             )
         )
