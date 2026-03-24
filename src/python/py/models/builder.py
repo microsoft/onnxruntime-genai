@@ -41,7 +41,7 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
-    Qwen35Model,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     WhisperModel,
@@ -322,7 +322,7 @@ def create_model(
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:

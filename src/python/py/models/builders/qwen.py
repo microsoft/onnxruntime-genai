@@ -928,7 +928,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         )
 
 
-class Qwen35Model(Model):
+class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
     Qwen3.5 uses a hybrid architecture with two layer types:
