@@ -275,12 +275,12 @@ struct Config {
       } outputs;
     } joiner;
 
-    struct Vad {
+    struct VAD {
       bool enabled{false};
-      std::string filename{"silero_vad.onnx"};
+      std::string filename;
       float threshold{0.5f};
       int min_silence_chunks{5};
-      int sample_rate{0};  // 0 = use model's sample_rate
+      int sample_rate{0};
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;

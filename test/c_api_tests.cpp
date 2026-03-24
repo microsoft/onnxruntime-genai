@@ -1526,7 +1526,7 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   ASSERT_EQ(std::string(processor->GetOption("vad_min_silence_chunks")), "10");
 
   // Enable VAD if silero_vad.onnx is available
-  std::string vad_path = std::string(STREAMING_ASR_PATH) + "/silero_vad.onnx";
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
   if (std::filesystem::exists(vad_path)) {
     processor->SetOption("vad_enabled", "true");
     ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
@@ -1546,7 +1546,7 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   if (!std::filesystem::exists(STREAMING_ASR_PATH))
     GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
 
-  std::string vad_path = std::string(STREAMING_ASR_PATH) + "/silero_vad.onnx";
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
   if (!std::filesystem::exists(vad_path))
     GTEST_SKIP() << "silero_vad.onnx not found in model dir";
 

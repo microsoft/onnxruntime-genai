@@ -33,7 +33,6 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   ///   "vad_enabled"             - "true" or "false" (default: "false")
   ///   "vad_threshold"           - float as string, e.g. "0.5"
   ///   "vad_min_silence_chunks"  - int as string, consecutive silence chunks before dropping (default: "5")
-  ///   "vad_model_path"          - path to silero_vad.onnx (overrides config filename)
   /// Derived classes can override to add model-specific keys, calling base for vad_* keys.
   virtual void SetOption(const char* key, const char* value);
 
@@ -56,7 +55,6 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   int consecutive_silence_chunks_{0};
   int min_silence_chunks_{5};
 
-  void EnableVad(const char* vad_model_path, int sample_rate, float threshold);
   void EnableVadFromModel();
 };
 

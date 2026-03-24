@@ -26,11 +26,6 @@ void StreamingProcessor::EnableVadFromModel() {
   consecutive_silence_chunks_ = 0;
 }
 
-void StreamingProcessor::EnableVad(const char* vad_model_path, int sample_rate, float threshold) {
-  vad_ = CreateSileroVad(vad_model_path, sample_rate, threshold);
-  consecutive_silence_chunks_ = 0;
-}
-
 bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_size) {
   if (!vad_) {
     return false;
@@ -73,10 +68,6 @@ void StreamingProcessor::SetOption(const char* key, const char* value) {
     }
   } else if (k == "vad_min_silence_chunks") {
     min_silence_chunks_ = std::stoi(value);
-  } else if (k == "vad_model_path") {
-    float threshold = vad_ ? vad_->GetThreshold() : 0.5f;
-    int sample_rate = vad_ ? vad_->GetSampleRate() : (model_ ? model_->config_->model.sample_rate : 16000);
-    EnableVad(value, sample_rate, threshold);
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }
@@ -91,8 +82,6 @@ std::string StreamingProcessor::GetOption(const char* key) const {
     return std::to_string(vad_ ? vad_->GetThreshold() : 0.5f);
   } else if (k == "vad_min_silence_chunks") {
     return std::to_string(min_silence_chunks_);
-  } else if (k == "vad_model_path") {
-    return "";
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }

@@ -25,13 +25,10 @@ namespace Generators {
 ///            sr     [1]                              int64    (sample rate)
 ///   Outputs: output [1, 1]                           float32  (speech probability)
 ///            stateN [2, 1, 128]                      float32  (updated hidden state)
-struct SileroVad : LeakChecked<SileroVad> {
+struct SileroVad {
   /// Construct from a Model reference (uses config for session/run options).
   /// The VAD model file is resolved relative to the model's config directory.
   SileroVad(Model& model);
-
-  /// Construct with an explicit model path and options (programmatic override).
-  SileroVad(const char* model_path, int sample_rate = 16000, float threshold = 0.5f);
 
   ~SileroVad();
 
@@ -49,7 +46,11 @@ struct SileroVad : LeakChecked<SileroVad> {
   void Reset();
 
   float GetThreshold() const { return threshold_; }
-  void SetThreshold(float threshold) { threshold_ = threshold; }
+  void SetThreshold(float threshold) {
+    if (threshold < 0.0f) threshold = 0.0f;
+    if (threshold > 1.0f) threshold = 1.0f;
+    threshold_ = threshold;
+  }
 
   /// Window size in samples (512 for 16kHz, 256 for 8kHz).
   int GetWindowSize() const { return window_size_; }
@@ -67,7 +68,7 @@ struct SileroVad : LeakChecked<SileroVad> {
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
-  Ort::Allocator* allocator_{nullptr};  // Points to model's device allocator (or CPU for standalone)
+  Ort::Allocator* allocator_{nullptr};
 
   int sample_rate_;
   float threshold_;
@@ -95,6 +96,5 @@ struct SileroVad : LeakChecked<SileroVad> {
 };
 
 std::unique_ptr<SileroVad> CreateSileroVad(Model& model);
-std::unique_ptr<SileroVad> CreateSileroVad(const char* model_path, int sample_rate, float threshold);
 
 }  // namespace Generators

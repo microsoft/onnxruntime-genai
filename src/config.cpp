@@ -966,8 +966,8 @@ struct Joiner_Element : JSON::Element {
   JoinerOutputs_Element outputs_{v_.outputs};
 };
 
-struct Vad_Element : JSON::Element {
-  explicit Vad_Element(Config::Model::Vad& v) : v_{v} {}
+struct VAD_Element : JSON::Element {
+  explicit VAD_Element(Config::Model::VAD& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
@@ -1000,7 +1000,7 @@ struct Vad_Element : JSON::Element {
   }
 
  private:
-  Config::Model::Vad& v_;
+  Config::Model::VAD& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
 };
@@ -1177,7 +1177,7 @@ struct Model_Element : JSON::Element {
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
-  Vad_Element vad_{v_.vad};
+  VAD_Element vad_{v_.vad};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {

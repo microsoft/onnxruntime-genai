@@ -28,11 +28,6 @@ void SileroVad::Initialize(int sample_rate, float threshold) {
   state_.assign(kStateSize, 0.0f);
   context_.assign(static_cast<size_t>(context_size_), 0.0f);
 
-  // Default to CPU allocator for standalone usage; Model constructor overrides this
-  if (!allocator_) {
-    allocator_ = &GetDeviceInterface(DeviceType::CPU)->GetAllocator();
-  }
-
   // Pre-allocate scratch buffer and register I/O
   const int effective_size = context_size_ + window_size_;
   input_data_.resize(static_cast<size_t>(effective_size), 0.0f);
@@ -100,7 +95,9 @@ SileroVad::SileroVad(Model& model) {
 
   // Load session through Model::CreateSession (handles model data spans, path resolution)
   std::string filename = vad_config.filename;
-  if (filename.empty()) filename = "silero_vad.onnx";
+  if (filename.empty()) {
+    throw std::runtime_error("VAD filename must be specified in genai_config.json when vad.enabled is true.");
+  }
   session_ = model.CreateSession(GetOrtEnv(), filename, session_opts);
 
   // Create run options from config if specified
@@ -114,29 +111,6 @@ SileroVad::SileroVad(Model& model) {
   // Use VAD-specific sample_rate if configured, otherwise fall back to model's sample_rate
   int sr = vad_config.sample_rate > 0 ? vad_config.sample_rate : model.config_->model.sample_rate;
   Initialize(sr, vad_config.threshold);
-}
-
-// Constructor with explicit path — standalone/programmatic usage
-SileroVad::SileroVad(const char* model_path, int sample_rate, float threshold) {
-  session_options_ = OrtSessionOptions::Create();
-  // Silero VAD is a ~2MB model with minimal compute (<1ms per window).
-  // Single-threaded execution avoids thread pool overhead which would exceed
-  // the inference time itself, and prevents contention with the main ASR model.
-  session_options_->SetIntraOpNumThreads(1);
-  session_options_->SetInterOpNumThreads(1);
-
-  auto& ort_env = GetOrtEnv();
-#ifdef _WIN32
-  std::wstring wide_path;
-  int len = MultiByteToWideChar(CP_UTF8, 0, model_path, -1, nullptr, 0);
-  wide_path.resize(len - 1);
-  MultiByteToWideChar(CP_UTF8, 0, model_path, -1, wide_path.data(), len);
-  session_ = OrtSession::Create(ort_env, wide_path.c_str(), session_options_.get());
-#else
-  session_ = OrtSession::Create(ort_env, model_path, session_options_.get());
-#endif
-
-  Initialize(sample_rate, threshold);
 }
 
 SileroVad::~SileroVad() = default;
@@ -206,10 +180,6 @@ bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
 
 std::unique_ptr<SileroVad> CreateSileroVad(Model& model) {
   return std::make_unique<SileroVad>(model);
-}
-
-std::unique_ptr<SileroVad> CreateSileroVad(const char* model_path, int sample_rate, float threshold) {
-  return std::make_unique<SileroVad>(model_path, sample_rate, threshold);
 }
 
 }  // namespace Generators
