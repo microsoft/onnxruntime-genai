@@ -982,6 +982,12 @@ class Qwen35TextModel(Model):
 
         # mRoPE config
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
+        if not self.mrope_sections:
+            raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
+        if len(self.mrope_sections) != 3:
+            raise ValueError(
+                f"Expected 3 MRoPE sections [T, H, W], got {len(self.mrope_sections)}: {self.mrope_sections}"
+            )
         self.mrope_rotary_dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
 
         # Force RoPE computation in float32 for numerical stability
@@ -2034,8 +2040,8 @@ class Qwen35TextModel(Model):
             ["flat_tokens", head_dim],
         )
 
-        # L2 normalize along last dim (head_dim)
-        norm_out = self._make_l2_normalize(basename, flat_out, head_dim)
+        # L2 normalize along last dim (head_dim) — input is 2D [flat_tokens, head_dim]
+        norm_out = self._make_l2_normalize(basename, flat_out, head_dim, leading_dims=["flat_tokens"])
 
         # Reshape back to [B, S, N*H] using input shape
         in_shape_name = f"{basename}/in_shape/Shape"
@@ -2051,13 +2057,23 @@ class Qwen35TextModel(Model):
         )
         return unflat_out
 
-    def _make_l2_normalize(self, basename, input_name, last_dim):
-        """L2-normalize along last dimension: x / sqrt(sum(x^2) + eps)"""
+    def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
+        """L2-normalize along last dimension: x / sqrt(sum(x^2) + eps)
+
+        Args:
+            leading_dims: Shape prefix for intermediate values (e.g., ["flat_tokens"] for 2D,
+                          ["batch_size", "sequence_length"] for 3D). Defaults to 3D if not specified.
+        """
+        if leading_dims is None:
+            leading_dims = ["batch_size", "sequence_length"]
+        full_shape = [*leading_dims, last_dim]
+        reduced_shape = [*leading_dims, 1]
+
         # x * x
         sq_name = f"{basename}/Square/Mul"
         sq_output = f"{sq_name}/output_0"
         self.make_node("Mul", [input_name, input_name], [sq_output], name=sq_name)
-        self.make_value(sq_output, self.io_dtype, ["batch_size", "sequence_length", last_dim])
+        self.make_value(sq_output, self.io_dtype, full_shape)
 
         # ReduceSum(x^2, axis=-1, keepdims=True)
         rs_name = f"{basename}/ReduceSum"
@@ -2069,7 +2085,7 @@ class Qwen35TextModel(Model):
             name=rs_name,
             keepdims=1,
         )
-        self.make_value(rs_output, self.io_dtype, ["batch_size", "sequence_length", 1])
+        self.make_value(rs_output, self.io_dtype, reduced_shape)
 
         # Add shared epsilon constant
         eps_name = self._get_shared_l2_eps()
@@ -2077,25 +2093,25 @@ class Qwen35TextModel(Model):
         add_eps_name = f"{basename}/AddEps"
         add_eps_output = f"{add_eps_name}/output_0"
         self.make_node("Add", [rs_output, eps_name], [add_eps_output], name=add_eps_name)
-        self.make_value(add_eps_output, self.io_dtype, ["batch_size", "sequence_length", 1])
+        self.make_value(add_eps_output, self.io_dtype, reduced_shape)
 
         # sqrt
         sqrt_name = f"{basename}/Sqrt"
         sqrt_output = f"{sqrt_name}/output_0"
         self.make_node("Sqrt", [add_eps_output], [sqrt_output], name=sqrt_name)
-        self.make_value(sqrt_output, self.io_dtype, ["batch_size", "sequence_length", 1])
+        self.make_value(sqrt_output, self.io_dtype, reduced_shape)
 
         # Reciprocal
         recip_name = f"{basename}/Reciprocal"
         recip_output = f"{recip_name}/output_0"
         self.make_node("Reciprocal", [sqrt_output], [recip_output], name=recip_name)
-        self.make_value(recip_output, self.io_dtype, ["batch_size", "sequence_length", 1])
+        self.make_value(recip_output, self.io_dtype, reduced_shape)
 
         # x * (1/norm)
         norm_name = f"{basename}/Normalize/Mul"
         norm_output = f"{norm_name}/output_0"
         self.make_node("Mul", [input_name, recip_output], [norm_output], name=norm_name)
-        self.make_value(norm_output, self.io_dtype, ["batch_size", "sequence_length", last_dim])
+        self.make_value(norm_output, self.io_dtype, full_shape)
 
         return norm_output
 
@@ -2586,7 +2602,12 @@ class Qwen35TextModel(Model):
 
         # Patch decoder section
         decoder = genai_config["model"]["decoder"]
-        decoder["num_hidden_layers"] = sum(1 for t in self.layer_types if t == "full_attention")
+        # Keep num_hidden_layers as the total layer count (not just full-attention layers).
+        # The KV cache indices are sparse (e.g., layers 3,7,11,15,19,23 for 0.8B) and
+        # DefaultKeyValueCache auto-discovers actual KV-layer indices from session inputs.
+        # Setting this to the full-attention count would break CombinedKeyValueCache and
+        # PagedKeyValueCache which iterate 0..num_hidden_layers-1 sequentially.
+        decoder["num_hidden_layers"] = len(self.layer_types)
 
         # Ensure eos_token_id is a list and fix bos/pad defaults
         eos = genai_config["model"].get("eos_token_id")
