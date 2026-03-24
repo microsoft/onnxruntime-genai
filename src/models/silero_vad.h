@@ -61,26 +61,37 @@ struct SileroVad : LeakChecked<SileroVad> {
 
  private:
   void Initialize(int sample_rate, float threshold);
+  void RegisterInputsOutputs();
+  void Run();
 
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
-  std::unique_ptr<OrtMemoryInfo> memory_info_;
+  Ort::Allocator* allocator_{nullptr};  // Points to model's device allocator (or CPU for standalone)
 
   int sample_rate_;
   float threshold_;
-  int window_size_;   // 512 for 16kHz, 256 for 8kHz
-  int context_size_;  // 64 for 16kHz, 32 for 8kHz
+  int window_size_;
+  int context_size_;
 
-  // Persistent hidden state [2 * 1 * 128 = 256 floats]
   static constexpr size_t kStateSize = 2 * 1 * 128;
   std::vector<float> state_;
-
-  // Context buffer: last context_size_ samples from the previous window
   std::vector<float> context_;
-
-  // Scratch space for sr tensor (must outlive the OrtValue that wraps it)
   int64_t sr_value_{};
+
+  // Registered I/O following the State pattern for GenAI infra consistency.
+  std::vector<const char*> input_names_;
+  std::vector<OrtValue*> inputs_;
+  std::vector<const char*> output_names_;
+  std::vector<OrtValue*> outputs_;
+
+  // Owned input tensors (updated each ProcessWindow call)
+  std::unique_ptr<OrtValue> input_tensor_;
+  std::unique_ptr<OrtValue> state_tensor_;
+  std::unique_ptr<OrtValue> sr_tensor_;
+
+  // Scratch buffer for building [context | samples] input
+  std::vector<float> input_data_;
 };
 
 std::unique_ptr<SileroVad> CreateSileroVad(Model& model);

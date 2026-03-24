@@ -54,8 +54,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaStreamingProcessorSetOption(
                 _processorHandle,
-                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
-                System.Text.Encoding.UTF8.GetBytes(value + '\0')));
+                StringUtils.ToUtf8(key),
+                StringUtils.ToUtf8(value)));
         }
 
         /// <summary>
@@ -63,14 +63,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         public string GetOption(string key)
         {
-            IntPtr valuePtr;
-            Result.VerifySuccess(NativeMethods.OgaStreamingProcessorGetOption(
-                _processorHandle,
-                System.Text.Encoding.UTF8.GetBytes(key + '\0'),
-                out valuePtr));
-            string result = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(valuePtr) ?? "";
-            NativeMethods.OgaDestroyString(valuePtr);
-            return result;
+            IntPtr valuePtr = IntPtr.Zero;
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaStreamingProcessorGetOption(
+                    _processorHandle,
+                    StringUtils.ToUtf8(key),
+                    out valuePtr));
+                return StringUtils.FromUtf8(valuePtr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyString(valuePtr);
+            }
         }
 
         ~StreamingProcessor()
