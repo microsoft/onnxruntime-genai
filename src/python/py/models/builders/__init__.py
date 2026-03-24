@@ -27,7 +27,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel
+from .qwen import Qwen3Model, Qwen3VLTextModel, Qwen25VLTextModel, Qwen35Model, QwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -56,6 +56,7 @@ __all__ = [
     "Qwen3Model",
     "Qwen3VLTextModel",
     "Qwen25VLTextModel",
+    "Qwen35Model",
     "QwenModel",
     "SmolLM3Model",
     "WhisperModel",
