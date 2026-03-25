@@ -1031,6 +1031,14 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
 
+  // Search and sampling are performed on the CPU for all device types,
+  // except for CUDA and NvTensorRtRtx, where this is performed on the device.
+  if (p_device_->GetType() == DeviceType::CUDA ||
+      p_device_->GetType() == DeviceType::NvTensorRtRtx)
+    p_device_scoring_ = p_device_;
+  else
+    p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
+
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
 }

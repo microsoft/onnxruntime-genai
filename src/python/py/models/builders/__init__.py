@@ -2,9 +2,10 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
-# --------------------------------------------------------------------------
-# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
-# --------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
+# -------------------------------------------------------------------------
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
@@ -29,6 +30,7 @@ from .phi import (
 )
 from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel
 from .smollm import SmolLM3Model
+from .whisper import WhisperModel
 
 __all__ = [
     "ChatGLMModel",
@@ -58,4 +60,5 @@ __all__ = [
     "Qwen25VLTextModel",
     "QwenModel",
     "SmolLM3Model",
+    "WhisperModel",
 ]
