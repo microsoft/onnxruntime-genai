@@ -228,7 +228,7 @@ class WhisperDecoder(Model):
     def make_inputs_and_outputs(self):
         # Set input dicts
         self.input_names = {
-            "input_ids": "input_ids",
+            "inputs_embeds": "inputs_embeds",
             "past_key_self": [f"past_key_self_{i}" for i in range(self.num_layers)],
             "past_value_self": [f"past_value_self_{i}" for i in range(self.num_layers)],
             "past_key_cross": [f"past_key_cross_{i}" for i in range(self.num_layers)],
@@ -248,7 +248,6 @@ class WhisperDecoder(Model):
             "past_key_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
             "past_value_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
         }
-        self.make_inputs_init()
 
         # Set output dicts
         self.output_names = {
