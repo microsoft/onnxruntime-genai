@@ -57,6 +57,14 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
 
+    # Track memory before/after VAD init
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_before_vad = process.memory_info().rss
+    except ImportError:
+        mem_before_vad = None
+
     # VAD is controlled via genai_config.json (disabled by default).
     # Override programmatically:
     if enable_vad and processor.get_option("vad_enabled") != "true":
@@ -67,6 +75,12 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     else:
         print("  VAD: disabled")
 
+    if mem_before_vad is not None:
+        mem_after_vad = process.memory_info().rss
+        vad_mem_mb = (mem_after_vad - mem_before_vad) / (1024 * 1024)
+    else:
+        vad_mem_mb = None
+
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
@@ -75,13 +89,26 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     print("-" * 60)
     stream_start = time.time()
     full_transcript = ""
+    vad_enabled = processor.get_option("vad_enabled") == "true"
+    chunks_total = 0
+    chunks_processed = 0
+    chunks_skipped = 0
+    vad_time_total = 0.0
 
     for i in range(0, len(audio), chunk_samples):
         chunk = audio[i:i + chunk_samples].astype(np.float32)
+        chunks_total += 1
+        chunk_start = time.time()
         inputs = processor.process(chunk)
+        chunk_elapsed = time.time() - chunk_start
         if inputs is not None:
+            chunks_processed += 1
             generator.set_inputs(inputs)
             full_transcript += decode_tokens(generator, tokenizer_stream)
+        else:
+            chunks_skipped += 1
+        if vad_enabled:
+            vad_time_total += chunk_elapsed
 
     # Flush remaining audio
     inputs = processor.flush()
@@ -95,6 +122,15 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     print(f"  {full_transcript.strip()}")
     print(f"{'=' * 60}")
     print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration/total_wall:.2f}x")
+    if vad_enabled:
+        avg_vad_ms = (vad_time_total / max(chunks_total, 1)) * 1000
+        chunk_duration_ms = (chunk_samples / sample_rate) * 1000
+        vad_pct = (avg_vad_ms / chunk_duration_ms) * 100
+        print(f"  VAD Metrics: {chunks_total} total chunks, {chunks_processed} processed, "
+              f"{chunks_skipped} skipped ({chunks_skipped / max(chunks_total, 1) * 100:.1f}% compute saved)")
+        print(f"  VAD Overhead: {vad_pct:.1f}% avg per chunk ({avg_vad_ms:.1f}ms)")
+        if vad_mem_mb is not None:
+            print(f"  VAD Memory: {vad_mem_mb:.1f}MB (Total Additional RSS)")
 
 
 def main():

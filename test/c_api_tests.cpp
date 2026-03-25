@@ -1370,6 +1370,10 @@ TEST(CAPITests, SetGuidance) {
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
 #endif
 
+#ifndef STREAMING_ASR_CHUNK_SAMPLES
+constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
+#endif
+
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   if (mel) {
@@ -1555,7 +1559,7 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   processor->SetOption("vad_enabled", "true");
   processor->SetOption("vad_min_silence_chunks", "2");  // Start dropping after 2 consecutive
 
-  constexpr size_t chunk_samples = 8960;
+  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
   std::vector<float> silence(chunk_samples, 0.0f);
 
   // First 2 silence chunks should still be processed (not dropped)
