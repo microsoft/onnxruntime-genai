@@ -67,3 +67,22 @@ class GraniteModel(MistralModel):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+
+class GraniteMoeHybridModel(GraniteModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # GraniteMoeHybrid uses shared_intermediate_size for the always-on dense MLP
+        # (when num_local_experts=0). Override so the base model reads the correct width.
+        config.intermediate_size = config.shared_intermediate_size
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_layer(self, layer_id, layer):
+        # GraniteMoeHybrid stores the MLP as `shared_mlp` with a fused input_linear
+        # (gate+up concatenated, shape [2*intermediate_size, hidden_size]) and
+        # output_linear (down projection). Adapt to the standard layout expected by
+        # make_mlp_unpacked_regular (gate_up_proj) and make_mlp_proj (down_proj).
+        mlp = layer.shared_mlp
+        mlp.gate_up_proj = mlp.input_linear
+        mlp.down_proj = mlp.output_linear
+        layer.mlp = mlp
+        super().make_layer(layer_id, layer)
