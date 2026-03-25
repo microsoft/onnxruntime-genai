@@ -28,8 +28,10 @@ class HunyuanDenseV1Model(Model):
         #   effective_theta ≈ 10000 * 1000^(128/126) ≈ 10,359,000
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             alpha = config.rope_scaling.get("alpha", 1.0)
-            head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-            if alpha != 1.0:
+            head_dim = getattr(config, "head_dim", None)
+            if head_dim is None:
+                head_dim = config.hidden_size // config.num_attention_heads
+            if alpha != 1.0 and head_dim is not None and head_dim > 2:
                 config.rope_theta = config.rope_theta * (alpha ** (head_dim / (head_dim - 2)))
 
         # Disable rope_scaling: effective theta is now baked into config.rope_theta above.
