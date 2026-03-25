@@ -5,8 +5,6 @@
 # --------------------------------------------------------------------------
 
 
-import json
-import os
 
 import numpy as np
 import onnx_ir as ir
@@ -967,9 +965,6 @@ class Qwen35TextModel(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Use opset 23 for newer ops (RMSNormalization, etc.)
-        self.model.opset_imports[""] = 23
-
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
         # SkipSimplifiedLayerNormalization can be used directly.
@@ -1036,87 +1031,59 @@ class Qwen35TextModel(Model):
         """Set up hybrid cache I/O: KV cache for attention layers,
         conv_state + recurrent_state for linear attention layers."""
 
-        # Remove the base class's template KV cache entries — Qwen3.5's hybrid
-        # architecture uses per-layer cache I/O (KV for attention, conv/recurrent
-        # for linear attention) instead of a single shared template.
+        # Filter the base class's KV cache template lists to only include
+        # full-attention layer indices.  The base class creates entries for
+        # all num_layers — we remove linear-attention layers that use
+        # conv/recurrent state instead of KV cache.
+        attn_indices = {i for i, lt in enumerate(self.layer_types) if lt == "full_attention"}
         for suffix in ("key", "value"):
-            for store in (self.input_names, self.input_types, self.input_shapes):
-                del store[f"past_key_values.{suffix}"]
-            for store in (self.output_names, self.output_types, self.output_shapes):
-                del store[f"present.{suffix}"]
+            self.input_names[f"past_key_values.{suffix}"] = [
+                name for i, name in enumerate(self.input_names[f"past_key_values.{suffix}"])
+                if i in attn_indices
+            ]
+            self.output_names[f"present.{suffix}"] = [
+                name for i, name in enumerate(self.output_names[f"present.{suffix}"])
+                if i in attn_indices
+            ]
 
-        # Build per-layer cache I/O
-        for i in range(self.num_layers):
-            if self.layer_types[i] == "full_attention":
-                # Standard KV cache for attention layers
-                self.input_names[f"past_kv.{i}.key"] = f"past_key_values.{i}.key"
-                self.input_types[f"past_kv.{i}.key"] = self.io_dtype
-                self.input_shapes[f"past_kv.{i}.key"] = [
-                    "batch_size",
-                    self.num_kv_heads,
-                    "past_sequence_length",
-                    self.head_size,
-                ]
-                self.input_names[f"past_kv.{i}.value"] = f"past_key_values.{i}.value"
-                self.input_types[f"past_kv.{i}.value"] = self.io_dtype
-                self.input_shapes[f"past_kv.{i}.value"] = [
-                    "batch_size",
-                    self.num_kv_heads,
-                    "past_sequence_length",
-                    self.head_size,
-                ]
+        # Add conv_state + recurrent_state entries for GatedDeltaNet layers
+        for i, lt in enumerate(self.layer_types):
+            if lt != "linear_attention":
+                continue
 
-                self.output_names[f"present_kv.{i}.key"] = f"present.{i}.key"
-                self.output_types[f"present_kv.{i}.key"] = self.io_dtype
-                self.output_shapes[f"present_kv.{i}.key"] = [
-                    "batch_size",
-                    self.num_kv_heads,
-                    "total_sequence_length",
-                    self.head_size,
-                ]
-                self.output_names[f"present_kv.{i}.value"] = f"present.{i}.value"
-                self.output_types[f"present_kv.{i}.value"] = self.io_dtype
-                self.output_shapes[f"present_kv.{i}.value"] = [
-                    "batch_size",
-                    self.num_kv_heads,
-                    "total_sequence_length",
-                    self.head_size,
-                ]
-            else:
-                # Conv state + recurrent state for GatedDeltaNet layers
-                self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
-                self.input_types[f"past_state.{i}.conv"] = self.io_dtype
-                self.input_shapes[f"past_state.{i}.conv"] = [
-                    "batch_size",
-                    self.linear_conv_dim,
-                    self.linear_conv_kernel_dim - 1,
-                ]
+            self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
+            self.input_types[f"past_state.{i}.conv"] = self.io_dtype
+            self.input_shapes[f"past_state.{i}.conv"] = [
+                "batch_size",
+                self.linear_conv_dim,
+                self.linear_conv_kernel_dim - 1,
+            ]
 
-                self.input_names[f"past_state.{i}.recurrent"] = f"past_key_values.{i}.recurrent_state"
-                self.input_types[f"past_state.{i}.recurrent"] = self.io_dtype
-                self.input_shapes[f"past_state.{i}.recurrent"] = [
-                    "batch_size",
-                    self.linear_num_value_heads,
-                    self.linear_key_head_dim,
-                    self.linear_value_head_dim,
-                ]
+            self.input_names[f"past_state.{i}.recurrent"] = f"past_key_values.{i}.recurrent_state"
+            self.input_types[f"past_state.{i}.recurrent"] = self.io_dtype
+            self.input_shapes[f"past_state.{i}.recurrent"] = [
+                "batch_size",
+                self.linear_num_value_heads,
+                self.linear_key_head_dim,
+                self.linear_value_head_dim,
+            ]
 
-                self.output_names[f"present_state.{i}.conv"] = f"present.{i}.conv_state"
-                self.output_types[f"present_state.{i}.conv"] = self.io_dtype
-                self.output_shapes[f"present_state.{i}.conv"] = [
-                    "batch_size",
-                    self.linear_conv_dim,
-                    self.linear_conv_kernel_dim - 1,
-                ]
+            self.output_names[f"present_state.{i}.conv"] = f"present.{i}.conv_state"
+            self.output_types[f"present_state.{i}.conv"] = self.io_dtype
+            self.output_shapes[f"present_state.{i}.conv"] = [
+                "batch_size",
+                self.linear_conv_dim,
+                self.linear_conv_kernel_dim - 1,
+            ]
 
-                self.output_names[f"present_state.{i}.recurrent"] = f"present.{i}.recurrent_state"
-                self.output_types[f"present_state.{i}.recurrent"] = self.io_dtype
-                self.output_shapes[f"present_state.{i}.recurrent"] = [
-                    "batch_size",
-                    self.linear_num_value_heads,
-                    self.linear_key_head_dim,
-                    self.linear_value_head_dim,
-                ]
+            self.output_names[f"present_state.{i}.recurrent"] = f"present.{i}.recurrent_state"
+            self.output_types[f"present_state.{i}.recurrent"] = self.io_dtype
+            self.output_shapes[f"present_state.{i}.recurrent"] = [
+                "batch_size",
+                self.linear_num_value_heads,
+                self.linear_key_head_dim,
+                self.linear_value_head_dim,
+            ]
 
     def load_weights(self, input_path):
         # Load in float32 to get full precision weights (HF default is bfloat16
@@ -1131,36 +1098,21 @@ class Qwen35TextModel(Model):
             torch_dtype=torch.float32,
         )
 
-    def is_layer(self, module):
-        return module.__class__.__name__ == "Qwen3_5DecoderLayer"
-
-    def has_final_norm(self, module, orig_model):
-        model = orig_model
-        if model.__class__.__name__.startswith("Peft"):
-            model = model.base_model.model
-        return hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        """Dispatch to full attention or GatedDeltaNet based on layer type."""
+        if self.layer_types[layer_id] == "linear_attention":
+            self._make_linear_attention(layer_id, attention, root_input)
+        else:
+            self._make_full_attention(layer_id, attention, root_input)
 
     def make_layer(self, layer_id, layer):
-        """Build one decoder layer. Dispatches to full attention or
-        GatedDeltaNet linear attention based on self.layer_types."""
-
-        if self.layer_types[layer_id] == "linear_attention":
-            self._make_linear_attention_layer(layer_id, layer)
-        else:
-            self._make_full_attention_layer(layer_id, layer)
-
-        self.layernorm_attrs["first_layernorm"] = False
-        if layer_id == self.num_layers - 1:
-            self.layernorm_attrs["last_layernorm"] = True
-
-    def _make_full_attention_layer(self, layer_id, layer):
-        """Build a full attention layer with output gating.
-
-        Qwen3.5 full attention has a doubled Q projection that produces both
-        Q and a gating signal. After attention, the output is multiplied by
-        sigmoid(gate) before the output projection.
-        """
-        # 1. Input LayerNorm
+        """Override to pass ``linear_attn`` instead of ``self_attn`` for
+        linear-attention layers (the base class assumes ``self_attn``)."""
+        attn_module = (
+            layer.linear_attn
+            if self.layer_types[layer_id] == "linear_attention"
+            else layer.self_attn
+        )
         self.make_layernorm(
             layer_id,
             layer.input_layernorm,
@@ -1168,11 +1120,28 @@ class Qwen35TextModel(Model):
             simple=self.layernorm_attrs["simple"],
             location="input",
         )
+        self.make_attention(layer_id, attn_module, root_input=self.layernorm_attrs["output_0"])
+        self.make_layernorm(
+            layer_id,
+            layer.post_attention_layernorm,
+            skip=True,
+            simple=self.layernorm_attrs["simple"],
+            location="post_attention",
+        )
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
-        root_input = self.layernorm_attrs["output_0"]
-        attn = layer.self_attn
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            self.layernorm_attrs["last_layernorm"] = True
 
-        # 2. Q projection (doubled: outputs Q and gate)
+    def _make_full_attention(self, layer_id, attn, root_input):
+        """Build full attention with output gating.
+
+        Qwen3.5 full attention has a doubled Q projection that produces both
+        Q and a gating signal. After attention, the output is multiplied by
+        sigmoid(gate) before the output projection.
+        """
+        # 1. Q projection (doubled: outputs Q and gate)
         q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
         self.make_matmul(attn.q_proj, q_matmul_name, root_input)
         q_gate_path = f"{q_matmul_name}/output_0"
@@ -1240,7 +1209,9 @@ class Qwen35TextModel(Model):
         self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
 
         # 4. Per-head QK RMSNorm (on Q and K separately)
-        self._make_per_head_qk_norm(layer_id, attn)
+        #    The base class's make_qk_norm uses SimplifiedLayerNormalization
+        #    and pre-bakes the +1 offset via layernorm_attrs["add_offset"].
+        self.make_qk_norm(layer_id, attn)
 
         # 5. Apply interleaved mRoPE to Q and K
         if self.attention_attrs["rope"]:
@@ -1325,122 +1296,6 @@ class Qwen35TextModel(Model):
         self.make_matmul(attn.o_proj, o_matmul_name, gated_output)
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name}/output_0"
 
-        # 9. Post-attention LayerNorm
-        self.make_layernorm(
-            layer_id,
-            layer.post_attention_layernorm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
-        )
-
-        # 10. MLP
-        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
-
-    def _make_per_head_qk_norm(self, layer_id, attention):
-        """Apply per-head OffsetRMSNorm to Q and K.
-
-        Reshapes [B, S, N*H] -> [B, S*N, H], applies SimplifiedLayerNorm,
-        then reshapes back to [B, S, N*H].
-        """
-        q_size = self.num_attn_heads * self.head_size
-        kv_size = self.num_kv_heads * self.head_size
-
-        # Q norm
-        q_path = self.attention_attrs["q_path"]
-        q_reshape_1 = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
-        self.make_reshape(
-            q_reshape_1,
-            [q_path, f"/model/constants/INT64/[0, -1, {self.head_size}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length * num_attention_heads", self.head_size],
-        )
-
-        q_norm_weight_raw = f"model.layers.{layer_id}.self_attn.q_norm.weight"
-        self.make_initializer(attention.q_norm.weight, q_norm_weight_raw, to=self.io_dtype)
-
-        # Add +1 at runtime for OffsetRMSNorm
-        offset_const = "/model/constants/FLOAT/1.0"
-        q_norm_weight = f"/model/layers.{layer_id}/attn/q_norm/offset_weight"
-        self.make_node(
-            "Add",
-            [q_norm_weight_raw, offset_const],
-            [q_norm_weight],
-            name=f"/model/layers.{layer_id}/attn/q_norm/Add_offset",
-        )
-        self.make_value(q_norm_weight, self.io_dtype, list(attention.q_norm.weight.shape))
-
-        q_norm_name = f"/model/layers.{layer_id}/attn/q_norm/RMSNormalization"
-        q_norm_output = f"{q_norm_name}/output_0"
-        self.make_node(
-            "RMSNormalization",
-            [f"{q_reshape_1}/output_0", q_norm_weight],
-            [q_norm_output],
-            name=q_norm_name,
-            epsilon=self.layernorm_attrs["epsilon"],
-        )
-        self.make_value(
-            q_norm_output,
-            self.io_dtype,
-            ["batch_size", "sequence_length * num_attention_heads", self.head_size],
-        )
-
-        q_reshape_2 = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        self.make_reshape(
-            q_reshape_2,
-            [q_norm_output, f"/model/constants/INT64/[0, -1, {q_size}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
-        )
-        self.attention_attrs["q_path"] = f"{q_reshape_2}/output_0"
-
-        # K norm
-        k_path = self.attention_attrs["k_path"]
-        k_reshape_1 = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
-        self.make_reshape(
-            k_reshape_1,
-            [k_path, f"/model/constants/INT64/[0, -1, {self.head_size}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length * num_key_value_heads", self.head_size],
-        )
-
-        k_norm_weight_raw = f"model.layers.{layer_id}.self_attn.k_norm.weight"
-        self.make_initializer(attention.k_norm.weight, k_norm_weight_raw, to=self.io_dtype)
-
-        # Add +1 at runtime for OffsetRMSNorm
-        k_norm_weight = f"/model/layers.{layer_id}/attn/k_norm/offset_weight"
-        self.make_node(
-            "Add",
-            [k_norm_weight_raw, offset_const],
-            [k_norm_weight],
-            name=f"/model/layers.{layer_id}/attn/k_norm/Add_offset",
-        )
-        self.make_value(k_norm_weight, self.io_dtype, list(attention.k_norm.weight.shape))
-
-        k_norm_name = f"/model/layers.{layer_id}/attn/k_norm/RMSNormalization"
-        k_norm_output = f"{k_norm_name}/output_0"
-        self.make_node(
-            "RMSNormalization",
-            [f"{k_reshape_1}/output_0", k_norm_weight],
-            [k_norm_output],
-            name=k_norm_name,
-            epsilon=self.layernorm_attrs["epsilon"],
-        )
-        self.make_value(
-            k_norm_output,
-            self.io_dtype,
-            ["batch_size", "sequence_length * num_key_value_heads", self.head_size],
-        )
-
-        k_reshape_2 = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        self.make_reshape(
-            k_reshape_2,
-            [k_norm_output, f"/model/constants/INT64/[0, -1, {kv_size}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", kv_size],
-        )
-        self.attention_attrs["k_path"] = f"{k_reshape_2}/output_0"
-
     def _make_causal_mask(self):
         """Build causal attention mask [B, 1, S, total_S] for Attention op.
 
@@ -1463,28 +1318,10 @@ class Qwen35TextModel(Model):
         basename = "/model/causal_mask"
         attn_mask = self.input_names["attention_mask"]  # [B, total_S]
 
-        # Constants
-        neg_inf_name = f"{basename}/neg_inf"
-        if neg_inf_name not in self.node_names:
-            self.make_node(
-                "Constant",
-                [],
-                [neg_inf_name],
-                name=f"{basename}/neg_inf/Constant",
-                value=ir.tensor(torch.tensor(-3.4028234663852886e38, dtype=torch.float32), name=neg_inf_name),
-            )
-            self.make_value(neg_inf_name, ir.DataType.FLOAT, [])
-
-        zero_f_name = f"{basename}/zero_f"
-        if zero_f_name not in self.node_names:
-            self.make_node(
-                "Constant",
-                [],
-                [zero_f_name],
-                name=f"{basename}/zero_f/Constant",
-                value=ir.tensor(torch.tensor(0.0, dtype=torch.float32), name=zero_f_name),
-            )
-            self.make_value(zero_f_name, ir.DataType.FLOAT, [])
+        # Constants (use the /model/constants/{dtype}/{value} format so
+        # make_node auto-creates them via make_constant)
+        neg_inf_name = f"/model/constants/FLOAT/{torch.finfo(torch.float32).min}"
+        zero_f_name = "/model/constants/FLOAT/0.0"
 
         # Step 1: Compute cumulative indices from attention_mask
         # CumSum gives each attended position a sequential index
@@ -1509,9 +1346,8 @@ class Qwen35TextModel(Model):
         )
 
         # Step 2: Get query length S from inputs_embeds shape
-        embeds_input = self.input_names.get("inputs_embeds", "inputs_embeds")
-        shape_embeds_name = f"{basename}/Shape_embeds"
-        self.make_shape(shape_embeds_name, embeds_input, [3])
+        shape_embeds_name = f"{basename}/embeds/Shape"
+        self.make_shape(shape_embeds_name, self.input_names["inputs_embeds"], [3])
 
         # seq_len as 1D [1] tensor for Slice
         seq_len_name = f"{basename}/seq_len/Gather"
@@ -1525,7 +1361,7 @@ class Qwen35TextModel(Model):
         )
 
         # Get total_S as 1D [1] tensor from attention_mask shape
-        shape_mask_name = f"{basename}/Shape_mask"
+        shape_mask_name = f"{basename}/mask/Shape"
         self.make_shape(shape_mask_name, attn_mask, [2])
 
         total_s_name = f"{basename}/total_S/Gather"
@@ -1569,9 +1405,9 @@ class Qwen35TextModel(Model):
 
         # Step 5: Combine with attention_mask padding
         # attn_mask_bool: [B, 1, total_S]
-        attn_mask_bool_name = f"{basename}/Cast_mask"
+        attn_mask_bool_name = f"{basename}/mask/Cast"
         attn_mask_bool_out = f"{attn_mask_bool_name}/output_0"
-        unsq_mask_name = f"{basename}/Unsqueeze_mask"
+        unsq_mask_name = f"{basename}/mask/Unsqueeze"
         unsq_mask_out = f"{unsq_mask_name}/output_0"
         self.make_unsqueeze(
             unsq_mask_name,
@@ -1594,7 +1430,7 @@ class Qwen35TextModel(Model):
         self.make_value(where_out, ir.DataType.FLOAT, ["batch_size", "sequence_length", "total_sequence_length"])
 
         # Cast to io_dtype
-        cast_where_name = f"{basename}/Cast_where"
+        cast_where_name = f"{basename}/where/Cast"
         cast_where_out = f"{cast_where_name}/output_0"
         self.make_cast(
             cast_where_name, where_out, self.io_dtype, ["batch_size", "sequence_length", "total_sequence_length"]
@@ -1657,27 +1493,23 @@ class Qwen35TextModel(Model):
 
     def _get_shared_q_scale(self, head_dim):
         """Return the name of a shared 1/sqrt(head_dim) constant (created once)."""
-        name = "/model/constants/q_scale"
-        if name not in self.node_names:
-            scale_val = float(1.0 / np.sqrt(head_dim))
-            self.make_initializer(
-                torch.tensor([scale_val], dtype=torch.float32),
-                name,
-                to=self.io_dtype,
-            )
-            self.node_names.add(name)
+        name = "model.constants.q_scale"
+        scale_val = float(1.0 / np.sqrt(head_dim))
+        self.make_initializer(
+            torch.tensor([scale_val], dtype=torch.float32),
+            name,
+            to=self.io_dtype,
+        )
         return name
 
     def _get_shared_l2_eps(self):
         """Return the name of a shared L2 epsilon constant (created once)."""
-        name = "/model/constants/l2_eps"
-        if name not in self.node_names:
-            self.make_initializer(
-                torch.tensor([1e-6], dtype=torch.float32),
-                name,
-                to=self.io_dtype,
-            )
-            self.node_names.add(name)
+        name = "model.constants.l2_eps"
+        self.make_initializer(
+            torch.tensor([1e-6], dtype=torch.float32),
+            name,
+            to=self.io_dtype,
+        )
         return name
 
     def _make_mrope_cos_sin(self, basename):
@@ -1694,29 +1526,32 @@ class Qwen35TextModel(Model):
         rdim_half = self.mrope_rotary_dim // 2
 
         def gather_dim(dim_idx, cache_name, suffix):
-            g_name = f"{basename}/{suffix}/dim{dim_idx}/Gather_pos"
-            g_out = f"{g_name}/output_0"
-            self.make_node("Gather", [pos_ids, f"/model/constants/INT64/[{dim_idx}]"], [g_out], name=g_name, axis=0)
-            sq_name = f"{basename}/{suffix}/dim{dim_idx}/Squeeze"
-            sq_out = f"{sq_name}/output_0"
-            self.make_squeeze(
-                sq_name, [g_out, "/model/constants/INT64/[0]"], ir.DataType.INT64, ["batch_size", "sequence_length"]
+            g_name = f"{basename}/{suffix}/dim{dim_idx}/pos/Gather"
+            self.make_gather(
+                g_name, [pos_ids, f"/model/constants/INT64/[{dim_idx}]"], ir.DataType.INT64,
+                [1, "batch_size", "sequence_length"], axis=0,
             )
-            gc_name = f"{basename}/{suffix}/dim{dim_idx}/Gather_cache"
-            gc_out = f"{gc_name}/output_0"
-            self.make_node("Gather", [cache_name, sq_out], [gc_out], name=gc_name, axis=0)
-            self.make_value(gc_out, ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half])
-            return gc_out
+            sq_name = f"{basename}/{suffix}/dim{dim_idx}/Squeeze"
+            self.make_squeeze(
+                sq_name, [f"{g_name}/output_0", "/model/constants/INT64/[0]"],
+                ir.DataType.INT64, ["batch_size", "sequence_length"],
+            )
+            gc_name = f"{basename}/{suffix}/dim{dim_idx}/cache/Gather"
+            self.make_gather(
+                gc_name, [cache_name, f"{sq_name}/output_0"], ir.DataType.FLOAT,
+                ["batch_size", "sequence_length", rdim_half], axis=0,
+            )
+            return f"{gc_name}/output_0"
 
         def interleave(suffix, cache_name):
             t = gather_dim(0, cache_name, suffix)
             h = gather_dim(1, cache_name, suffix)
             w = gather_dim(2, cache_name, suffix)
-            ww_name = f"{basename}/{suffix}/Where_W"
+            ww_name = f"{basename}/{suffix}/w/Where"
             ww_out = f"{ww_name}/output_0"
             self.make_node("Where", [w_mask, w, t], [ww_out], name=ww_name)
             self.make_value(ww_out, ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half])
-            hh_name = f"{basename}/{suffix}/Where_H"
+            hh_name = f"{basename}/{suffix}/h/Where"
             hh_out = f"{hh_name}/output_0"
             self.make_node("Where", [h_mask, h, ww_out], [hh_out], name=hh_name)
             self.make_value(hh_out, ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half])
@@ -1740,7 +1575,7 @@ class Qwen35TextModel(Model):
         self.make_value(rope_out, self.io_dtype, qk_shape)
         return rope_out
 
-    def _make_linear_attention_layer(self, layer_id, layer):
+    def _make_linear_attention(self, layer_id, linear_attn, root_input):
         """Build a GatedDeltaNet linear attention layer.
 
         Implements the full GatedDeltaNet forward pass:
@@ -1751,17 +1586,6 @@ class Qwen35TextModel(Model):
         5. Linear attention recurrence
         6. Gated RMSNorm + output projection
         """
-        # 1. Input LayerNorm
-        self.make_layernorm(
-            layer_id,
-            layer.input_layernorm,
-            skip=not self.layernorm_attrs["first_layernorm"],
-            simple=self.layernorm_attrs["simple"],
-            location="input",
-        )
-
-        root_input = self.layernorm_attrs["output_0"]
-        linear_attn = layer.linear_attn
         basename = f"/model/layers.{layer_id}/linear_attn"
 
         k_dim = self.linear_key_dim  # e.g. 2048
@@ -1791,7 +1615,7 @@ class Qwen35TextModel(Model):
 
         # 3. Depthwise causal conv1d
         # Transpose QKV: [B, S, D] -> [B, D, S]
-        qkv_t_name = f"{basename}/qkv_transpose"
+        qkv_t_name = f"{basename}/qkv_transpose/Transpose"
         qkv_t_output = f"{qkv_t_name}/output_0"
         self.make_transpose(
             qkv_t_name,
@@ -1838,7 +1662,7 @@ class Qwen35TextModel(Model):
         self.make_node("Sigmoid", [conv_output], [silu_sig_output], name=silu_name)
         self.make_value(silu_sig_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
 
-        silu_mul_name = f"{basename}/conv/SiLU_Mul"
+        silu_mul_name = f"{basename}/conv/SiLU/Mul"
         silu_output = f"{silu_mul_name}/output_0"
         self.make_node("Mul", [conv_output, silu_sig_output], [silu_output], name=silu_mul_name)
         self.make_value(silu_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
@@ -1846,27 +1670,21 @@ class Qwen35TextModel(Model):
         # Save new conv state: last (kernel_size-1) timesteps of the padded input
         present_conv = f"present.{layer_id}.conv_state"
         conv_state_slice_name = f"{basename}/conv_state/Slice"
-        self.make_slice(
-            conv_state_slice_name,
+        self.make_node(
+            "Slice",
             [
                 conv_cat_output,
                 f"/model/constants/INT64/[{-(kernel_size - 1)}]",
-                f"/model/constants/INT64/[{2**62}]",  # large value = end
+                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
                 "/model/constants/INT64/[-1]",
             ],
-            self.io_dtype,
-            ["batch_size", conv_dim, kernel_size - 1],
-        )
-        self.make_node(
-            "Identity",
-            [f"{conv_state_slice_name}/output_0"],
             [present_conv],
-            name=f"{basename}/conv_state/Identity",
+            name=conv_state_slice_name,
         )
         self.make_value(present_conv, self.io_dtype, ["batch_size", conv_dim, kernel_size - 1])
 
         # Transpose conv output back: [B, D, S] -> [B, S, D]
-        conv_out_t_name = f"{basename}/conv_out_transpose"
+        conv_out_t_name = f"{basename}/conv_out/Transpose"
         conv_out_t_output = f"{conv_out_t_name}/output_0"
         self.make_transpose(
             conv_out_t_name,
@@ -1946,11 +1764,11 @@ class Qwen35TextModel(Model):
         v_4d = self._reshape_to_bhsd(f"{basename}/v", v_out, n_kv, hv)
 
         # Transpose gates: [B, S, N] -> [B, N, S]
-        beta_t_name = f"{basename}/beta_transpose"
+        beta_t_name = f"{basename}/beta/Transpose"
         beta_t_output = f"{beta_t_name}/output_0"
         self.make_transpose(beta_t_name, beta_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
 
-        g_t_name = f"{basename}/g_transpose"
+        g_t_name = f"{basename}/g/Transpose"
         g_t_output = f"{g_t_name}/output_0"
         self.make_transpose(g_t_name, g_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
 
@@ -1980,7 +1798,7 @@ class Qwen35TextModel(Model):
         )
 
         # 9. Transpose back: [B, N, S, H] -> [B, S, N*H]
-        la_t_name = f"{basename}/la_transpose"
+        la_t_name = f"{basename}/la/Transpose"
         la_t_output = f"{la_t_name}/output_0"
         self.make_transpose(
             la_t_name,
@@ -1990,7 +1808,7 @@ class Qwen35TextModel(Model):
             [0, 2, 1, 3],
         )
 
-        la_flat_name = f"{basename}/la_reshape"
+        la_flat_name = f"{basename}/la/Reshape"
         la_flat_output = f"{la_flat_name}/output_0"
         self.make_reshape(
             la_flat_name,
@@ -2013,18 +1831,6 @@ class Qwen35TextModel(Model):
         o_name = f"{basename}/out_proj/MatMul"
         self.make_matmul(linear_attn.out_proj, o_name, gated_norm_output)
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
-
-        # 12. Post-attention LayerNorm
-        self.make_layernorm(
-            layer_id,
-            layer.post_attention_layernorm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
-        )
-
-        # 13. MLP
-        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
     def _make_per_head_l2_normalize(self, basename, input_name, n_heads, head_dim):
         """Per-head L2 normalize: reshape [B, S, N*H] -> [B*S*N, H], norm, reshape back."""
@@ -2058,7 +1864,7 @@ class Qwen35TextModel(Model):
         return unflat_out
 
     def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
-        """L2-normalize along last dimension: x / sqrt(sum(x^2) + eps)
+        """L2-normalize along last dimension: x / max(||x||_2, eps)
 
         Args:
             leading_dims: Shape prefix for intermediate values (e.g., ["flat_tokens"] for 2D,
@@ -2069,48 +1875,29 @@ class Qwen35TextModel(Model):
         full_shape = [*leading_dims, last_dim]
         reduced_shape = [*leading_dims, 1]
 
-        # x * x
-        sq_name = f"{basename}/Square/Mul"
-        sq_output = f"{sq_name}/output_0"
-        self.make_node("Mul", [input_name, input_name], [sq_output], name=sq_name)
-        self.make_value(sq_output, self.io_dtype, full_shape)
-
-        # ReduceSum(x^2, axis=-1, keepdims=True)
-        rs_name = f"{basename}/ReduceSum"
-        rs_output = f"{rs_name}/output_0"
+        # ||x||_2 along last dim
+        l2_name = f"{basename}/ReduceL2"
+        l2_output = f"{l2_name}/output_0"
         self.make_node(
-            "ReduceSum",
-            [sq_output, "/model/constants/INT64/[-1]"],
-            [rs_output],
-            name=rs_name,
+            "ReduceL2",
+            [input_name, "/model/constants/INT64/[-1]"],
+            [l2_output],
+            name=l2_name,
             keepdims=1,
         )
-        self.make_value(rs_output, self.io_dtype, reduced_shape)
+        self.make_value(l2_output, self.io_dtype, reduced_shape)
 
-        # Add shared epsilon constant
+        # Clamp to avoid division by zero
         eps_name = self._get_shared_l2_eps()
+        clip_name = f"{basename}/Clip"
+        clip_output = f"{clip_name}/output_0"
+        self.make_node("Clip", [l2_output, eps_name], [clip_output], name=clip_name)
+        self.make_value(clip_output, self.io_dtype, reduced_shape)
 
-        add_eps_name = f"{basename}/AddEps"
-        add_eps_output = f"{add_eps_name}/output_0"
-        self.make_node("Add", [rs_output, eps_name], [add_eps_output], name=add_eps_name)
-        self.make_value(add_eps_output, self.io_dtype, reduced_shape)
-
-        # sqrt
-        sqrt_name = f"{basename}/Sqrt"
-        sqrt_output = f"{sqrt_name}/output_0"
-        self.make_node("Sqrt", [add_eps_output], [sqrt_output], name=sqrt_name)
-        self.make_value(sqrt_output, self.io_dtype, reduced_shape)
-
-        # Reciprocal
-        recip_name = f"{basename}/Reciprocal"
-        recip_output = f"{recip_name}/output_0"
-        self.make_node("Reciprocal", [sqrt_output], [recip_output], name=recip_name)
-        self.make_value(recip_output, self.io_dtype, reduced_shape)
-
-        # x * (1/norm)
-        norm_name = f"{basename}/Normalize/Mul"
+        # x / ||x||_2
+        norm_name = f"{basename}/Normalize/Div"
         norm_output = f"{norm_name}/output_0"
-        self.make_node("Mul", [input_name, recip_output], [norm_output], name=norm_name)
+        self.make_node("Div", [input_name, clip_output], [norm_output], name=norm_name)
         self.make_value(norm_output, self.io_dtype, full_shape)
 
         return norm_output
@@ -2263,27 +2050,17 @@ class Qwen35TextModel(Model):
         )
 
         # Unmerge state: [B*N, hk, hv] -> [B, N, hk, hv]
-        state_out_rs_name = f"{scan_basename}/state_out_unmerge"
-        self.make_reshape(
-            state_out_rs_name,
+        state_out_name = present_state_name if present_state_name else f"{scan_basename}/state_out_unmerge/Reshape/output_0"
+        state_out_rs_name = f"{scan_basename}/state_out_unmerge/Reshape"
+        self.make_node(
+            "Reshape",
             [scan_output, f"/model/constants/INT64/[-1, {n_heads}, {hk}, {hv}]"],
-            self.io_dtype,
-            ["batch_size", n_heads, hk, hv],
+            [state_out_name],
+            name=state_out_rs_name,
         )
-        # Rename reshape output to target present state name
-        if present_state_name:
-            self.make_node(
-                "Identity",
-                [f"{state_out_rs_name}/output_0"],
-                [present_state_name],
-                name=f"{scan_basename}/state_out_identity",
-            )
-            self.make_value(present_state_name, self.io_dtype, ["batch_size", n_heads, hk, hv])
-            state_out_rs_output = present_state_name
-        else:
-            state_out_rs_output = f"{state_out_rs_name}/output_0"
+        self.make_value(state_out_name, self.io_dtype, ["batch_size", n_heads, hk, hv])
 
-        return out_rs_output, state_out_rs_output
+        return out_rs_output, state_out_name
 
     def _merge_batch_heads(self, basename, input_4d, n_heads, head_dim):
         """[B, N, S, D] -> [B*N, S, D] via static reshape.
@@ -2486,15 +2263,17 @@ class Qwen35TextModel(Model):
         norm_weight = f"model.layers.{layer_id}.linear_attn.norm.weight"
         self.make_initializer(norm_module.weight, norm_weight, to=self.io_dtype)
 
-        # RMSNormalization (opset 23, no offset for gated norm)
-        norm_name = f"{basename}/RMSNormalization"
+        # SimplifiedLayerNormalization (com.microsoft, no offset for gated norm)
+        norm_name = f"{basename}/SimplifiedLayerNormalization"
         norm_output = f"{norm_name}/output_0"
         self.make_node(
-            "RMSNormalization",
+            "SimplifiedLayerNormalization",
             [flat_output, norm_weight],
             [norm_output],
             name=norm_name,
             epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
         )
         self.make_value(norm_output, self.io_dtype, ["batch_seq_heads", hv])
 
@@ -2558,77 +2337,45 @@ class Qwen35TextModel(Model):
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         """Generate genai_config.json for the decoder (text-only) model.
 
-        Reuses the base class by temporarily restoring standard KV cache keys
-        and flattening text_config token IDs onto the HF config so the base
-        class can process them.  Then patches Qwen3.5-specific overrides.
-
-        Since the model builder only exports the decoder, the config contains
-        only decoder entries — no vision or embedding sections.
+        Temporarily adjusts attributes so the base class produces the correct
+        config for Qwen3.5's hybrid architecture (sparse KV cache, nested
+        token IDs in ``text_config``).
         """
-        # The base class loads AutoConfig internally and accesses
-        # config.eos_token_id.  For Qwen3.5 these live under text_config,
-        # so pre-flatten them onto the top-level config before calling super().
+        # Flatten text_config token IDs onto the HF config so the base class
+        # can access them.  Save to out_dir so AutoConfig.from_pretrained
+        # picks up the patched version.
         hf_config = AutoConfig.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
         )
         text_cfg = getattr(hf_config, "text_config", hf_config)
         for attr in ("eos_token_id", "bos_token_id", "pad_token_id"):
             val = getattr(text_cfg, attr, None)
-            if val is not None and not hasattr(hf_config, attr):
+            if val is not None:
                 setattr(hf_config, attr, val)
-        # Persist the flattened config so AutoConfig picks it up from cache
         hf_config.save_pretrained(out_dir)
 
-        # Temporarily re-add the standard KV cache keys so the base class
-        # generates correct past_key_names / present_key_names entries.
+        # Temporarily restore the KV cache template keys and adjust attributes
+        # so the base class generates the right entries.
+        saved = {
+            "num_layers": self.num_layers,
+            "model_type": self.model_type,
+            "past_present_share_buffer": self.past_present_share_buffer,
+        }
+        self.num_layers = len(self.layer_types)
+        self.model_type = "Qwen3_5ForConditionalGeneration"
+        self.past_present_share_buffer = False
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"
         self.output_names["present.value"] = "present.%d.value"
 
-        # Use out_dir as the model path so base class loads the patched config
         super().make_genai_config(out_dir, {}, out_dir)
 
-        # Remove the temporary keys
+        # Restore
+        self.num_layers = saved["num_layers"]
+        self.model_type = saved["model_type"]
+        self.past_present_share_buffer = saved["past_present_share_buffer"]
         del self.input_names["past_key_values.key"]
         del self.input_names["past_key_values.value"]
         del self.output_names["present.key"]
         del self.output_names["present.value"]
-
-        # Load the config we just wrote and patch Qwen3.5-specific fields
-        config_path = os.path.join(out_dir, "genai_config.json")
-        with open(config_path) as f:
-            genai_config = json.load(f)
-
-        # Patch decoder section
-        decoder = genai_config["model"]["decoder"]
-        # Keep num_hidden_layers as the total layer count (not just full-attention layers).
-        # The KV cache indices are sparse (e.g., layers 3,7,11,15,19,23 for 0.8B) and
-        # DefaultKeyValueCache auto-discovers actual KV-layer indices from session inputs.
-        # Setting this to the full-attention count would break CombinedKeyValueCache and
-        # PagedKeyValueCache which iterate 0..num_hidden_layers-1 sequentially.
-        decoder["num_hidden_layers"] = len(self.layer_types)
-
-        # Ensure eos_token_id is a list and fix bos/pad defaults
-        eos = genai_config["model"].get("eos_token_id")
-        if eos is not None and not isinstance(eos, list):
-            genai_config["model"]["eos_token_id"] = [eos]
-            eos = [eos]
-        # bos_token_id defaults to eos when unset (Qwen3.5 text_config has bos=None)
-        if genai_config["model"].get("bos_token_id") in (None, 1) and eos:
-            genai_config["model"]["bos_token_id"] = eos[0]
-        if genai_config["model"].get("pad_token_id") is None and eos:
-            genai_config["model"]["pad_token_id"] = eos[0]
-
-        genai_config["model"]["type"] = "qwen3_5"
-        genai_config["search"]["past_present_share_buffer"] = False
-
-        # Write patched config
-        with open(config_path, "w") as f:
-            json.dump(genai_config, f, indent=4)
-
-        # Clean up the temporary HF config files we saved to out_dir
-        for name in ("config.json", "preprocessor_config.json"):
-            path = os.path.join(out_dir, name)
-            if os.path.exists(path):
-                os.remove(path)
