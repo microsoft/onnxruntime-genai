@@ -51,7 +51,7 @@ class HunyuanDenseV1Model(Model):
             self.attention_attrs["use_rope_in_attn"] = False
             # position_ids was removed from graph inputs when use_rope_in_attn was True; restore it.
             if "position_ids" not in self.input_names:
-                self.input_names.append("position_ids")
+                self.input_names["position_ids"] = "position_ids"
 
         self.model_type = "hunyuan_v1_dense"
 
@@ -75,14 +75,14 @@ class HunyuanDenseV1Model(Model):
             self.make_rotary_embedding(
                 q_rotary_name,
                 root_input=self.attention_attrs["q_path"],
-                position_ids=kwargs.get("position_ids", "position_ids"),
+                position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
             )
             self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
             self.make_rotary_embedding(
                 k_rotary_name,
                 root_input=self.attention_attrs["k_path"],
-                position_ids=kwargs.get("position_ids", "position_ids"),
+                position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
             )
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
@@ -92,10 +92,7 @@ class HunyuanDenseV1Model(Model):
         self.make_qk_norm(layer_id, attention)
 
         # Step 3: Repeat KV (for GQA with MultiHeadAttention op)
-        past_k = f"past_key_values.{layer_id}.key"
-        past_v = f"past_key_values.{layer_id}.value"
-        present_k = f"present.{layer_id}.key"
-        present_v = f"present.{layer_id}.value"
+        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
         if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
             self.attention_attrs["k_path"] = self.make_repeat_kv(
                 layer_id, root_input=self.attention_attrs["k_path"], past_kv=past_k, present_kv=present_k
