@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.18.1)
 
 project(ortgenaiapp)
+
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Download and make available nlohmann/json
 include(FetchContent)
@@ -9,6 +12,8 @@ FetchContent_Declare(
   nlohmann_json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG        v3.12.0     # Or update to latest release
+  SYSTEM
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
@@ -18,6 +23,8 @@ FetchContent_Declare(
   CLI11
   GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
   GIT_TAG        v2.6.1      # Or update to latest release
+  SYSTEM
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(CLI11)
 
@@ -32,100 +39,31 @@ if(USE_CXX)
   add_compile_definitions(USE_CXX)
 endif()
 
-# Set expected library filenames
-if(WIN32)
-  set(ORT_LIB_FILE "onnxruntime.dll")
-  set(OGA_LIB_FILE "onnxruntime-genai.dll")
-elseif(APPLE)
-  set(ORT_LIB_FILE "libonnxruntime.dylib")
-  set(OGA_LIB_FILE "libonnxruntime-genai.dylib")
-elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
-  set(ORT_LIB_FILE "libonnxruntime.a")
-  set(OGA_LIB_FILE "libonnxruntime-genai.a")
-else()
-  set(ORT_LIB_FILE "libonnxruntime.so")
-  set(OGA_LIB_FILE "libonnxruntime-genai.so")
-endif()
+find_package(onnxruntime REQUIRED)
+find_package(onnxruntime-genai REQUIRED)
 
-# Set default variables to examples/c/include and examples/c/lib if not specified
-if(NOT ORT_INCLUDE_DIR)
-  set(ORT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
-endif()
-if(NOT OGA_INCLUDE_DIR)
-  set(OGA_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
-endif()
-if(NOT ORT_LIB_DIR)
-  set(ORT_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
-endif()
-if(NOT OGA_LIB_DIR)
-  set(OGA_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
-endif()
-
-# Store all library files in each directory
-file(GLOB ort_libs "${ORT_LIB_DIR}/*")
-file(GLOB oga_libs "${OGA_LIB_DIR}/*")
-
-function(prepare_executable executable)
-  # Link directory and library for ORT and ORT GenAI
-  target_link_directories(${executable} PRIVATE ${ORT_LIB_DIR})
-  target_link_libraries(${executable} PRIVATE ${ORT_LIB_FILE})
-  target_link_directories(${executable} PRIVATE ${OGA_LIB_DIR})
-  target_link_libraries(${executable} PRIVATE ${OGA_LIB_FILE})
-
-  # Add include directories for each executable
-  target_include_directories(${executable} PRIVATE ${ORT_INCLUDE_DIR})
-  target_include_directories(${executable} PRIVATE ${OGA_INCLUDE_DIR})
-
-  target_link_libraries(${executable} PUBLIC onnxruntime)
-  target_link_libraries(${executable} PUBLIC onnxruntime-genai)
-
-  foreach(DEPENDENCY_FILE ${ort_libs})
-    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
-      add_custom_command(
-        TARGET ${executable} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
-      )
-    endif()
-  endforeach()
-
-  foreach(DEPENDENCY_FILE ${oga_libs})
-    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
-      add_custom_command(
-        TARGET ${executable} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
-      )
-    endif()
-  endforeach()
+function(genai_add_example target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE onnxruntime::onnxruntime-genai onnxruntime::onnxruntime
+          nlohmann_json::nlohmann_json CLI11::CLI11)
 endfunction()
 
-set(EXAMPLES_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src)
+set(EXAMPLES_SOURCE_DIR ${PROJECT_SOURCE_DIR}/src)
 
 if(MODEL_CHAT)
-  add_executable(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_chat)
-  target_link_libraries(model_chat PRIVATE nlohmann_json::nlohmann_json)
-  target_link_libraries(model_chat PRIVATE CLI11::CLI11)
+  genai_add_example(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(MODEL_QA)
-  add_executable(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_qa)
-  target_link_libraries(model_qa PRIVATE nlohmann_json::nlohmann_json)
-  target_link_libraries(model_qa PRIVATE CLI11::CLI11)
+  genai_add_example(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(MODEL_MM)
-  add_executable(model_mm ${EXAMPLES_SOURCE_DIR}/model_mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_mm)
-  target_link_libraries(model_mm PRIVATE nlohmann_json::nlohmann_json)
-  target_link_libraries(model_mm PRIVATE CLI11::CLI11)
+  genai_add_example(model_mm ${EXAMPLES_SOURCE_DIR}/model_mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(WHISPER)
-  add_executable(whisper ${EXAMPLES_SOURCE_DIR}/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(whisper)
-  target_link_libraries(whisper PRIVATE nlohmann_json::nlohmann_json)
-  target_link_libraries(whisper PRIVATE CLI11::CLI11)
+  genai_add_example(whisper ${EXAMPLES_SOURCE_DIR}/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(NEMOTRON_SPEECH)

@@ -1,5 +1,5 @@
-if(USE_ROCM AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}")
-  message(FATAL_ERROR "Expected the ONNX Runtime providers ROCm library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}. Actual: Not found.")
+if(USE_ROCM AND NOT EXISTS "${ORT_BIN_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}")
+  message(FATAL_ERROR "Expected the ONNX Runtime providers ROCm library to be found at ${ORT_BIN_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}. Actual: Not found.")
 endif()
 
 if(USE_ROCM)

@@ -21,13 +21,7 @@ endif()
 
 add_executable(model_benchmark ${model_benchmark_srcs})
 
-target_include_directories(model_benchmark PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_SOURCE_DIR}/src  # directory containing the ort_genai headers
-)
-
-target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
-
-target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(model_benchmark PRIVATE onnxruntime-genai)
+target_include_directories(model_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})

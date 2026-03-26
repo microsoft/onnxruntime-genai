@@ -1,3 +1,4 @@
+
 set(ONNXRUNTIME_GENAI_PUBLIC_HEADERS
   "${PROJECT_SOURCE_DIR}/src/ort_genai_c.h;${PROJECT_SOURCE_DIR}/src/ort_genai.h"
 )
@@ -6,25 +7,38 @@ set_target_properties(
   onnxruntime-genai PROPERTIES
   PUBLIC_HEADER "${ONNXRUNTIME_GENAI_PUBLIC_HEADERS}"
 )
-install(TARGETS
-  onnxruntime-genai
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION lib
-  ARCHIVE DESTINATION lib
-  PUBLIC_HEADER DESTINATION include
+
+install(TARGETS onnxruntime-genai
+  EXPORT onnxruntime-genaiTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FRAMEWORK DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+export(EXPORT onnxruntime-genaiTargets
+  FILE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-targets.cmake
+  NAMESPACE onnxruntime::
+)
+install(
+  EXPORT onnxruntime-genaiTargets
+  FILE onnxruntime-genai-targets.cmake
+  NAMESPACE onnxruntime::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime-genai
+)
+
 if(USE_CUDA OR USE_TRT_RTX)
-  install(TARGETS
-    onnxruntime-genai-cuda
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION lib
-    ARCHIVE DESTINATION lib
+  install(TARGETS onnxruntime-genai-cuda
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
 endif()
 
 if (WIN32)
-  install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo Debug)
+  install(FILES $<TARGET_PDB_FILE:onnxruntime-genai>
+          DESTINATION ${CMAKE_INSTALL_BINDIR}
+          CONFIGURATIONS RelWithDebInfo Debug)
 endif()
 set(CPACK_PACKAGE_VENDOR "Microsoft")
 set(CPACK_PACKAGE_NAME "onnxruntime-genai")
@@ -83,7 +97,6 @@ install(FILES
   DESTINATION .)
 
 include(CPack)
-
 
 # Assemble the Apple static framework (iOS and macOS)
 if(BUILD_APPLE_FRAMEWORK)
@@ -147,3 +160,20 @@ if(BUILD_APPLE_FRAMEWORK)
   endforeach()
 
 endif()
+
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+  cmake/onnxruntime-genai-config.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-config.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime-genai
+)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-config-version.cmake
+  VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}
+  COMPATIBILITY AnyNewerVersion
+)
+
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-config.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-config-version.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime-genai)
