@@ -21,19 +21,25 @@ struct ModelType {
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 5> VLM = {"fara", "gemma3", "phi3v", "qwen2_5_vl", "qwen3_vl"};
+    static constexpr std::array<std::string_view, 6> VLM = {"fara", "gemma3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
     // Qwen-VL family: models requiring 3D mRoPE position IDs
-    return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl";
+    return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "qwen3_5";
   }
 
   inline static bool IsALM(const std::string& model_type) {
     // Audio-language model (ALM)
     static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
+  }
+
+  inline static bool IsRNNT(const std::string& model_type) {
+    // RNNT models bypass the search/logits pipeline entirely.
+    static constexpr std::array<std::string_view, 1> rnnt_types = {"nemotron_speech"};
+    return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
   }
 
   inline static bool IsMMM(const std::string& model_type) {

@@ -61,6 +61,7 @@ struct Memory : DeviceBuffer {
 
 struct Interface : RyzenAIInterface {
   Interface() {
+    ep_path_ = ep_filename_;
     // If already loaded then nothing to do
 #if defined(_WIN32)
     if (GetModuleHandleA(ep_filename_))
@@ -207,10 +208,6 @@ RyzenAIInterface* GetRyzenAIInterface() {
   });
 
   return RyzenAI::interface_.get();
-}
-
-bool IsRyzenAIPrunedModel(const Model& model) {
-  return model.p_device_->GetType() == DeviceType::RyzenAI && model.IsPruned();
 }
 
 }  // namespace Generators

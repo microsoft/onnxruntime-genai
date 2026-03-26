@@ -6,7 +6,6 @@
 #include "model.h"
 #include "logits.h"
 #include "../openvino/interface.h"
-#include "../ryzenai/interface.h"
 
 namespace Generators {
 
@@ -18,8 +17,9 @@ Logits::Logits(State& state)
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
-  if (IsOpenVINOStatefulModel(state.model_) || IsRyzenAIPrunedModel(state_.model_)) {
-    // In the case of OpenVINO stateful models or RyzenAI pruned models, they are patched in a way so that they only return the
+  if (IsOpenVINOStatefulModel(state.model_) || state.model_.IsPruned()) {
+    // In the case of OpenVINO stateful models, or any model whose ONNX graph
+    // has been patched to only output last-token logits (logits dim[1]==1), they only return the
     // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
     // logits of the shape:  [1,43,<vocab_size>]
     // they will have shape: [1, 1,<vocab_size>].
