@@ -5,13 +5,11 @@
 # --------------------------------------------------------------------------
 
 
-
 import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import (
     AutoConfig,
-    AutoModelForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
@@ -704,7 +702,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
         # but the C++ runtime expects "qwen3_vl" (with underscore).
         # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration" # noqa: overrides Model.model_type on purpose
+        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
@@ -1112,11 +1110,7 @@ class Qwen35TextModel(Model):
     def make_layer(self, layer_id, layer):
         """Override to pass ``linear_attn`` instead of ``self_attn`` for
         linear-attention layers (the base class assumes ``self_attn``)."""
-        attn_module = (
-            layer.linear_attn
-            if self.layer_types[layer_id] == "linear_attention"
-            else layer.self_attn
-        )
+        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
         self.make_layernorm(
             layer_id,
             layer.input_layernorm,
@@ -1274,7 +1268,9 @@ class Qwen35TextModel(Model):
         sigmoid_output = f"{sigmoid_name}/output_0"
 
         gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
-        self.make_mul(gated_name, [attn_output, sigmoid_output], self.io_dtype, ["batch_size", "sequence_length", q_size])
+        self.make_mul(
+            gated_name, [attn_output, sigmoid_output], self.io_dtype, ["batch_size", "sequence_length", q_size]
+        )
         gated_output = f"{gated_name}/output_0"
 
         # 8. Output projection
@@ -1360,18 +1356,26 @@ class Qwen35TextModel(Model):
         def gather_dim(dim_idx, cache_name, suffix):
             g_name = f"{basename}/{suffix}/dim{dim_idx}/pos/Gather"
             self.make_gather(
-                g_name, [pos_ids, f"/model/constants/INT64/[{dim_idx}]"], ir.DataType.INT64,
-                [1, "batch_size", "sequence_length"], axis=0,
+                g_name,
+                [pos_ids, f"/model/constants/INT64/[{dim_idx}]"],
+                ir.DataType.INT64,
+                [1, "batch_size", "sequence_length"],
+                axis=0,
             )
             sq_name = f"{basename}/{suffix}/dim{dim_idx}/Squeeze"
             self.make_squeeze(
-                sq_name, [f"{g_name}/output_0", "/model/constants/INT64/[0]"],
-                ir.DataType.INT64, ["batch_size", "sequence_length"],
+                sq_name,
+                [f"{g_name}/output_0", "/model/constants/INT64/[0]"],
+                ir.DataType.INT64,
+                ["batch_size", "sequence_length"],
             )
             gc_name = f"{basename}/{suffix}/dim{dim_idx}/cache/Gather"
             self.make_gather(
-                gc_name, [cache_name, f"{sq_name}/output_0"], ir.DataType.FLOAT,
-                ["batch_size", "sequence_length", rdim_half], axis=0,
+                gc_name,
+                [cache_name, f"{sq_name}/output_0"],
+                ir.DataType.FLOAT,
+                ["batch_size", "sequence_length", rdim_half],
+                axis=0,
             )
             return f"{gc_name}/output_0"
 
@@ -1380,11 +1384,12 @@ class Qwen35TextModel(Model):
             h = gather_dim(1, cache_name, suffix)
             w = gather_dim(2, cache_name, suffix)
             ww_name = f"{basename}/{suffix}/w/Where"
-            ww_out = f"{ww_name}/output_0"
             self.make_where(ww_name, [w_mask, w, t], ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half])
             ww_out = f"{ww_name}/output_0"
             hh_name = f"{basename}/{suffix}/h/Where"
-            self.make_where(hh_name, [h_mask, h, ww_out], ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half])
+            self.make_where(
+                hh_name, [h_mask, h, ww_out], ir.DataType.FLOAT, ["batch_size", "sequence_length", rdim_half]
+            )
             hh_out = f"{hh_name}/output_0"
             return hh_out
 
@@ -1444,63 +1449,132 @@ class Qwen35TextModel(Model):
         return final_output
 
     def _make_linear_attention(self, layer_id, linear_attn, root_input):
-        """Build a GatedDeltaNet linear attention layer.
+        """Dispatch to fused or decomposed GatedDeltaNet linear attention.
 
-        Implements the full GatedDeltaNet forward pass:
-        1. Linear projections (QKV fused, z gate, beta, alpha)
-        2. Depthwise causal conv1d with carry state
-        3. Split into Q, K, V + L2 normalize Q and K
-        4. Compute decay and forget gates
-        5. Linear attention recurrence
-        6. Gated RMSNorm + output projection
+        Currently always uses the decomposed path (Conv + Scan) which
+        works on all EPs.  Switch to fused ``CausalConvWithState`` +
+        ``LinearAttention`` ops once ORT registers kernels for them.
+        """
+        # TODO: Enable fused path when ORT has CausalConvWithState/LinearAttention kernels
+        # if self.ep in {"cuda"}:
+        #     self._make_linear_attention_fused(layer_id, linear_attn, root_input)
+        # else:
+        self._make_linear_attention_decomposed(layer_id, linear_attn, root_input)
+
+    def _make_linear_attention_fused(self, layer_id, linear_attn, root_input):
+        """Build GatedDeltaNet using fused CausalConvWithState + LinearAttention ops.
+
+        Uses proposed com.microsoft contrib ops (onnx/onnx#7767):
+        - CausalConvWithState: fused depthwise conv1d + SiLU + carry state
+        - LinearAttention: fused 3D-packed linear attention with GQA
+
+        Requires ORT kernel support (currently CUDA EP only).
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
+        conv_dim = self.linear_conv_dim
+        v_dim = self.linear_value_dim
+        n_kv = self.linear_num_value_heads
+        n_k = self.linear_num_key_heads
+        hk = self.linear_key_head_dim
+        hv = self.linear_value_head_dim
+        kernel_size = self.linear_conv_kernel_dim
 
-        k_dim = self.linear_key_dim  # e.g. 2048
-        v_dim = self.linear_value_dim  # e.g. 2048
-        conv_dim = self.linear_conv_dim  # e.g. 6144
-        n_kv = self.linear_num_value_heads  # e.g. 16
-        hk = self.linear_key_head_dim  # e.g. 128
-        hv = self.linear_value_head_dim  # e.g. 128
-        kernel_size = self.linear_conv_kernel_dim  # e.g. 4
+        # Projections, conv weight init, QKV transpose
+        z_name, b_name, a_name, qkv_t_output, conv_weight_name = self._make_linear_attention_projections(
+            layer_id, linear_attn, root_input
+        )
 
-        # 2. Linear projections
-        # QKV fused: [B, S, hidden] -> [B, S, conv_dim]
-        qkv_name = f"{basename}/in_proj_qkv/MatMul"
-        self.make_matmul(linear_attn.in_proj_qkv, qkv_name, root_input)
+        # --- Fused conv: CausalConvWithState (com.microsoft) ---
+        conv_bias_name = f"model.layers.{layer_id}.linear_attn.conv1d.bias"
+        self.make_initializer(torch.zeros(conv_dim, dtype=torch.float32), conv_bias_name, to=self.io_dtype)
 
-        # z (output gate): [B, S, hidden] -> [B, S, v_dim]
-        z_name = f"{basename}/in_proj_z/MatMul"
-        self.make_matmul(linear_attn.in_proj_z, z_name, root_input)
+        past_conv = f"past_key_values.{layer_id}.conv_state"
+        present_conv = f"present.{layer_id}.conv_state"
 
-        # b (forget/beta): [B, S, hidden] -> [B, S, n_kv]
-        b_name = f"{basename}/in_proj_b/MatMul"
-        self.make_matmul(linear_attn.in_proj_b, b_name, root_input)
+        conv_op_name = f"{basename}/CausalConvWithState"
+        silu_output = f"{conv_op_name}/output_0"
+        self.make_node(
+            "CausalConvWithState",
+            [qkv_t_output, conv_weight_name, conv_bias_name, past_conv],
+            [silu_output, present_conv],
+            name=conv_op_name,
+            ndim=1,
+            activation="silu",
+            domain="com.microsoft",
+        )
+        self.make_value(silu_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
+        self.make_value(present_conv, self.io_dtype, ["batch_size", conv_dim, kernel_size - 1])
 
-        # a (decay/alpha): [B, S, hidden] -> [B, S, n_kv]
-        a_name = f"{basename}/in_proj_a/MatMul"
-        self.make_matmul(linear_attn.in_proj_a, a_name, root_input)
-
-        # 3. Depthwise causal conv1d
-        # Transpose QKV: [B, S, D] -> [B, D, S]
-        qkv_t_name = f"{basename}/qkv_transpose/Transpose"
-        qkv_t_output = f"{qkv_t_name}/output_0"
+        conv_out_t_name = f"{basename}/conv_out/Transpose"
+        conv_out_t_output = f"{conv_out_t_name}/output_0"
         self.make_transpose(
-            qkv_t_name,
-            f"{qkv_name}/output_0",
+            conv_out_t_name,
+            silu_output,
             self.io_dtype,
-            ["batch_size", conv_dim, "sequence_length"],
+            ["batch_size", "sequence_length", conv_dim],
             [0, 2, 1],
         )
 
-        # Conv1d weight: [conv_dim, 1, kernel_size]
-        conv_weight_name = f"model.layers.{layer_id}.linear_attn.conv1d.weight"
-        self.make_initializer(linear_attn.conv1d.weight, conv_weight_name, to=self.io_dtype)
+        # Split QKV, L2 norm, gates
+        q_scaled_output, k_norm_out, v_out, g_output, beta_output = self._make_linear_attention_normalize_and_gate(
+            layer_id,
+            linear_attn,
+            conv_out_t_output,
+            b_name,
+            a_name,
+        )
 
-        # Past conv state: [B, D, kernel_size-1]
+        # --- Fused recurrence: LinearAttention (com.microsoft) ---
+        past_recurrent = f"past_key_values.{layer_id}.recurrent_state"
+        present_recurrent = f"present.{layer_id}.recurrent_state"
+
+        la_op_name = f"{basename}/LinearAttention"
+        la_output = f"{la_op_name}/output_0"
+        self.make_node(
+            "LinearAttention",
+            [q_scaled_output, k_norm_out, v_out, past_recurrent, g_output, beta_output],
+            [la_output, present_recurrent],
+            name=la_op_name,
+            q_num_heads=n_k,
+            kv_num_heads=n_kv,
+            update_rule="gated_delta",
+            scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
+            domain="com.microsoft",
+        )
+        self.make_value(la_output, self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_value(present_recurrent, self.io_dtype, ["batch_size", n_kv, hk, hv])
+
+        # Gated RMSNorm + output projection
+        self._make_linear_attention_output(
+            layer_id,
+            linear_attn,
+            la_output,
+            z_name,
+        )
+
+    def _make_linear_attention_decomposed(self, layer_id, linear_attn, root_input):
+        """Build GatedDeltaNet using decomposed standard ONNX ops.
+
+        Uses Conv + Scan with a hand-built body graph.  Works on all EPs
+        but is 10–50× slower than fused kernels because each recurrence
+        step materializes intermediates to global memory.
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        conv_dim = self.linear_conv_dim
+        v_dim = self.linear_value_dim
+        n_kv = self.linear_num_value_heads
+        hk = self.linear_key_head_dim
+        hv = self.linear_value_head_dim
+        kernel_size = self.linear_conv_kernel_dim
+
+        # Projections, conv weight init, QKV transpose
+        z_name, b_name, a_name, qkv_t_output, conv_weight_name = self._make_linear_attention_projections(
+            layer_id, linear_attn, root_input
+        )
+
+        # --- Decomposed conv: Concat + Conv + SiLU + Slice ---
         past_conv = f"past_key_values.{layer_id}.conv_state"
 
-        # Concatenate past conv state with current input: [B, D, K-1+S]
         conv_cat_name = f"{basename}/conv/Concat"
         conv_cat_output = f"{conv_cat_name}/output_0"
         self.make_concat(
@@ -1511,29 +1585,27 @@ class Qwen35TextModel(Model):
             axis=-1,
         )
 
-        # Depthwise Conv1d (groups=conv_dim)
         conv_name = f"{basename}/conv/Conv"
         conv_output = f"{conv_name}/output_0"
-        self.make_node(
-            "Conv",
+        self.make_conv(
+            conv_name,
             [conv_cat_output, conv_weight_name],
-            [conv_output],
-            name=conv_name,
+            self.io_dtype,
+            ["batch_size", conv_dim, "sequence_length"],
             group=conv_dim,
             pads=[0, 0],
         )
-        self.make_value(conv_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
 
-        # SiLU activation on conv output
         silu_name = f"{basename}/conv/Sigmoid"
         self.make_sigmoid(silu_name, conv_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
         silu_sig_output = f"{silu_name}/output_0"
 
         silu_mul_name = f"{basename}/conv/SiLU/Mul"
-        self.make_mul(silu_mul_name, [conv_output, silu_sig_output], self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
+        self.make_mul(
+            silu_mul_name, [conv_output, silu_sig_output], self.io_dtype, ["batch_size", conv_dim, "sequence_length"]
+        )
         silu_output = f"{silu_mul_name}/output_0"
 
-        # Save new conv state: last (kernel_size-1) timesteps of the padded input
         present_conv = f"present.{layer_id}.conv_state"
         conv_state_slice_name = f"{basename}/conv_state/Slice"
         self.make_node(
@@ -1549,7 +1621,6 @@ class Qwen35TextModel(Model):
         )
         self.make_value(present_conv, self.io_dtype, ["batch_size", conv_dim, kernel_size - 1])
 
-        # Transpose conv output back: [B, D, S] -> [B, S, D]
         conv_out_t_name = f"{basename}/conv_out/Transpose"
         conv_out_t_output = f"{conv_out_t_name}/output_0"
         self.make_transpose(
@@ -1560,79 +1631,25 @@ class Qwen35TextModel(Model):
             [0, 2, 1],
         )
 
-        # 4. Split into Q, K, V: [B, S, D] -> Q:[B,S,k_dim], K:[B,S,k_dim], V:[B,S,v_dim]
-        split_qkv_name = f"{basename}/split_qkv/Split"
-        q_out = f"{split_qkv_name}/output_0"
-        k_out = f"{split_qkv_name}/output_1"
-        v_out = f"{split_qkv_name}/output_2"
-        self.make_node(
-            "Split",
-            [conv_out_t_output, f"/model/constants/INT64/[{k_dim}, {k_dim}, {v_dim}]"],
-            [q_out, k_out, v_out],
-            name=split_qkv_name,
-            axis=-1,
+        # Split QKV, L2 norm, gates
+        q_scaled_output, k_norm_out, v_out, g_output, beta_output = self._make_linear_attention_normalize_and_gate(
+            layer_id,
+            linear_attn,
+            conv_out_t_output,
+            b_name,
+            a_name,
         )
-        self.make_value(q_out, self.io_dtype, ["batch_size", "sequence_length", k_dim])
-        self.make_value(k_out, self.io_dtype, ["batch_size", "sequence_length", k_dim])
-        self.make_value(v_out, self.io_dtype, ["batch_size", "sequence_length", v_dim])
 
-        # 5. Per-head L2 normalize Q and K
-        # Must reshape [B, S, N*hk] -> [B*S*N, hk], normalize, reshape back
-        n_k = self.linear_num_key_heads
-        q_norm_out = self._make_per_head_l2_normalize(f"{basename}/q_l2norm", q_out, n_k, hk)
-        k_norm_out = self._make_per_head_l2_normalize(f"{basename}/k_l2norm", k_out, n_k, hk)
-
-        # Scale Q by 1/sqrt(head_k_dim) — shared constant created once
-        scale_name = self._get_shared_q_scale(hk)
-
-        q_scaled_name = f"{basename}/q_scaled/Mul"
-        self.make_mul(q_scaled_name, [q_norm_out, scale_name], self.io_dtype, ["batch_size", "sequence_length", k_dim])
-        q_scaled_output = f"{q_scaled_name}/output_0"
-
-        # 6. Compute decay (g) and forget (beta) gates
-        # beta = sigmoid(b): [B, S, n_kv]
-        beta_name = f"{basename}/beta/Sigmoid"
-        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", n_kv])
-        beta_output = f"{beta_name}/output_0"
-
-        # g = -exp(A_log) * softplus(a + dt_bias)
-        # Pre-compute -exp(A_log) as an initializer (constant per layer)
-        dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
-        self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=self.io_dtype)
-
-        neg_exp_a_name = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
-        neg_exp_a = (-linear_attn.A_log.data.exp()).detach()
-        self.make_initializer(neg_exp_a, neg_exp_a_name, to=self.io_dtype)
-
-        # a + dt_bias
-        a_plus_dt_name = f"{basename}/decay/Add"
-        self.make_add(a_plus_dt_name, [f"{a_name}/output_0", dt_bias_init], self.io_dtype, ["batch_size", "sequence_length", n_kv])
-        a_plus_dt_output = f"{a_plus_dt_name}/output_0"
-
-        # softplus(a + dt_bias) = log(1 + exp(x))
-        softplus_name = f"{basename}/decay/Softplus"
-        softplus_output = f"{softplus_name}/output_0"
-        self.make_node("Softplus", [a_plus_dt_output], [softplus_output], name=softplus_name)
-        self.make_value(softplus_output, self.io_dtype, ["batch_size", "sequence_length", n_kv])
-
-        # g = neg_exp_a * softplus
-        g_name = f"{basename}/decay/Mul"
-        self.make_mul(g_name, [neg_exp_a_name, softplus_output], self.io_dtype, ["batch_size", "sequence_length", n_kv])
-        g_output = f"{g_name}/output_0"
-
-        # 7. Reshape Q, K, V to per-head: [B, S, D] -> [B, S, N, H] -> [B, N, S, H]
+        # --- Decomposed recurrence: reshape → GQA expand → Scan → reshape ---
         q_4d = self._reshape_to_bhsd(f"{basename}/q", q_scaled_output, self.linear_num_key_heads, hk)
         k_4d = self._reshape_to_bhsd(f"{basename}/k", k_norm_out, self.linear_num_key_heads, hk)
         v_4d = self._reshape_to_bhsd(f"{basename}/v", v_out, n_kv, hv)
 
-        # If num_value_heads > num_key_heads, repeat Q and K to match (GQA-style).
-        # HF does: query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
         kv_groups = n_kv // self.linear_num_key_heads
         if kv_groups > 1:
             q_4d = self._repeat_kv_heads(f"{basename}/q_repeat", q_4d, self.linear_num_key_heads, kv_groups, hk)
             k_4d = self._repeat_kv_heads(f"{basename}/k_repeat", k_4d, self.linear_num_key_heads, kv_groups, hk)
 
-        # Transpose gates: [B, S, N] -> [B, N, S]
         beta_t_name = f"{basename}/beta/Transpose"
         beta_t_output = f"{beta_t_name}/output_0"
         self.make_transpose(beta_t_name, beta_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
@@ -1641,18 +1658,10 @@ class Qwen35TextModel(Model):
         g_t_output = f"{g_t_name}/output_0"
         self.make_transpose(g_t_name, g_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
 
-        # 8. Linear attention recurrence via Scan op
-        #
-        # The GatedDeltaNet recurrence for each head is:
-        #   S_t = exp(g_t) * S_{t-1} + beta_t * outer(k_t, v_t)
-        #   o_t = q_t @ S_t
-        #
-        # We use the ONNX Scan op to iterate over the sequence dimension.
-        # First, merge batch and heads: [B, N, S, D] -> [B*N, S, D]
         past_recurrent = f"past_key_values.{layer_id}.recurrent_state"
         present_recurrent = f"present.{layer_id}.recurrent_state"
 
-        la_output, la_state_output = self._make_scan_recurrence(
+        la_output, _ = self._make_scan_recurrence(
             basename,
             q_4d,
             k_4d,
@@ -1666,7 +1675,7 @@ class Qwen35TextModel(Model):
             present_state_name=present_recurrent,
         )
 
-        # 9. Transpose back: [B, N, S, H] -> [B, S, N*H]
+        # Transpose back: [B, N, S, H] -> [B, S, N*H]
         la_t_name = f"{basename}/la/Transpose"
         la_t_output = f"{la_t_name}/output_0"
         self.make_transpose(
@@ -1686,17 +1695,155 @@ class Qwen35TextModel(Model):
             ["batch_size", "sequence_length", v_dim],
         )
 
-        # 10. Gated RMSNorm: norm(output) * silu(z)
+        # Gated RMSNorm + output projection
+        self._make_linear_attention_output(
+            layer_id,
+            linear_attn,
+            la_flat_output,
+            z_name,
+        )
+
+    def _make_linear_attention_projections(self, layer_id, linear_attn, root_input):
+        """Build linear projections, conv weight initializer, and QKV transpose.
+
+        Returns:
+            (z_name, b_name, a_name, qkv_t_output, conv_weight_name)
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        conv_dim = self.linear_conv_dim
+
+        qkv_name = f"{basename}/in_proj_qkv/MatMul"
+        self.make_matmul(linear_attn.in_proj_qkv, qkv_name, root_input)
+
+        z_name = f"{basename}/in_proj_z/MatMul"
+        self.make_matmul(linear_attn.in_proj_z, z_name, root_input)
+
+        b_name = f"{basename}/in_proj_b/MatMul"
+        self.make_matmul(linear_attn.in_proj_b, b_name, root_input)
+
+        a_name = f"{basename}/in_proj_a/MatMul"
+        self.make_matmul(linear_attn.in_proj_a, a_name, root_input)
+
+        qkv_t_name = f"{basename}/qkv_transpose/Transpose"
+        qkv_t_output = f"{qkv_t_name}/output_0"
+        self.make_transpose(
+            qkv_t_name,
+            f"{qkv_name}/output_0",
+            self.io_dtype,
+            ["batch_size", conv_dim, "sequence_length"],
+            [0, 2, 1],
+        )
+
+        conv_weight_name = f"model.layers.{layer_id}.linear_attn.conv1d.weight"
+        self.make_initializer(linear_attn.conv1d.weight, conv_weight_name, to=self.io_dtype)
+
+        return z_name, b_name, a_name, qkv_t_output, conv_weight_name
+
+    def _make_linear_attention_normalize_and_gate(
+        self,
+        layer_id,
+        linear_attn,
+        conv_out_3d,
+        b_name,
+        a_name,
+    ):
+        """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
+
+        Args:
+            conv_out_3d: Conv output transposed to [B, S, conv_dim].
+            b_name: Name of the beta projection MatMul node.
+            a_name: Name of the alpha projection MatMul node.
+
+        Returns:
+            (q_scaled_output, k_norm_out, v_out, g_output, beta_output)
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        k_dim = self.linear_key_dim
+        v_dim = self.linear_value_dim
+        n_kv = self.linear_num_value_heads
+        n_k = self.linear_num_key_heads
+        hk = self.linear_key_head_dim
+
+        # Split into Q, K, V
+        split_qkv_name = f"{basename}/split_qkv/Split"
+        q_out = f"{split_qkv_name}/output_0"
+        k_out = f"{split_qkv_name}/output_1"
+        v_out = f"{split_qkv_name}/output_2"
+        self.make_node(
+            "Split",
+            [conv_out_3d, f"/model/constants/INT64/[{k_dim}, {k_dim}, {v_dim}]"],
+            [q_out, k_out, v_out],
+            name=split_qkv_name,
+            axis=-1,
+        )
+        self.make_value(q_out, self.io_dtype, ["batch_size", "sequence_length", k_dim])
+        self.make_value(k_out, self.io_dtype, ["batch_size", "sequence_length", k_dim])
+        self.make_value(v_out, self.io_dtype, ["batch_size", "sequence_length", v_dim])
+
+        # Per-head L2 normalize Q and K
+        q_norm_out = self._make_per_head_l2_normalize(f"{basename}/q_l2norm", q_out, n_k, hk)
+        k_norm_out = self._make_per_head_l2_normalize(f"{basename}/k_l2norm", k_out, n_k, hk)
+
+        # Scale Q by 1/sqrt(head_k_dim)
+        scale_name = self._get_shared_q_scale(hk)
+        q_scaled_name = f"{basename}/q_scaled/Mul"
+        self.make_mul(q_scaled_name, [q_norm_out, scale_name], self.io_dtype, ["batch_size", "sequence_length", k_dim])
+        q_scaled_output = f"{q_scaled_name}/output_0"
+
+        # beta = sigmoid(b)
+        beta_name = f"{basename}/beta/Sigmoid"
+        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", n_kv])
+        beta_output = f"{beta_name}/output_0"
+
+        # g = -exp(A_log) * softplus(a + dt_bias)
+        dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
+        self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=self.io_dtype)
+
+        neg_exp_a_name = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
+        neg_exp_a = (-linear_attn.A_log.data.exp()).detach()
+        self.make_initializer(neg_exp_a, neg_exp_a_name, to=self.io_dtype)
+
+        a_plus_dt_name = f"{basename}/decay/Add"
+        self.make_add(
+            a_plus_dt_name, [f"{a_name}/output_0", dt_bias_init], self.io_dtype, ["batch_size", "sequence_length", n_kv]
+        )
+        a_plus_dt_output = f"{a_plus_dt_name}/output_0"
+
+        softplus_name = f"{basename}/decay/Softplus"
+        softplus_output = f"{softplus_name}/output_0"
+        self.make_node("Softplus", [a_plus_dt_output], [softplus_output], name=softplus_name)
+        self.make_value(softplus_output, self.io_dtype, ["batch_size", "sequence_length", n_kv])
+
+        g_name = f"{basename}/decay/Mul"
+        self.make_mul(g_name, [neg_exp_a_name, softplus_output], self.io_dtype, ["batch_size", "sequence_length", n_kv])
+        g_output = f"{g_name}/output_0"
+
+        return q_scaled_output, k_norm_out, v_out, g_output, beta_output
+
+    def _make_linear_attention_output(
+        self,
+        layer_id,
+        linear_attn,
+        attn_output_3d,
+        z_name,
+    ):
+        """Build gated RMSNorm and output projection.
+
+        Args:
+            attn_output_3d: Attention output [B, S, v_dim] (3D packed).
+            z_name: Name of the z-gate projection MatMul node.
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
         z_output = f"{z_name}/output_0"
+
         gated_norm_output = self._make_gated_rms_norm(
             f"{basename}/gated_norm",
-            la_flat_output,
+            attn_output_3d,
             z_output,
             linear_attn.norm,
             layer_id,
         )
 
-        # 11. Output projection
         o_name = f"{basename}/out_proj/MatMul"
         self.make_matmul(linear_attn.out_proj, o_name, gated_norm_output)
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
@@ -1834,7 +1981,12 @@ class Qwen35TextModel(Model):
         target_out = f"{target_name}/output_0"
         self.make_concat(
             target_name,
-            ["/model/constants/INT64/[-1]", f"/model/constants/INT64/[{n_out}]", s_out, f"/model/constants/INT64/[{head_dim}]"],
+            [
+                "/model/constants/INT64/[-1]",
+                f"/model/constants/INT64/[{n_out}]",
+                s_out,
+                f"/model/constants/INT64/[{head_dim}]",
+            ],
             ir.DataType.INT64,
             [4],
             axis=0,
@@ -1842,7 +1994,9 @@ class Qwen35TextModel(Model):
 
         rs_name = f"{basename}/Reshape"
         rs_out = f"{rs_name}/output_0"
-        self.make_reshape(rs_name, [expand_out, target_out], self.io_dtype, ["batch_size", n_out, "sequence_length", head_dim])
+        self.make_reshape(
+            rs_name, [expand_out, target_out], self.io_dtype, ["batch_size", n_out, "sequence_length", head_dim]
+        )
         return rs_out
 
     def _make_scan_recurrence(
@@ -1971,7 +2125,9 @@ class Qwen35TextModel(Model):
         )
 
         # Unmerge state: [B*N, hk, hv] -> [B, N, hk, hv]
-        state_out_name = present_state_name if present_state_name else f"{scan_basename}/state_out_unmerge/Reshape/output_0"
+        state_out_name = (
+            present_state_name if present_state_name else f"{scan_basename}/state_out_unmerge/Reshape/output_0"
+        )
         state_out_rs_name = f"{scan_basename}/state_out_unmerge/Reshape"
         self.make_node(
             "Reshape",
@@ -2242,12 +2398,16 @@ class Qwen35TextModel(Model):
         z_sigmoid_output = f"{z_sigmoid_name}/output_0"
 
         z_silu_name = f"{basename}/z_silu/Mul"
-        self.make_mul(z_silu_name, [gate_name, z_sigmoid_output], self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_mul(
+            z_silu_name, [gate_name, z_sigmoid_output], self.io_dtype, ["batch_size", "sequence_length", v_dim]
+        )
         z_silu_output = f"{z_silu_name}/output_0"
 
         # output = norm * silu(z)
         gated_name = f"{basename}/gated/Mul"
-        self.make_mul(gated_name, [unflat_output, z_silu_output], self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_mul(
+            gated_name, [unflat_output, z_silu_output], self.io_dtype, ["batch_size", "sequence_length", v_dim]
+        )
         gated_output = f"{gated_name}/output_0"
 
         return gated_output
