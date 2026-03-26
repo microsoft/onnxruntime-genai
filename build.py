@@ -532,7 +532,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_TRT_RTX={'ON' if args.use_trt_rtx else 'OFF'}",
-        f"-DUSE_ROCM=OFF",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -680,7 +679,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, False, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -727,7 +726,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, False, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 

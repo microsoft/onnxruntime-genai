@@ -162,6 +162,7 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'arm64'

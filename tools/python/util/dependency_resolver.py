@@ -133,7 +133,7 @@ def _download_d3d12(destination_dir: PathLike):
     return _lib_path()
 
 
-def download_dependencies(use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike):
+def download_dependencies(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
     dependencies_dir = destination_dir / "dependencies"
     if not dependencies_dir.exists():
         dependencies_dir.mkdir(parents=True)
