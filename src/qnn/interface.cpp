@@ -95,7 +95,7 @@ bool IsQNNStatefulModel(const Model& model) {
           if (option.first == "genie_model") {
             std::string lower_value(option.second);
             std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
-              [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+                           [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
             return lower_value == "true";
           }
         }
