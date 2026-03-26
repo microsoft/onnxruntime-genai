@@ -25,6 +25,9 @@ parameters:
   type: boolean
 - name: ort_version
   type: string
+- name: ort_build_version
+  type: string
+  default: ''
 
 stages:
 - stage: python_packaging
@@ -70,6 +73,7 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -79,6 +83,7 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -88,6 +93,7 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
     - template: jobs/py-packaging-job.yml
@@ -99,6 +105,7 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.8')) }}:
     - template: jobs/py-packaging-job.yml
@@ -110,6 +117,7 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -119,6 +127,7 @@ stages:
         os: 'linux'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
     - template: jobs/py-packaging-job.yml
@@ -130,6 +139,7 @@ stages:
         os: 'linux'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.8')) }}:
     - template: jobs/py-packaging-job.yml
@@ -141,6 +151,7 @@ stages:
         os: 'linux'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if eq(parameters.enable_linux_rocm, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -150,6 +161,7 @@ stages:
         os: 'linux'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -158,3 +170,4 @@ stages:
         os: 'osx'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}

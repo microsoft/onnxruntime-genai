@@ -10,6 +10,9 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+- name: ort_build_version
+  type: string
+  default: ''
 
 steps:
 
@@ -52,6 +55,45 @@ steps:
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- ${{ if ne(parameters.ort_build_version, '') }}:
+  - bash: |
+      set -e -x
+      # macOS only supports CPU
+      package_name="Microsoft.ML.OnnxRuntime"
+
+      org_name="aiinfra"
+      feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+      feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
+      version="${{ parameters.ort_build_version }}"
+
+      url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+
+      echo "Downloading $package_name version $version"
+      download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
+      curl -L -o "$download_path" "$url"
+
+      extract_path="$(Agent.TempDirectory)/ort_build_extracted"
+      mkdir -p "$extract_path"
+      unzip -o "$download_path" -d "$extract_path"
+
+      ort_home="$(Build.Repository.LocalPath)/ort_build"
+      mkdir -p "$ort_home/include"
+      mkdir -p "$ort_home/lib"
+
+      # Copy headers
+      cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
+
+      # Copy libraries
+      platform="osx-arm64"
+      cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
+
+      echo "ORT_HOME: $ort_home"
+      ls -la "$ort_home/include/"
+      ls -la "$ort_home/lib/"
+      echo "##vso[task.setvariable variable=ORT_HOME_CMAKE_ARG]-DORT_HOME=$(Build.Repository.LocalPath)/ort_build"
+    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:CC="$env:LLVM_PREFIX\bin\clang"
@@ -63,9 +105,9 @@ steps:
       $env:CXX_aarch64_apple_darwin = $env:CXX
       Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
       Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
-      cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
+      cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin $(ORT_HOME_CMAKE_ARG)
     } else {
-      cmake --preset macos_$(arch)_$(ep)_$(build_config)
+      cmake --preset macos_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
     }
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'

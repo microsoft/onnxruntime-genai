@@ -31,6 +31,10 @@ parameters:
 - name: ort_version
   type: string
 
+- name: ort_build_version
+  type: string
+  default: ''
+
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
@@ -120,6 +124,8 @@ jobs:
 
   - name: feed_name
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
+  - name: ORT_HOME_CMAKE_ARG
+    value: ''
 
   steps:
   - script: |
@@ -166,6 +172,7 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
@@ -176,6 +183,7 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
@@ -184,6 +192,7 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

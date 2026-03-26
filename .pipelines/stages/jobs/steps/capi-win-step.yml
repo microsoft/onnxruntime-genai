@@ -14,6 +14,9 @@ parameters:
 - name: enable_winml
   type: boolean
   default: false
+- name: ort_build_version
+  type: string
+  default: ''
 
 steps:
 - bash: |
@@ -102,6 +105,54 @@ steps:
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- ${{ if ne(parameters.ort_build_version, '') }}:
+  - powershell: |
+      $ep = "$(ep)"
+      $arch = "$(arch)"
+
+      switch ($ep) {
+          "cuda" { $packageName = "Microsoft.ML.OnnxRuntime.Gpu.Windows" }
+          "directml" { $packageName = "Microsoft.ML.OnnxRuntime.DirectML" }
+          default { $packageName = "Microsoft.ML.OnnxRuntime" }
+      }
+
+      $orgName = "aiinfra"
+      $feedProject = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+      $feedId = "7982ae20-ed19-4a35-a362-a96ac99897b7"
+      $version = "${{ parameters.ort_build_version }}"
+
+      $url = "https://pkgs.dev.azure.com/$orgName/$feedProject/_apis/packaging/feeds/$feedId/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
+
+      Write-Host "Downloading $packageName version $version"
+      $downloadPath = "$(Agent.TempDirectory)\ort_build_pkg.zip"
+      Invoke-WebRequest -Uri $url -OutFile $downloadPath
+
+      $extractPath = "$(Agent.TempDirectory)\ort_build_extracted"
+      Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
+
+      $ortHome = "$(Build.Repository.LocalPath)\ort_build"
+      New-Item -ItemType Directory -Force -Path "$ortHome\include"
+      New-Item -ItemType Directory -Force -Path "$ortHome\lib"
+
+      # Copy headers
+      if ($ep -eq "cuda") {
+          $headerSrc = "$extractPath\buildTransitive\native\include"
+      } else {
+          $headerSrc = "$extractPath\build\native\include"
+      }
+      Copy-Item "$headerSrc\*" "$ortHome\include\" -Recurse -Force
+
+      # Copy libraries
+      $platform = if ($arch -eq "arm64") { "win-arm64" } else { "win-x64" }
+      Copy-Item "$extractPath\runtimes\$platform\native\*" "$ortHome\lib\" -Recurse -Force
+
+      Write-Host "ORT_HOME: $ortHome"
+      Get-ChildItem "$ortHome" -Recurse | Select-Object FullName
+      Write-Host "##vso[task.setvariable variable=ORT_HOME_CMAKE_ARG]-DORT_HOME=$ortHome"
+    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+    condition: ne(variables['ep'], 'winml')
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -DWINML_SDK_VERSION='$(ort_version)'
   displayName: 'Configure CMake C API with WinML (arm64, NO CUDA) - $(ort_version)'
@@ -115,13 +166,13 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG)
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config)
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
   displayName: 'Configure CMake C API without CUDA'
   condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
   workingDirectory: '$(Build.Repository.LocalPath)'

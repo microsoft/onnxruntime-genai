@@ -103,6 +103,11 @@ parameters:
       - dev
       - stable
 
+  - name: ort_build_version
+    displayName: 'OnnxRuntime nightly version for build-time compilation (e.g., 1.25.0-dev-20260125-1205-727db0d3dc). Leave empty to use the default version in ortlib.cmake.'
+    type: string
+    default: ''
+
   - name: custom_ort_package_versioned_name
     displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
     type: string
@@ -153,6 +158,7 @@ extends:
           build_config: ${{ parameters.build_config }}
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
+          ort_build_version: ${{ parameters.ort_build_version }}
 
       - template: stages/nuget-packaging-stage.yml
         parameters:

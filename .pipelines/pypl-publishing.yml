@@ -67,6 +67,11 @@ parameters:
       - 'relwithdebinfo'
       - 'debug'
 
+  - name: ort_build_version
+    displayName: 'OnnxRuntime nightly version for build-time compilation (e.g., 1.25.0-dev-20260125-1205-727db0d3dc). Leave empty to use the default version in ortlib.cmake.'
+    type: string
+    default: ''
+
 resources:
   repositories:
     - repository: 1esPipelines
@@ -111,6 +116,7 @@ extends:
             ort_version: ${{ parameters.ort_winml_version }}
           ${{ else }}:
             ort_version: '' # Not used for non winml builds.
+          ort_build_version: ${{ parameters.ort_build_version }}
 
       - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
           - template: stages/py-validation-stage.yml
