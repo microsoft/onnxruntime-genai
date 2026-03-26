@@ -118,6 +118,8 @@ steps:
       mkdir -p "$ort_home/lib"
 
       # Copy headers
+      # CUDA packages store headers in buildTransitive/native/include, while other
+      # ORT packages (CPU, ROCm) use build/native/include per NuGet package layout.
       if [ "$ep" = "cuda" ]; then
           cp -r "$extract_path/buildTransitive/native/include/"* "$ort_home/include/"
       else

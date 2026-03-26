@@ -135,6 +135,8 @@ steps:
       New-Item -ItemType Directory -Force -Path "$ortHome\lib"
 
       # Copy headers
+      # CUDA packages store headers in buildTransitive/native/include, while other
+      # ORT packages (CPU, DML) use build/native/include per NuGet package layout.
       if ($ep -eq "cuda") {
           $headerSrc = "$extractPath\buildTransitive\native\include"
       } else {

@@ -84,7 +84,11 @@ steps:
       cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
 
       # Copy libraries
-      platform="osx-arm64"
+      if [ "$(arch)" = "arm64" ]; then
+          platform="osx-arm64"
+      else
+          platform="osx-x64"
+      fi
       cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
 
       echo "ORT_HOME: $ort_home"
