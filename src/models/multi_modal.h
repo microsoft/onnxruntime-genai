@@ -51,14 +51,19 @@ struct VisionState : State {
   std::unique_ptr<MultiModalFeatures> image_features_;
 };
 
-// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
+// QwenVisionState: handles Qwen2.5-VL / Qwen3-VL vision encoding.
 //
-// vision.onnx is exported for exactly one image (Dynamo unrolls Python
-// for-loops at trace time, so an N-image dummy produces a graph that only
-// works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
+// Two strategies are used depending on the ONNX model and the input images:
+//
+// 1. Batched single-call (HuggingFace-like): when vision.onnx has a dynamic
+//    image_grid_thw dim-0 AND all images share the same (t,h,w) grid, all N
+//    images are processed in one Session::Run call — matching the original
+//    HuggingFace PyTorch behaviour.
+//
+// 2. Per-image loop: when images have different sizes, or the ONNX model has
+//    a static image_grid_thw dim-0 (e.g. QNN/NPU models exported with N=1),
+//    we iterate over images in C++, creating zero-copy sub-tensor views and
+//    writing each result into the pre-allocated image_features buffer.
 struct QwenVisionState : VisionState {
   using VisionState::VisionState;  // inherit constructor
 

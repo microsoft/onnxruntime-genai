@@ -54,6 +54,8 @@
             "filename": "dummy_vision.onnx",
             "spatial_merge_size": 2,
             "tokens_per_second": 2.0,
+            "patch_size": 14,
+            "window_size": 56,
             "inputs": {
                 "pixel_values": "pixel_values",
                 "image_grid_thw": "image_grid_thw"

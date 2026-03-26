@@ -150,7 +150,7 @@ DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 // ---------------------------------------------------------------------------
-// QwenVisionState: per-image slicing loop
+// QwenVisionState: batched single-call or per-image loop
 // ---------------------------------------------------------------------------
 
 DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -158,20 +158,24 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     State::SetRunOptions(model_.config_->model.vision.run_options.value());
   }
 
-  // Single image (or no image data): run the ONNX session directly.
+  // Single image (or no image data): always a direct call.
   if (num_images_ <= 1) {
     State::Run(*model_.vision_session_);
     return {};
   }
 
-  // Multi-image: vision.onnx is exported for exactly one image at a time.
+  // --- Multi-image: decide between batched call vs per-image loop ---
   //
-  // Dynamo unrolls Python for-loops at export time, so an N-image dummy
-  // input would produce a graph that only works for that exact N.  To
-  // support a variable number of images we export with N=1 and iterate
-  // here in C++, slicing out per-image views of pixel_values and
-  // image_grid_thw and writing each result directly into the correct
-  // offset of the pre-allocated image_features output buffer.
+  // Strategy:
+  //   1. Check if the ONNX model's image_grid_thw input has a DYNAMIC dim-0
+  //      (i.e. supports variable num_images in one call).
+  //   2. Check if all images share the same (t, h, w) grid — the vectorized
+  //      model code uses a uniform-grid assumption so batching only works
+  //      when grids are identical.
+  //   3. If both conditions are met → single State::Run (like HuggingFace).
+  //      Otherwise → per-image loop (handles any mix of image sizes, and
+  //      works with static/QNN models that only accept N=1).
+
   const std::string& pv_name = model_.config_->model.vision.inputs.pixel_values;
   const std::string& grid_name = model_.config_->model.vision.inputs.image_grid_thw;
 
@@ -192,8 +196,50 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     return {};
   }
 
-  OrtValue* pv_full = inputs_[pv_idx];
   OrtValue* grid_full = inputs_[grid_idx];
+  const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+
+  // Check if the ONNX model accepts dynamic num_images.
+  // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
+  bool model_supports_batch = false;
+  {
+    // Find image_grid_thw's ordinal index in the ONNX session's inputs.
+    auto session_input_names = model_.vision_session_->GetInputNames();
+    for (size_t si = 0; si < session_input_names.size(); ++si) {
+      if (session_input_names[si] == grid_name) {
+        auto grid_input_info = model_.vision_session_->GetInputTypeInfo(si);
+        auto grid_expected_shape = grid_input_info->GetTensorTypeAndShapeInfo().GetShape();
+        if (!grid_expected_shape.empty() && grid_expected_shape[0] <= 0) {
+          model_supports_batch = true;  // dim-0 is symbolic — accepts any N
+        }
+        break;
+      }
+    }
+  }
+
+  // Check if all images share the same (t, h, w) grid.
+  bool uniform_grid = true;
+  if (num_images_ > 1) {
+    int64_t t0 = grid_data[0], h0 = grid_data[1], w0 = grid_data[2];
+    for (int64_t img = 1; img < num_images_; ++img) {
+      if (grid_data[img * 3] != t0 || grid_data[img * 3 + 1] != h0 || grid_data[img * 3 + 2] != w0) {
+        uniform_grid = false;
+        break;
+      }
+    }
+  }
+
+  // --- Batched single-call path (like HuggingFace) ---
+  if (model_supports_batch && uniform_grid) {
+    // The model has dynamic image_grid_thw dim-0 and all images share the
+    // same grid.  Pass all N images' pixel_values and the full [N, 3]
+    // grid_thw in one call — the ONNX graph was vectorized to handle this.
+    State::Run(*model_.vision_session_);
+    return {};
+  }
+
+  // --- Per-image loop path (fallback for different-sized images or static models) ---
+  OrtValue* pv_full = inputs_[pv_idx];
   OrtValue* feat_full = outputs_[0];  // pre-allocated image_features output
 
   // Shapes: pixel_values[total_patches, patch_dim], image_features[total_logical_patches, hidden_size]
@@ -224,7 +270,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   size_t pv_element_size = element_size(pv_type);
   size_t feat_element_size = element_size(feat_type);
 
-  const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+  // grid_data already obtained above for the uniform-grid check.
   void* pv_raw = pv_full->GetTensorMutableRawData();
   void* feat_raw = feat_full->GetTensorMutableRawData();
   int64_t spatial_merge_size = model_.config_->model.vision.spatial_merge_size;

@@ -18,10 +18,10 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        const std::string& vision_attn_model,
                                        const std::string& patch_merger_model,
                                        int64_t spatial_merge_size,
-                                       bool use_qnn_attn,
-                                       const std::string& qnn_backend_path,
                                        int64_t patch_size,
-                                       int64_t window_size)
+                                       int64_t window_size,
+                                       bool use_qnn_attn,
+                                       const std::string& qnn_backend_path)
     // Match declaration order to avoid MSVC C5038 warning-as-error
     : use_qnn_attn_(use_qnn_attn),
       qnn_backend_path_(qnn_backend_path),
@@ -40,6 +40,26 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
   // Patch embed and patch merger sessions (CPU for now)
   patch_embed_session_ = OrtSession::Create(env_, pe_path.c_str(), nullptr);
   patch_merger_session_ = OrtSession::Create(env_, merger_path.c_str(), nullptr);
+
+  // Discover hidden dimensions from the ONNX model output type info so we
+  // don't have to hard-code values that differ across model sizes.
+  //
+  // patch_embed output shape: [num_patches, hidden_dim]  → dim[1] = hidden_dim
+  // patch_merger output shape: [merged_patches, merged_hidden] → dim[1] = merged_hidden
+  {
+    auto pe_out_info = patch_embed_session_->GetOutputTypeInfo(0);
+    auto pe_shape = pe_out_info->GetTensorTypeAndShapeInfo().GetShape();
+    // dim[1] is the embedding width; it must be a static (positive) value.
+    if (pe_shape.size() >= 2 && pe_shape[1] > 0) {
+      hidden_dim_ = pe_shape[1];
+    }
+
+    auto pm_out_info = patch_merger_session_->GetOutputTypeInfo(0);
+    auto pm_shape = pm_out_info->GetTensorTypeAndShapeInfo().GetShape();
+    if (pm_shape.size() >= 2 && pm_shape[1] > 0) {
+      merged_hidden_ = pm_shape[1];
+    }
+  }
 
   if (use_qnn_attn_) {
     // Ensure QNN provider is available
@@ -120,10 +140,15 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* pe_input_names[] = {pe_in_name.c_str()};
   OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
-  const int64_t num_patches = pixel_shape[1];
-  const int64_t hidden_dim = 1280;
-  std::vector<int64_t> pe_out_shape{num_patches, hidden_dim};
-  pe_out_buf_.resize(num_patches * hidden_dim);
+  // pixel_values layout is [num_patches, channels] — dim[0] is the patch count.
+  // (dim[1] is channels per patch, e.g. 1176 for Qwen2.5-VL, 1536 for Qwen3-VL.)
+  const int64_t num_patches = pixel_shape[0];
+  if (hidden_dim_ <= 0) {
+    throw std::runtime_error("Vision pipeline: patch_embed hidden dimension unknown — "
+                             "check patch_embed model output shape");
+  }
+  std::vector<int64_t> pe_out_shape{num_patches, hidden_dim_};
+  pe_out_buf_.resize(static_cast<size_t>(num_patches * hidden_dim_));
   auto pe_out_tensor = CreateTensor(pe_out_buf_.data(), pe_out_buf_.size(), pe_out_shape);
 
   auto pe_out_name = patch_embed_session_->GetOutputName(0);
@@ -137,7 +162,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const int64_t num_windows = seq_len / window_area;
 
   // Apply window reordering if indices available
-  reordered_buf_.resize(seq_len * hidden_dim);
+  reordered_buf_.resize(static_cast<size_t>(seq_len * hidden_dim_));
 
   if (!wnd_idx_.empty()) {
     // Validate window configuration
@@ -149,14 +174,15 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
       int64_t src_w = wnd_idx_[dst_w];
       if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
-      size_t offset_size = window_area * hidden_dim;
+      size_t offset_size = static_cast<size_t>(window_area * hidden_dim_);
       std::memcpy(reordered_buf_.data() + dst_w * offset_size,
                   pe_out_buf_.data() + src_w * offset_size,
                   offset_size * sizeof(float));
     }
   } else {
     // No window reordering - use sequential order
-    std::memcpy(reordered_buf_.data(), pe_out_buf_.data(), seq_len * hidden_dim * sizeof(float));
+    std::memcpy(reordered_buf_.data(), pe_out_buf_.data(),
+                static_cast<size_t>(seq_len * hidden_dim_) * sizeof(float));
   }
 
   // Check if vision_attn session expects a different sequence length (fixed shape model)
@@ -164,6 +190,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   auto& attn_input_tensor_info = attn_input_info->GetTensorTypeAndShapeInfo();
   auto attn_expected_shape = attn_input_tensor_info.GetShape();
 
+  // A positive dim[0] means the attn model has a STATIC input size (exported for a
+  // specific patch count); non-positive (0 or -1) means DYNAMIC — accept any size.
   int64_t expected_seq_len = (attn_expected_shape.size() >= 2 && attn_expected_shape[0] > 0) ? attn_expected_shape[0] : seq_len;
   int64_t actual_seq_len = seq_len;  // Mutable copy for padding adjustments
 
@@ -171,7 +199,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     // Model expects fixed sequence length - need to pad or error
     if (expected_seq_len > seq_len) {
       // Pad the reordered buffer with zeros to match model's expected size
-      reordered_buf_.resize(expected_seq_len * hidden_dim, 0.0f);
+      reordered_buf_.resize(static_cast<size_t>(expected_seq_len * hidden_dim_), 0.0f);
       actual_seq_len = expected_seq_len;  // Update actual_seq_len for subsequent operations
     } else {
       // Model expects smaller input - this is an error (image too large for fixed-shape model)
@@ -179,13 +207,13 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     }
   }
 
-  std::vector<int64_t> attn_shape{actual_seq_len, hidden_dim};
+  std::vector<int64_t> attn_shape{actual_seq_len, hidden_dim_};
   auto attn_in_tensor = CreateTensor(reordered_buf_.data(), reordered_buf_.size(), attn_shape);
   auto attn_in_name = vision_attn_session_->GetInputName(0);
   const char* attn_input_names[] = {attn_in_name.c_str()};
   OrtValue* attn_inputs[] = {attn_in_tensor.get()};
 
-  attn_out_buf_.resize(actual_seq_len * hidden_dim);
+  attn_out_buf_.resize(static_cast<size_t>(actual_seq_len * hidden_dim_));
   auto attn_out_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
   auto attn_out_name = vision_attn_session_->GetOutputName(0);
   const char* attn_output_names[] = {attn_out_name.c_str()};
@@ -199,9 +227,12 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   OrtValue* merger_inputs[] = {merger_in_tensor.get()};
 
   const int64_t merged_seq_len = actual_seq_len / window_area;  // One token per window after merging
-  const int64_t merged_hidden = 3584;
-  std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
-  merger_out_buf_.resize(merged_seq_len * merged_hidden);
+  if (merged_hidden_ <= 0) {
+    throw std::runtime_error("Vision pipeline: patch_merger hidden dimension unknown — "
+                             "check patch_merger model output shape");
+  }
+  std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden_};
+  merger_out_buf_.resize(static_cast<size_t>(merged_seq_len * merged_hidden_));
   auto merger_out_tensor = CreateTensor(merger_out_buf_.data(), merger_out_buf_.size(), merger_shape);
   auto merger_out_name = patch_merger_session_->GetOutputName(0);
   const char* merger_output_names[] = {merger_out_name.c_str()};
@@ -217,9 +248,9 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
       throw std::runtime_error("Vision pipeline reverse index size mismatch");
     }
     for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
-      std::memcpy(final_embeddings_buf_.data() + dst_w * merged_hidden,
-                  merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden,
-                  merged_hidden * sizeof(float));
+      std::memcpy(final_embeddings_buf_.data() + dst_w * merged_hidden_,
+                  merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden_,
+                  static_cast<size_t>(merged_hidden_) * sizeof(float));
     }
   } else {
     // No reverse reordering - use sequential order
@@ -228,7 +259,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   }
 
   last_seq_len_ = merged_seq_len;
-  last_hidden_size_ = merged_hidden;
+  last_hidden_size_ = merged_hidden_;
   return final_embeddings_buf_;
 }
 

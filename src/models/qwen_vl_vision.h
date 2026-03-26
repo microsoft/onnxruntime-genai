@@ -19,10 +19,10 @@ struct QwenVisionPipeline {
                      const std::string& vision_attn_model,
                      const std::string& patch_merger_model,
                      int64_t spatial_merge_size,
-                     bool use_qnn_attn = false,
-                     const std::string& qnn_backend_path = "QnnHtp.dll",
                      int64_t patch_size = 14,
-                     int64_t window_size = 56);
+                     int64_t window_size = 0,
+                     bool use_qnn_attn = false,
+                     const std::string& qnn_backend_path = "QnnHtp.dll");
   bool use_qnn_attn_{};
   std::string qnn_backend_path_{};
 
@@ -54,6 +54,11 @@ struct QwenVisionPipeline {
   std::unique_ptr<OrtSession> patch_embed_session_;
   std::unique_ptr<OrtSession> vision_attn_session_;
   std::unique_ptr<OrtSession> patch_merger_session_;
+
+  // Hidden dimension sizes read from the ONNX model output shapes at construction time.
+  // Populated in the constructor; -1 means the dimension is dynamic/unknown.
+  int64_t hidden_dim_{-1};    // patch_embed output dim[1] (e.g. 1152 for 3B, 1280 for 7B)
+  int64_t merged_hidden_{-1}; // patch_merger output dim[1] (e.g. 2048 for 3B, 3584 for 7B)
 
   std::vector<int64_t> wnd_idx_;  // window reordering indices (computed dynamically)
   std::vector<int64_t> rev_idx_;  // reverse ordering indices (argsort of wnd_idx)
