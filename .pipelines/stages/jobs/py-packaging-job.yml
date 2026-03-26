@@ -33,7 +33,10 @@ parameters:
 
 - name: ort_build_version
   type: string
-  default: ''
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
@@ -173,6 +176,7 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
@@ -184,6 +188,7 @@ jobs:
         build_config: ${{ parameters.build_config }}
         enable_winml: ${{ parameters.enable_winml }}
         ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
@@ -193,6 +198,7 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

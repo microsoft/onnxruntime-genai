@@ -16,7 +16,10 @@ parameters:
   default: false
 - name: ort_build_version
   type: string
-  default: ''
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
 
 steps:
 - bash: |
@@ -105,7 +108,7 @@ steps:
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if ne(parameters.ort_build_version, '') }}:
+- ${{ if ne(parameters.ort_build_version, 'default') }}:
   - powershell: |
       $ep = "$(ep)"
       $arch = "$(arch)"
@@ -121,7 +124,12 @@ steps:
       $feedId = "7982ae20-ed19-4a35-a362-a96ac99897b7"
       $version = "${{ parameters.ort_build_version }}"
 
-      $url = "https://pkgs.dev.azure.com/$orgName/$feedProject/_apis/packaging/feeds/$feedId/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
+      $source = "${{ parameters.ort_build_source }}"
+      if ($source -eq "Ort-Nightly") {
+          $url = "https://pkgs.dev.azure.com/$orgName/$feedProject/_apis/packaging/feeds/$feedId/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
+      } else {
+          $url = "https://www.nuget.org/api/v2/package/$packageName/$version"
+      }
 
       Write-Host "Downloading $packageName version $version"
       $downloadPath = "$(Agent.TempDirectory)\ort_build_pkg.zip"

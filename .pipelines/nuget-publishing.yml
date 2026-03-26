@@ -104,9 +104,17 @@ parameters:
       - stable
 
   - name: ort_build_version
-    displayName: 'OnnxRuntime nightly version for build-time compilation (e.g., 1.25.0-dev-20260125-1205-727db0d3dc). Leave empty to use the default version in ortlib.cmake.'
+    displayName: 'OnnxRuntime nightly version for build-time compilation (e.g., 1.25.0-dev-20260125-1205-727db0d3dc). Leave as ''default'' to use the default version in ortlib.cmake.'
     type: string
-    default: ''
+    default: 'default'
+
+  - name: ort_build_source
+    displayName: 'Package source for build-time ORT download. NuGet uses nuget.org, Ort-Nightly uses the ADO nightly feed.'
+    type: string
+    default: 'NuGet'
+    values:
+      - 'NuGet'
+      - 'Ort-Nightly'
 
   - name: custom_ort_package_versioned_name
     displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
@@ -159,6 +167,7 @@ extends:
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
           ort_build_version: ${{ parameters.ort_build_version }}
+          ort_build_source: ${{ parameters.ort_build_source }}
 
       - template: stages/nuget-packaging-stage.yml
         parameters:

@@ -12,7 +12,10 @@ parameters:
   default: 'release'
 - name: ort_build_version
   type: string
-  default: ''
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
 
 steps:
 
@@ -55,7 +58,7 @@ steps:
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if ne(parameters.ort_build_version, '') }}:
+- ${{ if ne(parameters.ort_build_version, 'default') }}:
   - bash: |
       set -e -x
       # macOS only supports CPU
@@ -66,7 +69,12 @@ steps:
       feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
       version="${{ parameters.ort_build_version }}"
 
-      url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+      source="${{ parameters.ort_build_source }}"
+      if [ "$source" = "Ort-Nightly" ]; then
+          url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+      else
+          url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
+      fi
 
       echo "Downloading $package_name version $version"
       download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
