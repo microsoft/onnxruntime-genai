@@ -10,7 +10,7 @@
 namespace Generators {
 
 void StreamingProcessor::InitVadFromConfig(Model& model) {
-  model_ = &model;  // Store for deferred creation via SetOption("vad_enabled", "true")
+  model_ = model.shared_from_this();  // Store for deferred creation via SetOption("vad_enabled", "true")
   auto& vad_config = model.config_->model.vad;
   if (vad_config.enabled) {
     EnableVadFromModel();

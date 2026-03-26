@@ -76,31 +76,25 @@ SileroVad::SileroVad(Model& model) {
   // Use the model's device input allocator — supports GPU if configured
   allocator_ = &model.p_device_inputs_->GetAllocator();
 
-  // Use the model's existing session options (inherits provider options, thread settings, etc.)
-  // VAD is a lightweight model that doesn't need its own provider configuration.
-  OrtSessionOptions* session_opts = model.session_options_.get();
-
-  // If VAD-specific session options are provided in config, create dedicated options
-  if (vad_config.session_options.has_value()) {
-    session_options_ = OrtSessionOptions::Create();
-    const auto& so = vad_config.session_options.value();
-    // Use configured thread counts if set, otherwise default to 1.
-    // Silero VAD is a ~2MB model with minimal compute (<1ms per window).
-    // Single-threaded execution avoids thread pool overhead which would exceed
-    // the inference time itself, and prevents contention with the main ASR model.
-    session_options_->SetIntraOpNumThreads(so.intra_op_num_threads.value_or(1));
-    session_options_->SetInterOpNumThreads(so.inter_op_num_threads.value_or(1));
-    session_opts = session_options_.get();
-  }
+  // Create session options via GenAI's CreateSessionOptionsFromConfig,
+  // following the same pattern as multi_modal.cpp for speech sessions.
+  // Uses VAD-specific session options if provided, otherwise falls back to decoder config.
+  session_options_ = OrtSessionOptions::Create();
+  model.CreateSessionOptionsFromConfig(
+      vad_config.session_options.has_value()
+          ? vad_config.session_options.value()
+          : model.config_->model.decoder.session_options,
+      *session_options_, false, true);
 
   // Load session through Model::CreateSession (handles model data spans, path resolution)
   std::string filename = vad_config.filename;
   if (filename.empty()) {
     throw std::runtime_error("VAD filename must be specified in genai_config.json when vad.enabled is true.");
   }
-  session_ = model.CreateSession(GetOrtEnv(), filename, session_opts);
+  session_ = model.CreateSession(GetOrtEnv(), filename, session_options_.get());
 
-  // Create run options from config if specified
+  // Create run options from config if specified,
+  // following the State::SetRunOptions pattern from multi_modal.cpp
   if (vad_config.run_options.has_value()) {
     run_options_ = OrtRunOptions::Create();
     for (const auto& [key, value] : vad_config.run_options.value()) {

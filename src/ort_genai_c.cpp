@@ -1136,7 +1136,7 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* pr
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value) {
+OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value) {
   OGA_TRY
   auto result = processor->GetOption(key);
   *value = AllocOgaString(result);

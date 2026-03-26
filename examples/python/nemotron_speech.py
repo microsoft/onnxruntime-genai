@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import numpy as np
+import psutil
 import onnxruntime_genai as og
 from common import get_config
 
@@ -58,12 +59,8 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     processor = og.StreamingProcessor(model)
 
     # Track memory before/after VAD init
-    try:
-        import psutil
-        process = psutil.Process()
-        mem_before_vad = process.memory_info().rss
-    except ImportError:
-        mem_before_vad = None
+    process = psutil.Process()
+    mem_before_vad = process.memory_info().rss
 
     # VAD is controlled via genai_config.json (disabled by default).
     # Override programmatically:
@@ -75,11 +72,8 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     else:
         print("  VAD: disabled")
 
-    if mem_before_vad is not None:
-        mem_after_vad = process.memory_info().rss
-        vad_mem_mb = (mem_after_vad - mem_before_vad) / (1024 * 1024)
-    else:
-        vad_mem_mb = None
+    mem_after_vad = process.memory_info().rss
+    vad_mem_mb = (mem_after_vad - mem_before_vad) / (1024 * 1024)
 
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -129,8 +123,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
         print(f"  VAD Metrics: {chunks_total} total chunks, {chunks_processed} processed, "
               f"{chunks_skipped} skipped ({chunks_skipped / max(chunks_total, 1) * 100:.1f}% compute saved)")
         print(f"  VAD Overhead: {vad_pct:.1f}% avg per chunk ({avg_vad_ms:.1f}ms)")
-        if vad_mem_mb is not None:
-            print(f"  VAD Memory: {vad_mem_mb:.1f}MB (Total Additional RSS)")
+        print(f"  VAD Memory: {vad_mem_mb:.1f}MB (Total Additional RSS)")
 
 
 def main():

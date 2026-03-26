@@ -68,7 +68,7 @@ struct SileroVad {
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
-  Ort::Allocator* allocator_{nullptr};
+  Ort::Allocator* allocator_{nullptr};  // Non-owning: borrowed from Model::p_device_inputs_->GetAllocator()
 
   int sample_rate_;
   float threshold_;

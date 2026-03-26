@@ -1197,7 +1197,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingPr
  * \param[out] value Pointer to store the value string. Caller must free with OgaDestroyString.
  * \return OgaResult on error, nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(OgaStreamingProcessor* processor, const char* key, const char** value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value);
 
 #ifdef __cplusplus
 }

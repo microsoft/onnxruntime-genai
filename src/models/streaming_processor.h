@@ -50,7 +50,7 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   void InitVadFromConfig(Model& model);
 
  private:
-  Model* model_{nullptr};  // Stored for deferred VAD creation via SetOption
+  std::shared_ptr<Model> model_;  // Shared ref for deferred VAD creation; Model lifetime managed by caller
   std::unique_ptr<SileroVad> vad_;
   int consecutive_silence_chunks_{0};
   int min_silence_chunks_{5};
