@@ -150,6 +150,7 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+    float blank_penalty{};
 
     struct Encoder {
       std::string filename;
