@@ -911,6 +911,32 @@ class Model:
         self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, ir.DataType.INT64, shape=shape)
 
+    def _gather_shape_dim(self, basename, shape_node_output, dim_idx, node_suffix=None):
+        """Extract one dimension from a shape tensor via Gather(axis=0) → Unsqueeze([0]).
+
+        Commonly used to decompose a shape vector into individual scalar dimensions that
+        can later be recombined (e.g. in Concat) to build a new shape for Reshape/Expand.
+
+        Args:
+            basename: Shared name prefix for all nodes in the enclosing subgraph.
+            shape_node_output: Output name of the upstream Shape node, e.g. ``"{shape}/output_0"``.
+            dim_idx: Which axis index to gather (0-based).
+            node_suffix: Node name suffix to disambiguate multiple calls, e.g. ``"1"``, ``"2"``.
+                Defaults to ``dim_idx + 1`` when omitted so that the first dimension (0) produces
+                ``Gather_1`` / ``Unsqueeze_1``, matching the conventional 1-based numbering used
+                throughout the graph-building methods.
+
+        Returns:
+            The name of the Unsqueeze node (its output is ``"{name}/output_0"``).
+        """
+        if node_suffix is None:
+            node_suffix = dim_idx + 1
+        gather_name = f"{basename}/Gather_{node_suffix}"
+        self.make_gather(gather_name, [shape_node_output, f"/model/constants/INT64/{dim_idx}"], dtype=ir.DataType.INT64, shape=[], axis=0)
+        unsqueeze_name = f"{basename}/Unsqueeze_{node_suffix}"
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
+        return unsqueeze_name
+
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("ConstantOfShape", inputs=[root_input], outputs=[output], name=name, value=value)
@@ -2237,6 +2263,77 @@ class Model:
         self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
         self.make_value(output_0, dtype=io_dtype, shape=shape)
 
+    def _make_head_layernorm(self, layer_id, norm_prefix, input_path, weight, num_heads, new_io_dtype, cast):
+        """Apply per-head SimplifiedLayerNorm: Reshape(B,S,D→B,S*N,H) → Norm → Reshape(B,S*N,H→B,S,N*H).
+
+        This is the building block for QK-norm, which normalises Q and K independently
+        over the head dimension before the attention operation.
+
+        Args:
+            layer_id: Index of the decoder layer.
+            norm_prefix: One of ``"q"`` or ``"k"``, used in node/weight names.
+            input_path: Value name of the (B, S, N*H) input tensor.
+            weight: The normalisation weight tensor from the HF model.
+            num_heads: Number of attention heads for this projection (``num_attn_heads`` for Q,
+                ``num_kv_heads`` for K).
+            new_io_dtype: Precision used inside the LayerNorm computation.
+            cast: Whether ``new_io_dtype != io_dtype`` and cast nodes must be inserted.
+
+        Returns:
+            The value name of the (B, S, N*H) output tensor after the second Reshape.
+        """
+        layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
+        old_io_dtype = self.io_dtype
+
+        # Reshape: (B, S, N*H) → (B, S*N, H)
+        reshape_1_name = f"/model/layers.{layer_id}/attn/{norm_prefix}_norm/Reshape_1"
+        reshape_1_inputs = [input_path, f"/model/constants/INT64/[0, -1, {self.head_size}]"]
+        reshape_1_output = f"{reshape_1_name}/output_0"
+        self.make_reshape(
+            reshape_1_name,
+            reshape_1_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length * num_heads", self.head_size],
+        )
+
+        # Build weight initializer
+        weight_name = f"model.layers.{layer_id}.attn.{norm_prefix}_norm.layernorm.weight"
+        self.make_initializer(weight + self.layernorm_attrs["add_offset"], weight_name, to=new_io_dtype)
+
+        # Apply SimplifiedLayerNorm (with optional cast wrapper)
+        layernorm_name = f"/model/layers.{layer_id}/attn/{norm_prefix}_norm/SimplifiedLayerNormalization"
+        layernorm_output = f"{layernorm_name}/output_0"
+        layernorm_inputs = [reshape_1_output, weight_name]
+        layernorm_outputs = [layernorm_output]
+        if cast:
+            layernorm_inputs, layernorm_outputs = self.make_layernorm_casts(
+                layernorm_name, layernorm_inputs, layernorm_outputs, old_io_dtype, new_io_dtype
+            )
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=layernorm_inputs,
+            outputs=layernorm_outputs,
+            name=layernorm_name,
+            **layernorm_kwargs,
+        )
+        self.make_value(
+            layernorm_outputs[0],
+            dtype=new_io_dtype,
+            shape=["batch_size", "sequence_length * num_heads", self.head_size],
+        )
+
+        # Reshape: (B, S*N, H) → (B, S, N*H)
+        reshape_2_name = f"/model/layers.{layer_id}/attn/{norm_prefix}_norm/Reshape_2"
+        reshape_2_inputs = [layernorm_output, f"/model/constants/INT64/[0, -1, {num_heads * self.head_size}]"]
+        self.make_reshape(
+            reshape_2_name,
+            reshape_2_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", num_heads * self.head_size],
+        )
+
+        return f"{reshape_2_name}/output_0"
+
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
         #
@@ -2247,113 +2344,15 @@ class Model:
         #  SimplifiedLayerNorm (BxSxNxH)
         #          |
         #       Reshape (BxSxD)
-
-        # Save kwargs shared by LayerNorm ops and precision types to use
-        layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
-        old_io_dtype = self.io_dtype
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
-        cast = old_io_dtype != new_io_dtype
+        cast = self.io_dtype != new_io_dtype
 
-        # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
-        q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
-        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
-        q_reshape_1_output = f"{q_reshape_1_name}/output_0"
-        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length * num_attention_heads", self.head_size])
-
-        # Make Q LayerNorm
-        q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
-        q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
-        q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_initializer(attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=new_io_dtype)
-
-        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
-        q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
-        q_layernorm_outputs = [q_layernorm_output]
-        if cast:
-            q_layernorm_inputs, q_layernorm_outputs = self.make_layernorm_casts(q_layernorm_name, q_layernorm_inputs, q_layernorm_outputs, old_io_dtype, new_io_dtype)
-
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=q_layernorm_inputs,
-            outputs=q_layernorm_outputs,
-            name=q_layernorm_name,
-            **layernorm_kwargs,
+        self.attention_attrs["q_path"] = self._make_head_layernorm(
+            layer_id, "q", self.attention_attrs["q_path"], attention.q_norm.weight, self.num_attn_heads, new_io_dtype, cast
         )
-        self.make_value(
-            q_layernorm_outputs[0],
-            dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_attention_heads", self.head_size],
+        self.attention_attrs["k_path"] = self._make_head_layernorm(
+            layer_id, "k", self.attention_attrs["k_path"], attention.k_norm.weight, self.num_kv_heads, new_io_dtype, cast
         )
-
-        # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
-        q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        q_reshape_2_inputs = [
-            q_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.num_attn_heads * self.head_size}]",
-        ]
-        self.make_reshape(
-            q_reshape_2_name,
-            q_reshape_2_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
-        )
-
-        # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
-        k_reshape_1_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
-        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
-        k_reshape_1_output = f"{k_reshape_1_name}/output_0"
-        self.make_reshape(
-            k_reshape_1_name,
-            k_reshape_1_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
-        )
-
-        # Make K LayerNorm
-        k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
-        k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
-        k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_initializer(
-            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=new_io_dtype
-        )
-
-        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
-        k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
-        k_layernorm_outputs = [k_layernorm_output]
-        if cast:
-            k_layernorm_inputs, k_layernorm_outputs = self.make_layernorm_casts(
-                k_layernorm_name, k_layernorm_inputs, k_layernorm_outputs, old_io_dtype, new_io_dtype
-            )
-
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=k_layernorm_inputs,
-            outputs=k_layernorm_outputs,
-            name=k_layernorm_name,
-            **layernorm_kwargs,
-        )
-        self.make_value(
-            k_layernorm_outputs[0],
-            dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
-        )
-
-        # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
-        k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        k_reshape_2_inputs = [
-            k_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.num_kv_heads * self.head_size}]",
-        ]
-        self.make_reshape(
-            k_reshape_2_name,
-            k_reshape_2_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_kv_heads * self.head_size],
-        )
-
-        # Update q_path and k_path now
-        self.attention_attrs["q_path"] = f"{q_reshape_2_name}/output_0"
-        self.attention_attrs["k_path"] = f"{k_reshape_2_name}/output_0"
 
     def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
         # Make subgraph that repeats tensor of shape (batch_size, sequence_length, num_kv_heads, head_size)
@@ -2460,30 +2459,11 @@ class Model:
 
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
-        gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0"]
-        self.make_gather(gather_1_name, gather_1_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
-        gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/1"]
-        self.make_gather(gather_2_name, gather_2_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
-        gather_3_name = f"{basename}/Gather_3"
-        gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/2"]
-        self.make_gather(gather_3_name, gather_3_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_3_name = f"{basename}/Unsqueeze_3"
-        unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
-        gather_4_name = f"{basename}/Gather_4"
-        gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/3"]
-        self.make_gather(gather_4_name, gather_4_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=[1])
+        shape_1_output = f"{shape_1_name}/output_0"
+        unsqueeze_1_name = self._gather_shape_dim(basename, shape_1_output, 0)
+        unsqueeze_2_name = self._gather_shape_dim(basename, shape_1_output, 1)
+        unsqueeze_3_name = self._gather_shape_dim(basename, shape_1_output, 2)
+        unsqueeze_4_name = self._gather_shape_dim(basename, shape_1_output, 3)
         concat_2_name = f"{basename}/Concat_2"
         concat_2_inputs = [
             f"{unsqueeze_1_name}/output_0",
@@ -3675,6 +3655,37 @@ class Model:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
+    def _make_softcap_nodes(self, lm_name, softcap, final_output, seq_dim):
+        """Build the logit softcapping subgraph: Div → Tanh → Mul.
+
+        Softcapping keeps logits in a bounded range by computing
+        ``output = softcap * tanh(logits / softcap)``.
+
+        Args:
+            lm_name: Name of the upstream node whose ``/output_0`` feeds into the Div.
+            softcap: The scalar softcap value.
+            final_output: The output name for the last Mul node (either ``"logits"`` or
+                the node's own ``/output_0``, determined by the caller).
+            seq_dim: Sequence-length dimension label (``"sequence_length"`` or ``1``).
+
+        Returns:
+            The name of the final Mul node (same as the ``softcap/Mul`` base name).
+        """
+        dtype_str = self.to_str_dtype(self.io_dtype)
+        shape = ["batch_size", seq_dim, self.vocab_size]
+
+        div_name = "/lm_head/softcap/Div"
+        self.make_div(div_name, [f"{lm_name}/output_0", f"/model/constants/{dtype_str}/{softcap}"], dtype=self.io_dtype, shape=shape)
+
+        tanh_name = "/lm_head/softcap/Tanh"
+        self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=shape)
+
+        mul_name = "/lm_head/softcap/Mul"
+        mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{dtype_str}/{softcap}"]
+        self.make_node("Mul", inputs=mul_inputs, outputs=[final_output], name=mul_name)
+        self.make_value(final_output, self.io_dtype, shape=shape)
+        return mul_name
+
     def make_lm_head(self, lm_head):
         # Check if there are ops to insert after MatMul
         bias_exists = lm_head.bias is not None
@@ -3762,32 +3773,8 @@ class Model:
 
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
-            div_name = "/lm_head/softcap/Div"
-            div_inputs = [
-                f"{lm_name}/output_0",
-                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}",
-            ]
-            self.make_div(
-                div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size]
-            )
-
-            tanh_name = "/lm_head/softcap/Tanh"
-            self.make_tanh(
-                tanh_name,
-                f"{div_name}/output_0",
-                dtype=self.io_dtype,
-                shape=["batch_size", seq_dim, self.vocab_size],
-            )
-
-            mul_name = "/lm_head/softcap/Mul"
-            mul_inputs = [
-                f"{tanh_name}/output_0",
-                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}",
-            ]
-            mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
-            self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
-            lm_name = mul_name
+            mul_output = "logits" if not any(exists_checks[4:]) else "/lm_head/softcap/Mul/output_0"
+            lm_name = self._make_softcap_nodes(lm_name, self.lm_head_attrs["softcap"], mul_output, seq_dim)
 
         if cast_exists:
             # Add final cast from io_dtype to logits_dtype
@@ -4338,18 +4325,8 @@ class Model:
         self.make_shape(shape_1_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
-        gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0"]
-        self.make_gather(gather_1_name, gather_1_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/1"]
-        self.make_gather(gather_2_name, gather_2_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
-        unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
+        unsqueeze_1_name = self._gather_shape_dim(basename, f"{shape_1_name}/output_0", 0)
+        unsqueeze_2_name = self._gather_shape_dim(basename, f"{shape_2_name}/output_0", 1)
 
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
         concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/[1]"]
