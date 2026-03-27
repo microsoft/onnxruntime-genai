@@ -71,18 +71,42 @@ class GraniteModel(MistralModel):
 
 class GraniteMoeHybridModel(GraniteModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # GraniteMoeHybrid uses shared_intermediate_size for the always-on dense MLP
-        # (when num_local_experts=0). Override so the base model reads the correct width.
+        # GraniteMoeHybrid's always-on dense MLP uses shared_intermediate_size,
+        # not the MoE intermediate_size. Set before super().__init__ so that
+        # self.intermediate_size (base.py:64) gets the correct value for ONNX shapes.
+        self._mlp_intermediate_size = config.shared_intermediate_size
         config.intermediate_size = config.shared_intermediate_size
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_layer(self, layer_id, layer):
-        # GraniteMoeHybrid stores the MLP as `shared_mlp` with a fused input_linear
-        # (gate+up concatenated, shape [2*intermediate_size, hidden_size]) and
-        # output_linear (down projection). Adapt to the standard layout expected by
-        # make_mlp_unpacked_regular (gate_up_proj) and make_mlp_proj (down_proj).
+        # Access shared_mlp directly. Wire the attribute names that base class
+        # expects: gate_up_proj (fused gate+up input_linear) and down_proj (output_linear).
         mlp = layer.shared_mlp
         mlp.gate_up_proj = mlp.input_linear
         mlp.down_proj = mlp.output_linear
         layer.mlp = mlp
         super().make_layer(layer_id, layer)
+
+    def make_mlp_unpacked_regular(self, layer_id, mlp, gate_up_linear, root_input):
+        # Override to split input_linear at _mlp_intermediate_size explicitly,
+        # making the slicing independent of self.intermediate_size.
+        import torch
+        s = self._mlp_intermediate_size
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=s)
+        mlp.gate_proj.weight = torch.nn.Parameter(
+            gate_up_linear.weight[:s, :], requires_grad=False
+        )
+        mlp.gate_proj.bias = (
+            None
+            if gate_up_linear.bias is None
+            else torch.nn.Parameter(gate_up_linear.bias[:s], requires_grad=False)
+        )
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=s)
+        mlp.up_proj.weight = torch.nn.Parameter(
+            gate_up_linear.weight[s:, :], requires_grad=False
+        )
+        mlp.up_proj.bias = (
+            None
+            if gate_up_linear.bias is None
+            else torch.nn.Parameter(gate_up_linear.bias[s:], requires_grad=False)
+        )
