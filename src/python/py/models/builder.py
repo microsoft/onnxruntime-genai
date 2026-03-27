@@ -105,6 +105,12 @@ def check_extra_options(kv_pairs, execution_provider):
         )
         kv_pairs["enable_webgpu_graph"] = False
 
+    if kv_pairs.get("compact_attention_mask", False) and execution_provider != "webgpu":
+        print(
+            "WARNING: compact_attention_mask is currently only supported with WebGPU execution provider. Disabling compact_attention_mask."
+        )
+        kv_pairs["compact_attention_mask"] = False
+
 
 def parse_extra_options(kv_items, execution_provider):
     """

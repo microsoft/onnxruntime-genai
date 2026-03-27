@@ -656,7 +656,13 @@ class Model:
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         if self.extra_options.get("compact_attention_mask", False):
-            genai_config["model"]["decoder"]["compact_attention_mask"] = True
+            if self.attention_attrs["op_type"] != "GroupQueryAttention":
+                print(
+                    "WARNING: compact_attention_mask is only supported with GroupQueryAttention. "
+                    f"Current attention op is {self.attention_attrs['op_type']}. Disabling compact_attention_mask."
+                )
+            else:
+                genai_config["model"]["decoder"]["compact_attention_mask"] = True
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
@@ -4463,7 +4469,7 @@ class Model:
 
         # Cast from INT64 to INT32
         cast_name = f"{attn_mask_basename}/Cast"
-        self.make_cast(cast_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        self.make_cast(cast_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
 
         # Reshape from [batch_size, 1] to [batch_size]
         reshape_name = f"{attn_mask_basename}/Reshape"

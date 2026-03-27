@@ -455,11 +455,10 @@ void DefaultPositionInputs::CreateAndInitializeCompactAttentionMask(DeviceSpan<i
 void DefaultPositionInputs::UpdateCompactAttentionMask() {
   // In compact mode, attention_mask has shape [batch_size, 1] containing total seq len per batch.
   // Each decode step adds one token, so increment each value by 1.
+  // Use CpuSpan() as the source of truth — avoids per-token device-to-host readback.
+  // This is safe because all non-fast-path updates go through CpuSpan() + CopyCpuToDevice().
   auto byte_span = attention_mask_->GetByteSpan();
-  // CopyDeviceToCpu() ensures the CPU buffer reflects the current device contents before reading.
-  // This is needed because the WebGPU fast path writes directly to GPU memory, so CpuSpan() alone
-  // would read stale/uninitialized data.
-  auto cpu_data = byte_span.CopyDeviceToCpu();
+  auto cpu_data = byte_span.CpuSpan();
   if (type_ == Ort::TypeToTensorType<int32_t>) {
     auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
     for (int64_t i = 0; i < attention_mask_shape_[0]; i++)
