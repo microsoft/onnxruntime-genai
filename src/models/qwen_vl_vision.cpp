@@ -27,7 +27,9 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
       qnn_backend_path_(qnn_backend_path),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
-      window_size_(window_size),
+      window_size_(window_size > 0
+                       ? window_size
+                       : patch_size * spatial_merge_size * 2),
       env_(env) {
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)
   auto toOrtPath = [](const std::string& s) -> std::basic_string<ORTCHAR_T> {
@@ -144,8 +146,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   // (dim[1] is channels per patch, e.g. 1176 for Qwen2.5-VL, 1536 for Qwen3-VL.)
   const int64_t num_patches = pixel_shape[0];
   if (hidden_dim_ <= 0) {
-    throw std::runtime_error("Vision pipeline: patch_embed hidden dimension unknown — "
-                             "check patch_embed model output shape");
+    throw std::runtime_error(
+        "Vision pipeline: patch_embed hidden dimension unknown - check patch_embed model output shape");
   }
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim_};
   pe_out_buf_.resize(static_cast<size_t>(num_patches * hidden_dim_));
@@ -227,9 +229,13 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   OrtValue* merger_inputs[] = {merger_in_tensor.get()};
 
   const int64_t merged_seq_len = actual_seq_len / window_area;  // One token per window after merging
+  // Logical output length based on the original (unpadded) sequence length.
+  // Padding may have increased actual_seq_len, but downstream consumers expect
+  // the token count derived from the real grid dimensions.
+  const int64_t logical_merged_len = seq_len / window_area;
   if (merged_hidden_ <= 0) {
-    throw std::runtime_error("Vision pipeline: patch_merger hidden dimension unknown — "
-                             "check patch_merger model output shape");
+    throw std::runtime_error(
+        "Vision pipeline: patch_merger hidden dimension unknown - check patch_merger model output shape");
   }
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden_};
   merger_out_buf_.resize(static_cast<size_t>(merged_seq_len * merged_hidden_));
@@ -243,7 +249,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   final_embeddings_buf_.resize(merger_out_buf_.size());
 
   if (!rev_idx_.empty()) {
-    // Apply reverse reordering
+    // Apply reverse reordering for the logical (non-padded) windows
     if (static_cast<int64_t>(rev_idx_.size()) != num_windows) {
       throw std::runtime_error("Vision pipeline reverse index size mismatch");
     }
@@ -252,13 +258,21 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
                   merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden_,
                   static_cast<size_t>(merged_hidden_) * sizeof(float));
     }
+    // Copy any remaining (padded) windows sequentially so the buffer is fully initialized
+    if (merged_seq_len > num_windows) {
+      std::memcpy(final_embeddings_buf_.data() + num_windows * merged_hidden_,
+                  merger_out_buf_.data() + num_windows * merged_hidden_,
+                  static_cast<size_t>((merged_seq_len - num_windows) * merged_hidden_) * sizeof(float));
+    }
   } else {
     // No reverse reordering - use sequential order
     std::memcpy(final_embeddings_buf_.data(), merger_out_buf_.data(),
                 merger_out_buf_.size() * sizeof(float));
   }
 
-  last_seq_len_ = merged_seq_len;
+  // Report the logical (unpadded) output length so downstream consumers
+  // see the correct number of image tokens derived from the real grid.
+  last_seq_len_ = logical_merged_len;
   last_hidden_size_ = merged_hidden_;
   return final_embeddings_buf_;
 }

@@ -57,8 +57,8 @@ struct QwenVisionPipeline {
 
   // Hidden dimension sizes read from the ONNX model output shapes at construction time.
   // Populated in the constructor; -1 means the dimension is dynamic/unknown.
-  int64_t hidden_dim_{-1};    // patch_embed output dim[1] (e.g. 1152 for 3B, 1280 for 7B)
-  int64_t merged_hidden_{-1}; // patch_merger output dim[1] (e.g. 2048 for 3B, 3584 for 7B)
+  int64_t hidden_dim_{-1};     // patch_embed output dim[1] (e.g. 1152 for 3B, 1280 for 7B)
+  int64_t merged_hidden_{-1};  // patch_merger output dim[1] (e.g. 2048 for 3B, 3584 for 7B)
 
   std::vector<int64_t> wnd_idx_;  // window reordering indices (computed dynamically)
   std::vector<int64_t> rev_idx_;  // reverse ordering indices (argsort of wnd_idx)

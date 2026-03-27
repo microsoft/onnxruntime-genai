@@ -78,10 +78,11 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
 def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, relative_image_paths):
     """Test processing multiple images with Qwen/Fara models.
 
-    The qwen3-vl dummy vision model has dynamic image_grid_thw dim-0 ('num_images'),
-    so it exercises the batched single-call path in QwenVisionState::Run when images
-    share the same grid.  The qwen (2.5-VL) model has static dim-0 ('1'), so it
-    uses the per-image loop path.
+    This validates that the multimodal processor can handle multiple images that
+    share the same grid layout.  The qwen3-vl dummy vision model uses a dynamic
+    image_grid_thw dim-0 ("num_images"), while the qwen (2.5-VL) model uses a
+    static dim-0 ("1"), so both configurations are covered by this preprocessing
+    test.
     """
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
@@ -111,7 +112,7 @@ def test_qwen3_vl_vision_dynamic_grid_dim(test_data_path):
     path in QwenVisionState::Run.  When image_grid_thw dim-0 is symbolic (dynamic),
     the runtime can pass all images in one call instead of looping per-image.
     """
-    import onnx
+    onnx = pytest.importorskip("onnx")
 
     vision_path = os.path.join(
         test_data_path, "qwen3-vl-vision-preprocessing", "dummy_vision.onnx"
