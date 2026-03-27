@@ -108,7 +108,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
+            opset_imports={"": 23, "com.microsoft": 1},
             name="main_graph",
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
@@ -949,6 +949,11 @@ class Model:
     def make_greater_or_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
+
+    def make_and(self, name, inputs, shape):
+        output = f"{name}/output_0"
+        self.make_node("And", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_isinf(self, name, root_input, shape):
