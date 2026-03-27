@@ -900,7 +900,11 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         return flat_cos, flat_sin
 
     def load_weights(self, input_path):
-        # Load the Hugging Face model
+        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
+        # which loads weights directly via QuantModel
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
         print("Loading Qwen3VLForConditionalGeneration model...")
         return Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
