@@ -42,8 +42,6 @@ def _onnxruntime_dependency() -> str:
         ort_version = os.environ.get('ONNXRUNTIME_VERSION', '1.23.0')
     elif package_name == "onnxruntime-genai-directml":
         dependency = "onnxruntime-directml"
-    elif package_name == "onnxruntime-genai-rocm":
-        dependency = "onnxruntime-rocm"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
     
