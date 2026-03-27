@@ -36,12 +36,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   // Read vision geometry from genai_config.json; fall back to sensible defaults.
   int64_t spatial_merge = config_->model.vision.spatial_merge_size;  // default 2
   int64_t patch_size = config_->model.vision.patch_size;
+  // window_size == 0 is auto-computed inside QwenVisionPipeline constructor
   int64_t window_size = config_->model.vision.window_size;
-  if (window_size == 0) {
-    // Auto-compute: window_size = patch_size * spatial_merge * 2
-    // Qwen2.5-VL: 14 * 2 * 2 = 56; Qwen3-VL: 16 * 2 * 2 = 64
-    window_size = patch_size * spatial_merge * 2;
-  }
 
   vision_pipeline_ = std::make_unique<QwenVisionPipeline>(
       ort_env, patch_embed_path, vision_attn_path, patch_merger_path,

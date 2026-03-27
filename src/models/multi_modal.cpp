@@ -285,6 +285,13 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   bool temporal_padded = (total_patches != total_grid_tokens && total_hw > 0 && total_patches % total_hw == 0);
   int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
 
+  // Validate that the pre-allocated output buffer is large enough for all images
+  int64_t expected_total_feats = total_grid_tokens / merge_sq;
+  if (total_feats < expected_total_feats)
+    throw std::runtime_error("pre-allocated image_features dim 0 (" + std::to_string(total_feats) +
+                             ") is smaller than expected (" + std::to_string(expected_total_feats) +
+                             ") for " + std::to_string(num_images_) + " images");
+
   int64_t patch_offset = 0;
   int64_t feat_offset = 0;
   for (int64_t img = 0; img < num_images_; ++img) {
