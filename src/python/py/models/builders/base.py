@@ -16,6 +16,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from onnx_ir import tape as ir_tape
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -1842,109 +1843,51 @@ class Model:
 
         Both If nodes use the same condition and independently select their respective caches.
         """
-        cos_if_name = f"{basename}/cos/If"
 
-        cos_large_for_split = ir.node(
-            "Constant",
-            [],
-            outputs=[
-                ir.Value(
-                    name=f"{cos_cache_large_name}_split",
-                    type=ir.TensorType(self.io_dtype),
-                    shape=ir.Shape(cos_cache_large.shape),
-                )
-            ],
-            name="/large/cos_cache/Constant_split_cos",
-            attributes=dict(value=ir.tensor(cos_cache_large)),
+        def _make_cache_if_node(cache_large, cache_small, cache_name, large_const_name, small_const_name, if_name):
+            """Build one If node that selects between large and small caches using Tape."""
+            then_tape = ir_tape.Tape()
+            large_out = then_tape.op("Constant", [], {"value": ir.tensor(cache_large)}, name=large_const_name)
+            large_out.type = ir.TensorType(self.io_dtype)
+            large_out.shape = ir.Shape(cache_large.shape)
+
+            else_tape = ir_tape.Tape()
+            small_out = else_tape.op("Constant", [], {"value": ir.tensor(cache_small)}, name=small_const_name)
+            small_out.type = ir.TensorType(self.io_dtype)
+            small_out.shape = ir.Shape(small_cache_shape)
+
+            self.make_node(
+                "If",
+                inputs=[f"{greater_name}/output_0"],
+                outputs=[cache_name],
+                name=if_name,
+                then_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[large_out],
+                    nodes=list(then_tape.nodes),
+                    name=f"large_{cache_name}_graph",
+                ),
+                else_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[small_out],
+                    nodes=list(else_tape.nodes),
+                    name=f"small_{cache_name}_graph",
+                ),
+            )
+            self.make_value(cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
+        _make_cache_if_node(
+            cos_cache_large, cos_cache_small, cos_cache_name,
+            f"/large/{cos_cache_large_name}/Constant_split",
+            f"/small/{cos_cache_small_name}/Constant_split",
+            f"{basename}/cos/If",
         )
-
-        cos_small_for_split = ir.node(
-            "Constant",
-            [],
-            outputs=[
-                ir.Value(
-                    name=f"{cos_cache_small_name}_split",
-                    type=ir.TensorType(self.io_dtype),
-                    shape=ir.Shape(small_cache_shape),
-                )
-            ],
-            name="/small/cos_cache/Constant_split_cos",
-            attributes=dict(value=ir.tensor(cos_cache_small)),
+        _make_cache_if_node(
+            sin_cache_large, sin_cache_small, sin_cache_name,
+            f"/large/{sin_cache_large_name}/Constant_split",
+            f"/small/{sin_cache_small_name}/Constant_split",
+            f"{basename}/sin/If",
         )
-
-        self.make_node(
-            "If",
-            inputs=[f"{greater_name}/output_0"],
-            outputs=[cos_cache_name],
-            name=cos_if_name,
-            then_branch=ir.Graph(
-                inputs=[],
-                outputs=[cos_large_for_split.outputs[0]],
-                nodes=[cos_large_for_split],
-                name="large_cos_cache_graph",
-            ),
-            else_branch=ir.Graph(
-                inputs=[],
-                outputs=[cos_small_for_split.outputs[0]],
-                nodes=[cos_small_for_split],
-                name="small_cos_cache_graph",
-            ),
-        )
-
-        # Create separate If node for sin_cache only
-        sin_if_name = f"{basename}/sin/If"
-
-        # Create unique constant nodes for sin to avoid tensor sharing
-        sin_large_for_split = ir.node(
-            "Constant",
-            [],
-            outputs=[
-                ir.Value(
-                    name=f"{sin_cache_large_name}_split",
-                    type=ir.TensorType(self.io_dtype),
-                    shape=ir.Shape(sin_cache_large.shape),
-                )
-            ],
-            name="/large/sin_cache/Constant_split_sin",
-            attributes=dict(value=ir.tensor(sin_cache_large)),
-        )
-
-        sin_small_for_split = ir.node(
-            "Constant",
-            [],
-            outputs=[
-                ir.Value(
-                    name=f"{sin_cache_small_name}_split",
-                    type=ir.TensorType(self.io_dtype),
-                    shape=ir.Shape(small_cache_shape),
-                )
-            ],
-            name="/small/sin_cache/Constant_split_sin",
-            attributes=dict(value=ir.tensor(sin_cache_small)),
-        )
-
-        self.make_node(
-            "If",
-            inputs=[f"{greater_name}/output_0"],
-            outputs=[sin_cache_name],
-            name=sin_if_name,
-            then_branch=ir.Graph(
-                inputs=[],
-                outputs=[sin_large_for_split.outputs[0]],
-                nodes=[sin_large_for_split],
-                name="large_sin_cache_graph",
-            ),
-            else_branch=ir.Graph(
-                inputs=[],
-                outputs=[sin_small_for_split.outputs[0]],
-                nodes=[sin_small_for_split],
-                name="small_sin_cache_graph",
-            ),
-        )
-
-        # Create output values
-        self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
-        self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
     def make_rotary_embedding(self, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
@@ -2159,14 +2102,25 @@ class Model:
         #                             Add-------------> output (1)
         #                              |
         #                      SimplifiedLayerNorm----> output (0)
-        make_add_name = f"{basename}/Add"
-        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        add_name = f"{basename}/Add"
+        if output_3 is None:
+            output_3 = f"{add_name}/output_0"
 
-        make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
+        # Resolve named inputs and pre-register the skip-connection output.
+        root_val = self.make_value(root_input)
+        skip_val = self.make_value(skip_input)
+        added_out = self.make_value(output_3, io_dtype, ["batch_size", "sequence_length", self.hidden_size])
+
+        tape = ir_tape.Tape(self.model.graph)
+        tape.op("Add", [root_val, skip_val], output=added_out, name=add_name)
+
+        for node in tape.nodes:
+            if node.name:
+                self.node_names.add(node.name)
+
+        # Compose: feed the Add output into the RMS-norm subgraph.
         self._make_simplified_layer_norm(
-            make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape
+            f"{basename}/skip_simplified_layer_norm", output_3, weight_name, output_0, io_dtype, shape=shape
         )
 
     # This expansion contrib-op can be updated / deprecated in the future.
@@ -2180,19 +2134,31 @@ class Model:
         #                             Add-------------> output (1)
         #                              |
         #                      LayerNormalization-----> output (0)
-        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
-        make_add_name = f"{basename}/Add"
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        add_name = f"{basename}/Add"
+        if output_3 is None:
+            output_3 = f"{add_name}/output_0"
 
-        make_layer_norm_name = f"{basename}/LayerNormalization"
-        inputs = [output_3, weight_name, bias_name]
+        # Resolve named inputs and pre-register both outputs.
+        root_val = self.make_value(root_input)
+        skip_val = self.make_value(skip_input)
+        weight_val = self.make_value(weight_name)
+        bias_val = self.make_value(bias_name)
+        added_out = self.make_value(output_3, io_dtype, ["batch_size", "sequence_length", self.hidden_size])
+        final_out = self.make_value(output_0, io_dtype, shape)
 
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        kwargs.update({"axis": -1, "stash_type": 1})
+        tape = ir_tape.Tape(self.model.graph)
+        tape.op("Add", [root_val, skip_val], output=added_out, name=add_name)
+        tape.op(
+            "LayerNormalization",
+            [added_out, weight_val, bias_val],
+            {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1},
+            output=final_out,
+            name=f"{basename}/LayerNormalization",
+        )
 
-        self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
-        self.make_value(output_0, io_dtype, shape=shape)
+        for node in tape.nodes:
+            if node.name:
+                self.node_names.add(node.name)
 
     # This expansion contrib-op can be updated / deprecated in the future.
     def _make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape):
@@ -2218,50 +2184,52 @@ class Model:
         #                              |
         #                            Mul_1
 
-        make_cast_name = f"{basename}/Cast"
-        self.make_cast(make_cast_name, root_input, ir.DataType.FLOAT, shape=shape)
+        # Resolve named inputs to ir.Value objects and pre-register the output.
+        x_val = self.make_value(root_input)
+        weight_val = self.make_value(weight_name)
+        final_out = self.make_value(output_0, io_dtype, shape)
 
-        make_pow_name = f"{basename}/Pow"
-        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/2"]
+        tape = ir_tape.Tape(self.model.graph)
 
-        self.make_node(
-            "Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain=""
-        )
-        self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
+        # Cast to fp32 for numerical stability; keep a reference for the later Mul.
+        x_fp32 = tape.op("Cast", [x_val], {"to": int(ir.DataType.FLOAT)}, name=f"{basename}/Cast")
+        x_fp32.dtype = ir.DataType.FLOAT
+        x_fp32.shape = ir.Shape(shape)
 
-        make_reducemean_name = f"{basename}/ReduceMean"
-        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/[-1]"]
-        self.make_reduce_mean(
-            make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, shape=shape
-        )
+        # Pow(x_fp32, 2) → ReduceMean(axis=-1, keepdims=1) → Add(epsilon) → Sqrt → 1/Sqrt
+        two = tape.op("Constant", [], {"value": ir.tensor(np.array(2.0, dtype=np.float32))}, name=f"{basename}/Constant_pow_exp")
+        pow_out = tape.op("Pow", [x_fp32, two], name=f"{basename}/Pow")
+        pow_out.dtype = ir.DataType.FLOAT
+        pow_out.shape = ir.Shape(shape)
 
-        make_add_name = f"{basename}/Add"
-        make_add_inputs = [
-            f"{make_reducemean_name}/output_0",
-            f"/model/constants/FLOAT/{self.layernorm_attrs['epsilon']}",
-        ]
-        self.make_add(make_add_name, make_add_inputs, ir.DataType.FLOAT, shape=shape)
+        reduce_axes = tape.op("Constant", [], {"value": ir.tensor(np.array([-1], dtype=np.int64))}, name=f"{basename}/Constant_reduce_axes")
+        mean_out = tape.op("ReduceMean", [pow_out, reduce_axes], {"keepdims": 1}, name=f"{basename}/ReduceMean")
+        mean_out.dtype = ir.DataType.FLOAT
 
-        make_sqrt_name = f"{basename}/Sqrt"
-        make_sqrt_inputs = [f"{make_add_name}/output_0"]
-        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, ir.DataType.FLOAT, shape=shape)
+        eps = tape.op("Constant", [], {"value": ir.tensor(np.array(self.layernorm_attrs["epsilon"], dtype=np.float32))}, name=f"{basename}/Constant_epsilon")
+        add_out = tape.op("Add", [mean_out, eps], name=f"{basename}/Add")
+        add_out.dtype = ir.DataType.FLOAT
 
-        make_div_name = f"{basename}/Div"
-        make_div_inputs = ["/model/constants/FLOAT/1", f"{make_sqrt_name}/output_0"]
-        self.make_div(make_div_name, make_div_inputs, ir.DataType.FLOAT, shape=shape)
+        sqrt_out = tape.op("Sqrt", [add_out], name=f"{basename}/Sqrt")
+        sqrt_out.dtype = ir.DataType.FLOAT
 
-        make_mul_name = f"{basename}/Mul"
-        make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
-        self.make_mul(make_mul_name, make_mul_inputs, ir.DataType.FLOAT, shape=shape)
+        one = tape.op("Constant", [], {"value": ir.tensor(np.array(1.0, dtype=np.float32))}, name=f"{basename}/Constant_one")
+        inv_rms = tape.op("Div", [one, sqrt_out], name=f"{basename}/Div")
+        inv_rms.dtype = ir.DataType.FLOAT
 
-        make_cast_1_name = f"{basename}/Cast_1"
-        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
+        # Scale input: inv_rms * x_fp32, then cast back to io_dtype, then multiply by weight.
+        scaled = tape.op("Mul", [inv_rms, x_fp32], name=f"{basename}/Mul")
+        scaled.dtype = ir.DataType.FLOAT
 
-        make_mul_1_name = f"{basename}/Mul_1"
-        make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
+        scaled_out = tape.op("Cast", [scaled], {"to": int(io_dtype)}, name=f"{basename}/Cast_1")
+        scaled_out.dtype = io_dtype
+        scaled_out.shape = ir.Shape(shape)
 
-        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
-        self.make_value(output_0, dtype=io_dtype, shape=shape)
+        tape.op("Mul", [scaled_out, weight_val], output=final_out, name=f"{basename}/Mul_1")
+
+        for node in tape.nodes:
+            if node.name:
+                self.node_names.add(node.name)
 
     def _make_head_layernorm(self, layer_id, norm_prefix, input_path, weight, num_heads, new_io_dtype, cast):
         """Apply per-head SimplifiedLayerNorm: Reshape(B,S,D→B,S*N,H) → Norm → Reshape(B,S*N,H→B,S,N*H).
@@ -3506,16 +3474,37 @@ class Model:
         # Make MoE nodes
         gate_name = f"{gate_ops_base}/MatMul"
         self.make_matmul(bsm.gate, gate_name, root_input)
-        shape_name = f"{gate_ops_base}/Shape"
-        self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
-        gather_name = f"{gate_ops_base}/Gather"
-        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
-        concat_name = f"{gate_ops_base}/Concat"
-        self.make_concat(concat_name, ["/model/constants/INT64/[-1]", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
+
+        # Router shape-manipulation subgraph: extract the last dim of the gate output
+        # (batch * seq_len) so we can reshape to [num_rows, num_experts] for QMoE.
+        gate_out = self.make_value(f"{gate_name}/output_0")
         gate_reshape_name = f"{gate_ops_base}/Reshape"
-        self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=["num_rows", self.moe_attrs["num_experts"]])
+        router_probs = self.make_value(f"{gate_reshape_name}/output_0", self.io_dtype, ["num_rows", self.moe_attrs["num_experts"]])
+
+        tape = ir_tape.Tape(self.model.graph)
+        shape_out = tape.op("Shape", [gate_out], name=f"{gate_ops_base}/Shape")
+        shape_out.dtype = ir.DataType.INT64
+        shape_out.shape = ir.Shape([3])
+
+        idx2 = tape.op("Constant", [], {"value": ir.tensor(np.array(2, dtype=np.int64))}, name=f"{gate_ops_base}/Constant_gather_idx")
+        gather_out = tape.op("Gather", [shape_out, idx2], {"axis": 0}, name=f"{gate_ops_base}/Gather")
+        gather_out.dtype = ir.DataType.INT64
+
+        unsqueeze_axes = tape.op("Constant", [], {"value": ir.tensor(np.array([0], dtype=np.int64))}, name=f"{gate_ops_base}/Constant_unsqueeze_axes")
+        unsqueeze_out = tape.op("Unsqueeze", [gather_out, unsqueeze_axes], name=f"{gate_ops_base}/Unsqueeze")
+        unsqueeze_out.dtype = ir.DataType.INT64
+        unsqueeze_out.shape = ir.Shape([1])
+
+        neg1 = tape.op("Constant", [], {"value": ir.tensor(np.array([-1], dtype=np.int64))}, name=f"{gate_ops_base}/Constant_neg1")
+        concat_out = tape.op("Concat", [neg1, unsqueeze_out], {"axis": 0}, name=f"{gate_ops_base}/Concat")
+        concat_out.dtype = ir.DataType.INT64
+        concat_out.shape = ir.Shape([2])
+
+        tape.op("Reshape", [gate_out, concat_out], output=router_probs, name=gate_reshape_name)
+
+        for node in tape.nodes:
+            if node.name:
+                self.node_names.add(node.name)
 
         w1_list = []
         w2_list = []
@@ -4107,12 +4096,22 @@ class Model:
         self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
-        shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, "past_key_values.0.key", shape=[4])
-        gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/2"]
-        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        return gather_name
+        past_key_val = self.make_value("past_key_values.0.key")
+        gather_out = self.make_value(f"{basename}/Gather/output_0", ir.DataType.INT64, [])
+
+        tape = ir_tape.Tape(self.model.graph)
+        shape_out = tape.op("Shape", [past_key_val], name=f"{basename}/Shape")
+        shape_out.dtype = ir.DataType.INT64
+        shape_out.shape = ir.Shape([4])
+
+        idx2 = tape.op("Constant", [], {"value": ir.tensor(np.array(2, dtype=np.int64))}, name=f"{basename}/Constant_gather_idx")
+        tape.op("Gather", [shape_out, idx2], {"axis": 0}, output=gather_out, name=f"{basename}/Gather")
+
+        for node in tape.nodes:
+            if node.name:
+                self.node_names.add(node.name)
+
+        return f"{basename}/Gather"
 
     def make_input_ids_subgraph(self, basename, past_key_gather_name):
         # Make shared nodes between past_key_values.0.key (Gather with idx=2) and input_ids (Gather with idx=1) subgraphs
