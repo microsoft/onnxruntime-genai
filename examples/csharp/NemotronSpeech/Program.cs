@@ -34,7 +34,8 @@ using var processor = new StreamingProcessor(model);
 // or programmatically:
 // processor.SetOption("vad_enabled", "true");
 // processor.SetOption("vad_threshold", "0.3");
-// processor.SetOption("vad_min_silence_chunks", "5");
+// processor.SetOption("silence_duration_ms", "500");
+// processor.SetOption("prefix_padding_ms", "300");
 if (processor.GetOption("vad_enabled") == "true")
     Console.WriteLine("  VAD: enabled");
 else

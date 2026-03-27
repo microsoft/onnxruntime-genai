@@ -1526,8 +1526,8 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
 
   // Set and get threshold
-  processor->SetOption("vad_min_silence_chunks", "10");
-  ASSERT_EQ(std::string(processor->GetOption("vad_min_silence_chunks")), "10");
+  processor->SetOption("silence_duration_ms", "1000");
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
 
   // Enable VAD if silero_vad.onnx is available
   auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
@@ -1557,7 +1557,7 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
   processor->SetOption("vad_enabled", "true");
-  processor->SetOption("vad_min_silence_chunks", "2");  // Start dropping after 2 consecutive
+  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
 
   constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
   std::vector<float> silence(chunk_samples, 0.0f);

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -10,11 +11,19 @@
 namespace Generators {
 
 void StreamingProcessor::InitVadFromConfig(Model& model) {
-  model_ = model.shared_from_this();  // Store for deferred creation via SetOption("vad_enabled", "true")
+  model_ = model.shared_from_this();
   auto& vad_config = model.config_->model.vad;
-  if (vad_config.enabled) {
+  // VAD is enabled if the "vad" section exists in genai_config.json (detected by non-empty filename)
+  if (!vad_config.filename.empty()) {
     EnableVadFromModel();
-    min_silence_chunks_ = vad_config.min_silence_chunks;
+
+    // Convert ms-based config to chunk counts
+    int sample_rate = model.config_->model.sample_rate;
+    int chunk_samples = model.config_->model.chunk_samples;
+    float chunk_duration_ms = (static_cast<float>(chunk_samples) / sample_rate) * 1000.0f;
+
+    silence_duration_chunks_ = std::max(1, static_cast<int>(vad_config.silence_duration_ms / chunk_duration_ms));
+    prefix_padding_chunks_ = std::max(1, static_cast<int>(vad_config.prefix_padding_ms / chunk_duration_ms));
   }
 }
 
@@ -38,11 +47,15 @@ bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_s
   }
 
   consecutive_silence_chunks_++;
-  if (consecutive_silence_chunks_ > min_silence_chunks_) {
-    return true;  // Enough consecutive silence — drop
+
+  // Keep at least prefix_padding_chunks_ of silence for context before potential speech.
+  // After silence_duration_chunks_ of continuous silence, start dropping.
+  int effective_threshold = std::max(prefix_padding_chunks_, silence_duration_chunks_);
+  if (consecutive_silence_chunks_ >= effective_threshold) {
+    return true;
   }
 
-  return false;  // Not enough consecutive silence yet — keep to preserve context
+  return false;  // Within tolerance — keep to preserve context
 }
 
 void StreamingProcessor::SetOption(const char* key, const char* value) {
@@ -66,8 +79,20 @@ void StreamingProcessor::SetOption(const char* key, const char* value) {
     if (vad_) {
       vad_->SetThreshold(threshold);
     }
-  } else if (k == "vad_min_silence_chunks") {
-    min_silence_chunks_ = std::stoi(value);
+  } else if (k == "silence_duration_ms") {
+    int ms = std::stoi(value);
+    if (model_) {
+      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
+                                 model_->config_->model.sample_rate) * 1000.0f;
+      silence_duration_chunks_ = std::max(1, static_cast<int>(ms / chunk_duration_ms));
+    }
+  } else if (k == "prefix_padding_ms") {
+    int ms = std::stoi(value);
+    if (model_) {
+      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
+                                 model_->config_->model.sample_rate) * 1000.0f;
+      prefix_padding_chunks_ = std::max(1, static_cast<int>(ms / chunk_duration_ms));
+    }
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }
@@ -80,8 +105,20 @@ std::string StreamingProcessor::GetOption(const char* key) const {
     return vad_ ? "true" : "false";
   } else if (k == "vad_threshold") {
     return std::to_string(vad_ ? vad_->GetThreshold() : 0.5f);
-  } else if (k == "vad_min_silence_chunks") {
-    return std::to_string(min_silence_chunks_);
+  } else if (k == "silence_duration_ms") {
+    if (model_) {
+      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
+                                 model_->config_->model.sample_rate) * 1000.0f;
+      return std::to_string(static_cast<int>(silence_duration_chunks_ * chunk_duration_ms));
+    }
+    return "500";
+  } else if (k == "prefix_padding_ms") {
+    if (model_) {
+      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
+                                 model_->config_->model.sample_rate) * 1000.0f;
+      return std::to_string(static_cast<int>(prefix_padding_chunks_ * chunk_duration_ms));
+    }
+    return "300";
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }

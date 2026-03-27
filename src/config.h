@@ -276,10 +276,10 @@ struct Config {
     } joiner;
 
     struct VAD {
-      bool enabled{false};
       std::string filename;
       float threshold{0.5f};
-      int min_silence_chunks{5};
+      int silence_duration_ms{500};
+      int prefix_padding_ms{300};
       int sample_rate{0};
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;

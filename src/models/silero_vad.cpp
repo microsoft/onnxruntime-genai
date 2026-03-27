@@ -11,7 +11,60 @@
 
 namespace Generators {
 
-// Shared initialization for both constructors
+// --- SileroVadState: proper State subclass for VAD inference ---
+
+SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
+                               float* input_data, int input_size,
+                               float* state_data, int64_t* sr_value)
+    : State{params, model},
+      vad_session_{session} {
+  auto& allocator = model.p_device_inputs_->GetAllocator();
+  const auto& memory_info = allocator.GetInfo();
+
+  // Register inputs — tensors wrap external buffers (owned by SileroVad, not us)
+  int64_t input_shape[] = {1, input_size};
+  input_tensor_ = OrtValue::CreateTensor<float>(
+      memory_info, std::span<float>(input_data, input_size), std::span<const int64_t>(input_shape, 2));
+  input_names_.push_back("input");
+  inputs_.push_back(input_tensor_.get());
+
+  int64_t state_shape[] = {2, 1, 128};
+  state_tensor_ = OrtValue::CreateTensor<float>(
+      memory_info, std::span<float>(state_data, 256), std::span<const int64_t>(state_shape, 3));
+  input_names_.push_back("state");
+  inputs_.push_back(state_tensor_.get());
+
+  int64_t sr_shape[] = {1};
+  sr_tensor_ = OrtValue::CreateTensor<int64_t>(
+      memory_info, std::span<int64_t>(sr_value, 1), std::span<const int64_t>(sr_shape, 1));
+  input_names_.push_back("sr");
+  inputs_.push_back(sr_tensor_.get());
+
+  // Register outputs (ORT allocates)
+  output_names_.push_back("output");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("stateN");
+  outputs_.push_back(nullptr);
+
+  // Apply run options from config if specified
+  if (model.config_->model.vad.run_options.has_value()) {
+    SetRunOptionsFromConfig(model.config_->model.vad.run_options.value());
+  }
+}
+
+DeviceSpan<float> SileroVadState::Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/,
+                                      DeviceSpan<int32_t> /*next_indices*/) {
+  // Use State::Run which handles run options, session terminate, EP options, graph capture
+  State::Run(vad_session_);
+  return {};
+}
+
+void SileroVadState::SetRunOptionsFromConfig(const Config::RunOptions& config_run_options) {
+  State::SetRunOptions(config_run_options);
+}
+
+// --- SileroVad: main wrapper ---
+
 void SileroVad::Initialize(int sample_rate, float threshold) {
   sample_rate_ = sample_rate;
   threshold_ = threshold;
@@ -25,60 +78,20 @@ void SileroVad::Initialize(int sample_rate, float threshold) {
   window_size_ = 256 * factor;
   context_size_ = 32 * factor;
 
-  state_.assign(kStateSize, 0.0f);
+  state_data_.assign(kStateSize, 0.0f);
   context_.assign(static_cast<size_t>(context_size_), 0.0f);
 
-  // Pre-allocate scratch buffer and register I/O
   const int effective_size = context_size_ + window_size_;
   input_data_.resize(static_cast<size_t>(effective_size), 0.0f);
-  RegisterInputsOutputs();
-}
-
-void SileroVad::RegisterInputsOutputs() {
-  const auto& memory_info = allocator_->GetInfo();
-  const int effective_size = context_size_ + window_size_;
-
-  // Create persistent input tensors wrapping our buffers
-  int64_t input_shape[] = {1, effective_size};
-  input_tensor_ = OrtValue::CreateTensor<float>(
-      memory_info, std::span<float>(input_data_), std::span<const int64_t>(input_shape, 2));
-
-  int64_t state_shape[] = {2, 1, 128};
-  state_tensor_ = OrtValue::CreateTensor<float>(
-      memory_info, std::span<float>(state_), std::span<const int64_t>(state_shape, 3));
-
   sr_value_ = static_cast<int64_t>(sample_rate_);
-  int64_t sr_shape[] = {1};
-  sr_tensor_ = OrtValue::CreateTensor<int64_t>(
-      memory_info, std::span<int64_t>(&sr_value_, 1), std::span<const int64_t>(sr_shape, 1));
-
-  // Register input names and pointers (State pattern)
-  input_names_ = {"input", "state", "sr"};
-  inputs_ = {input_tensor_.get(), state_tensor_.get(), sr_tensor_.get()};
-
-  // Register output names and pointers (ORT allocates outputs)
-  output_names_ = {"output", "stateN"};
-  outputs_ = {nullptr, nullptr};
 }
 
-void SileroVad::Run() {
-  // Run inference through registered I/O, matching the State::Run pattern
-  session_->Run(
-      run_options_ ? run_options_.get() : nullptr,
-      input_names_.data(), inputs_.data(), input_names_.size(),
-      output_names_.data(), outputs_.data(), output_names_.size());
-}
-
-// Constructor from Model — uses GenAI's session creation infrastructure
-SileroVad::SileroVad(Model& model) {
+SileroVad::SileroVad(Model& model)
+    : model_{model} {
   auto& vad_config = model.config_->model.vad;
 
-  // Use the model's device input allocator — supports GPU if configured
-  allocator_ = &model.p_device_inputs_->GetAllocator();
-
-  // Create session options via GenAI's CreateSessionOptionsFromConfig,
-  // following the same pattern as multi_modal.cpp for speech sessions.
-  // Uses VAD-specific session options if provided, otherwise falls back to decoder config.
+  // Create session options via CreateSessionOptionsFromConfig (public on Model).
+  // Falls back to decoder session options if VAD-specific ones aren't provided.
   session_options_ = OrtSessionOptions::Create();
   model.CreateSessionOptionsFromConfig(
       vad_config.session_options.has_value()
@@ -86,34 +99,29 @@ SileroVad::SileroVad(Model& model) {
           : model.config_->model.decoder.session_options,
       *session_options_, false, true);
 
-  // Load session through Model::CreateSession (handles model data spans, path resolution)
+  // Load session through Model::CreateSession
   std::string filename = vad_config.filename;
   if (filename.empty()) {
     throw std::runtime_error("VAD filename must be specified in genai_config.json when vad.enabled is true.");
   }
   session_ = model.CreateSession(GetOrtEnv(), filename, session_options_.get());
 
-  // Create run options from config if specified,
-  // following the State::SetRunOptions pattern from multi_modal.cpp
-  if (vad_config.run_options.has_value()) {
-    run_options_ = OrtRunOptions::Create();
-    for (const auto& [key, value] : vad_config.run_options.value()) {
-      run_options_->AddConfigEntry(key.c_str(), value.c_str());
-    }
-  }
-
-  // Use VAD-specific sample_rate if configured, otherwise fall back to model's sample_rate
   int sr = vad_config.sample_rate > 0 ? vad_config.sample_rate : model.config_->model.sample_rate;
   Initialize(sr, vad_config.threshold);
 }
 
 SileroVad::~SileroVad() = default;
 
-void SileroVad::Reset() {
-  std::fill(state_.begin(), state_.end(), 0.0f);
-  std::fill(context_.begin(), context_.end(), 0.0f);
-  outputs_[0] = nullptr;
-  outputs_[1] = nullptr;
+void SileroVad::EnsureState() {
+  if (!state_) {
+    // Create GeneratorParams internally — VAD doesn't need search/generation params
+    params_ = CreateGeneratorParams(model_);
+    const int effective_size = context_size_ + window_size_;
+    state_ = std::make_unique<SileroVadState>(
+        model_, *params_, *session_,
+        input_data_.data(), effective_size,
+        state_data_.data(), &sr_value_);
+  }
 }
 
 float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
@@ -122,21 +130,27 @@ float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
                              " samples, got " + std::to_string(num_samples));
   }
 
-  // Build input in-place: [context | samples] -> pre-allocated input_data_ buffer
+  // Build input in-place
   std::memcpy(input_data_.data(), context_.data(), context_size_ * sizeof(float));
   std::memcpy(input_data_.data() + context_size_, samples, window_size_ * sizeof(float));
 
-  // Run inference through registered I/O (State pattern)
-  Run();
+  // Ensure State is created (deferred until first use)
+  EnsureState();
 
-  // Extract speech probability from output
-  float speech_prob = outputs_[0]->GetTensorMutableData<float>()[0];
+  // Run through State::Run — gets EP infrastructure (terminate, run options, etc.)
+  DeviceSpan<int32_t> dummy_tokens;
+  state_->Run(0, dummy_tokens);
 
-  // Update hidden state from output
-  const float* new_state = outputs_[1]->GetTensorMutableData<float>();
-  std::memcpy(state_.data(), new_state, kStateSize * sizeof(float));
+  // Extract speech probability
+  auto* output = state_->GetOutput("output");
+  float speech_prob = output->GetTensorMutableData<float>()[0];
 
-  // Update context with the last context_size_ samples from this window
+  // Update hidden state
+  auto* new_state = state_->GetOutput("stateN");
+  const float* new_state_data = new_state->GetTensorMutableData<float>();
+  std::memcpy(state_data_.data(), new_state_data, kStateSize * sizeof(float));
+
+  // Update context
   std::memcpy(context_.data(), samples + window_size_ - context_size_,
               context_size_ * sizeof(float));
 
@@ -146,9 +160,8 @@ float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
 bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
   const size_t window = static_cast<size_t>(window_size_);
 
-  // Process audio in non-overlapping windows of window_size_ samples (e.g. 512 for 16kHz).
-  // Returns true as soon as any window exceeds the speech probability threshold,
-  // allowing early exit without processing the entire chunk.
+  // Process audio in non-overlapping windows.
+  // Returns true as soon as any window exceeds the speech probability threshold.
   for (size_t offset = 0; offset + window <= num_samples; offset += window) {
     float prob = ProcessWindow(samples + offset, window);
     if (prob >= threshold_) {
@@ -156,9 +169,7 @@ bool SileroVad::ContainsSpeech(const float* samples, size_t num_samples) {
     }
   }
 
-  // Handle leftover samples that don't fill a complete window.
-  // Pad with silence (zeros) to reach window_size_ and check for speech.
-  // This ensures no audio at the end of a chunk is silently ignored.
+  // Handle leftover samples — pad with silence to reach window_size_.
   size_t processed = (num_samples / window) * window;
   if (processed < num_samples) {
     std::vector<float> padded(window, 0.0f);

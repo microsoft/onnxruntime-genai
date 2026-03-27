@@ -30,10 +30,11 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
 
   /// Set a processor option as a key-value pair.
   /// Built-in keys (handled by base class):
-  ///   "vad_enabled"             - "true" or "false" (default: "false")
-  ///   "vad_threshold"           - float as string, e.g. "0.5"
-  ///   "vad_min_silence_chunks"  - int as string, consecutive silence chunks before dropping (default: "5")
-  /// Derived classes can override to add model-specific keys, calling base for vad_* keys.
+  ///   \"vad_enabled\"          - \"true\" or \"false\" (default: \"false\")
+  ///   \"vad_threshold\"        - float as string, e.g. \"0.5\"
+  ///   \"silence_duration_ms\"  - int as string, silence before dropping chunks (default: \"500\")
+  ///   \"prefix_padding_ms\"    - int as string, audio to keep before speech (default: \"300\")
+  /// Derived classes can override to add model-specific keys.
   virtual void SetOption(const char* key, const char* value);
 
   /// Get a processor option value by key. Returns the value as a string.
@@ -53,7 +54,8 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   std::shared_ptr<Model> model_;  // Shared ref for deferred VAD creation; Model lifetime managed by caller
   std::unique_ptr<SileroVad> vad_;
   int consecutive_silence_chunks_{0};
-  int min_silence_chunks_{5};
+  int silence_duration_chunks_{5};  // Derived from silence_duration_ms / chunk_duration
+  int prefix_padding_chunks_{1};    // Derived from prefix_padding_ms / chunk_duration
 
   void EnableVadFromModel();
 };

@@ -58,22 +58,22 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
 
-    # Track memory before/after VAD init
     process = psutil.Process()
-    mem_before_vad = process.memory_info().rss
 
     # VAD is controlled via genai_config.json (disabled by default).
     # Override programmatically:
     if enable_vad and processor.get_option("vad_enabled") != "true":
         processor.set_option("vad_enabled", "true")
-    if processor.get_option("vad_enabled") == "true":
+    if vad_threshold != 0.5 and processor.get_option("vad_enabled") == "true":
         processor.set_option("vad_threshold", str(vad_threshold))
-        print(f"  VAD: enabled (threshold={vad_threshold})")
+    if processor.get_option("vad_enabled") == "true":
+        actual_threshold = processor.get_option("vad_threshold")
+        print(f"  VAD: enabled (threshold={actual_threshold})")
     else:
         print("  VAD: disabled")
 
-    mem_after_vad = process.memory_info().rss
-    vad_mem_mb = (mem_after_vad - mem_before_vad) / (1024 * 1024)
+    # Measure memory after first chunk (VAD session is created lazily)
+    mem_before_vad = process.memory_info().rss
 
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -95,6 +95,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
         chunk_start = time.time()
         inputs = processor.process(chunk)
         chunk_elapsed = time.time() - chunk_start
+        # Measure memory after first chunk (VAD session created lazily on first process call)
+        if chunks_total == 1 and vad_enabled:
+            mem_after_vad = process.memory_info().rss
         if inputs is not None:
             chunks_processed += 1
             generator.set_inputs(inputs)
@@ -123,6 +126,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, enable_vad=F
         print(f"  VAD Metrics: {chunks_total} total chunks, {chunks_processed} processed, "
               f"{chunks_skipped} skipped ({chunks_skipped / max(chunks_total, 1) * 100:.1f}% compute saved)")
         print(f"  VAD Overhead: {vad_pct:.1f}% avg per chunk ({avg_vad_ms:.1f}ms)")
+        vad_mem_mb = (mem_after_vad - mem_before_vad) / (1024 * 1024)
         print(f"  VAD Memory: {vad_mem_mb:.1f}MB (Total Additional RSS)")
 
 
