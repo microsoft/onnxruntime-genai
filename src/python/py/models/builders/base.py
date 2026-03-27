@@ -63,7 +63,10 @@ class Ops:
 
     Special keyword-only arguments (not forwarded as ONNX attributes):
 
-    * ``name`` (str, required) - node name used for graph deduplication.
+    * ``name`` (str, required) - node name used for graph deduplication.  If a node with
+      the same name was already registered in ``builder.node_names``, the call is a no-op
+      and the existing ``{name}/output_0`` value is returned, enabling multiple subgraph
+      helpers to reference the same nodes without double-insertion.
     * ``output`` (ir.Value, optional) - pre-existing value to reuse as the single output.
     * ``dtype`` (ir.DataType, optional) - set on the first output value after creation.
     * ``shape`` (sequence, optional) - set on the first output value after creation.
@@ -94,6 +97,8 @@ class Ops:
                 return b.make_value(f"{name}/output_0")
 
             # Resolve string inputs → ir.Value so callers may pass either.
+            # None becomes an anonymous empty Value to represent an optional/missing
+            # ONNX input that is intentionally omitted from the graph.
             resolved: list[ir.Value | None] = []
             for inp in inputs:
                 if inp is None:
