@@ -1370,6 +1370,10 @@ TEST(CAPITests, SetGuidance) {
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
 #endif
 
+#ifndef STREAMING_ASR_CHUNK_SAMPLES
+constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
+#endif
+
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   if (mel) {
@@ -1509,4 +1513,64 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   OgaDestroyGeneratorParams(params);
   OgaDestroyStreamingProcessor(processor);
   OgaDestroyModel(model);
+}
+
+// Test VAD set_option/get_option on StreamingProcessor
+TEST(CAPITests, StreamingASRVadSetGetOption) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  // Default: VAD disabled
+  ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
+
+  // Set and get threshold
+  processor->SetOption("silence_duration_ms", "1000");
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+
+  // Enable VAD if silero_vad.onnx is available
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (std::filesystem::exists(vad_path)) {
+    processor->SetOption("vad_enabled", "true");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
+
+    processor->SetOption("vad_threshold", "0.8");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
+
+    // Disable
+    processor->SetOption("vad_enabled", "false");
+    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
+  }
+  SUCCEED();
+}
+
+// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
+TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  processor->SetOption("vad_enabled", "true");
+  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+
+  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // First 2 silence chunks should still be processed (not dropped)
+  auto mel1 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+
+  auto mel2 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+
+  // Third silence chunk should be dropped (> min_silence_chunks)
+  auto mel3 = processor->Process(silence.data(), silence.size());
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  SUCCEED();
 }

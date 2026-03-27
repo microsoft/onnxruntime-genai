@@ -275,6 +275,16 @@ struct Config {
       } outputs;
     } joiner;
 
+    struct VAD {
+      std::string filename;
+      float threshold{0.5f};
+      int silence_duration_ms{500};
+      int prefix_padding_ms{300};
+      int sample_rate{0};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } vad;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
@@ -319,6 +329,7 @@ struct Config {
 
         // RNNT decoder inputs
         std::string targets;
+        std::string target_length;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } inputs;
@@ -333,6 +344,7 @@ struct Config {
 
         // RNNT decoder outputs
         std::string outputs;
+        std::string prednet_lengths;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } outputs;

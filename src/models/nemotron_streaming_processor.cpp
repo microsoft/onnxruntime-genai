@@ -35,6 +35,9 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
   mel_pre_encode_cache_.assign(
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
   cache_pos_ = 0;
+
+  // Initialize VAD from config (disabled by default)
+  InitVadFromConfig(model);
 }
 
 NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
@@ -47,7 +50,16 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
 
   // Process the first complete chunk available
   if (audio_buffer_.size() >= chunk_size) {
-    auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
+    const float* chunk_data = audio_buffer_.data();
+
+    // VAD check: drop chunk if prolonged silence detected
+    if (ShouldDropChunk(chunk_data, chunk_size)) {
+      audio_buffer_.erase(audio_buffer_.begin(),
+                          audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+      return nullptr;
+    }
+
+    auto mel = BuildMelTensor(chunk_data, chunk_size);
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
     auto result = std::make_unique<NamedTensors>();

@@ -1180,6 +1180,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProces
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
 
+/**
+ * \brief Set a processor option as a key-value pair.
+ *        Supported keys: "vad_enabled", "vad_threshold", "silence_duration_ms", "prefix_padding_ms".
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[in] value Option value as string.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value);
+
+/**
+ * \brief Get a processor option value by key.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[out] value Pointer to store the value string. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value);
+
 #ifdef __cplusplus
 }
 #endif

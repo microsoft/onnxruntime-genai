@@ -155,7 +155,7 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
   return text;
 }
 
-void StreamingTranscribe(const std::string& model_path, const std::string& audio_path) {
+void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, bool enable_vad = false) {
   auto [sample_rate, chunk_samples] = LoadConfig(model_path);
 
   std::cout << "Loading audio: " << audio_path << std::endl;
@@ -166,6 +166,17 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   auto config = OgaConfig::Create(model_path.c_str());
   auto model = OgaModel::Create(*config);
   auto processor = OgaStreamingProcessor::Create(*model);
+
+  // VAD is disabled by default. Enable via genai_config.json or --enable_vad.
+  if (enable_vad && std::string(processor->GetOption("vad_enabled")) != "true") {
+    processor->SetOption("vad_enabled", "true");
+  }
+  if (std::string(processor->GetOption("vad_enabled")) == "true") {
+    std::cout << "  VAD: enabled" << std::endl;
+  } else {
+    std::cout << "  VAD: disabled" << std::endl;
+  }
+
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
   auto params = OgaGeneratorParams::Create(*model);
@@ -215,12 +226,15 @@ int main(int argc, char* argv[]) {
 
   std::string model_path;
   std::string audio_file;
+  bool enable_vad = false;
 
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--model_path" && i + 1 < argc) {
       model_path = argv[++i];
     } else if (std::string(argv[i]) == "--audio_file" && i + 1 < argc) {
       audio_file = argv[++i];
+    } else if (std::string(argv[i]) == "--enable_vad") {
+      enable_vad = true;
     }
   }
 
@@ -230,7 +244,7 @@ int main(int argc, char* argv[]) {
   }
 
   try {
-    StreamingTranscribe(model_path, audio_file);
+    StreamingTranscribe(model_path, audio_file, enable_vad);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;
