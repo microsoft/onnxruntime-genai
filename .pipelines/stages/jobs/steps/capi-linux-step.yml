@@ -114,7 +114,12 @@ steps:
 
       echo "Downloading $package_name version $version"
       download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
-      curl -L -o "$download_path" "$url"
+      curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
+
+      if [ ! -s "$download_path" ]; then
+          echo "Error: Downloaded ORT package is missing or empty at $download_path"
+          exit 1
+      fi
 
       extract_path="$(Agent.TempDirectory)/ort_build_extracted"
       mkdir -p "$extract_path"

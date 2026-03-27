@@ -133,10 +133,13 @@ steps:
 
       Write-Host "Downloading $packageName version $version"
       $downloadPath = "$(Agent.TempDirectory)\ort_build_pkg.zip"
-      Invoke-WebRequest -Uri $url -OutFile $downloadPath
+      Invoke-WebRequest -Uri $url -OutFile $downloadPath -ErrorAction Stop
 
       $extractPath = "$(Agent.TempDirectory)\ort_build_extracted"
-      Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
+      if (Test-Path $extractPath) {
+          Remove-Item -Path $extractPath -Recurse -Force
+      }
+      Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force -ErrorAction Stop
 
       $ortHome = "$(Build.Repository.LocalPath)\ort_build"
       New-Item -ItemType Directory -Force -Path "$ortHome\include"
