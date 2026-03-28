@@ -75,9 +75,15 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
 )
-@pytest.mark.skip(reason="Multiple images not fully supported in dummy model - image_grid_thw shape issue")
 def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, relative_image_paths):
-    """Test processing multiple images with Qwen/Fara models."""
+    """Test processing multiple images with Qwen/Fara models.
+
+    This validates that the multimodal processor can handle multiple images that
+    share the same grid layout.  The qwen3-vl dummy vision model uses a dynamic
+    image_grid_thw dim-0 ("num_images"), while the qwen (2.5-VL) model uses a
+    static dim-0 ("1"), so both configurations are covered by this preprocessing
+    test.
+    """
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -97,6 +103,44 @@ def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, r
 
     assert inputs is not None
     assert "pixel_values" in inputs
+
+
+def test_qwen3_vl_vision_dynamic_grid_dim(test_data_path):
+    """Test that qwen3-vl dummy vision model has dynamic image_grid_thw dim-0.
+
+    This validates the ONNX model structure required for the batched single-call
+    path in QwenVisionState::Run.  When image_grid_thw dim-0 is symbolic (dynamic),
+    the runtime can pass all images in one call instead of looping per-image.
+    """
+    onnx = pytest.importorskip("onnx")
+
+    vision_path = os.path.join(
+        test_data_path, "qwen3-vl-vision-preprocessing", "dummy_vision.onnx"
+    )
+    model = onnx.load(vision_path)
+
+    # Find image_grid_thw input
+    grid_input = None
+    for inp in model.graph.input:
+        if inp.name == "image_grid_thw":
+            grid_input = inp
+            break
+
+    assert grid_input is not None, "image_grid_thw input not found in dummy_vision.onnx"
+
+    # dim-0 should be symbolic (dynamic), not a fixed integer
+    dim0 = grid_input.type.tensor_type.shape.dim[0]
+    assert dim0.dim_param != "", (
+        f"image_grid_thw dim-0 should be symbolic (e.g. 'num_images') "
+        f"but got static dim_value={dim0.dim_value}"
+    )
+    assert dim0.dim_param == "num_images", (
+        f"Expected dim_param='num_images', got '{dim0.dim_param}'"
+    )
+
+    # dim-1 should be static 3 (temporal, height, width)
+    dim1 = grid_input.type.tensor_type.shape.dim[1]
+    assert dim1.dim_value == 3, f"image_grid_thw dim-1 should be 3, got {dim1.dim_value}"
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
