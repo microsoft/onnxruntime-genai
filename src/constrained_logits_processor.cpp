@@ -174,9 +174,9 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
 
 void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
+  const size_t words_per_row = (params_->config.model.vocab_size - 1) / 32 + 1;
 
-  if (params_->p_device->GetType() == DeviceType::CUDA) {
-    const size_t words_per_row = params_->config.model.vocab_size / 32;
+  if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
     const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
     uint32_t* dst = flat_masks.data();
@@ -184,15 +184,17 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       std::memcpy(dst, row.data(), words_per_row * sizeof(uint32_t));
       dst += words_per_row;
     }
-    auto cuda_logits_mask_ptr_ = params_->p_device->Allocate<uint32_t>(total_words);
-    copy(std::span<const uint32_t>{flat_masks}, cuda_logits_mask_ptr_.CpuSpan());
-    cuda_logits_mask_ptr_.CopyCpuToDevice();
-    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, cuda_logits_mask_ptr_.Span().data());
+    if (device_logits_mask_.empty() || device_logits_mask_.size() != total_words) {
+      device_logits_mask_ = params_->p_device->Allocate<uint32_t>(total_words);
+    }
+    copy(std::span<const uint32_t>{flat_masks}, device_logits_mask_.CpuSpan());
+    device_logits_mask_.CopyCpuToDevice();
+    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, device_logits_mask_.Span().data());
     return;
   }
   size_t vocab_index = 0;
 
-  auto logits_span = logits.CpuSpan();
+  auto logits_span = params_->p_device->GetType() == DeviceType::CPU ? logits.CpuSpan() : logits.CopyDeviceToCpu();
   for (int index = 0; index < params_->search.batch_size; index++) {
     auto subspan = logits_span.subspan(vocab_index, params_->config.model.vocab_size);
     auto& mask = masks[index];
@@ -202,6 +204,9 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       subspan[i] = mask[i / 32] & (1 << (i % 32)) ? subspan[i] : std::numeric_limits<float>::lowest();
     }
     vocab_index += params_->config.model.vocab_size;
+  }
+  if (params_->p_device->GetType() != DeviceType::CPU) {
+    logits.CopyCpuToDevice();
   }
 }
 
