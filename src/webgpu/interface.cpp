@@ -215,6 +215,46 @@ struct InterfaceImpl : DeviceInterface {
 
     return true;
   }
+
+  // Compact attention mask: write total_length into a [1, 1] tensor on WebGPU.
+  // Only supports batch_beam_size == 1 to avoid per-token heap allocation.
+  // For batch_beam_size > 1, returns false to fall back to the CPU path.
+  bool UpdateCompactAttentionMask(void* mask_data, int batch_beam_size, int total_length, ONNXTensorElementDataType type) override {
+    if (!ort_allocator_ || batch_beam_size != 1) {
+      return false;
+    }
+
+    // Single scalar on the stack — no heap allocation
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      int32_t value = static_cast<int32_t>(total_length);
+      const size_t byte_count = sizeof(int32_t);
+
+      int64_t shape_val = static_cast<int64_t>(byte_count);
+      std::span<const int64_t> shape{&shape_val, 1};
+      auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, &value, byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    } else {
+      int64_t value = static_cast<int64_t>(total_length);
+      const size_t byte_count = sizeof(int64_t);
+
+      int64_t shape_val = static_cast<int64_t>(byte_count);
+      std::span<const int64_t> shape{&shape_val, 1};
+      auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, &value, byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, byte_count, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    }
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU

@@ -69,6 +69,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "hf_remote",
         "disable_qkv_fusion",
         "prune_lm_head",
+        "compact_attention_mask",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -103,6 +104,12 @@ def check_extra_options(kv_pairs, execution_provider):
             "WARNING: enable_webgpu_graph is only supported with WebGPU execution provider. Disabling enable_webgpu_graph."
         )
         kv_pairs["enable_webgpu_graph"] = False
+
+    if kv_pairs.get("compact_attention_mask", False) and execution_provider != "webgpu":
+        print(
+            "WARNING: compact_attention_mask is currently only supported with WebGPU execution provider. Disabling compact_attention_mask."
+        )
+        kv_pairs["compact_attention_mask"] = False
 
 
 def parse_extra_options(kv_items, execution_provider):
@@ -453,6 +460,11 @@ def get_args():
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
                     Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
                     eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
+                compact_attention_mask = Use compact attention mask with shape [batch_size, 1] instead of [batch_size, total_sequence_length]. Default is false.
+                    When enabled, attention_mask contains a single int64 value per batch representing the total sequence length,
+                    rather than a full binary 0/1 mask. This simplifies the ONNX graph by eliminating ReduceSum/Shape/Cast
+                    operations on the full mask tensor. Especially beneficial for WebGPU graph capture mode.
+                    The GenAI runtime will pass the sequence length scalar directly instead of computing it from the mask.
             """),
     )
 

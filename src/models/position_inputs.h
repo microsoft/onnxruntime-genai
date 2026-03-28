@@ -34,9 +34,12 @@ struct DefaultPositionInputs : PositionInputs {
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
   template <typename T>
+  void CreateAndInitializeCompactAttentionMask(DeviceSpan<int32_t> next_tokens, int64_t prompt_length);
+  template <typename T>
   void InitializeStaticMask(OrtValue& cpu_attention_mask);
 
   void RewindMask(size_t index);
+  void UpdateCompactAttentionMask();
 
   // This returns true when either:
   // 1. Graph capture is enabled, OR

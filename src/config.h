@@ -364,6 +364,9 @@ struct Config {
 
       std::vector<PipelineModel> pipeline;
 
+      bool compact_attention_mask{false};  // When true, attention_mask has shape [batch_size, 1] with the total sequence length value
+                                           // instead of the standard [batch_size, total_sequence_length] binary mask
+
     } decoder;
 
   } model;
