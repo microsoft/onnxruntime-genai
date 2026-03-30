@@ -59,7 +59,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     # VAD is off by default. Use --use_vad true to enable (requires "vad" section in genai_config.json).
     processor.set_option("use_vad", "false")
-    if use_vad is True:
+    if use_vad:
         try:
             processor.set_option("use_vad", "true")
         except Exception as e:
