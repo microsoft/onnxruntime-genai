@@ -48,7 +48,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Set a processor option as a key-value pair.
-        /// Supported keys: "vad_enabled", "vad_threshold", "vad_min_silence_chunks", "vad_model_path".
+        /// Supported keys: "use_vad", "vad_threshold", "silence_duration_ms", "prefix_padding_ms".
         /// </summary>
         public void SetOption(string key, string value)
         {

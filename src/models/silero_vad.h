@@ -37,9 +37,7 @@ struct SileroVad {
 
   float GetThreshold() const { return threshold_; }
   void SetThreshold(float threshold) {
-    if (threshold < 0.0f) threshold = 0.0f;
-    if (threshold > 1.0f) threshold = 1.0f;
-    threshold_ = threshold;
+    threshold_ = std::max(0.0f, std::min(1.0f, threshold));
   }
 
   int GetWindowSize() const { return window_size_; }
@@ -58,15 +56,15 @@ struct SileroVad {
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<SileroVadState> state_;
 
-  float threshold_;
-  int sample_rate_;
-  int window_size_;
-  int context_size_;
+  float threshold_{};
+  int sample_rate_{};
+  int window_size_{};
+  int context_size_{};
 
-  static constexpr size_t kStateSize = 2 * 1 * 128;
+  static constexpr size_t kStateSize = 2 * 1 * 128;  // Silero hidden state: [2, 1, 128]
   std::vector<float> state_data_;
   std::vector<float> context_;
-  int64_t sr_value_{};
+  int64_t sr_value_{};  // int64 copy of sample_rate_ required by ORT tensor (needs stable address)
   std::vector<float> input_data_;
 };
 
@@ -78,8 +76,6 @@ struct SileroVadState : State {
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
-
-  void SetRunOptionsFromConfig(const Config::RunOptions& run_options);
 
  private:
   OrtSession& vad_session_;

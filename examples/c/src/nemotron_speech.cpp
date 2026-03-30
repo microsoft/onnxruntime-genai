@@ -167,14 +167,15 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   auto model = OgaModel::Create(*config);
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // VAD is disabled by default. Enable via genai_config.json or --enable_vad.
-  if (enable_vad && std::string(processor->GetOption("vad_enabled")) != "true") {
-    processor->SetOption("vad_enabled", "true");
+  // VAD is disabled by default. Enable via --enable_vad.
+  if (!enable_vad) {
+    processor->SetOption("use_vad", "false");
   }
-  if (std::string(processor->GetOption("vad_enabled")) == "true") {
-    std::cout << "  VAD: enabled" << std::endl;
-  } else {
-    std::cout << "  VAD: disabled" << std::endl;
+  auto use_vad = std::string(processor->GetOption("use_vad"));
+  std::cout << "  Use VAD: " << use_vad << std::endl;
+
+  if (use_vad == "true") {
+    std::cout << "  VAD threshold: " << processor->GetOption("vad_threshold") << std::endl;
   }
 
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -188,14 +189,21 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto start = std::chrono::high_resolution_clock::now();
   std::string full_transcript;
+  int chunks_total = 0;
+  int chunks_processed = 0;
+  int chunks_skipped = 0;
 
   // Stream audio in chunks
   for (size_t i = 0; i < audio.size(); i += chunk_samples) {
     size_t remaining = std::min(static_cast<size_t>(chunk_samples), audio.size() - i);
     auto inputs = processor->Process(audio.data() + i, remaining);
+    chunks_total++;
     if (inputs) {
+      chunks_processed++;
       generator->SetInputs(*inputs);
       full_transcript += DecodeTokens(*generator, *tokenizer_stream);
+    } else {
+      chunks_skipped++;
     }
   }
 
@@ -216,6 +224,11 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   std::cout << "  " << full_transcript << std::endl;
   std::cout << std::string(60, '=') << std::endl;
   std::cout << "  Audio: " << duration << "s | Wall: " << wall_time << "s | RTF: " << (duration / wall_time) << "x" << std::endl;
+  if (use_vad == "true") {
+    double pct_saved = (chunks_total > 0) ? (static_cast<double>(chunks_skipped) / chunks_total * 100.0) : 0.0;
+    std::cout << "  VAD Metrics: " << chunks_total << " total chunks, " << chunks_processed << " processed, "
+              << chunks_skipped << " skipped (" << pct_saved << "% compute saved)" << std::endl;
+  }
 }
 
 int main(int argc, char* argv[]) {

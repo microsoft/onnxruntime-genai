@@ -61,7 +61,7 @@ bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_s
 void StreamingProcessor::SetOption(const char* key, const char* value) {
   std::string_view k{key};
 
-  if (k == "vad_enabled") {
+  if (k == "use_vad") {
     std::string_view v{value};
     if (v == "true" || v == "1") {
       if (!vad_) {
@@ -72,26 +72,24 @@ void StreamingProcessor::SetOption(const char* key, const char* value) {
       consecutive_silence_chunks_ = 0;
     } else {
       throw std::runtime_error(
-          "Invalid value for vad_enabled: '" + std::string(value) + "'. Expected 'true' or 'false'.");
+          "Invalid value for use_vad: '" + std::string(value) + "'. Expected 'true' or 'false'.");
     }
   } else if (k == "vad_threshold") {
     float threshold = std::stof(value);
     if (vad_) {
       vad_->SetThreshold(threshold);
     }
-  } else if (k == "silence_duration_ms") {
+  } else if (k == "silence_duration_ms" || k == "prefix_padding_ms") {
     int ms = std::stoi(value);
     if (model_) {
       float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
                                  model_->config_->model.sample_rate) * 1000.0f;
-      silence_duration_chunks_ = std::max(1, static_cast<int>(ms / chunk_duration_ms));
-    }
-  } else if (k == "prefix_padding_ms") {
-    int ms = std::stoi(value);
-    if (model_) {
-      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
-                                 model_->config_->model.sample_rate) * 1000.0f;
-      prefix_padding_chunks_ = std::max(1, static_cast<int>(ms / chunk_duration_ms));
+      int num_chunks = std::max(1, static_cast<int>(ms / chunk_duration_ms));
+      if (k == "silence_duration_ms") {
+        silence_duration_chunks_ = num_chunks;
+      } else {
+        prefix_padding_chunks_ = num_chunks;
+      }
     }
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
@@ -101,24 +99,21 @@ void StreamingProcessor::SetOption(const char* key, const char* value) {
 std::string StreamingProcessor::GetOption(const char* key) const {
   std::string_view k{key};
 
-  if (k == "vad_enabled") {
+  if (k == "use_vad") {
     return vad_ ? "true" : "false";
   } else if (k == "vad_threshold") {
-    return std::to_string(vad_ ? vad_->GetThreshold() : 0.5f);
-  } else if (k == "silence_duration_ms") {
+    if (vad_) {
+      return std::to_string(vad_->GetThreshold());
+    }
+    return model_ ? std::to_string(model_->config_->model.vad.threshold) : "0.5";
+  } else if (k == "silence_duration_ms" || k == "prefix_padding_ms") {
     if (model_) {
       float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
                                  model_->config_->model.sample_rate) * 1000.0f;
-      return std::to_string(static_cast<int>(silence_duration_chunks_ * chunk_duration_ms));
+      int chunks = (k == "silence_duration_ms") ? silence_duration_chunks_ : prefix_padding_chunks_;
+      return std::to_string(static_cast<int>(chunks * chunk_duration_ms));
     }
-    return "500";
-  } else if (k == "prefix_padding_ms") {
-    if (model_) {
-      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
-                                 model_->config_->model.sample_rate) * 1000.0f;
-      return std::to_string(static_cast<int>(prefix_padding_chunks_ * chunk_duration_ms));
-    }
-    return "300";
+    return (k == "silence_duration_ms") ? "3360" : "560";
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }

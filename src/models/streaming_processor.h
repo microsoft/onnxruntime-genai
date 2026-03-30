@@ -30,10 +30,10 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
 
   /// Set a processor option as a key-value pair.
   /// Built-in keys (handled by base class):
-  ///   \"vad_enabled\"          - \"true\" or \"false\" (default: \"false\")
+  ///   \"use_vad\"              - \"true\" or \"false\" (default: \"false\")
   ///   \"vad_threshold\"        - float as string, e.g. \"0.5\"
-  ///   \"silence_duration_ms\"  - int as string, silence before dropping chunks (default: \"500\")
-  ///   \"prefix_padding_ms\"    - int as string, audio to keep before speech (default: \"300\")
+  ///   \"silence_duration_ms\"  - int as string, silence before dropping chunks (default: \"3360\")
+  ///   \"prefix_padding_ms\"    - int as string, audio to keep before speech (default: \"560\")
   /// Derived classes can override to add model-specific keys.
   virtual void SetOption(const char* key, const char* value);
 

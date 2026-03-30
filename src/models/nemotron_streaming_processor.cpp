@@ -36,7 +36,7 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
       static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
   cache_pos_ = 0;
 
-  // Initialize VAD from config (disabled by default)
+  // Initialize VAD from config
   InitVadFromConfig(model);
 }
 

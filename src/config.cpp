@@ -978,8 +978,6 @@ struct VAD_Element : JSON::Element {
       v_.silence_duration_ms = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "prefix_padding_ms") {
       v_.prefix_padding_ms = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "sample_rate") {
-      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

@@ -668,7 +668,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("key"),
           pybind11::arg("value"),
-          "Set a processor option. Keys: 'vad_enabled', 'vad_threshold', 'vad_min_silence_chunks', 'vad_model_path'.")
+          "Set a processor option. Keys: 'use_vad', 'vad_threshold', 'silence_duration_ms', 'prefix_padding_ms'.")
       .def(
           "get_option",
           [](OgaStreamingProcessor& proc, const std::string& key) {

@@ -1182,7 +1182,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor*
 
 /**
  * \brief Set a processor option as a key-value pair.
- *        Supported keys: "vad_enabled", "vad_threshold", "silence_duration_ms", "prefix_padding_ms".
+ *        Supported keys: "use_vad", "vad_threshold", "silence_duration_ms", "prefix_padding_ms".
  * \param[in] processor The StreamingProcessor instance.
  * \param[in] key Option name.
  * \param[in] value Option value as string.

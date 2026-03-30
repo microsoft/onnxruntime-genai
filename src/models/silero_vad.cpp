@@ -11,8 +11,6 @@
 
 namespace Generators {
 
-// --- SileroVadState: proper State subclass for VAD inference ---
-
 SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
                                float* input_data, int input_size,
                                float* state_data, int64_t* sr_value)
@@ -48,7 +46,7 @@ SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params
 
   // Apply run options from config if specified
   if (model.config_->model.vad.run_options.has_value()) {
-    SetRunOptionsFromConfig(model.config_->model.vad.run_options.value());
+    State::SetRunOptions(model.config_->model.vad.run_options.value());
   }
 }
 
@@ -59,21 +57,17 @@ DeviceSpan<float> SileroVadState::Run(int /*total_length*/, DeviceSpan<int32_t>&
   return {};
 }
 
-void SileroVadState::SetRunOptionsFromConfig(const Config::RunOptions& config_run_options) {
-  State::SetRunOptions(config_run_options);
-}
-
-// --- SileroVad: main wrapper ---
-
 void SileroVad::Initialize(int sample_rate, float threshold) {
   sample_rate_ = sample_rate;
   threshold_ = threshold;
 
   if (sample_rate != 16000 && sample_rate != 8000) {
-    throw std::runtime_error("SileroVad only supports sample rates 16000 and 8000. Got: " +
+    throw std::runtime_error("SileroVad only supports a sample rate of 8,000 Hz or 16,000 Hz. Got: " +
                              std::to_string(sample_rate));
   }
 
+  // Silero VAD expects fixed window/context sizes that scale with sample rate.
+  // At 8kHz: window=256, context=32. At 16kHz: window=512, context=64.
   const int factor = sample_rate / 8000;
   window_size_ = 256 * factor;
   context_size_ = 32 * factor;
@@ -102,12 +96,11 @@ SileroVad::SileroVad(Model& model)
   // Load session through Model::CreateSession
   std::string filename = vad_config.filename;
   if (filename.empty()) {
-    throw std::runtime_error("VAD filename must be specified in genai_config.json when vad.enabled is true.");
+    throw std::runtime_error("VAD filename must be specified in genai_config.json");
   }
   session_ = model.CreateSession(GetOrtEnv(), filename, session_options_.get());
 
-  int sr = vad_config.sample_rate > 0 ? vad_config.sample_rate : model.config_->model.sample_rate;
-  Initialize(sr, vad_config.threshold);
+  Initialize(model.config_->model.sample_rate, vad_config.threshold);
 }
 
 SileroVad::~SileroVad() = default;

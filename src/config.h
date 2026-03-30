@@ -280,7 +280,6 @@ struct Config {
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};
-      int sample_rate{0};
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;

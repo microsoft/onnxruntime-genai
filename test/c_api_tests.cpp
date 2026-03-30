@@ -1523,7 +1523,7 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   auto processor = OgaStreamingProcessor::Create(*model);
 
   // Default: VAD disabled
-  ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
 
   // Set and get threshold
   processor->SetOption("silence_duration_ms", "1000");
@@ -1532,15 +1532,15 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   // Enable VAD if silero_vad.onnx is available
   auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
   if (std::filesystem::exists(vad_path)) {
-    processor->SetOption("vad_enabled", "true");
-    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
+    processor->SetOption("use_vad", "true");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
 
     processor->SetOption("vad_threshold", "0.8");
-    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "true");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
 
     // Disable
-    processor->SetOption("vad_enabled", "false");
-    ASSERT_EQ(std::string(processor->GetOption("vad_enabled")), "false");
+    processor->SetOption("use_vad", "false");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
   }
   SUCCEED();
 }
@@ -1556,7 +1556,7 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
 
   auto model = OgaModel::Create(STREAMING_ASR_PATH);
   auto processor = OgaStreamingProcessor::Create(*model);
-  processor->SetOption("vad_enabled", "true");
+  processor->SetOption("use_vad", "true");
   processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
 
   constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;

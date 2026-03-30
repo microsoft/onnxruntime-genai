@@ -14,7 +14,16 @@ if (args.Length < 2) {
 
 string modelPath = args[0];
 string audioFile = args[1];
-string executionProvider = args.Length > 2 ? args[2] : "follow_config";
+string executionProvider = "follow_config";
+bool enableVad = false;
+
+for (int i = 2; i < args.Length; i++) {
+  if (args[i] == "--enable_vad") {
+    enableVad = true;
+  } else {
+    executionProvider = args[i];
+  }
+}
 
 // Read sample_rate and chunk_samples from genai_config.json
 var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
@@ -30,16 +39,15 @@ using var config = Common.GetConfig(path: modelPath, ep: executionProvider, null
 using var model = new Model(config);
 using var processor = new StreamingProcessor(model);
 
-// VAD is disabled by default. Enable via genai_config.json ("vad": {"enabled": true})
-// or programmatically:
-// processor.SetOption("vad_enabled", "true");
-// processor.SetOption("vad_threshold", "0.3");
-// processor.SetOption("silence_duration_ms", "500");
-// processor.SetOption("prefix_padding_ms", "300");
-if (processor.GetOption("vad_enabled") == "true")
-    Console.WriteLine("  VAD: enabled");
-else
-    Console.WriteLine("  VAD: disabled");
+// VAD is disabled by default. Enable via --enable_vad.
+if (!enableVad) {
+    processor.SetOption("use_vad", "false");
+}
+var useVad = processor.GetOption("use_vad");
+Console.WriteLine("  Use VAD: " + useVad);
+if (useVad == "true") {
+    Console.WriteLine("  VAD threshold: " + processor.GetOption("vad_threshold"));
+}
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
@@ -47,6 +55,9 @@ using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
+int chunksTotal = 0;
+int chunksProcessed = 0;
+int chunksSkipped = 0;
 
 for (int i = 0; i < audio.Length; i += chunkSize) {
   int remaining = Math.Min(chunkSize, audio.Length - i);
@@ -54,9 +65,13 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   Array.Copy(audio, i, chunk, 0, remaining);
 
   using var inputs = processor.Process(chunk);
+  chunksTotal++;
   if (inputs != null) {
+    chunksProcessed++;
     generator.SetInputs(inputs);
     fullTranscript += DecodeTokens(generator, tokenizerStream);
+  } else {
+    chunksSkipped++;
   }
 }
 
@@ -70,6 +85,11 @@ if (flushInputs != null) {
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
 Console.WriteLine(new string('=', 60));
+if (useVad == "true") {
+  double pctSaved = chunksTotal > 0 ? (double)chunksSkipped / chunksTotal * 100.0 : 0.0;
+  Console.WriteLine($"  VAD Metrics: {chunksTotal} total chunks, {chunksProcessed} processed, " +
+                    $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
+}
 
 static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream) {
   string text = "";

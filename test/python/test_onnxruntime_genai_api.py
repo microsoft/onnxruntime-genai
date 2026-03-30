@@ -1072,7 +1072,7 @@ def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
     processor = og.StreamingProcessor(model)
 
     # Default: VAD disabled
-    assert processor.get_option("vad_enabled") == "false"
+    assert processor.get_option("use_vad") == "false"
 
     # Set and get min_silence_chunks
     processor.set_option("silence_duration_ms", "1000")
@@ -1081,15 +1081,15 @@ def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
     # Enable VAD if silero model is available
     vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
     if os.path.exists(vad_path):
-        processor.set_option("vad_enabled", "true")
-        assert processor.get_option("vad_enabled") == "true"
+        processor.set_option("use_vad", "true")
+        assert processor.get_option("use_vad") == "true"
 
         processor.set_option("vad_threshold", "0.8")
-        assert processor.get_option("vad_enabled") == "true"
+        assert processor.get_option("use_vad") == "true"
 
         # Disable
-        processor.set_option("vad_enabled", "false")
-        assert processor.get_option("vad_enabled") == "false"
+        processor.set_option("use_vad", "false")
+        assert processor.get_option("use_vad") == "false"
 
 
 def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
@@ -1101,7 +1101,7 @@ def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
     sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     model = og.Model(nemotron_speech_model_path)
     processor = og.StreamingProcessor(model)
-    processor.set_option("vad_enabled", "true")
+    processor.set_option("use_vad", "true")
     processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
 
     silence = np.zeros(chunk_samples, dtype=np.float32)
