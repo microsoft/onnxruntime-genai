@@ -2457,154 +2457,56 @@ class Model:
         #                 Reshape
         basename = f"/model/layers.{layer_id}/attn/{'k_proj' if past_kv.endswith('key') else 'v_proj'}/repeat_kv"
 
-        # Make the initial subgraph
-        #
-        #                                                       +------> Gather --> Unsqueeze -----+
-        #                                                       |                                  |
-        #                                         past_kv       +------> Gather --> Unsqueeze -----+---> Mul --> Concat (4D)
-        #                                            |          |                                  |
-        # root_input --> Reshape --> Transpose --> Concat --> Shape ---> Gather --> Unsqueeze -----+---> Concat (5D)
-        #                                            |          |                                  |
-        #                                        present_kv     +------> Gather --> Unsqueeze -----+
-        reshape_1_name = f"{basename}/Reshape_1"
-        reshape_1_inputs = [root_input, f"/model/constants/INT64/[0, 0, {self.num_kv_heads}, -1]"]
-        self.make_reshape(
-            reshape_1_name,
-            reshape_1_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_kv_heads, self.head_size],
-        )
-        transpose_1_name = f"{basename}/Transpose_1"
-        transpose_1_input = f"{reshape_1_name}/output_0"
-        self.make_transpose(
-            transpose_1_name,
-            transpose_1_input,
-            dtype=self.io_dtype,
-            shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size],
-            perm=[0, 2, 1, 3],
-        )
-        concat_1_name = f"{basename}/Concat_1"
-        concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
-        self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
+        root_val = self.make_value(root_input)
+        past_kv_val = self.make_value(past_kv)
 
-        shape_1_name = f"{basename}/Shape_1"
-        self.make_shape(shape_1_name, present_kv, shape=[4])
-        shape_1_output = f"{shape_1_name}/output_0"
-        unsqueeze_1_name = self._gather_shape_dim(basename, shape_1_output, 0)
-        unsqueeze_2_name = self._gather_shape_dim(basename, shape_1_output, 1)
-        unsqueeze_3_name = self._gather_shape_dim(basename, shape_1_output, 2)
-        unsqueeze_4_name = self._gather_shape_dim(basename, shape_1_output, 3)
-        concat_2_name = f"{basename}/Concat_2"
-        concat_2_inputs = [
-            f"{unsqueeze_1_name}/output_0",
-            f"{unsqueeze_2_name}/output_0",
-            f"/model/constants/INT64/[{self.num_attn_heads // self.num_kv_heads}]",
-            f"{unsqueeze_3_name}/output_0",
-            f"{unsqueeze_4_name}/output_0",
-        ]
-        self.make_concat(concat_2_name, concat_2_inputs, dtype=ir.DataType.INT64, shape=[5], axis=0)
+        reshape_shape_1 = self.op.Constant(value=ir.tensor(np.array([0, 0, self.num_kv_heads, -1], dtype=np.int64)))
+        reshape_1 = self.op.Reshape(root_val, reshape_shape_1)
+        transpose_1 = self.op.Transpose(reshape_1, perm=[0, 2, 1, 3])
 
-        mul_1_name = f"{basename}/Mul_1"
-        mul_1_inputs = [
-            f"{unsqueeze_2_name}/output_0",
-            f"/model/constants/INT64/{self.num_attn_heads // self.num_kv_heads}",
-        ]
-        self.make_mul(mul_1_name, mul_1_inputs, dtype=ir.DataType.INT64, shape=None)
-        concat_3_name = f"{basename}/Concat_3"
-        concat_3_inputs = [
-            f"{unsqueeze_1_name}/output_0",
-            f"{mul_1_name}/output_0",
-            f"{unsqueeze_3_name}/output_0",
-            f"{unsqueeze_4_name}/output_0",
-        ]
-        self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
+        present_kv_val = self.make_value(present_kv)
+        concat_1 = self.op.Concat(past_kv_val, transpose_1, axis=2)
+        self._bind(concat_1, present_kv, self.io_dtype, ["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
 
-        # Make the subgraph that follows the initial subgraph
-        #
-        #                               Mul ---> Equal
-        #                              /              \
-        # Reshape --> Shape --> ConstantOfShape --> Where
-        #    |                                        |
-        #    +----------------------------------------+
-        reshape_2_name = f"{basename}/Reshape_2"
-        reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/INT64/[-1]"]
-        self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=ir.DataType.INT64, shape=None)
-        shape_2_name = f"{basename}/Shape_2"
-        self.make_shape(shape_2_name, f"{reshape_2_name}/output_0", shape=[1])
-        constant_shape_name = f"{basename}/ConstantOfShape"
-        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
-        self.make_constant_of_shape(
-            constant_shape_name,
-            f"{shape_2_name}/output_0",
-            value=constant_shape_value,
-            dtype=ir.DataType.INT64,
-            shape=[5],
-        )
-        mul_2_name = f"{basename}/Mul"
-        mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/-1"]
-        self.make_mul(mul_2_name, mul_2_inputs, dtype=ir.DataType.INT64, shape=[5])
-        equal_name = f"{basename}/Equal"
-        equal_inputs = [f"{reshape_2_name}/output_0", f"{mul_2_name}/output_0"]
-        self.make_equal(equal_name, equal_inputs, shape=[5])
-        where_name = f"{basename}/Where"
-        where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{reshape_2_name}/output_0"]
-        self.make_where(where_name, where_inputs, dtype=ir.DataType.INT64, shape=[5])
+        shape_1 = self.op.Shape(concat_1)
+        self._bind(shape_1, f"{basename}/Shape_1/output_0", ir.DataType.INT64, [4])
+        unsqueeze_1_name = self._gather_shape_dim(basename, f"{basename}/Shape_1/output_0", 0)
+        unsqueeze_2_name = self._gather_shape_dim(basename, f"{basename}/Shape_1/output_0", 1)
+        unsqueeze_3_name = self._gather_shape_dim(basename, f"{basename}/Shape_1/output_0", 2)
+        unsqueeze_4_name = self._gather_shape_dim(basename, f"{basename}/Shape_1/output_0", 3)
 
-        # Make the final nodes
-        #
-        # Where (from above)  Concat (from above)
-        #                   \           \
-        # Unsqueeze --> Expand --> Reshape --> Transpose --> Reshape
-        unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        unsqueeze_5_inputs = [present_kv, "/model/constants/INT64/[2]"]
-        self.make_unsqueeze(
-            unsqueeze_5_name,
-            unsqueeze_5_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", self.num_kv_heads, 1, "sequence_length", self.head_size],
-        )
-        expand_name = f"{basename}/Expand"
-        expand_inputs = [f"{unsqueeze_5_name}/output_0", f"{where_name}/output_0"]
-        self.make_expand(
-            expand_name,
-            expand_inputs,
-            dtype=self.io_dtype,
-            shape=[
-                "batch_size",
-                self.num_kv_heads,
-                self.num_attn_heads // self.num_kv_heads,
-                "sequence_length",
-                self.head_size,
-            ],
-        )
-        reshape_3_name = f"{basename}/Reshape_3"
-        reshape_3_inputs = [f"{expand_name}/output_0", f"{concat_3_name}/output_0"]
-        self.make_reshape(
-            reshape_3_name,
-            reshape_3_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", self.num_attn_heads, "sequence_length", self.head_size],
-        )
-        transpose_2_name = f"{basename}/Transpose_2"
-        transpose_2_input = f"{reshape_3_name}/output_0"
-        self.make_transpose(
-            transpose_2_name,
-            transpose_2_input,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads, self.head_size],
-            perm=[0, 2, 1, 3],
-        )
+        u1 = self.make_value(f"{unsqueeze_1_name}/output_0")
+        u2 = self.make_value(f"{unsqueeze_2_name}/output_0")
+        u3 = self.make_value(f"{unsqueeze_3_name}/output_0")
+        u4 = self.make_value(f"{unsqueeze_4_name}/output_0")
+
+        ratio_const = self.op.Constant(value=ir.tensor(np.array([self.num_attn_heads // self.num_kv_heads], dtype=np.int64)))
+        concat_5d = self.op.Concat(u1, u2, ratio_const, u3, u4, axis=0)
+
+        ratio_scalar = self.op.Constant(value=ir.tensor(np.array(self.num_attn_heads // self.num_kv_heads, dtype=np.int64)))
+        mul_1 = self.op.Mul(u2, ratio_scalar)
+        concat_4d = self.op.Concat(u1, mul_1, u3, u4, axis=0)
+
+        neg1_shape = self.op.Constant(value=ir.tensor(np.array([-1], dtype=np.int64)))
+        reshape_2 = self.op.Reshape(concat_5d, neg1_shape)
+        shape_2 = self.op.Shape(reshape_2)
+        cos_val = ir.tensor([1], dtype=ir.DataType.INT64)
+        cos_shape = self.op.ConstantOfShape(shape_2, value=cos_val)
+        neg1_scalar = self.op.Constant(value=ir.tensor(np.array(-1, dtype=np.int64)))
+        mul_2 = self.op.Mul(cos_shape, neg1_scalar)
+        equal_out = self.op.Equal(reshape_2, mul_2)
+        where_out = self.op.Where(equal_out, cos_shape, reshape_2)
+
+        axes_2 = self.op.Constant(value=ir.tensor(np.array([2], dtype=np.int64)))
+        unsqueeze_5 = self.op.Unsqueeze(concat_1, axes_2)
+        expand_out = self.op.Expand(unsqueeze_5, where_out)
+        reshape_3 = self.op.Reshape(expand_out, concat_4d)
+        transpose_2 = self.op.Transpose(reshape_3, perm=[0, 2, 1, 3])
+        final_shape = self.op.Constant(value=ir.tensor(np.array([0, 0, self.num_attn_heads * self.head_size], dtype=np.int64)))
+        reshape_4 = self.op.Reshape(transpose_2, final_shape)
+
         reshape_4_name = f"{basename}/Reshape_4"
-        reshape_4_inputs = [
-            f"{transpose_2_name}/output_0",
-            f"/model/constants/INT64/[0, 0, {self.num_attn_heads * self.head_size}]",
-        ]
-        self.make_reshape(
-            reshape_4_name,
-            reshape_4_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
-        )
+        self._bind(reshape_4, f"{reshape_4_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", self.num_attn_heads * self.head_size])
 
         input_to_attention = f"{reshape_4_name}/output_0"
         return input_to_attention
@@ -4162,12 +4064,13 @@ class Model:
         #                 Add
         #                  |
         #              Unsqueeze
-        shared_add_name = f"{basename}/Add_1"
-        shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
-        self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
-        unsqueeze_3_name = f"{basename}/Unsqueeze_3"  # shared unsqueeze for input_ids and past_key_values.0.key
-        unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
+        gather_2_val = self.make_value(f"{basename}/Gather_2/output_0")
+        past_key_gather_val = self.make_value(f"{past_key_gather_name}/output_0")
+        shared_add = self.op.Add(gather_2_val, past_key_gather_val)
+        axes_0 = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_3 = self.op.Unsqueeze(shared_add, axes_0)
+        unsqueeze_3_name = f"{basename}/Unsqueeze_3"
+        self._bind(unsqueeze_3, f"{unsqueeze_3_name}/output_0", ir.DataType.INT64, [1])
 
         # Make the additional subgraph for input_ids
         #
@@ -4176,92 +4079,63 @@ class Model:
         # Gather (idx=1)   --> Concat --> ConstantOfShape                                                      Reshape --> Less --> Where --> Unsqueeze --> Unsqueeze --> Expand
         #      \          /                              \                                                     |
         #       Unsqueeze (unsqueeze_5)                   Shape --> Slice --> Squeeze --> Range --> Add -------+
-        unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/INT64/[0]"]
-        unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
-        unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        self.make_unsqueeze(unsqueeze_5_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
-        unsqueeze_6_name = f"{basename}/Unsqueeze_6"  # shared unsqueeze for input_ids and attention_mask
-        self.make_unsqueeze(unsqueeze_6_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
-        concat_2_name = f"{basename}/Concat_2"
-        concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
-        self.make_concat(concat_2_name, concat_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
-        constant_shape_name = f"{basename}/ConstantOfShape_2"
+        axes_0b = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_4 = self.op.Unsqueeze(gather_2_val, axes_0b)
+        axes_0c = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_5 = self.op.Unsqueeze(gather_2_val, axes_0c)
+        axes_0d = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_6 = self.op.Unsqueeze(gather_2_val, axes_0d)
+        unsqueeze_6_name = f"{basename}/Unsqueeze_6"
+        self._bind(unsqueeze_6, f"{unsqueeze_6_name}/output_0", ir.DataType.INT64, [1])
+
+        concat_2 = self.op.Concat(unsqueeze_4, unsqueeze_5, axis=0)
         constant_shape_torch_dtype = to_torch_dtype(self.io_dtype)
         constant_shape_value = ir.tensor(
             torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype),
             name="make_input_ids_subgraph_shape",
         )
-        self.make_constant_of_shape(
-            constant_shape_name,
-            f"{concat_2_name}/output_0",
-            value=constant_shape_value,
-            dtype=self.io_dtype,
-            shape=["unk", "unk"],
-        )
+        cos_shape = self.op.ConstantOfShape(concat_2, value=constant_shape_value)
 
         # Top path
-        shape_4_name = f"{basename}/Shape_4"
-        self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
-        slice_1_name = f"{basename}/Slice_1"
-        slice_1_inputs = [
-            f"{shape_4_name}/output_0",
-            "/model/constants/INT64/[-1]",
-            f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
-            "/model/constants/INT64/[0]",
-        ]
-        self.make_slice(slice_1_name, slice_1_inputs, dtype=ir.DataType.INT64, shape=[1])
-        squeeze_1_name = f"{basename}/Squeeze_1"
-        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_squeeze(squeeze_1_name, squeeze_1_inputs, dtype=ir.DataType.INT64, shape=[])
+        shape_4 = self.op.Shape(cos_shape)
+        slice_starts = self.op.Constant(value=ir.tensor(np.array([-1], dtype=np.int64)))
+        slice_ends = self.op.Constant(value=ir.tensor(np.array([torch.iinfo(torch.int64).max], dtype=np.int64)))
+        slice_axes = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        slice_1 = self.op.Slice(shape_4, slice_starts, slice_ends, slice_axes)
+        squeeze_axes_1 = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        squeeze_1 = self.op.Squeeze(slice_1, squeeze_axes_1)
+        unsqueeze_7_axes = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_7 = self.op.Unsqueeze(squeeze_1, unsqueeze_7_axes)
         unsqueeze_7_name = f"{basename}/output_0"
-        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=ir.DataType.INT64, shape=[1])
-        concat_3_name = f"{basename}/Concat_3"
-        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
+        self._bind(unsqueeze_7, f"{unsqueeze_7_name}/output_0", ir.DataType.INT64, [1])
+        one_val = self.op.Constant(value=ir.tensor(np.array([1], dtype=np.int64)))
+        concat_3 = self.op.Concat(unsqueeze_7, one_val, axis=0)
 
         # Bottom path
-        shape_5_name = f"{basename}/Shape_5"
-        self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
-        slice_2_name = f"{basename}/Slice_2"
-        slice_2_inputs = [
-            f"{shape_5_name}/output_0",
-            "/model/constants/INT64/[-1]",
-            f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
-            "/model/constants/INT64/[0]",
-        ]
-        self.make_slice(slice_2_name, slice_2_inputs, dtype=ir.DataType.INT64, shape=[1])
-        squeeze_2_name = f"{basename}/Squeeze_2"
-        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_squeeze(squeeze_2_name, squeeze_2_inputs, dtype=ir.DataType.INT64, shape=[])
-        range_name = f"{basename}/Range"
-        range_inputs = ["/model/constants/INT64/0", f"{squeeze_2_name}/output_0", "/model/constants/INT64/1"]
-        self.make_range(range_name, range_inputs, dtype=ir.DataType.INT64, shape=["unk"])
-        add_2_name = f"{basename}/Add_2"
-        add_inputs = [f"{range_name}/output_0", "/model/constants/INT64/1"]
-        self.make_add(add_2_name, add_inputs, dtype=ir.DataType.INT64, shape=["unk"])
+        shape_5 = self.op.Shape(cos_shape)
+        slice_starts_2 = self.op.Constant(value=ir.tensor(np.array([-1], dtype=np.int64)))
+        slice_ends_2 = self.op.Constant(value=ir.tensor(np.array([torch.iinfo(torch.int64).max], dtype=np.int64)))
+        slice_axes_2 = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        slice_2 = self.op.Slice(shape_5, slice_starts_2, slice_ends_2, slice_axes_2)
+        squeeze_axes_2 = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        squeeze_2 = self.op.Squeeze(slice_2, squeeze_axes_2)
+        range_start = self.op.Constant(value=ir.tensor(np.array(0, dtype=np.int64)))
+        range_delta = self.op.Constant(value=ir.tensor(np.array(1, dtype=np.int64)))
+        range_out = self.op.Range(range_start, squeeze_2, range_delta)
+        one_scalar = self.op.Constant(value=ir.tensor(np.array(1, dtype=np.int64)))
+        add_2 = self.op.Add(range_out, one_scalar)
 
         # Merged path
-        reshape_name = f"{basename}/Reshape"
-        reshape_inputs = [f"{add_2_name}/output_0", f"{concat_3_name}/output_0"]
-        self.make_reshape(reshape_name, reshape_inputs, dtype=ir.DataType.INT64, shape=None)
-        less_name = f"{basename}/Less"
-        less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
-        self.make_less(less_name, less_inputs)
-        where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [
-            f"{less_name}/output_0",
-            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0",
-            f"{constant_shape_name}/output_0",
-        ]
-        self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
-        unsqueeze_8_name = f"{basename}/Unsqueeze_8"
-        unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_unsqueeze(unsqueeze_8_name, unsqueeze_8_inputs, dtype=self.io_dtype, shape=None)
+        reshape_out = self.op.Reshape(add_2, concat_3)
+        less_out = self.op.Less(range_out, reshape_out)
+        io_zero = self.op.Constant(value=ir.tensor(np.array(0.0, dtype=to_torch_dtype(self.io_dtype))))
+        where_2 = self.op.Where(less_out, io_zero, cos_shape)
+        axes_unsq8 = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)))
+        unsqueeze_8 = self.op.Unsqueeze(where_2, axes_unsq8)
+        axes_unsq9 = self.op.Constant(value=ir.tensor(np.array([1], dtype=np.int64)))
+        unsqueeze_9 = self.op.Unsqueeze(unsqueeze_8, axes_unsq9)
         unsqueeze_9_name = f"{basename}/Unsqueeze_9"
-        unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
+        self._bind(unsqueeze_9, f"{unsqueeze_9_name}/output_0", self.io_dtype, None)
 
         expand_name = self.make_common_mask_reformat_subgraph(
             basename,
@@ -4358,6 +4232,10 @@ class Model:
         #                              \    /
         #                              Expand
 
+        root_val = self.make_value(root_input)
+        unsqueeze_for_concat_val = self.make_value(f"{unsqueeze_for_concat}/output_0")
+        unsqueeze_for_expand_val = self.make_value(f"{unsqueeze_for_expand}/output_0")
+
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         shape_2_name = f"{basename}/Shape_2"
@@ -4365,43 +4243,28 @@ class Model:
         unsqueeze_1_name = self._gather_shape_dim(basename, f"{shape_1_name}/output_0", 0)
         unsqueeze_2_name = self._gather_shape_dim(basename, f"{shape_2_name}/output_0", 1)
 
-        concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
-        concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/[1]"]
-        concat_last_two_inputs = (
-            [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"]
-            if not input_ids_subgraph
-            else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
-        )
-        concat_inputs = concat_first_two_inputs + concat_last_two_inputs
-        self.make_concat(concat_name, concat_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
-        shape_3_name = f"{basename}/Shape_3"
-        self.make_shape(shape_3_name, f"{concat_name}/output_0", shape=[1])
-        constant_shape_name = (
-            f"{basename}/ConstantOfShape" if not input_ids_subgraph else f"{basename}/ConstantOfShape_1"
-        )
-        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
-        self.make_constant_of_shape(
-            constant_shape_name,
-            f"{shape_3_name}/output_0",
-            value=constant_shape_value,
-            dtype=ir.DataType.INT64,
-            shape=["unk"],
-        )
-        mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/-1"]
-        self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=["unk"])
-        equal_name = f"{basename}/Equal"
-        equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
-        self.make_equal(equal_name, equal_inputs, shape=[4])
+        u1_val = self.make_value(f"{unsqueeze_1_name}/output_0")
+        u2_val = self.make_value(f"{unsqueeze_2_name}/output_0")
+        one_val = self.op.Constant(value=ir.tensor(np.array([1], dtype=np.int64)))
 
-        where_name = f"{basename}/Where_1"
-        where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{concat_name}/output_0"]
-        self.make_where(where_name, where_inputs, dtype=ir.DataType.INT64, shape=[4])
+        if not input_ids_subgraph:
+            concat_out = self.op.Concat(u1_val, one_val, unsqueeze_for_concat_val, u2_val, axis=0)
+        else:
+            concat_out = self.op.Concat(u1_val, one_val, u2_val, unsqueeze_for_concat_val, axis=0)
+
+        shape_3 = self.op.Shape(concat_out)
+        cos_val = ir.tensor([1], dtype=ir.DataType.INT64)
+        cos_shape = self.op.ConstantOfShape(shape_3, value=cos_val)
+        neg1_scalar = self.op.Constant(value=ir.tensor(np.array(-1, dtype=np.int64)))
+        mul_out = self.op.Mul(cos_shape, neg1_scalar)
+        equal_out = self.op.Equal(concat_out, mul_out)
+        where_out = self.op.Where(equal_out, cos_shape, concat_out)
+
         expand_name = f"{basename}/Expand"
-        expand_inputs = [f"{unsqueeze_for_expand}/output_0", f"{where_name}/output_0"]
         expand_dtype = self.io_dtype if input_ids_subgraph else ir.DataType.INT64
         expand_shape = None if input_ids_subgraph else ["unk", "unk", "unk", "unk"]
-        self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
+        expand_out = self.op.Expand(unsqueeze_for_expand_val, where_out)
+        self._bind(expand_out, f"{expand_name}/output_0", expand_dtype, expand_shape)
 
         return expand_name
 
