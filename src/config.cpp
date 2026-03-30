@@ -334,8 +334,6 @@ struct DecoderInputs_Element : JSON::Element {
       v_.block_table = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
-    } else if (name == "target_length") {
-      v_.target_length = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
@@ -367,8 +365,6 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
-    } else if (name == "prednet_lengths") {
-      v_.prednet_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {

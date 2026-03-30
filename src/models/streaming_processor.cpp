@@ -82,8 +82,8 @@ void StreamingProcessor::SetOption(const char* key, const char* value) {
   } else if (k == "silence_duration_ms" || k == "prefix_padding_ms") {
     int ms = std::stoi(value);
     if (model_) {
-      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
-                                 model_->config_->model.sample_rate) * 1000.0f;
+      float chunk_duration_ms =
+          (static_cast<float>(model_->config_->model.chunk_samples) / model_->config_->model.sample_rate) * 1000.0f;
       int num_chunks = std::max(1, static_cast<int>(ms / chunk_duration_ms));
       if (k == "silence_duration_ms") {
         silence_duration_chunks_ = num_chunks;
@@ -108,8 +108,8 @@ std::string StreamingProcessor::GetOption(const char* key) const {
     return model_ ? std::to_string(model_->config_->model.vad.threshold) : "0.5";
   } else if (k == "silence_duration_ms" || k == "prefix_padding_ms") {
     if (model_) {
-      float chunk_duration_ms = (static_cast<float>(model_->config_->model.chunk_samples) /
-                                 model_->config_->model.sample_rate) * 1000.0f;
+      float chunk_duration_ms =
+          (static_cast<float>(model_->config_->model.chunk_samples) / model_->config_->model.sample_rate) * 1000.0f;
       int chunks = (k == "silence_duration_ms") ? silence_duration_chunks_ : prefix_padding_chunks_;
       return std::to_string(static_cast<int>(chunks * chunk_duration_ms));
     }

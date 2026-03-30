@@ -328,7 +328,6 @@ struct Config {
 
         // RNNT decoder inputs
         std::string targets;
-        std::string target_length;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } inputs;
@@ -343,7 +342,6 @@ struct Config {
 
         // RNNT decoder outputs
         std::string outputs;
-        std::string prednet_lengths;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
       } outputs;
