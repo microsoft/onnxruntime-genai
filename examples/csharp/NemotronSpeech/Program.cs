@@ -15,11 +15,11 @@ if (args.Length < 2) {
 string modelPath = args[0];
 string audioFile = args[1];
 string executionProvider = "follow_config";
-bool enableVad = false;
+string useVadOverride = "";
 
 for (int i = 2; i < args.Length; i++) {
-  if (args[i] == "--enable_vad") {
-    enableVad = true;
+  if (args[i] == "--use_vad" && i + 1 < args.Length) {
+    useVadOverride = args[++i];
   } else {
     executionProvider = args[i];
   }
@@ -39,9 +39,14 @@ using var config = Common.GetConfig(path: modelPath, ep: executionProvider, null
 using var model = new Model(config);
 using var processor = new StreamingProcessor(model);
 
-// VAD is disabled by default. Enable via --enable_vad.
-if (!enableVad) {
-    processor.SetOption("use_vad", "false");
+// VAD is off by default. Use --use_vad true to enable (requires "vad" section in genai_config.json).
+processor.SetOption("use_vad", "false");
+if (useVadOverride == "true") {
+    try {
+        processor.SetOption("use_vad", "true");
+    } catch (Exception e) {
+        Console.WriteLine($"  VAD: disabled (no VAD config in genai_config.json: {e.Message})");
+    }
 }
 var useVad = processor.GetOption("use_vad");
 Console.WriteLine("  Use VAD: " + useVad);

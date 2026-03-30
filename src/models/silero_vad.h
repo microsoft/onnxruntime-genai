@@ -40,9 +40,9 @@ struct SileroVad {
     threshold_ = std::max(0.0f, std::min(1.0f, threshold));
   }
 
-  int GetWindowSize() const { return window_size_; }
-  int GetContextSize() const { return context_size_; }
-  int GetSampleRate() const { return sample_rate_; }
+  int GetWindowSize() const { return static_cast<int>(window_size_); }
+  int GetContextSize() const { return static_cast<int>(context_size_); }
+  int GetSampleRate() const { return static_cast<int>(sample_rate_); }
 
  private:
   void Initialize(int sample_rate, float threshold);
@@ -57,22 +57,21 @@ struct SileroVad {
   std::unique_ptr<SileroVadState> state_;
 
   float threshold_{};
-  int sample_rate_{};
-  int window_size_{};
-  int context_size_{};
+  int64_t sample_rate_{};
+  int64_t window_size_{};
+  int64_t context_size_{};
 
   static constexpr size_t kStateSize = 2 * 1 * 128;  // Silero hidden state: [2, 1, 128]
   std::vector<float> state_data_;
   std::vector<float> context_;
-  int64_t sr_value_{};  // int64 copy of sample_rate_ required by ORT tensor (needs stable address)
   std::vector<float> input_data_;
 };
 
 /// Internal State for SileroVad — uses State::Run for proper EP/run-options support.
 struct SileroVadState : State {
   SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
-                 float* input_data, int input_size,
-                 float* state_data, int64_t* sr_value);
+                 float* input_data, int64_t input_size,
+                 float* state_data, int64_t* sample_rate);
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;

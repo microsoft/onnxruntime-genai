@@ -155,7 +155,7 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
   return text;
 }
 
-void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, bool enable_vad = false) {
+void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, const std::string& use_vad_override = "") {
   auto [sample_rate, chunk_samples] = LoadConfig(model_path);
 
   std::cout << "Loading audio: " << audio_path << std::endl;
@@ -167,9 +167,14 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   auto model = OgaModel::Create(*config);
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // VAD is disabled by default. Enable via --enable_vad.
-  if (!enable_vad) {
-    processor->SetOption("use_vad", "false");
+  // VAD is off by default. Use --use_vad true to enable (requires "vad" section in genai_config.json).
+  processor->SetOption("use_vad", "false");
+  if (use_vad_override == "true") {
+    try {
+      processor->SetOption("use_vad", "true");
+    } catch (const std::exception& e) {
+      std::cout << "  VAD: disabled (no VAD config in genai_config.json: " << e.what() << ")" << std::endl;
+    }
   }
   auto use_vad = std::string(processor->GetOption("use_vad"));
   std::cout << "  Use VAD: " << use_vad << std::endl;
@@ -239,15 +244,15 @@ int main(int argc, char* argv[]) {
 
   std::string model_path;
   std::string audio_file;
-  bool enable_vad = false;
+  std::string use_vad;
 
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--model_path" && i + 1 < argc) {
       model_path = argv[++i];
     } else if (std::string(argv[i]) == "--audio_file" && i + 1 < argc) {
       audio_file = argv[++i];
-    } else if (std::string(argv[i]) == "--enable_vad") {
-      enable_vad = true;
+    } else if (std::string(argv[i]) == "--use_vad" && i + 1 < argc) {
+      use_vad = argv[++i];
     }
   }
 
@@ -257,7 +262,7 @@ int main(int argc, char* argv[]) {
   }
 
   try {
-    StreamingTranscribe(model_path, audio_file, enable_vad);
+    StreamingTranscribe(model_path, audio_file, use_vad);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;

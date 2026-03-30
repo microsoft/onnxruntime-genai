@@ -105,7 +105,8 @@ std::string StreamingProcessor::GetOption(const char* key) const {
     if (vad_) {
       return std::to_string(vad_->GetThreshold());
     }
-    return model_ ? std::to_string(model_->config_->model.vad.threshold) : "0.5";
+    const auto& vad_config = model_ ? model_->config_->model.vad : Config::Model::VAD{};
+    return std::to_string(vad_config.threshold);
   } else if (k == "silence_duration_ms" || k == "prefix_padding_ms") {
     if (model_) {
       float chunk_duration_ms =
@@ -113,7 +114,8 @@ std::string StreamingProcessor::GetOption(const char* key) const {
       int chunks = (k == "silence_duration_ms") ? silence_duration_chunks_ : prefix_padding_chunks_;
       return std::to_string(static_cast<int>(chunks * chunk_duration_ms));
     }
-    return (k == "silence_duration_ms") ? "3360" : "560";
+    const auto& vad_config = Config::Model::VAD{};
+    return std::to_string((k == "silence_duration_ms") ? vad_config.silence_duration_ms : vad_config.prefix_padding_ms);
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }

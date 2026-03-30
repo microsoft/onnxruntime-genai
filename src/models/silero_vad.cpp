@@ -12,8 +12,8 @@
 namespace Generators {
 
 SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
-                               float* input_data, int input_size,
-                               float* state_data, int64_t* sr_value)
+                               float* input_data, int64_t input_size,
+                               float* state_data, int64_t* sample_rate)
     : State{params, model},
       vad_session_{session} {
   auto& allocator = model.p_device_inputs_->GetAllocator();
@@ -34,7 +34,7 @@ SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params
 
   int64_t sr_shape[] = {1};
   sr_tensor_ = OrtValue::CreateTensor<int64_t>(
-      memory_info, std::span<int64_t>(sr_value, 1), std::span<const int64_t>(sr_shape, 1));
+      memory_info, std::span<int64_t>(sample_rate, 1), std::span<const int64_t>(sr_shape, 1));
   input_names_.push_back("sr");
   inputs_.push_back(sr_tensor_.get());
 
@@ -58,7 +58,7 @@ DeviceSpan<float> SileroVadState::Run(int /*total_length*/, DeviceSpan<int32_t>&
 }
 
 void SileroVad::Initialize(int sample_rate, float threshold) {
-  sample_rate_ = sample_rate;
+  sample_rate_ = static_cast<int64_t>(sample_rate);
   threshold_ = threshold;
 
   if (sample_rate != 16000 && sample_rate != 8000) {
@@ -68,16 +68,15 @@ void SileroVad::Initialize(int sample_rate, float threshold) {
 
   // Silero VAD expects fixed window/context sizes that scale with sample rate.
   // At 8kHz: window=256, context=32. At 16kHz: window=512, context=64.
-  const int factor = sample_rate / 8000;
+  const int64_t factor = sample_rate / 8000;
   window_size_ = 256 * factor;
   context_size_ = 32 * factor;
 
   state_data_.assign(kStateSize, 0.0f);
   context_.assign(static_cast<size_t>(context_size_), 0.0f);
 
-  const int effective_size = context_size_ + window_size_;
+  const int64_t effective_size = context_size_ + window_size_;
   input_data_.resize(static_cast<size_t>(effective_size), 0.0f);
-  sr_value_ = static_cast<int64_t>(sample_rate_);
 }
 
 SileroVad::SileroVad(Model& model)
@@ -109,16 +108,16 @@ void SileroVad::EnsureState() {
   if (!state_) {
     // Create GeneratorParams internally — VAD doesn't need search/generation params
     params_ = CreateGeneratorParams(model_);
-    const int effective_size = context_size_ + window_size_;
+    const int64_t effective_size = context_size_ + window_size_;
     state_ = std::make_unique<SileroVadState>(
         model_, *params_, *session_,
         input_data_.data(), effective_size,
-        state_data_.data(), &sr_value_);
+        state_data_.data(), &sample_rate_);
   }
 }
 
 float SileroVad::ProcessWindow(const float* samples, size_t num_samples) {
-  if (static_cast<int>(num_samples) != window_size_) {
+  if (static_cast<int64_t>(num_samples) != window_size_) {
     throw std::runtime_error("SileroVad::ProcessWindow expects " + std::to_string(window_size_) +
                              " samples, got " + std::to_string(num_samples));
   }
