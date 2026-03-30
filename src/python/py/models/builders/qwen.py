@@ -260,22 +260,13 @@ class Qwen25VLTextModel(Model):
 
         # Cos(emb) and Sin(emb)
         cos_name = f"{basename}/Cos"
+        cos_cache_shape = [3, "batch_size", "sequence_length", self.head_size]
+        self.make_cos(cos_name, concat_output, ir.DataType.FLOAT, cos_cache_shape)
         cos_output = f"{cos_name}/output_0"
-        self.make_node("Cos", [concat_output], [cos_output], name=cos_name)
-        self.make_value(
-            cos_output,
-            ir.DataType.FLOAT,
-            [3, "batch_size", "sequence_length", self.head_size],
-        )
 
         sin_name = f"{basename}/Sin"
+        self.make_sin(sin_name, concat_output, ir.DataType.FLOAT, cos_cache_shape)
         sin_output = f"{sin_name}/output_0"
-        self.make_node("Sin", [concat_output], [sin_output], name=sin_name)
-        self.make_value(
-            sin_output,
-            ir.DataType.FLOAT,
-            [3, "batch_size", "sequence_length", self.head_size],
-        )
 
         return cos_output, sin_output
 
@@ -464,16 +455,16 @@ class Qwen25VLTextModel(Model):
         # Calculate Total Tokens = B * S
         mul_len_node = f"{basename}/TotalLen/Mul"
         mul_len_out = f"{mul_len_node}/output_0"
-        self.make_node("Mul", [batch_size_out, seq_len_out], [mul_len_out], name=mul_len_node)
-        self.make_value(mul_len_out, ir.DataType.INT64, [])
+        self.make_mul(mul_len_node, [batch_size_out, seq_len_out], ir.DataType.INT64, [])
+        mul_len_out = f"{mul_len_node}/output_0"
 
         # Range(0, TotalTokens)
         range_node = f"{basename}/Range"
         range_out = f"{range_node}/output_0"
-        self.make_node(
-            "Range", ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], [range_out], name=range_node
+        self.make_range(
+            range_node, ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], ir.DataType.INT64, ["total_token_count"]
         )
-        self.make_value(range_out, ir.DataType.INT64, ["total_token_count"])
+        range_out = f"{range_node}/output_0"
 
         # Slice Position IDs shape from input shape (take first 2 dims)
         slice_shape_node = f"{basename}/SliceShape"
@@ -853,15 +844,14 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
 
                 # Gather specific positions (reuse shared constant node)
                 gather_pos_name = f"{basename}/{name_suffix}/dim{dim_idx}/Positions/Gather"
-                gather_pos_output = f"{gather_pos_name}/output_0"
-                self.make_node(
-                    "Gather",
+                self.make_gather(
+                    gather_pos_name,
                     [squeeze_dim_output, positions_outputs[dim_idx]],
-                    [gather_pos_output],
-                    name=gather_pos_name,
+                    ir.DataType.FLOAT,
+                    ["batch_size", "sequence_length", len(positions)],
                     axis=-1,
                 )
-                self.make_value(gather_pos_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", len(positions)])
+                gather_pos_output = f"{gather_pos_name}/output_0"
 
                 gathered_pieces.append((positions, gather_pos_output))
 
@@ -883,15 +873,14 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
 
             # Reorder using shared constant
             gather_reorder_name = f"{basename}/{name_suffix}/Reorder/Gather"
-            gather_reorder_output = f"{gather_reorder_name}/output_0"
-            self.make_node(
-                "Gather",
+            self.make_gather(
+                gather_reorder_name,
                 [concat_output, reorder_const_output],
-                [gather_reorder_output],
-                name=gather_reorder_name,
+                ir.DataType.FLOAT,
+                ["batch_size", "sequence_length", half_head],
                 axis=-1,
             )
-            self.make_value(gather_reorder_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", half_head])
+            gather_reorder_output = f"{gather_reorder_name}/output_0"
 
             # 4. Flatten: -> [B*S, H/2]
             reshape_name = f"{basename}/{name_suffix}_flat/Reshape"
@@ -969,6 +958,10 @@ class Qwen35TextModel(Model):
         # and cast back after, matching HF behaviour and preventing precision
         # loss that compounds across 36+ layers in fp16/bf16 builds.
         self.layernorm_attrs["cast"]["use_fp32"] = True
+        self.layernorm_attrs["cast"]["root_input"] = True
+        self.layernorm_attrs["cast"]["skip_input"] = True
+        self.layernorm_attrs["cast"]["output_0"] = True
+        self.layernorm_attrs["cast"]["output_3"] = True
 
         # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
@@ -1060,9 +1053,12 @@ class Qwen35TextModel(Model):
                 filtered_key_outputs.append(kv_key_outputs[i])
                 filtered_value_outputs.append(kv_value_outputs[i])
             else:
+                # Fused CausalConvWithState + LinearAttention ops use same dtype as activations.
+                state_dtype = self.io_dtype
+
                 # linear_attention: add conv_state + recurrent_state
                 self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
-                self.input_types[f"past_state.{i}.conv"] = self.io_dtype
+                self.input_types[f"past_state.{i}.conv"] = state_dtype
                 self.input_shapes[f"past_state.{i}.conv"] = [
                     "batch_size",
                     self.linear_conv_dim,
@@ -1070,7 +1066,7 @@ class Qwen35TextModel(Model):
                 ]
 
                 self.input_names[f"past_state.{i}.recurrent"] = f"past_key_values.{i}.recurrent_state"
-                self.input_types[f"past_state.{i}.recurrent"] = self.io_dtype
+                self.input_types[f"past_state.{i}.recurrent"] = state_dtype
                 self.input_shapes[f"past_state.{i}.recurrent"] = [
                     "batch_size",
                     self.linear_num_value_heads,
@@ -1079,7 +1075,7 @@ class Qwen35TextModel(Model):
                 ]
 
                 self.output_names[f"present_state.{i}.conv"] = f"present.{i}.conv_state"
-                self.output_types[f"present_state.{i}.conv"] = self.io_dtype
+                self.output_types[f"present_state.{i}.conv"] = state_dtype
                 self.output_shapes[f"present_state.{i}.conv"] = [
                     "batch_size",
                     self.linear_conv_dim,
@@ -1087,7 +1083,7 @@ class Qwen35TextModel(Model):
                 ]
 
                 self.output_names[f"present_state.{i}.recurrent"] = f"present.{i}.recurrent_state"
-                self.output_types[f"present_state.{i}.recurrent"] = self.io_dtype
+                self.output_types[f"present_state.{i}.recurrent"] = state_dtype
                 self.output_shapes[f"present_state.{i}.recurrent"] = [
                     "batch_size",
                     self.linear_num_value_heads,
@@ -1449,26 +1445,11 @@ class Qwen35TextModel(Model):
         return final_output
 
     def _make_linear_attention(self, layer_id, linear_attn, root_input):
-        """Dispatch to fused or decomposed GatedDeltaNet linear attention.
-
-        Currently always uses the decomposed path (Conv + Scan) which
-        works on all EPs.  Switch to fused ``CausalConvWithState`` +
-        ``LinearAttention`` ops once ORT registers kernels for them.
-        """
-        # TODO: Enable fused path when ORT has CausalConvWithState/LinearAttention kernels
-        # if self.ep in {"cuda"}:
-        #     self._make_linear_attention_fused(layer_id, linear_attn, root_input)
-        # else:
-        self._make_linear_attention_decomposed(layer_id, linear_attn, root_input)
-
-    def _make_linear_attention_fused(self, layer_id, linear_attn, root_input):
         """Build GatedDeltaNet using fused CausalConvWithState + LinearAttention ops.
 
-        Uses proposed com.microsoft contrib ops (onnx/onnx#7767):
+        Uses com.microsoft contrib ops:
         - CausalConvWithState: fused depthwise conv1d + SiLU + carry state
         - LinearAttention: fused 3D-packed linear attention with GQA
-
-        Requires ORT kernel support (currently CUDA EP only).
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
         conv_dim = self.linear_conv_dim
@@ -1492,18 +1473,17 @@ class Qwen35TextModel(Model):
         present_conv = f"present.{layer_id}.conv_state"
 
         conv_op_name = f"{basename}/CausalConvWithState"
-        silu_output = f"{conv_op_name}/output_0"
-        self.make_node(
-            "CausalConvWithState",
-            [qkv_t_output, conv_weight_name, conv_bias_name, past_conv],
-            [silu_output, present_conv],
-            name=conv_op_name,
-            ndim=1,
-            activation="silu",
-            domain="com.microsoft",
+        self.make_causal_conv_with_state(
+            conv_op_name,
+            root_input=qkv_t_output,
+            weight=conv_weight_name,
+            bias=conv_bias_name,
+            past_conv_state=past_conv,
+            present_conv_state=present_conv,
+            output_shape=["batch_size", conv_dim, "sequence_length"],
+            present_conv_shape=["batch_size", conv_dim, kernel_size - 1],
         )
-        self.make_value(silu_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
-        self.make_value(present_conv, self.io_dtype, ["batch_size", conv_dim, kernel_size - 1])
+        silu_output = f"{conv_op_name}/output_0"
 
         conv_out_t_name = f"{basename}/conv_out/Transpose"
         conv_out_t_output = f"{conv_out_t_name}/output_0"
@@ -1529,177 +1509,29 @@ class Qwen35TextModel(Model):
         present_recurrent = f"present.{layer_id}.recurrent_state"
 
         la_op_name = f"{basename}/LinearAttention"
-        la_output = f"{la_op_name}/output_0"
-        self.make_node(
-            "LinearAttention",
-            [q_scaled_output, k_norm_out, v_out, past_recurrent, g_output, beta_output],
-            [la_output, present_recurrent],
-            name=la_op_name,
+        self.make_linear_attention(
+            la_op_name,
+            q_path=q_scaled_output,
+            k_path=k_norm_out,
+            v_path=v_out,
+            past_recurrent_state=past_recurrent,
+            present_recurrent_state=present_recurrent,
+            decay=g_output,
+            beta=beta_output,
             q_num_heads=n_k,
             kv_num_heads=n_kv,
             update_rule="gated_delta",
             scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
-            domain="com.microsoft",
+            output_shape=["batch_size", "sequence_length", v_dim],
+            present_recurrent_shape=["batch_size", n_kv, hk, hv],
         )
-        self.make_value(la_output, self.io_dtype, ["batch_size", "sequence_length", v_dim])
-        self.make_value(present_recurrent, self.io_dtype, ["batch_size", n_kv, hk, hv])
+        la_output = f"{la_op_name}/output_0"
 
         # Gated RMSNorm + output projection
         self._make_linear_attention_output(
             layer_id,
             linear_attn,
             la_output,
-            z_name,
-        )
-
-    def _make_linear_attention_decomposed(self, layer_id, linear_attn, root_input):
-        """Build GatedDeltaNet using decomposed standard ONNX ops.
-
-        Uses Conv + Scan with a hand-built body graph.  Works on all EPs
-        but is 10–50× slower than fused kernels because each recurrence
-        step materializes intermediates to global memory.
-        """
-        basename = f"/model/layers.{layer_id}/linear_attn"
-        conv_dim = self.linear_conv_dim
-        v_dim = self.linear_value_dim
-        n_kv = self.linear_num_value_heads
-        hk = self.linear_key_head_dim
-        hv = self.linear_value_head_dim
-        kernel_size = self.linear_conv_kernel_dim
-
-        # Projections, conv weight init, QKV transpose
-        z_name, b_name, a_name, qkv_t_output, conv_weight_name = self._make_linear_attention_projections(
-            layer_id, linear_attn, root_input
-        )
-
-        # --- Decomposed conv: Concat + Conv + SiLU + Slice ---
-        past_conv = f"past_key_values.{layer_id}.conv_state"
-
-        conv_cat_name = f"{basename}/conv/Concat"
-        conv_cat_output = f"{conv_cat_name}/output_0"
-        self.make_concat(
-            conv_cat_name,
-            [past_conv, qkv_t_output],
-            self.io_dtype,
-            ["batch_size", conv_dim, "conv_total_length"],
-            axis=-1,
-        )
-
-        conv_name = f"{basename}/conv/Conv"
-        conv_output = f"{conv_name}/output_0"
-        self.make_conv(
-            conv_name,
-            [conv_cat_output, conv_weight_name],
-            self.io_dtype,
-            ["batch_size", conv_dim, "sequence_length"],
-            group=conv_dim,
-            pads=[0, 0],
-        )
-
-        silu_name = f"{basename}/conv/Sigmoid"
-        self.make_sigmoid(silu_name, conv_output, self.io_dtype, ["batch_size", conv_dim, "sequence_length"])
-        silu_sig_output = f"{silu_name}/output_0"
-
-        silu_mul_name = f"{basename}/conv/SiLU/Mul"
-        self.make_mul(
-            silu_mul_name, [conv_output, silu_sig_output], self.io_dtype, ["batch_size", conv_dim, "sequence_length"]
-        )
-        silu_output = f"{silu_mul_name}/output_0"
-
-        present_conv = f"present.{layer_id}.conv_state"
-        conv_state_slice_name = f"{basename}/conv_state/Slice"
-        self.make_node(
-            "Slice",
-            [
-                conv_cat_output,
-                f"/model/constants/INT64/[{-(kernel_size - 1)}]",
-                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
-                "/model/constants/INT64/[-1]",
-            ],
-            [present_conv],
-            name=conv_state_slice_name,
-        )
-        self.make_value(present_conv, self.io_dtype, ["batch_size", conv_dim, kernel_size - 1])
-
-        conv_out_t_name = f"{basename}/conv_out/Transpose"
-        conv_out_t_output = f"{conv_out_t_name}/output_0"
-        self.make_transpose(
-            conv_out_t_name,
-            silu_output,
-            self.io_dtype,
-            ["batch_size", "sequence_length", conv_dim],
-            [0, 2, 1],
-        )
-
-        # Split QKV, L2 norm, gates
-        q_scaled_output, k_norm_out, v_out, g_output, beta_output = self._make_linear_attention_normalize_and_gate(
-            layer_id,
-            linear_attn,
-            conv_out_t_output,
-            b_name,
-            a_name,
-        )
-
-        # --- Decomposed recurrence: reshape → GQA expand → Scan → reshape ---
-        q_4d = self._reshape_to_bhsd(f"{basename}/q", q_scaled_output, self.linear_num_key_heads, hk)
-        k_4d = self._reshape_to_bhsd(f"{basename}/k", k_norm_out, self.linear_num_key_heads, hk)
-        v_4d = self._reshape_to_bhsd(f"{basename}/v", v_out, n_kv, hv)
-
-        kv_groups = n_kv // self.linear_num_key_heads
-        if kv_groups > 1:
-            q_4d = self._repeat_kv_heads(f"{basename}/q_repeat", q_4d, self.linear_num_key_heads, kv_groups, hk)
-            k_4d = self._repeat_kv_heads(f"{basename}/k_repeat", k_4d, self.linear_num_key_heads, kv_groups, hk)
-
-        beta_t_name = f"{basename}/beta/Transpose"
-        beta_t_output = f"{beta_t_name}/output_0"
-        self.make_transpose(beta_t_name, beta_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
-
-        g_t_name = f"{basename}/g/Transpose"
-        g_t_output = f"{g_t_name}/output_0"
-        self.make_transpose(g_t_name, g_output, self.io_dtype, ["batch_size", n_kv, "sequence_length"], [0, 2, 1])
-
-        past_recurrent = f"past_key_values.{layer_id}.recurrent_state"
-        present_recurrent = f"present.{layer_id}.recurrent_state"
-
-        la_output, _ = self._make_scan_recurrence(
-            basename,
-            q_4d,
-            k_4d,
-            v_4d,
-            past_recurrent,
-            g_t_output,
-            beta_t_output,
-            n_kv,
-            hk,
-            hv,
-            present_state_name=present_recurrent,
-        )
-
-        # Transpose back: [B, N, S, H] -> [B, S, N*H]
-        la_t_name = f"{basename}/la/Transpose"
-        la_t_output = f"{la_t_name}/output_0"
-        self.make_transpose(
-            la_t_name,
-            la_output,
-            self.io_dtype,
-            ["batch_size", "sequence_length", n_kv, hv],
-            [0, 2, 1, 3],
-        )
-
-        la_flat_name = f"{basename}/la/Reshape"
-        la_flat_output = f"{la_flat_name}/output_0"
-        self.make_reshape(
-            la_flat_name,
-            [la_t_output, f"/model/constants/INT64/[0, 0, {v_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", v_dim],
-        )
-
-        # Gated RMSNorm + output projection
-        self._make_linear_attention_output(
-            layer_id,
-            linear_attn,
-            la_flat_output,
             z_name,
         )
 
@@ -1796,27 +1628,38 @@ class Qwen35TextModel(Model):
         beta_output = f"{beta_name}/output_0"
 
         # g = -exp(A_log) * softplus(a + dt_bias)
+        # The reference model computes this entirely in float32 to prevent
+        # precision loss that is exponentially amplified by exp(g) in the
+        # recurrence.  Cast inputs to fp32, compute, then cast result back.
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
-        self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=self.io_dtype)
+        self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
         neg_exp_a_name = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
         neg_exp_a = (-linear_attn.A_log.data.exp()).detach()
-        self.make_initializer(neg_exp_a, neg_exp_a_name, to=self.io_dtype)
+        self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
+
+        # Cast a projection output to fp32
+        a_cast_name = f"{basename}/decay/a_cast/Cast"
+        self.make_cast(a_cast_name, f"{a_name}/output_0", ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
 
         a_plus_dt_name = f"{basename}/decay/Add"
         self.make_add(
-            a_plus_dt_name, [f"{a_name}/output_0", dt_bias_init], self.io_dtype, ["batch_size", "sequence_length", n_kv]
+            a_plus_dt_name, [f"{a_cast_name}/output_0", dt_bias_init], ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv]
         )
         a_plus_dt_output = f"{a_plus_dt_name}/output_0"
 
         softplus_name = f"{basename}/decay/Softplus"
+        self.make_softplus(softplus_name, a_plus_dt_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
         softplus_output = f"{softplus_name}/output_0"
-        self.make_node("Softplus", [a_plus_dt_output], [softplus_output], name=softplus_name)
-        self.make_value(softplus_output, self.io_dtype, ["batch_size", "sequence_length", n_kv])
 
-        g_name = f"{basename}/decay/Mul"
-        self.make_mul(g_name, [neg_exp_a_name, softplus_output], self.io_dtype, ["batch_size", "sequence_length", n_kv])
-        g_output = f"{g_name}/output_0"
+        g_fp32_name = f"{basename}/decay/Mul"
+        self.make_mul(g_fp32_name, [neg_exp_a_name, softplus_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
+        g_fp32_output = f"{g_fp32_name}/output_0"
+
+        # Cast decay back to io_dtype for the kernel
+        g_cast_name = f"{basename}/decay/g_cast/Cast"
+        self.make_cast(g_cast_name, g_fp32_output, self.io_dtype, ["batch_size", "sequence_length", n_kv])
+        g_output = f"{g_cast_name}/output_0"
 
         return q_scaled_output, k_norm_out, v_out, g_output, beta_output
 
@@ -1893,22 +1736,20 @@ class Qwen35TextModel(Model):
 
         # ||x||_2 along last dim
         l2_name = f"{basename}/ReduceL2"
-        l2_output = f"{l2_name}/output_0"
-        self.make_node(
-            "ReduceL2",
+        self.make_reduce_l2(
+            l2_name,
             [input_name, "/model/constants/INT64/[-1]"],
-            [l2_output],
-            name=l2_name,
+            self.io_dtype,
+            reduced_shape,
             keepdims=1,
         )
-        self.make_value(l2_output, self.io_dtype, reduced_shape)
+        l2_output = f"{l2_name}/output_0"
 
         # Clamp to avoid division by zero
         eps_name = self._get_shared_l2_eps()
         clip_name = f"{basename}/Clip"
+        self.make_clip(clip_name, [l2_output, eps_name], self.io_dtype, reduced_shape)
         clip_output = f"{clip_name}/output_0"
-        self.make_node("Clip", [l2_output, eps_name], [clip_output], name=clip_name)
-        self.make_value(clip_output, self.io_dtype, reduced_shape)
 
         # x / ||x||_2
         norm_name = f"{basename}/Normalize/Div"
@@ -1916,405 +1757,6 @@ class Qwen35TextModel(Model):
         norm_output = f"{norm_name}/output_0"
 
         return norm_output
-
-    def _reshape_to_bhsd(self, basename, input_name, num_heads, head_dim):
-        """Reshape [B, S, N*H] -> [B, S, N, H] -> Transpose to [B, N, S, H]"""
-        rs_name = f"{basename}/reshape_4d/Reshape"
-        rs_output = f"{rs_name}/output_0"
-        self.make_reshape(
-            rs_name,
-            [input_name, f"/model/constants/INT64/[0, 0, {num_heads}, {head_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", num_heads, head_dim],
-        )
-
-        tp_name = f"{basename}/transpose_bhsd/Transpose"
-        tp_output = f"{tp_name}/output_0"
-        self.make_transpose(
-            tp_name,
-            rs_output,
-            self.io_dtype,
-            ["batch_size", num_heads, "sequence_length", head_dim],
-            [0, 2, 1, 3],
-        )
-        return tp_output
-
-    def _repeat_kv_heads(self, basename, input_4d, n_heads, n_rep, head_dim):
-        """Repeat [B, N, S, H] -> [B, N*n_rep, S, H] (GQA-style head expansion).
-
-        Equivalent to HF's repeat_interleave(n_rep, dim=1) on BNSH layout.
-        Implemented as: [B, N, S, H] -> [B, N, 1, S, H] -> expand [B, N, n_rep, S, H] -> reshape [B, N*n_rep, S, H].
-        """
-        n_out = n_heads * n_rep
-
-        # Unsqueeze: [B, N, S, H] -> [B, N, 1, S, H]
-        unsq_name = f"{basename}/Unsqueeze"
-        unsq_out = f"{unsq_name}/output_0"
-        self.make_unsqueeze(
-            unsq_name,
-            [input_4d, "/model/constants/INT64/[2]"],
-            self.io_dtype,
-            ["batch_size", n_heads, 1, "sequence_length", head_dim],
-        )
-
-        # Expand: [B, N, 1, S, H] -> [B, N, n_rep, S, H]
-        expand_name = f"{basename}/Expand"
-        expand_out = f"{expand_name}/output_0"
-        self.make_node(
-            "Expand",
-            [unsq_out, f"/model/constants/INT64/[1, 1, {n_rep}, 1, 1]"],
-            [expand_out],
-            name=expand_name,
-        )
-        self.make_value(expand_out, self.io_dtype, ["batch_size", n_heads, n_rep, "sequence_length", head_dim])
-
-        # Reshape: [B, N, n_rep, S, H] -> [B, N*n_rep, S, H]
-        # Use dynamic reshape to handle variable S
-        shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, input_4d, [4])
-
-        s_name = f"{basename}/S/Gather"
-        s_out = f"{s_name}/output_0"
-        self.make_gather(s_name, [f"{shape_name}/output_0", "/model/constants/INT64/[2]"], ir.DataType.INT64, [1], 0)
-
-        target_name = f"{basename}/target_shape/Concat"
-        target_out = f"{target_name}/output_0"
-        self.make_concat(
-            target_name,
-            [
-                "/model/constants/INT64/[-1]",
-                f"/model/constants/INT64/[{n_out}]",
-                s_out,
-                f"/model/constants/INT64/[{head_dim}]",
-            ],
-            ir.DataType.INT64,
-            [4],
-            axis=0,
-        )
-
-        rs_name = f"{basename}/Reshape"
-        rs_out = f"{rs_name}/output_0"
-        self.make_reshape(
-            rs_name, [expand_out, target_out], self.io_dtype, ["batch_size", n_out, "sequence_length", head_dim]
-        )
-        return rs_out
-
-    def _make_scan_recurrence(
-        self, basename, q_4d, k_4d, v_4d, past_state, g_output, beta_output, n_heads, hk, hv, present_state_name=None
-    ):
-        """Implement GatedDeltaNet recurrence using ONNX Scan op.
-
-        Inputs (all in BNSH layout):
-            q_4d:        [B, N, S, hk]   - queries (L2-normed and scaled)
-            k_4d:        [B, N, S, hk]   - keys (L2-normed)
-            v_4d:        [B, N, S, hv]   - values
-            past_state:  [B, N, hk, hv]  - previous recurrent state
-            g_output:    [B, N, S]        - decay (log-space, negative)
-            beta_output: [B, N, S]        - update rate (sigmoid output)
-
-        Returns:
-            (output_name, state_name) where:
-                output: [B, N, S, hv]
-                state:  [B, N, hk, hv]
-        """
-        scan_basename = f"{basename}/scan"
-
-        # Merge B and N: [B, N, S, D] -> [B*N, S, D]
-        q_bn = self._merge_batch_heads(f"{scan_basename}/q", q_4d, n_heads, hk)
-        k_bn = self._merge_batch_heads(f"{scan_basename}/k", k_4d, n_heads, hk)
-        v_bn = self._merge_batch_heads(f"{scan_basename}/v", v_4d, n_heads, hv)
-
-        # Merge state: [B, N, hk, hv] -> [B*N, hk, hv]
-        # hk and hv are constants, so [-1, hk, hv] correctly infers B*N
-        state_rs_name = f"{scan_basename}/state_merge/Reshape"
-        state_rs_output = f"{state_rs_name}/output_0"
-        self.make_reshape(
-            state_rs_name,
-            [past_state, f"/model/constants/INT64/[-1, {hk}, {hv}]"],
-            self.io_dtype,
-            ["batch_heads", hk, hv],
-        )
-
-        # Merge gates: [B, N, S] -> [B*N, S]
-        g_bn_output = self._merge_batch_heads_2d(f"{scan_basename}/g", g_output, n_heads)
-        beta_bn_output = self._merge_batch_heads_2d(f"{scan_basename}/beta", beta_output, n_heads)
-
-        # Build the Scan body subgraph (names prefixed by layer for uniqueness)
-        layer_id = int(basename.split("layers.")[1].split("/")[0])
-        body = self._build_scan_body(layer_id, hk, hv)
-
-        # Create Scan node
-        # Scan carries: state [B*N, hk, hv]
-        # Scan inputs: q [B*N, S, hk], k [B*N, S, hk], v [B*N, S, hv],
-        #              g [B*N, S], beta [B*N, S]
-        # Scan outputs: output [B*N, S, hv]
-        scan_name = f"{scan_basename}/Scan"
-        scan_output = f"{scan_name}/output_0"  # carry out: state
-        scan_output_seq = f"{scan_name}/output_1"  # scan out: per-step outputs
-
-        scan_inputs = [
-            self.make_value(state_rs_output),  # carry input
-            self.make_value(q_bn),  # scan input 0
-            self.make_value(k_bn),  # scan input 1
-            self.make_value(v_bn),  # scan input 2
-            self.make_value(g_bn_output),  # scan input 3
-            self.make_value(beta_bn_output),  # scan input 4
-        ]
-        scan_out_state = ir.Value(name=scan_output)
-        scan_out_state.dtype = ir.DataType(self.io_dtype)
-        scan_out_state.shape = ir.Shape(["batch_heads", hk, hv])
-        self.values[scan_output] = scan_out_state
-
-        scan_out_seq = ir.Value(name=scan_output_seq)
-        scan_out_seq.dtype = ir.DataType(self.io_dtype)
-        scan_out_seq.shape = ir.Shape(["batch_heads", "sequence_length", hv])
-        self.values[scan_output_seq] = scan_out_seq
-
-        scan_node = ir.node(
-            "Scan",
-            inputs=scan_inputs,
-            outputs=[scan_out_state, scan_out_seq],
-            attributes={
-                "body": ir.AttrGraph("body", body),
-                "num_scan_inputs": ir.AttrInt64("num_scan_inputs", 5),
-                "scan_input_axes": ir.AttrInt64s("scan_input_axes", [1, 1, 1, 1, 1]),
-                "scan_output_axes": ir.AttrInt64s("scan_output_axes", [1]),
-            },
-            name=scan_name,
-        )
-        self.model.graph.append(scan_node)
-        self.node_names.add(scan_name)
-
-        # Unmerge batch and heads for output: [B*N, S, hv] -> [B, N, S, hv]
-        # Need dynamic reshape since S is variable
-        out_shape_name = f"{scan_basename}/out_unmerge/Shape"
-        self.make_shape(out_shape_name, scan_output_seq, [3])
-
-        out_s_name = f"{scan_basename}/out_unmerge/S/Gather"
-        out_s_out = f"{out_s_name}/output_0"
-        self.make_gather(
-            out_s_name, [f"{out_shape_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
-        )
-
-        out_s_unsq_name = f"{scan_basename}/out_unmerge/S/Unsqueeze"
-        out_s_unsq_out = f"{out_s_unsq_name}/output_0"
-        self.make_unsqueeze(out_s_unsq_name, [out_s_out, "/model/constants/INT64/[0]"], ir.DataType.INT64, [1])
-
-        out_target_name = f"{scan_basename}/out_unmerge/target_shape/Concat"
-        out_target_out = f"{out_target_name}/output_0"
-        self.make_concat(
-            out_target_name,
-            [
-                "/model/constants/INT64/[-1]",
-                f"/model/constants/INT64/[{n_heads}]",
-                out_s_unsq_out,
-                f"/model/constants/INT64/[{hv}]",
-            ],
-            ir.DataType.INT64,
-            [4],
-            axis=0,
-        )
-
-        out_rs_name = f"{scan_basename}/out_unmerge/Reshape"
-        out_rs_output = f"{out_rs_name}/output_0"
-        self.make_reshape(
-            out_rs_name,
-            [scan_output_seq, out_target_out],
-            self.io_dtype,
-            ["batch_size", n_heads, "sequence_length", hv],
-        )
-
-        # Unmerge state: [B*N, hk, hv] -> [B, N, hk, hv]
-        state_out_name = (
-            present_state_name if present_state_name else f"{scan_basename}/state_out_unmerge/Reshape/output_0"
-        )
-        state_out_rs_name = f"{scan_basename}/state_out_unmerge/Reshape"
-        self.make_node(
-            "Reshape",
-            [scan_output, f"/model/constants/INT64/[-1, {n_heads}, {hk}, {hv}]"],
-            [state_out_name],
-            name=state_out_rs_name,
-        )
-        self.make_value(state_out_name, self.io_dtype, ["batch_size", n_heads, hk, hv])
-
-        return out_rs_output, state_out_name
-
-    def _merge_batch_heads(self, basename, input_4d, n_heads, head_dim):
-        """[B, N, S, D] -> [B*N, S, D] via static reshape.
-
-        Since N and D are compile-time constants, we reshape with
-        ``[-1, S, D]`` which lets ONNX infer ``B*N`` from the total
-        element count.  This replaces a 7-op dynamic Shape/Gather/Mul
-        chain with a single Reshape.
-        """
-        rs_name = f"{basename}/merge_bn/Reshape"
-        rs_output = f"{rs_name}/output_0"
-        # Reshape [B, N, S, D] → [B*N, S, D]:  N and D are constants,
-        # so [0, 0, -1, D] preserves B and N while merging them is
-        # impossible with two unknowns.  Instead, transpose to
-        # [B*N, S, D] in one step by using the 3-D target shape.
-        # Because the total number of elements is fixed, ONNX can
-        # infer B*N from [-1, (original S), D].  We use a Shape op
-        # to extract S dynamically.
-        shape_name = f"{basename}/merge_bn/Shape"
-        self.make_shape(shape_name, input_4d, [4])
-
-        s_name = f"{basename}/merge_bn/S/Gather"
-        s_out = f"{s_name}/output_0"
-        self.make_gather(s_name, [f"{shape_name}/output_0", "/model/constants/INT64/[2]"], ir.DataType.INT64, [1], 0)
-
-        target_name = f"{basename}/merge_bn/target_shape/Concat"
-        target_out = f"{target_name}/output_0"
-        self.make_concat(
-            target_name,
-            ["/model/constants/INT64/[-1]", s_out, f"/model/constants/INT64/[{head_dim}]"],
-            ir.DataType.INT64,
-            [3],
-            axis=0,
-        )
-
-        self.make_reshape(rs_name, [input_4d, target_out], self.io_dtype, ["batch_heads", "sequence_length", head_dim])
-        return rs_output
-
-    def _merge_batch_heads_2d(self, basename, input_3d, n_heads):
-        """[B, N, S] -> [B*N, S] via static reshape."""
-        shape_name = f"{basename}/merge_bn/Shape"
-        self.make_shape(shape_name, input_3d, [3])
-
-        s_name = f"{basename}/merge_bn/S/Gather"
-        s_out = f"{s_name}/output_0"
-        self.make_gather(s_name, [f"{shape_name}/output_0", "/model/constants/INT64/[2]"], ir.DataType.INT64, [1], 0)
-
-        target_name = f"{basename}/merge_bn/target_shape/Concat"
-        target_out = f"{target_name}/output_0"
-        self.make_concat(
-            target_name,
-            ["/model/constants/INT64/[-1]", s_out],
-            ir.DataType.INT64,
-            [2],
-            axis=0,
-        )
-
-        rs_name = f"{basename}/merge_bn/Reshape"
-        rs_output = f"{rs_name}/output_0"
-        self.make_reshape(rs_name, [input_3d, target_out], self.io_dtype, ["batch_heads", "sequence_length"])
-        return rs_output
-
-    def _build_scan_body(self, layer_id, hk, hv):
-        """Build the Scan body graph for one timestep of GatedDeltaNet.
-
-        Names are prefixed with the layer index so that each Scan body
-        has globally unique value and node names (required by Olive's
-        OnnxDAG which processes all subgraphs together).
-
-        Carry input:  state [B*N, hk, hv]
-        Scan inputs:  q_t [B*N, hk], k_t [B*N, hk], v_t [B*N, hv],
-                      g_t [B*N], beta_t [B*N]
-        Carry output: new_state [B*N, hk, hv]
-        Scan output:  out_t [B*N, hv]
-        """
-        p = f"L{layer_id}"
-        body = ir.Graph(inputs=(), outputs=(), nodes=(), name=f"gated_deltanet_body_{layer_id}")
-        io_dt = ir.DataType(self.io_dtype)
-
-        def body_val(name, shape):
-            v = ir.Value(name=f"{p}/{name}")
-            v.dtype = io_dt
-            v.shape = ir.Shape(shape)
-            return v
-
-        axes_neg1 = self._make_body_const(body, f"{p}/axes_neg1", [-1])
-        axes_neg2 = self._make_body_const(body, f"{p}/axes_neg2", [-2])
-        axes_1 = self._make_body_const(body, f"{p}/axes_1", [1])
-
-        # Define body inputs
-        state_in = body_val("state_in", ["batch_heads", hk, hv])
-        q_t = body_val("q_t", ["batch_heads", hk])
-        k_t = body_val("k_t", ["batch_heads", hk])
-        v_t = body_val("v_t", ["batch_heads", hv])
-        g_t = body_val("g_t", ["batch_heads"])
-        beta_t = body_val("beta_t", ["batch_heads"])
-
-        body.inputs.extend([state_in, q_t, k_t, v_t, g_t, beta_t])
-
-        # 1. decay = exp(unsqueeze(g_t, -1)): [B*N] -> [B*N, 1] -> broadcast
-        g_unsq = body_val("g_unsq", ["batch_heads", 1])
-        body.append(ir.node("Unsqueeze", inputs=[g_t, axes_neg1], outputs=[g_unsq], name=f"{p}/g_unsq"))
-
-        decay = body_val("decay", ["batch_heads", 1])
-        body.append(ir.node("Exp", inputs=[g_unsq], outputs=[decay], name=f"{p}/Exp"))
-
-        # 2. decayed_state = state * decay: [B*N, hk, hv] * [B*N, 1, 1]
-        decay_2d = body_val("decay_2d", ["batch_heads", 1, 1])
-        body.append(ir.node("Unsqueeze", inputs=[decay, axes_neg1], outputs=[decay_2d], name=f"{p}/decay_2d"))
-
-        decayed_state = body_val("decayed_state", ["batch_heads", hk, hv])
-        body.append(ir.node("Mul", inputs=[state_in, decay_2d], outputs=[decayed_state], name=f"{p}/decay_mul"))
-
-        # 3. k_state = k_t @ decayed_state
-        k_unsq = body_val("k_unsq", ["batch_heads", 1, hk])
-        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg2], outputs=[k_unsq], name=f"{p}/k_unsq"))
-
-        k_state_3d = body_val("k_state_3d", ["batch_heads", 1, hv])
-        body.append(ir.node("MatMul", inputs=[k_unsq, decayed_state], outputs=[k_state_3d], name=f"{p}/k_matmul"))
-
-        k_state = body_val("k_state", ["batch_heads", hv])
-        body.append(ir.node("Squeeze", inputs=[k_state_3d, axes_neg2], outputs=[k_state], name=f"{p}/k_squeeze"))
-
-        # 4. delta_v = v_t - k_state
-        delta_v = body_val("delta_v", ["batch_heads", hv])
-        body.append(ir.node("Sub", inputs=[v_t, k_state], outputs=[delta_v], name=f"{p}/delta_v"))
-
-        # 5. update = delta_v * beta_t
-        beta_unsq = body_val("beta_unsq", ["batch_heads", 1])
-        body.append(ir.node("Unsqueeze", inputs=[beta_t, axes_neg1], outputs=[beta_unsq], name=f"{p}/beta_unsq"))
-
-        update = body_val("update", ["batch_heads", hv])
-        body.append(ir.node("Mul", inputs=[delta_v, beta_unsq], outputs=[update], name=f"{p}/update"))
-
-        # 6. new_state = decayed_state + outer(k_t, update)
-        k_col = body_val("k_col", ["batch_heads", hk, 1])
-        body.append(ir.node("Unsqueeze", inputs=[k_t, axes_neg1], outputs=[k_col], name=f"{p}/k_col"))
-
-        update_row = body_val("update_row", ["batch_heads", 1, hv])
-        body.append(ir.node("Unsqueeze", inputs=[update, axes_neg2], outputs=[update_row], name=f"{p}/update_row"))
-
-        kv_update = body_val("kv_update", ["batch_heads", hk, hv])
-        body.append(ir.node("MatMul", inputs=[k_col, update_row], outputs=[kv_update], name=f"{p}/kv_matmul"))
-
-        new_state = body_val("new_state", ["batch_heads", hk, hv])
-        body.append(ir.node("Add", inputs=[decayed_state, kv_update], outputs=[new_state], name=f"{p}/state_add"))
-
-        # 7. out_t = q_t @ new_state
-        q_unsq = body_val("q_unsq", ["batch_heads", 1, hk])
-        body.append(ir.node("Unsqueeze", inputs=[q_t, axes_neg2], outputs=[q_unsq], name=f"{p}/q_unsq"))
-
-        out_3d = body_val("out_3d", ["batch_heads", 1, hv])
-        body.append(ir.node("MatMul", inputs=[q_unsq, new_state], outputs=[out_3d], name=f"{p}/matmul"))
-
-        out_t = body_val("out_t", ["batch_heads", hv])
-        body.append(ir.node("Squeeze", inputs=[out_3d, axes_1], outputs=[out_t], name=f"{p}/squeeze"))
-
-        body.outputs.extend([new_state, out_t])
-        return body
-
-    @staticmethod
-    def _make_body_const(body, name, values):
-        """Create a constant value inside a Scan body graph."""
-        val = ir.Value(name=name)
-        val.dtype = ir.DataType.INT64
-        val.shape = ir.Shape([len(values)])
-        tensor = ir.tensor(torch.tensor(values, dtype=torch.int64), name=name)
-        body.append(
-            ir.node(
-                "Constant",
-                inputs=[],
-                outputs=[val],
-                name=f"{name}/Constant",
-                attributes={"value": tensor},
-            )
-        )
-        return val
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).
@@ -2354,60 +1796,49 @@ class Qwen35TextModel(Model):
         )
         self.make_value(norm_output, self.io_dtype, ["batch_seq_heads", hv])
 
-        # Reshape back to [B, S, v_dim] using input shape
-        # Get B and S from input_name shape [B, S, v_dim]
+        # Reshape back to [B, S, v_dim] — reuse the original input's shape directly
+        # since input_name is [B, S, v_dim] and v_dim = N * hv.
         in_shape_name = f"{basename}/in_shape/Shape"
         self.make_shape(in_shape_name, input_name, [3])
-
-        in_bs_name = f"{basename}/in_shape/BS/Slice"
-        in_bs_out = f"{in_bs_name}/output_0"
-        self.make_slice(
-            in_bs_name,
-            [
-                f"{in_shape_name}/output_0",
-                "/model/constants/INT64/[0]",
-                "/model/constants/INT64/[2]",
-                "/model/constants/INT64/[0]",
-            ],
-            ir.DataType.INT64,
-            [2],
-        )
-
-        unflat_target_name = f"{basename}/norm_unflat/target_shape/Concat"
-        unflat_target_out = f"{unflat_target_name}/output_0"
-        self.make_concat(
-            unflat_target_name,
-            [in_bs_out, f"/model/constants/INT64/[{v_dim}]"],
-            ir.DataType.INT64,
-            [3],
-            axis=0,
-        )
 
         unflat_name = f"{basename}/norm_unflat/Reshape"
         unflat_output = f"{unflat_name}/output_0"
         self.make_reshape(
             unflat_name,
-            [norm_output, unflat_target_out],
+            [norm_output, f"{in_shape_name}/output_0"],
             self.io_dtype,
             ["batch_size", "sequence_length", v_dim],
         )
 
-        # SiLU(z)
+        # SiLU(z) — computed in float32 as in the reference model to preserve
+        # gate precision (F.silu(gate.to(torch.float32))).
+        z_cast_name = f"{basename}/z_cast/Cast"
+        self.make_cast(z_cast_name, gate_name, ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim])
+        z_fp32 = f"{z_cast_name}/output_0"
+
         z_sigmoid_name = f"{basename}/z_sigmoid/Sigmoid"
-        self.make_sigmoid(z_sigmoid_name, gate_name, self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_sigmoid(z_sigmoid_name, z_fp32, ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim])
         z_sigmoid_output = f"{z_sigmoid_name}/output_0"
 
         z_silu_name = f"{basename}/z_silu/Mul"
         self.make_mul(
-            z_silu_name, [gate_name, z_sigmoid_output], self.io_dtype, ["batch_size", "sequence_length", v_dim]
+            z_silu_name, [z_fp32, z_sigmoid_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim]
         )
         z_silu_output = f"{z_silu_name}/output_0"
 
-        # output = norm * silu(z)
-        gated_name = f"{basename}/gated/Mul"
+        # Cast norm output to fp32 for the multiplication, then cast result back
+        norm_cast_name = f"{basename}/norm_cast/Cast"
+        self.make_cast(norm_cast_name, unflat_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim])
+
+        # output = norm * silu(z) in fp32
+        gated_fp32_name = f"{basename}/gated_fp32/Mul"
         self.make_mul(
-            gated_name, [unflat_output, z_silu_output], self.io_dtype, ["batch_size", "sequence_length", v_dim]
+            gated_fp32_name, [f"{norm_cast_name}/output_0", z_silu_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim]
         )
+
+        # Cast back to io_dtype
+        gated_name = f"{basename}/gated/Cast"
+        self.make_cast(gated_name, f"{gated_fp32_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", v_dim])
         gated_output = f"{gated_name}/output_0"
 
         return gated_output
@@ -2437,11 +1868,9 @@ class Qwen35TextModel(Model):
         saved = {
             "num_layers": self.num_layers,
             "model_type": self.model_type,
-            "past_present_share_buffer": self.past_present_share_buffer,
         }
         self.num_layers = len(self.layer_types)
         self.model_type = "Qwen3_5ForConditionalGeneration"
-        self.past_present_share_buffer = False
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"
@@ -2452,7 +1881,6 @@ class Qwen35TextModel(Model):
         # Restore
         self.num_layers = saved["num_layers"]
         self.model_type = saved["model_type"]
-        self.past_present_share_buffer = saved["past_present_share_buffer"]
         del self.input_names["past_key_values.key"]
         del self.input_names["past_key_values.value"]
         del self.output_names["present.key"]
