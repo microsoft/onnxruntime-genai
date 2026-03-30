@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 from collections.abc import Sequence
@@ -67,10 +68,64 @@ class ModelGraphBuilder(ir_tape.Builder):
     The ``_domain=`` keyword arg is still supported (forwarded to ``Builder``)::
 
         out = self.op.RotaryEmbedding(q, pos, cos, sin, _domain="com.microsoft")
+
+    Use :meth:`name_prefix` as a context manager to prefix all auto-generated node and
+    value names with a path string::
+
+        with self.op.name_prefix("/model/layers.0/attn/"):
+            mm   = self.op.MatMul(q, k)    # node "/model/layers.0/attn/MatMul"
+            bias = self.op.Add(mm, b)      # node "/model/layers.0/attn/Add"
+
+        # Node "/model/layers.0/attn/MatMul_1" for a second MatMul under the same prefix
+        with self.op.name_prefix("/model/layers.0/attn/"):
+            mm2 = self.op.MatMul(a, b)
+
+    When no prefix is active, node and value names are left as the ``Builder`` default
+    (i.e. ``None`` / auto-generated sequential integers).
     """
 
     def __init__(self, graph: ir.Graph) -> None:
         super().__init__(graph)
+        self._prefix: str = ""
+        # Persists across name_prefix() calls so that re-entering the same prefix
+        # does not produce duplicate names.
+        self._op_counters: dict[str, int] = {}
+
+    def _make_node(self, op_type: str, inputs, kwargs: dict):
+        result = super()._make_node(op_type, inputs, kwargs)
+
+        if self._prefix:
+            key = self._prefix + op_type
+            count = self._op_counters.get(key, 0)
+            node_name = key if count == 0 else f"{key}_{count}"
+            self._op_counters[key] = count + 1
+
+            # result is either a single ir.Value or a sequence of ir.Value
+            first: ir.Value = result[0] if isinstance(result, (list, tuple)) else result
+            node = first.producer()
+            if node is not None:
+                node.name = node_name
+                for i, v in enumerate(node.outputs):
+                    v.name = f"{node_name}/output_{i}"
+
+        return result
+
+    @contextlib.contextmanager
+    def name_prefix(self, prefix: str):
+        """Context manager: prefix all auto-generated node/value names with ``prefix``.
+
+        The prefix counter state persists across calls so that re-entering the same
+        prefix string never produces duplicate names.
+
+        Args:
+            prefix: Path-style prefix string, e.g. ``"/model/layers.3/mlp/"``.
+        """
+        old_prefix = self._prefix
+        self._prefix = prefix
+        try:
+            yield self
+        finally:
+            self._prefix = old_prefix
 
 
 class Model:
