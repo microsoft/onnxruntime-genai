@@ -16,6 +16,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from onnx_ir import _tape as ir_tape
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -50,93 +51,73 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
-class Ops:
-    """Thin wrapper that provides ``op.Cast``, ``op.Add``, ``op.Constant``, etc. syntax
-    for building ONNX IR nodes directly in the model graph.
+class ModelGraphBuilder(ir_tape.Builder):
+    """Extends ``onnx_ir._tape.Builder`` with model-building-specific features.
 
-    Each attribute access returns a callable that creates the corresponding ONNX node
-    and registers it in the builder's graph.  The callable interface is::
+    This is the same ``op`` object used in ``onnxscript.rewriter.ort_fusions`` (where it
+    is called ``RewriterContext``), providing identical ``op.Cast``, ``op.Add``,
+    ``op.Constant`` etc. syntax.  It is enriched with private-underscore keyword
+    arguments that handle concerns specific to building ONNX graphs from scratch:
 
-        result = op.Cast(x, to=int(ir.DataType.FLOAT), name="my_node")
-        result = op.Add(a, b, name="my_add", dtype=ir.DataType.FLOAT, shape=[1, 128])
-        op.Mul(scaled, weight, output=pre_registered_val, name="my_mul")
+    * ``_name`` (str) - node name; also used for **deduplication**.  If a node with this
+      name is already registered in ``node_names``, the call is a no-op and the existing
+      ``{_name}/output_0`` value is returned.  This lets multiple subgraph helpers
+      reference the same nodes without double-insertion.
+    * ``_output`` (ir.Value) - pre-existing ``ir.Value`` to reuse as the single output
+      (passed to ``Tape.op`` as ``output=``).
+    * ``_dtype`` (ir.DataType) - annotate the output value's dtype after creation.
+    * ``_shape`` (sequence) - annotate the output value's shape after creation.
 
-    Special keyword-only arguments (not forwarded as ONNX attributes):
-
-    * ``name`` (str, required) - node name used for graph deduplication.  If a node with
-      the same name was already registered in ``builder.node_names``, the call is a no-op
-      and the existing ``{name}/output_0`` value is returned, enabling multiple subgraph
-      helpers to reference the same nodes without double-insertion.
-    * ``output`` (ir.Value, optional) - pre-existing value to reuse as the single output.
-    * ``dtype`` (ir.DataType, optional) - set on the first output value after creation.
-    * ``shape`` (sequence, optional) - set on the first output value after creation.
-    * ``num_outputs`` (int, default 1) - number of outputs when ``output`` is not given.
-    * ``domain`` (str, default "") - ONNX op domain.
-
-    All remaining kwargs are forwarded as ONNX node attributes.
+    All other keyword arguments are forwarded as ONNX node attributes, identical to the
+    standard ``Builder`` behaviour (e.g. ``to=``, ``keepdims=``, ``axis=``, ``_domain=``).
     """
 
-    def __init__(self, builder: Model) -> None:
-        self._b = builder
+    def __init__(self, graph: ir.Graph, node_names: set, values: dict) -> None:
+        super().__init__(graph)
+        self._node_names = node_names
+        self._values = values
 
-    def __getattr__(self, op_type: str):
-        b = self._b
+    def _make_node(self, op_type: str, inputs, kwargs: dict) -> ir.Value:
+        node_name: str | None = kwargs.pop("_name", None)
+        pre_output: ir.Value | None = kwargs.pop("_output", None)
+        dtype = kwargs.pop("_dtype", None)
+        shape = kwargs.pop("_shape", None)
 
-        def make_op(
-            *inputs,
-            name: str,
-            output: ir.Value | None = None,
-            dtype: ir.DataType | None = None,
-            shape=None,
-            num_outputs: int = 1,
-            domain: str = "",
-            **attrs,
-        ) -> ir.Value:
-            # Deduplication: if the node already exists, return its registered output.
-            if name in b.node_names:
-                return b.make_value(f"{name}/output_0")
+        # Deduplication: if the node was already inserted, return its existing output.
+        if node_name and node_name in self._node_names:
+            return self._values.get(f"{node_name}/output_0", ir.Value(name=f"{node_name}/output_0"))
 
-            # Resolve string inputs → ir.Value so callers may pass either.
-            # None becomes an anonymous empty Value to represent an optional/missing
-            # ONNX input that is intentionally omitted from the graph.
-            resolved: list[ir.Value | None] = []
-            for inp in inputs:
-                if inp is None:
-                    resolved.append(ir.Value(name=""))
-                elif isinstance(inp, str):
-                    resolved.append(b.make_value(inp))
-                else:
-                    resolved.append(inp)
-
-            # Build output value(s), optionally with pre-populated dtype/shape.
-            if output is not None:
-                out_vals = [output]
-            else:
-                out_vals = [b.make_value(f"{name}/output_0", dtype, shape)]
-                for i in range(1, num_outputs):
-                    out_vals.append(b.make_value(f"{name}/output_{i}"))
-
-            node = ir.node(
+        if pre_output is not None:
+            # Call Tape.op directly so we can pass `output=` and `name=`, which
+            # Builder._make_node does not expose.
+            domain = kwargs.pop("_domain", "")
+            version = kwargs.pop("_version", None)
+            kwargs.pop("_outputs", None)  # not meaningful when pre_output is set
+            result = ir_tape.Tape.op(
+                self,
                 op_type,
-                inputs=resolved,
-                attributes=attrs,
+                inputs=inputs,
+                attributes=kwargs,
                 domain=domain,
-                outputs=out_vals,
-                name=name,
+                version=version,
+                name=node_name,
+                output=pre_output,
             )
-            b.model.graph.append(node)
-            b.node_names.add(name)
+        else:
+            # Standard path: Builder._make_node handles _domain, _version, _outputs.
+            result = super()._make_node(op_type, inputs, kwargs)
+            # Set the node name after creation (Builder does not expose this).
+            if node_name:
+                result.producer().name = node_name
 
-            # Apply dtype/shape annotations when using an externally supplied output.
-            if output is not None:
-                if dtype is not None:
-                    output.dtype = ir.DataType(dtype) if isinstance(dtype, int) else dtype
-                if shape is not None:
-                    output.shape = ir.Shape(shape)
+        if node_name:
+            self._node_names.add(node_name)
+        if dtype is not None:
+            result.dtype = ir.DataType(dtype) if isinstance(dtype, int) else dtype
+        if shape is not None:
+            result.shape = ir.Shape(shape) if not isinstance(shape, ir.Shape) else shape
 
-            return out_vals[0] if len(out_vals) == 1 else tuple(out_vals)  # type: ignore[return-value]
-
-        return make_op
+        return result
 
 
 class Model:
@@ -270,8 +251,9 @@ class Model:
         # Store names of nodes already created
         self.node_names = set()
 
-        # ONNX op builder - provides op.Cast, op.Add, etc. syntax
-        self.op = Ops(self)
+        # ONNX op builder - provides op.Cast, op.Add, op.Constant, etc. syntax
+        # (same Builder used as `op` in onnxscript.rewriter.ort_fusions)
+        self.op = ModelGraphBuilder(self.model.graph, self.node_names, self.values)
 
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
@@ -2195,7 +2177,7 @@ class Model:
         skip_val = self.make_value(skip_input)
         added_out = self.make_value(output_3, io_dtype, ["batch_size", "sequence_length", self.hidden_size])
 
-        self.op.Add(root_val, skip_val, output=added_out, name=add_name)
+        self.op.Add(root_val, skip_val, _output=added_out, _name=add_name)
 
         # Compose: feed the Add output into the RMS-norm subgraph.
         self._make_simplified_layer_norm(
@@ -2225,11 +2207,11 @@ class Model:
         added_out = self.make_value(output_3, io_dtype, ["batch_size", "sequence_length", self.hidden_size])
         final_out = self.make_value(output_0, io_dtype, shape)
 
-        self.op.Add(root_val, skip_val, output=added_out, name=add_name)
+        self.op.Add(root_val, skip_val, _output=added_out, _name=add_name)
         self.op.LayerNormalization(
             added_out, weight_val, bias_val,
             epsilon=self.layernorm_attrs["epsilon"], axis=-1, stash_type=1,
-            output=final_out, name=f"{basename}/LayerNormalization",
+            _output=final_out, _name=f"{basename}/LayerNormalization",
         )
 
     # This expansion contrib-op can be updated / deprecated in the future.
@@ -2263,38 +2245,38 @@ class Model:
 
         # Cast to fp32 for numerical stability; keep a reference for the later Mul.
         x_fp32 = self.op.Cast(x_val, to=int(ir.DataType.FLOAT),
-                              name=f"{basename}/Cast", dtype=ir.DataType.FLOAT, shape=shape)
+                              _name=f"{basename}/Cast", _dtype=ir.DataType.FLOAT, _shape=shape)
 
         # Pow(x_fp32, 2) → ReduceMean(axis=-1, keepdims=1) → Add(epsilon) → Sqrt → 1/Sqrt
         two = self.op.Constant(value=ir.tensor(np.array(2.0, dtype=np.float32)),
-                               name=f"{basename}/Constant_pow_exp")
-        pow_out = self.op.Pow(x_fp32, two, name=f"{basename}/Pow",
-                              dtype=ir.DataType.FLOAT, shape=shape)
+                               _name=f"{basename}/Constant_pow_exp")
+        pow_out = self.op.Pow(x_fp32, two, _name=f"{basename}/Pow",
+                              _dtype=ir.DataType.FLOAT, _shape=shape)
 
         reduce_axes = self.op.Constant(value=ir.tensor(np.array([-1], dtype=np.int64)),
-                                       name=f"{basename}/Constant_reduce_axes")
+                                       _name=f"{basename}/Constant_reduce_axes")
         mean_out = self.op.ReduceMean(pow_out, reduce_axes, keepdims=1,
-                                      name=f"{basename}/ReduceMean", dtype=ir.DataType.FLOAT)
+                                      _name=f"{basename}/ReduceMean", _dtype=ir.DataType.FLOAT)
 
         eps = self.op.Constant(
             value=ir.tensor(np.array(self.layernorm_attrs["epsilon"], dtype=np.float32)),
-            name=f"{basename}/Constant_epsilon",
+            _name=f"{basename}/Constant_epsilon",
         )
-        add_out = self.op.Add(mean_out, eps, name=f"{basename}/Add", dtype=ir.DataType.FLOAT)
+        add_out = self.op.Add(mean_out, eps, _name=f"{basename}/Add", _dtype=ir.DataType.FLOAT)
 
-        sqrt_out = self.op.Sqrt(add_out, name=f"{basename}/Sqrt", dtype=ir.DataType.FLOAT)
+        sqrt_out = self.op.Sqrt(add_out, _name=f"{basename}/Sqrt", _dtype=ir.DataType.FLOAT)
 
         one = self.op.Constant(value=ir.tensor(np.array(1.0, dtype=np.float32)),
-                               name=f"{basename}/Constant_one")
-        inv_rms = self.op.Div(one, sqrt_out, name=f"{basename}/Div", dtype=ir.DataType.FLOAT)
+                               _name=f"{basename}/Constant_one")
+        inv_rms = self.op.Div(one, sqrt_out, _name=f"{basename}/Div", _dtype=ir.DataType.FLOAT)
 
         # Scale input: inv_rms * x_fp32, then cast back to io_dtype, then multiply by weight.
-        scaled = self.op.Mul(inv_rms, x_fp32, name=f"{basename}/Mul", dtype=ir.DataType.FLOAT)
+        scaled = self.op.Mul(inv_rms, x_fp32, _name=f"{basename}/Mul", _dtype=ir.DataType.FLOAT)
 
         scaled_out = self.op.Cast(scaled, to=int(io_dtype),
-                                  name=f"{basename}/Cast_1", dtype=io_dtype, shape=shape)
+                                  _name=f"{basename}/Cast_1", _dtype=io_dtype, _shape=shape)
 
-        self.op.Mul(scaled_out, weight_val, output=final_out, name=f"{basename}/Mul_1")
+        self.op.Mul(scaled_out, weight_val, _output=final_out, _name=f"{basename}/Mul_1")
 
     def _make_head_layernorm(self, layer_id, norm_prefix, input_path, weight, num_heads, new_io_dtype, cast):
         """Apply per-head SimplifiedLayerNorm: Reshape(B,S,D→B,S*N,H) → Norm → Reshape(B,S*N,H→B,S,N*H).
@@ -3546,23 +3528,23 @@ class Model:
         gate_reshape_name = f"{gate_ops_base}/Reshape"
         router_probs = self.make_value(f"{gate_reshape_name}/output_0", self.io_dtype, ["num_rows", self.moe_attrs["num_experts"]])
 
-        shape_out = self.op.Shape(gate_out, name=f"{gate_ops_base}/Shape",
-                                  dtype=ir.DataType.INT64, shape=[3])
+        shape_out = self.op.Shape(gate_out, _name=f"{gate_ops_base}/Shape",
+                                  _dtype=ir.DataType.INT64, _shape=[3])
         idx2 = self.op.Constant(value=ir.tensor(np.array(2, dtype=np.int64)),
-                                name=f"{gate_ops_base}/Constant_gather_idx")
+                                _name=f"{gate_ops_base}/Constant_gather_idx")
         gather_out = self.op.Gather(shape_out, idx2, axis=0,
-                                    name=f"{gate_ops_base}/Gather", dtype=ir.DataType.INT64)
+                                    _name=f"{gate_ops_base}/Gather", _dtype=ir.DataType.INT64)
         unsqueeze_axes = self.op.Constant(value=ir.tensor(np.array([0], dtype=np.int64)),
-                                          name=f"{gate_ops_base}/Constant_unsqueeze_axes")
+                                          _name=f"{gate_ops_base}/Constant_unsqueeze_axes")
         unsqueeze_out = self.op.Unsqueeze(gather_out, unsqueeze_axes,
-                                          name=f"{gate_ops_base}/Unsqueeze",
-                                          dtype=ir.DataType.INT64, shape=[1])
+                                          _name=f"{gate_ops_base}/Unsqueeze",
+                                          _dtype=ir.DataType.INT64, _shape=[1])
         neg1 = self.op.Constant(value=ir.tensor(np.array([-1], dtype=np.int64)),
-                                name=f"{gate_ops_base}/Constant_neg1")
+                                _name=f"{gate_ops_base}/Constant_neg1")
         concat_out = self.op.Concat(neg1, unsqueeze_out, axis=0,
-                                    name=f"{gate_ops_base}/Concat",
-                                    dtype=ir.DataType.INT64, shape=[2])
-        self.op.Reshape(gate_out, concat_out, output=router_probs, name=gate_reshape_name)
+                                    _name=f"{gate_ops_base}/Concat",
+                                    _dtype=ir.DataType.INT64, _shape=[2])
+        self.op.Reshape(gate_out, concat_out, _output=router_probs, _name=gate_reshape_name)
 
         w1_list = []
         w2_list = []
@@ -4157,11 +4139,11 @@ class Model:
         past_key_val = self.make_value("past_key_values.0.key")
         gather_out = self.make_value(f"{basename}/Gather/output_0", ir.DataType.INT64, [])
 
-        shape_out = self.op.Shape(past_key_val, name=f"{basename}/Shape",
-                                  dtype=ir.DataType.INT64, shape=[4])
+        shape_out = self.op.Shape(past_key_val, _name=f"{basename}/Shape",
+                                  _dtype=ir.DataType.INT64, _shape=[4])
         idx2 = self.op.Constant(value=ir.tensor(np.array(2, dtype=np.int64)),
-                                name=f"{basename}/Constant_gather_idx")
-        self.op.Gather(shape_out, idx2, axis=0, output=gather_out, name=f"{basename}/Gather")
+                                _name=f"{basename}/Constant_gather_idx")
+        self.op.Gather(shape_out, idx2, axis=0, _output=gather_out, _name=f"{basename}/Gather")
 
         return f"{basename}/Gather"
 
