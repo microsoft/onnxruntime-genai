@@ -8,6 +8,7 @@
 import numpy as np
 import onnx_ir as ir
 import torch
+from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
 from transformers import (
     AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -1012,19 +1013,29 @@ class Qwen35TextModel(Model):
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
 
-        # Auto-exclude linear attention gate projections from int4 quantization.
-        # in_proj_a and in_proj_b project to just n_kv dims (~16) and control
-        # recurrence gates: exp(decay) errors compound across the sequence,
-        # causing output collapse when quantized to int4.
-        gate_exclusions = []
+        # Mixed-precision quantization for linear attention layers.
+        # Baseline: whole model INT4. Override linear attention layer nodes
+        # to INT8 for better accuracy with modest size increase.
+        #
+        # Linear attention recurrence accumulates errors across the full sequence,
+        # unlike softmax attention which normalizes per-step.
+        int8_nodes = {}
         for i, lt in enumerate(self.layer_types):
             if lt == "linear_attention":
-                gate_exclusions.append(f"/model/layers.{i}/linear_attn/in_proj_b/MatMul")
-                gate_exclusions.append(f"/model/layers.{i}/linear_attn/in_proj_a/MatMul")
-        if gate_exclusions:
-            existing = list(self.quant_attrs["int4"]["nodes_to_exclude"])
-            existing.extend(n for n in gate_exclusions if n not in existing)
-            self.quant_attrs["int4"]["nodes_to_exclude"] = existing
+                # All linear attention projections: INT8
+                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                # MLP projections in linear attention layers: INT8
+                for proj in ("gate_proj", "up_proj", "down_proj"):
+                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
+
+        if int8_nodes:
+            algo_config = self.quant_attrs["int4"].get("algo_config")
+            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
+                algo_config.customized_weight_config.update(int8_nodes)
+            else:
+                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
+                self.quant_attrs["int4"]["algo_config"] = algo_config
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1723,40 +1734,38 @@ class Qwen35TextModel(Model):
         return unflat_out
 
     def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
-        """L2-normalize along last dimension: x / max(||x||_2, eps)
+        """L2-normalize along last dimension: x * rsqrt(sum(x^2) + eps)
 
-        Args:
-            leading_dims: Shape prefix for intermediate values (e.g., ["flat_tokens"] for 2D,
-                          ["batch_size", "sequence_length"] for 3D). Defaults to 3D if not specified.
+        Matches the FLA library's l2norm used by the PyTorch reference:
+            inv_norm = rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+            return x * inv_norm
         """
         if leading_dims is None:
             leading_dims = ["batch_size", "sequence_length"]
         full_shape = [*leading_dims, last_dim]
         reduced_shape = [*leading_dims, 1]
 
-        # ||x||_2 along last dim
-        l2_name = f"{basename}/ReduceL2"
-        self.make_reduce_l2(
-            l2_name,
-            [input_name, "/model/constants/INT64/[-1]"],
-            self.io_dtype,
-            reduced_shape,
-            keepdims=1,
-        )
-        l2_output = f"{l2_name}/output_0"
+        # sum(x^2, dim=-1, keepdim=True)
+        sq_name = f"{basename}/Square/Mul"
+        self.make_mul(sq_name, [input_name, input_name], self.io_dtype, full_shape)
 
-        # Clamp to avoid division by zero
+        sum_name = f"{basename}/SumSq/ReduceSum"
+        self.make_reduce_sum(sum_name, [f"{sq_name}/output_0", "/model/constants/INT64/[-1]"],
+                             self.io_dtype, reduced_shape, keepdims=True)
+
+        # sum(x^2) + eps
         eps_name = self._get_shared_l2_eps()
-        clip_name = f"{basename}/Clip"
-        self.make_clip(clip_name, [l2_output, eps_name], self.io_dtype, reduced_shape)
-        clip_output = f"{clip_name}/output_0"
+        add_eps_name = f"{basename}/AddEps/Add"
+        self.make_add(add_eps_name, [f"{sum_name}/output_0", eps_name], self.io_dtype, reduced_shape)
 
-        # x / ||x||_2
-        norm_name = f"{basename}/Normalize/Div"
-        self.make_div(norm_name, [input_name, clip_output], self.io_dtype, full_shape)
-        norm_output = f"{norm_name}/output_0"
+        # x * rsqrt(sum(x^2) + eps)
+        rsqrt_name = f"{basename}/Rsqrt"
+        self.make_rsqrt(rsqrt_name, [f"{add_eps_name}/output_0"], self.io_dtype, reduced_shape)
 
-        return norm_output
+        norm_name = f"{basename}/Normalize/Mul"
+        self.make_mul(norm_name, [input_name, f"{rsqrt_name}/output_0"], self.io_dtype, full_shape)
+
+        return f"{norm_name}/output_0"
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).

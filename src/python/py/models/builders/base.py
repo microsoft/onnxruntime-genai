@@ -994,6 +994,14 @@ class Model:
         self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
+    def make_rsqrt(self, name, inputs, dtype, shape):
+        """Reciprocal square root: 1 / sqrt(x)."""
+        sqrt_name = f"{name}/Sqrt"
+        self.make_sqrt(sqrt_name, inputs, dtype, shape)
+        output = f"{name}/output_0"
+        self.make_node("Reciprocal", inputs=[f"{sqrt_name}/output_0"], outputs=[output], name=f"{name}/Reciprocal")
+        self.make_value(output, dtype, shape=shape)
+
     def make_cast(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
