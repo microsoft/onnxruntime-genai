@@ -4,7 +4,6 @@
 import functools
 import os
 
-import onnxruntime_genai as og
 import pytest
 
 
