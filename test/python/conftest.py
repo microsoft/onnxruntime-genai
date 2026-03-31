@@ -32,7 +32,7 @@ def create_model_for_device(model_path, device):
     if device == "dml":
         config.append_provider("dml")
         config.set_provider_option("dml", "enable_graph_capture", "0")
-    else:
+    elif device != "cpu":
         config.append_provider(device)
     return og.Model(config)
 
