@@ -18,9 +18,9 @@
 
 namespace Generators {
 
+#if USE_GUIDANCE
 static constexpr size_t kBitsPerMaskWord = 32;  // Number of vocabulary tokens packed into each uint32_t mask word
 
-#if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
       eos_token_(state.params_->config.model.eos_token_id[0]) {
@@ -189,9 +189,8 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
     if (device_logits_mask_.empty() || device_logits_mask_.size() != total_words) {
       device_logits_mask_ = params_->p_device->Allocate<uint32_t>(total_words);
     }
-    auto cpu_span = device_logits_mask_.CpuSpan();
-    copy(std::span<const uint32_t>{flat_masks}, cpu_span);
-    device_logits_mask_.CopyCpuToDevice();
+    auto cpu_span = GetDeviceInterface(DeviceType::CPU)->WrapMemory<uint32_t>(std::span<uint32_t>{flat_masks});
+    device_logits_mask_.CopyFrom(cpu_span);
     params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, static_cast<int>(words_per_row), device_logits_mask_.Span().data());
     return;
   }
@@ -207,9 +206,6 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       subspan[i] = mask[i / kBitsPerMaskWord] & (1 << (i % kBitsPerMaskWord)) ? subspan[i] : std::numeric_limits<float>::lowest();
     }
     vocab_index += params_->config.model.vocab_size;
-  }
-  if (params_->p_device->GetType() != DeviceType::CPU) {
-    logits.CopyCpuToDevice();
   }
 }
 
