@@ -120,8 +120,17 @@ jobs:
           set -e -x
           python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
 
-      # This will also download all the test models to the test/test_models directory
+      # This will also restore all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
+      - name: Restore cached test models
+        uses: actions/cache@v4
+        with:
+          path: |
+            test/test_models/phi-4-mini
+            test/test_models/qwen-2.5-0.5b
+          key: linux-cpu-test-models-${{ hashFiles('test/python/_test_utils.py') }}
+          save-always: true
+
       - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
