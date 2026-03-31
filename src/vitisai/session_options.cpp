@@ -26,7 +26,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
 
 #if defined(_WIN32)
   if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                       [](const auto& pair) { return pair.first == "external_ep_libray"; });
+                                       [](const auto& pair) { return pair.first == "external_ep_library"; });
       opt_it != provider_options.options.end()) {
     auto lib_name = opt_it->second;
     HMODULE lib = LoadLibrary(lib_name.c_str());
