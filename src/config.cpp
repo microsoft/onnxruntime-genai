@@ -1341,6 +1341,11 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
           }
         }
       } else if (provider_options->name == "DML") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {

@@ -444,8 +444,12 @@ def test_e2e(device, phi2_for):
 def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     model_path = phi2_for(device)
     config = og.Config(model_path)
+    config.clear_providers()
     if device == "dml":
-        config.set_provider_option("DML", "enable_graph_capture", "0")
+        config.append_provider("dml")
+        config.set_provider_option("dml", "enable_graph_capture", "0")
+    elif device != "cpu":
+        config.append_provider(device)
     model_data = None
     with open(os.path.join(model_path, "model.onnx"), "rb") as model_file:
         model_data = wrapper_bytes_function(model_file.read())
