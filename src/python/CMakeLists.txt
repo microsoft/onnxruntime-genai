@@ -32,8 +32,6 @@ if(BUILD_WHEEL)
     set(TARGET_NAME "onnxruntime-genai-winml")
   elseif(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
-  elseif(USE_ROCM)
-    set(TARGET_NAME "onnxruntime-genai-rocm")
   elseif(USE_DML)
     set(TARGET_NAME "onnxruntime-genai-directml")
   else()
@@ -74,20 +72,6 @@ if(BUILD_WHEEL)
     "libnvinfer_plugin.so.10"
     "libnvonnxparser.so.8"
     "libnvonnxparser.so.10"
-
-    "libamdhip64.so.5"
-    "libamdhip64.so.6"
-    "libhipblas.so.0"
-    "libhipblas.so.2"
-    "libhipfft.so"
-    "libhipfft.so.0"
-    "libhiprtc.so.5"
-    "libhsa-runtime64.so.1"
-    "librccl.so.1"
-    "librocblas.so.3"
-    "librocfft.so.0"
-    "libroctracer64.so.4"
-    "libMIOpen.so.1"
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)

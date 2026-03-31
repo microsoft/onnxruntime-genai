@@ -80,7 +80,7 @@ cd build\Debug
 
 2. On Linux and macOS:
 
-```powershell
+```bash
 # Prerequisite: navigate to the compiled binaries.
 cd build
 ```

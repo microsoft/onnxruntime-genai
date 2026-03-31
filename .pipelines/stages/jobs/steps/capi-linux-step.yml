@@ -10,6 +10,12 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
 
 steps:
 
@@ -82,6 +88,71 @@ steps:
   displayName: 'Set CMake Extra Args'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- ${{ if ne(parameters.ort_build_version, 'default') }}:
+  - bash: |
+      set -e -x
+      ep="$(ep)"
+      arch="$(arch)"
+
+      # Determine package name
+      case "$ep" in
+          "cuda") package_name="Microsoft.ML.OnnxRuntime.Gpu.Linux" ;;
+          *) package_name="Microsoft.ML.OnnxRuntime" ;;
+      esac
+
+      org_name="aiinfra"
+      feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+      feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
+      version="${{ parameters.ort_build_version }}"
+
+      source="${{ parameters.ort_build_source }}"
+      if [ "$source" = "Ort-Nightly" ]; then
+          url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+      else
+          url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
+      fi
+
+      echo "Downloading $package_name version $version"
+      download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
+      curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
+
+      if [ ! -s "$download_path" ]; then
+          echo "Error: Downloaded ORT package is missing or empty at $download_path"
+          exit 1
+      fi
+
+      extract_path="$(Agent.TempDirectory)/ort_build_extracted"
+      mkdir -p "$extract_path"
+      unzip -o "$download_path" -d "$extract_path"
+
+      ort_home="$(Build.Repository.LocalPath)/ort_build"
+      mkdir -p "$ort_home/include"
+      mkdir -p "$ort_home/lib"
+
+      # Copy headers
+      # CUDA packages store headers in buildTransitive/native/include, while other
+      # ORT packages (CPU) use build/native/include per NuGet package layout.
+      if [ "$ep" = "cuda" ]; then
+          cp -r "$extract_path/buildTransitive/native/include/"* "$ort_home/include/"
+      else
+          cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
+      fi
+
+      # Copy libraries
+      platform="linux-x64"
+      if [ "$arch" = "arm64" ]; then
+          platform="linux-arm64"
+      fi
+      cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
+
+      echo "ORT_HOME: $ort_home"
+      ls -la "$ort_home/include/"
+      ls -la "$ort_home/lib/"
+      # Inside Docker, the path is /ort_genai_src/ort_build
+      echo "##vso[task.setvariable variable=ORT_HOME_CMAKE_ARG]-DORT_HOME=/ort_genai_src/ort_build"
+    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
@@ -91,7 +162,7 @@ steps:
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF $(CMAKE_EXTRA_ARGS) && \
+            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF $(CMAKE_EXTRA_ARGS) $(ORT_HOME_CMAKE_ARG) && \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
@@ -136,7 +207,7 @@ steps:
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
             -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) \
-            $(CMAKE_EXTRA_ARGS) && \
+            $(CMAKE_EXTRA_ARGS) $(ORT_HOME_CMAKE_ARG) && \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'

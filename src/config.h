@@ -208,10 +208,17 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
-      // Qwen VL specific vision config values
+      // Qwen VL specific vision config values.
+      // These are only needed for the QNN 3-stage pipeline (patch_embed → vision_attn → patch_merger),
+      // where the C++ runtime computes window attention indices between stages.
+      // For standard single-ONNX CUDA/CPU models, windowing is baked into the ONNX graph
+      // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL/3.5 uses 16
+      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
+                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
