@@ -680,7 +680,24 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         InitDmlInterface(p_device_luid, p_device_index);
       }
 
-      if (!disable_graph_capture) {
+      bool dml_graph_capture_disabled = disable_graph_capture;
+      if (!dml_graph_capture_disabled) {
+        for (const auto& dml_provider_options : provider_options_list) {
+          if (dml_provider_options.name != "DML") {
+            continue;
+          }
+
+          if (std::find_if(dml_provider_options.options.begin(), dml_provider_options.options.end(),
+                           [](const Config::NamedString& option) {
+                             return option.first == "enable_graph_capture" && option.second == "0";
+                           }) != dml_provider_options.options.end()) {
+            dml_graph_capture_disabled = true;
+            break;
+          }
+        }
+      }
+
+      if (!dml_graph_capture_disabled) {
         session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       }
 

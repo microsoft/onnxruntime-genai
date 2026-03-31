@@ -1327,6 +1327,22 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
   for (const auto& provider : session_options.providers) {
+    if (provider == "DML") {
+      for (const auto& provider_options : session_options.provider_options) {
+        if (provider_options.name != "DML") {
+          continue;
+        }
+
+        for (const auto& value : provider_options.options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    }
+
     const auto provider_options = std::find_if(session_options.provider_options.begin(),
                                                session_options.provider_options.end(),
                                                [&provider](const Config::ProviderOptions& po) {
@@ -1340,13 +1356,6 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
             throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
           }
         }
-      } else if (provider_options->name == "DML") {
-        for (const auto& value : provider_options->options) {
-          if (value.first == "enable_graph_capture" && value.second == "0") {
-            return false;
-          }
-        }
-        return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
           if (value.first == "enableGraphCapture" && value.second == "1") {

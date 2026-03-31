@@ -24,19 +24,6 @@ def get_path_for_model(data_path, model_name, precision, device):
     return model_path
 
 
-def create_model_for_device(model_path, device):
-    """Create an og.Model, disabling graph capture for DML to avoid
-    failures when not all nodes are partitioned to the DML EP."""
-    config = og.Config(model_path)
-    config.clear_providers()
-    if device == "dml":
-        config.append_provider("dml")
-        config.set_provider_option("dml", "enable_graph_capture", "0")
-    elif device != "cpu":
-        config.append_provider(device)
-    return og.Model(config)
-
-
 @pytest.fixture
 def phi2_for(request):
     return functools.partial(
