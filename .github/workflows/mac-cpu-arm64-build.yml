@@ -94,18 +94,39 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-macos-arm64-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-arm64-${{ github.ref }}-
+            ccache-macos-arm64-
+
+      - name: Install and configure ccache
+        run: |
+          brew install ccache
+          ccache --set-config cache_dir=${{ github.workspace }}/.ccache
+          ccache --set-config max_size=2G
+          ccache --zero-stats
+
       - name: Configure CMake
         run: |
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-          cmake --preset macos_arm64_cpu_release
+          export CCACHE_DIR=${{ github.workspace }}/.ccache
+          cmake --preset macos_arm64_cpu_release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build with CMake
         run: |
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+          export CCACHE_DIR=${{ github.workspace }}/.ccache
           cmake --build --preset macos_arm64_cpu_release --parallel
           cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
+          ccache --show-stats
         continue-on-error: false
 
       - name: Install the Python wheel and test dependencies
@@ -120,8 +141,7 @@ jobs:
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x
-          source genai-macos-venv/bin/activate
-          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles" --macos MacOSX --osx_arch arm64 --apple_deploy_target 12.0 --apple_sysroot macosx
+          ctest --test-dir build/cpu/osx-arm64/src/java --build-config Release --verbose --timeout 10800
 
       - name: Remove the ort lib and header files
         run: |
@@ -136,6 +156,14 @@ jobs:
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
+      - name: Restore cached test models
+        uses: actions/cache@v4
+        with:
+          path: |
+            test/test_models/phi-4-mini
+            test/test_models/qwen-2.5-0.5b
+          key: test-models-${{ hashFiles('test/python/_test_utils.py') }}
+
       - name: Run the Python tests
         run: |
           source genai-macos-venv/bin/activate
