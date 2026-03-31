@@ -777,6 +777,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DMODEL_CHAT=ON",
         "-DMODEL_MM=ON",
         "-DWHISPER=ON",
+        "-DNEMOTRON_SPEECH=ON"
     ]
 
     ort_include_dir = REPO_ROOT / "ort" / "include"
