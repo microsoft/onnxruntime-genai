@@ -1339,9 +1339,10 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 #endif
 
 #if USE_GUIDANCE
-TEST(CAPITests, SetGuidance) {
-#if TEST_PHI2
+const std::string json_schema = R"json({"x-guidance": {"whitespace_flexible": false, "key_separator": ": ", "item_separator": ", "}, "type": "array", "items": {"anyOf": [{"description": "How to get the statistics for a city", "type": "object", "properties": {"name": {"const": "get_statistics"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the weather for a city", "type": "object", "properties": {"name": {"const": "get_weather"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the population for a city", "type": "object", "properties": {"name": {"const": "get_population"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}]}, "minItems": 1})json";
 
+TEST(CAPITests, UseRegexCAPI) {
+#if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
@@ -1361,7 +1362,55 @@ TEST(CAPITests, SetGuidance) {
   auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
+#endif
+}
 
+TEST(CAPITests, UseLarkGrammarCAPI) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "What is the weather in San Francisco?";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 256);
+  auto lark_grammar = "start: functioncall" + "\n" + "functioncall: %json " + json_schema;
+  params->SetGuidance("lark_grammar", lark_grammar, false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  auto output = std::string(out_string).substr(std::string(input_string).size());
+  EXPECT_TRUE(std::regex_match(output, R"json([{"name": "get_weather", "parameters": {"city": "San Francisco"}}])json"));
+#endif
+}
+
+TEST(CAPITests, UseJsonSchemaCAPI) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "What is the weather in San Francisco?";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 256);
+  params->SetGuidance("json_schema", json_schema, false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  auto output = std::string(out_string).substr(std::string(input_string).size());
+  EXPECT_TRUE(std::regex_match(output, R"json([{"name": "get_weather", "parameters": {"city": "San Francisco"}}])json"));
 #endif
 }
 #endif
