@@ -14,6 +14,8 @@ import onnxruntime
 import onnxruntime_genai as og
 import pytest
 
+from conftest import create_model_for_device
+
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
     # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
@@ -287,7 +289,7 @@ def test_rewind(test_data_path, relative_model_path):
 def test_tokenizer_encode_decode(device, phi2_for, batch):
     model_path = phi2_for(device)
 
-    model = og.Model(model_path)
+    model = create_model_for_device(model_path, device)
     tokenizer = og.Tokenizer(model)
 
     prompts = [
@@ -316,7 +318,7 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
 def test_phi3_chat_template(device, phi3_for):
     model_path = phi3_for(device)
 
-    model = og.Model(model_path)
+    model = create_model_for_device(model_path, device)
     tokenizer = og.Tokenizer(model)
 
     messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
@@ -336,7 +338,7 @@ def test_phi3_chat_template(device, phi3_for):
 def test_phi2_chat_template(device, phi2_for):
     model_path = phi2_for(device)
 
-    model = og.Model(model_path)
+    model = create_model_for_device(model_path, device)
     tokenizer = og.Tokenizer(model)
 
     messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
@@ -356,7 +358,7 @@ def test_phi2_chat_template(device, phi2_for):
 )
 @pytest.mark.parametrize("device", devices)
 def test_stream(device, phi2_for):
-    model = og.Model(phi2_for(device))
+    model = create_model_for_device(phi2_for(device), device)
     tokenizer = og.Tokenizer(model)
     stream = tokenizer.create_stream()
 
@@ -384,7 +386,7 @@ def test_batching(device, phi2_for):
     if device == "dml":
         pytest.skip("EP DML does not support batching")
 
-    model = og.Model(phi2_for(device))
+    model = create_model_for_device(phi2_for(device), device)
     tokenizer = og.Tokenizer(model)
 
     prompts = [
@@ -410,7 +412,7 @@ def test_batching(device, phi2_for):
 )
 @pytest.mark.parametrize("device", devices)
 def test_e2e(device, phi2_for):
-    model = og.Model(phi2_for(device))
+    model = create_model_for_device(phi2_for(device), device)
     tokenizer = og.Tokenizer(model)
 
     assert tokenizer.bos_token_id == 50256
@@ -442,6 +444,8 @@ def test_e2e(device, phi2_for):
 def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     model_path = phi2_for(device)
     config = og.Config(model_path)
+    if device == "dml":
+        config.set_provider_option("DML", "enable_graph_capture", "0")
     model_data = None
     with open(os.path.join(model_path, "model.onnx"), "rb") as model_file:
         model_data = wrapper_bytes_function(model_file.read())
@@ -553,7 +557,7 @@ def test_get_output(test_data_path, relative_model_path):
 )
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
-    model = og.Model(qwen_for(device))
+    model = create_model_for_device(qwen_for(device), device)
 
     search_params = og.GeneratorParams(model)
     input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)

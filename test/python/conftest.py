@@ -4,6 +4,7 @@
 import functools
 import os
 
+import onnxruntime_genai as og
 import pytest
 
 
@@ -21,6 +22,19 @@ def get_path_for_model(data_path, model_name, precision, device):
     if not os.path.exists(model_path):
         pytest.skip(f"Model {model_name} not found at {model_path}")
     return model_path
+
+
+def create_model_for_device(model_path, device):
+    """Create an og.Model, disabling graph capture for DML to avoid
+    failures when not all nodes are partitioned to the DML EP."""
+    config = og.Config(model_path)
+    config.clear_providers()
+    if device == "dml":
+        config.append_provider("dml")
+        config.set_provider_option("dml", "enable_graph_capture", "0")
+    else:
+        config.append_provider(device)
+    return og.Model(config)
 
 
 @pytest.fixture
