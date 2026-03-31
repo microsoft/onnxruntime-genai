@@ -102,16 +102,31 @@ jobs:
         run: |
           python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel --use_guidance
 
-      # This will also restore all the test models to the test/test_models directory
-      # These models are used by the python tests.
+      # Restore test models from cache; populate via a dedicated download step so the
+      # cache is saved inline (before the test step) rather than as a post-step.
+      # This avoids cache loss when the runner VM is terminated hard during tests.
       - name: Restore cached test models
-        uses: actions/cache@v4
+        id: cache-test-models
+        uses: actions/cache/restore@v4
         with:
           path: |
             test/test_models/phi-4-mini
             test/test_models/qwen-2.5-0.5b
           key: win-cuda-test-models-${{ hashFiles('test/python/_test_utils.py') }}
-          save-always: true
+
+      - name: Download test models
+        if: steps.cache-test-models.outputs.cache-hit != 'true'
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+
+      - name: Save test models to cache
+        if: steps.cache-test-models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            test/test_models/phi-4-mini
+            test/test_models/qwen-2.5-0.5b
+          key: win-cuda-test-models-${{ hashFiles('test/python/_test_utils.py') }}
 
       - name: Run the Python Tests
         run: |
