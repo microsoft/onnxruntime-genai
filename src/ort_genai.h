@@ -910,10 +910,12 @@ struct OgaStreamingProcessor : OgaAbstract {
     OgaCheckResult(OgaStreamingProcessorSetOption(this, key, value));
   }
 
-  OgaString GetOption(const char* key) const {
+  std::string GetOption(const char* key) const {
     const char* value;
     OgaCheckResult(OgaStreamingProcessorGetOption(this, key, &value));
-    return value;
+    std::string result(value);
+    OgaDestroyString(value);
+    return result;
   }
 
   static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
