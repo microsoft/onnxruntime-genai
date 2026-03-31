@@ -232,8 +232,8 @@ def create_model(
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
+        # print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        # extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
