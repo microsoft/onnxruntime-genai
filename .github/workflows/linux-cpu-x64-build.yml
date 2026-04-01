@@ -106,8 +106,8 @@ jobs:
           set -e -x
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-            -DORT_INCLUDE_DIR=build/cpu/_deps/ortlib-src/build/native/include \
-            -DORT_LIB_DIR=build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
             -DOGA_INCLUDE_DIR=src \
             -DOGA_LIB_DIR=build/cpu
           cmake --build examples/c/build --config Release
