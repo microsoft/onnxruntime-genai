@@ -469,10 +469,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  // search_->GetSequenceLength() != next_tokens.size() implies that this is not the first time ComputeLogits
+  // next_tokens.size() == 1 implies that this is not the first time ComputeLogits
   // is being called (i.e. we're not computing logits for the initial input tokens), so we need to commit
   // tokens to the guidance logits processor before running the model.
-  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
+  // We are computing logits on a previously generated token.
+  if (guidance_logits_processor_ && next_tokens.size() == 1) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -485,7 +486,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   }
   SetLogits(logits);
 
-  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
+  if (guidance_logits_processor_ && next_tokens.size() == 1) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
