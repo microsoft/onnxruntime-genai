@@ -81,6 +81,8 @@ uv run benchmark/python/benchmark_e2e.py -i docs/8b-cuda --chat_template '<|im_s
 
 ### Qwen/Qwen3-8B + CUDA
 
+GPU NVIDIA GeForce RTX 4080
+
 | Metric | Value | Unit |
 |---|---:|---|
 | Average Tokenization Latency (per token) | 0.007992400031071156 | ms |
