@@ -84,7 +84,7 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
@@ -105,6 +105,18 @@ jobs:
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
+      - name: Build the C Examples
+        run: |
+          set -e -x
+          cmake -S examples/c -B examples/c/build \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+            -DORT_INCLUDE_DIR=ort/include \
+            -DORT_LIB_DIR=ort/lib \
+            -DOGA_INCLUDE_DIR=src \
+            -DOGA_LIB_DIR=build/cpu \
+            -DUSE_GUIDANCE=ON
+          cmake --build examples/c/build --config Release
+
       - name: Install the Python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
@@ -117,7 +129,7 @@ jobs:
         run: |
           ls -l ${{ github.workspace }}/build
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
           set -e -x
           ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
@@ -140,17 +152,6 @@ jobs:
           dotnet build -c Release
           cd ../ModelMM
           dotnet build -c Release
-
-      - name: Build the C Examples
-        run: |
-          set -e -x
-          cmake -S examples/c -B examples/c/build \
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON \
-            -DORT_INCLUDE_DIR=ort/include \
-            -DORT_LIB_DIR=ort/lib \
-            -DOGA_INCLUDE_DIR=src \
-            -DOGA_LIB_DIR=build/cpu
-          cmake --build examples/c/build --config Release
 
       - name: Test the C# LLM Example with Tool Calling
         run: |

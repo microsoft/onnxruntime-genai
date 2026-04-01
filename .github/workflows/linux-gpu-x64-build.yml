@@ -148,14 +148,15 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               /usr/bin/cmake -S examples/c -B examples/c/build \
-                -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON \
+                -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
                 -DORT_INCLUDE_DIR=ort/include \
                 -DORT_LIB_DIR=ort/lib \
                 -DOGA_INCLUDE_DIR=src \
-                -DOGA_LIB_DIR=build/cuda && \
+                -DOGA_LIB_DIR=build/cuda \
+                -DUSE_GUIDANCE=ON && \
               /usr/bin/cmake --build examples/c/build --config Release"
 
-      - name: Build the Java API and Run the Java Tests in Docker
+      - name: Run the Java tests in Docker
         run: |
           set -e -x
           docker run \

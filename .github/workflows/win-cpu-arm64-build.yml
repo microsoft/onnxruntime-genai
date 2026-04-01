@@ -82,12 +82,23 @@ jobs:
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON
+          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
           cmake --build --preset windows_arm64_cpu_release --parallel
           cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
+
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON `
+            -DORT_INCLUDE_DIR=ort\include `
+            -DORT_LIB_DIR=ort\lib `
+            -DOGA_INCLUDE_DIR=src `
+            -DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release `
+            -DUSE_GUIDANCE=ON
+          cmake --build examples\c\build --config Release
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -99,7 +110,7 @@ jobs:
           python -m pip install onnxruntime-qnn -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
           ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
@@ -118,16 +129,6 @@ jobs:
           dotnet build -c Release
           cd ..\ModelMM
           dotnet build -c Release
-
-      - name: Build the C Examples
-        run: |
-          cmake -S examples\c -B examples\c\build `
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON `
-            -DORT_INCLUDE_DIR=ort\include `
-            -DORT_LIB_DIR=ort\lib `
-            -DOGA_INCLUDE_DIR=src `
-            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
-          cmake --build examples\c\build --config Release
 
       - name: Test the C# LLM Example with Tool Calling
         run: |

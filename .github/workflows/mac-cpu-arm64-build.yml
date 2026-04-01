@@ -98,7 +98,7 @@ jobs:
         run: |
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-          cmake --preset macos_arm64_cpu_release -DENABLE_JAVA=ON
+          cmake --preset macos_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
@@ -107,6 +107,18 @@ jobs:
           cmake --build --preset macos_arm64_cpu_release --parallel
           cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
         continue-on-error: false
+
+      - name: Build the C Examples
+        run: |
+          set -e -x
+          cmake -S examples/c -B examples/c/build \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+            -DORT_INCLUDE_DIR=ort/include \
+            -DORT_LIB_DIR=ort/lib \
+            -DOGA_INCLUDE_DIR=src \
+            -DOGA_LIB_DIR=build/cpu/osx-arm64 \
+            -DUSE_GUIDANCE=ON
+          cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
         run: |
@@ -117,21 +129,10 @@ jobs:
           python3 -m pip install -r test/python/macos/ort/requirements.txt
           python3 -m pip install build/cpu/osx-arm64/wheel/onnxruntime_genai*.whl --no-deps
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
           set -e -x
           ctest --test-dir build/cpu/osx-arm64/src/java --build-config Release --verbose --timeout 10800
-
-      - name: Build the C Examples
-        run: |
-          set -e -x
-          cmake -S examples/c -B examples/c/build \
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON \
-            -DORT_INCLUDE_DIR=ort/include \
-            -DORT_LIB_DIR=ort/lib \
-            -DOGA_INCLUDE_DIR=src \
-            -DOGA_LIB_DIR=build/cpu/osx-arm64
-          cmake --build examples/c/build --config Release
 
       - name: Remove the ort lib and header files
         run: |

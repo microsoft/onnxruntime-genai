@@ -62,7 +62,7 @@ jobs:
           ls -R microsoft.ml.onnxruntime
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
@@ -99,11 +99,12 @@ jobs:
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             /usr/bin/cmake -S examples/c -B examples/c/build \
-              -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON \
+              -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
               -DORT_INCLUDE_DIR=ort/include \
               -DORT_LIB_DIR=ort/lib \
               -DOGA_INCLUDE_DIR=src \
-              -DOGA_LIB_DIR=build/cpu && \
+              -DOGA_LIB_DIR=build/cpu \
+              -DUSE_GUIDANCE=ON && \
             /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Docker -- Check test directory
