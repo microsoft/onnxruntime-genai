@@ -654,10 +654,7 @@ class Model:
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
-            ep_settings = dict(self.ep_attrs[self.ep])
-            if self.ep == "dml":
-                ep_settings["enable_graph_capture"] = "0"
-            ep_options = {ep_name: ep_settings}
+            ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
