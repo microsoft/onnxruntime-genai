@@ -151,8 +151,8 @@ jobs:
                 -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
                 -DORT_INCLUDE_DIR=/ort_genai_src/build/cuda/_deps/ortlib-src/buildTransitive/native/include \
                 -DORT_LIB_DIR=/ort_genai_src/build/cuda/_deps/ortlib-src/runtimes/linux-x64/native \
-                -DOGA_INCLUDE_DIR=src \
-                -DOGA_LIB_DIR=build/cuda && \
+                -DOGA_INCLUDE_DIR=/ort_genai_src/src \
+                -DOGA_LIB_DIR=/ort_genai_src/build/cuda && \
               /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Run the Java tests in Docker

@@ -102,8 +102,8 @@ jobs:
               -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
               -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/build/native/include \
               -DORT_LIB_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/runtimes/linux-arm64/native \
-              -DOGA_INCLUDE_DIR=src \
-              -DOGA_LIB_DIR=build/cpu && \
+              -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
+              -DOGA_LIB_DIR=/onnxruntime_src/build/cpu && \
             /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Docker -- Check test directory

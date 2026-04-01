@@ -115,8 +115,8 @@ jobs:
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
             -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/osx-arm64/_deps/ortlib-src/build/native/include \
             -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/osx-arm64/_deps/ortlib-src/runtimes/osx-arm64/native \
-            -DOGA_INCLUDE_DIR=src \
-            -DOGA_LIB_DIR=build/cpu/osx-arm64
+            -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
+            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/osx-arm64
           cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
