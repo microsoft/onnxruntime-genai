@@ -19,8 +19,6 @@
 namespace Generators {
 
 #if USE_GUIDANCE
-static constexpr size_t kBitsPerMaskWord = 32;  // Number of vocabulary tokens packed into each uint32_t mask word
-
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
       eos_token_(state.params_->config.model.eos_token_id[0]) {
@@ -120,12 +118,12 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
     std::vector<uint32_t> mask;
     if (mask_result.is_stop) {
       // when logits processor decides to stop, we mask all tokens except the EOS token
-      mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / kBitsPerMaskWord + 1, 0);
-      uint32_t eos_mask32 = 1 << (eos_token_ % kBitsPerMaskWord);
-      mask[eos_token_ / kBitsPerMaskWord] = eos_mask32;
+      mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
+      uint32_t eos_mask32 = 1 << (eos_token_ % 32);
+      mask[eos_token_ / 32] = eos_mask32;
     } else {
-      mask.reserve((params_->config.model.vocab_size - 1) / kBitsPerMaskWord + 1);
-      for (int i = 0; i < (params_->config.model.vocab_size - 1) / static_cast<int>(kBitsPerMaskWord) + 1; i++) {
+      mask.reserve((params_->config.model.vocab_size - 1) / 32 + 1);
+      for (int i = 0; i < (params_->config.model.vocab_size - 1) / 32 + 1; i++) {
         mask.push_back(mask_result.sample_mask[i]);
       }
     }
@@ -178,7 +176,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
 
   if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
-    const size_t words_per_row = params_->config.model.vocab_size / kBitsPerMaskWord;
+    const size_t words_per_row = params_->config.model.vocab_size / 32;
     const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
     uint32_t* dst = flat_masks.data();
@@ -201,7 +199,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
     for (size_t i = 0; i < params_->config.model.vocab_size; i++) {
       // mask is a 32-bit integer, where each bit corresponds to a token in the vocabulary.
       // If the bit is set, the corresponding token is masked (i.e., its logit is set to the lowest possible value).
-      subspan[i] = mask[i / kBitsPerMaskWord] & (1 << (i % kBitsPerMaskWord)) ? subspan[i] : std::numeric_limits<float>::lowest();
+      subspan[i] = mask[i / 32] & (1 << (i % 32)) ? subspan[i] : std::numeric_limits<float>::lowest();
     }
     vocab_index += params_->config.model.vocab_size;
   }
