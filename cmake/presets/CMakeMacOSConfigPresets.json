@@ -104,8 +104,7 @@
         "macos_cpu_release"
       ],
       "cacheVariables": {
-        "CMAKE_OSX_ARCHITECTURES": "arm64",
-        "ENABLE_JAVA": "ON"
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
       },
       "displayName": "macos arm64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
