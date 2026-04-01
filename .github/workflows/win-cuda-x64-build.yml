@@ -130,6 +130,16 @@ jobs:
           cd ..\ModelMM
           dotnet build -c Release
 
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON `
+            -DORT_INCLUDE_DIR=ort\include `
+            -DORT_LIB_DIR=ort\lib `
+            -DOGA_INCLUDE_DIR=src `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
+
       - name: Test the C# LLM Example with Tool Calling
         run: |
           python test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"

@@ -128,6 +128,16 @@ jobs:
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
 
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON `
+            -DORT_INCLUDE_DIR=ort\include `
+            -DORT_LIB_DIR=ort\lib `
+            -DOGA_INCLUDE_DIR=src `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
+
       - name: Run tests
         run: |-
           copy $env:GITHUB_WORKSPACE\ort\lib\* $env:GITHUB_WORKSPACE\$env:binaryDir\Release
