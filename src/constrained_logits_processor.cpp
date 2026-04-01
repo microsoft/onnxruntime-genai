@@ -24,7 +24,7 @@ static constexpr size_t kBitsPerMaskWord = 32;  // Number of vocabulary tokens p
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
       eos_token_(state.params_->config.model.eos_token_id[0]) {
-  if (params_->guidance_type.empty() || params_->guidance_type.empty()) {
+  if (params_->guidance_type.empty() || params_->guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
 
@@ -176,7 +176,7 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
 
 void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
-  const size_t words_per_row = (params_->config.model.vocab_size - 1) / kBitsPerMaskWord + 1;
+  const size_t words_per_row = params_->config.model.vocab_size / kBitsPerMaskWord;
 
   if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
     const size_t total_words = masks.size() * words_per_row;
@@ -191,12 +191,12 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
     }
     auto cpu_span = GetDeviceInterface(DeviceType::CPU)->WrapMemory<uint32_t>(std::span<uint32_t>{flat_masks});
     device_logits_mask_.CopyFrom(cpu_span);
-    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, static_cast<int>(words_per_row), device_logits_mask_.Span().data());
+    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, device_logits_mask_.Span().data());
     return;
   }
   size_t vocab_index = 0;
 
-  auto logits_span = params_->p_device->GetType() == DeviceType::CPU ? logits.CpuSpan() : logits.CopyDeviceToCpu();
+  auto logits_span = logits.CpuSpan();
   for (int index = 0; index < params_->search.batch_size; index++) {
     auto subspan = logits_span.subspan(vocab_index, params_->config.model.vocab_size);
     auto& mask = masks[index];

@@ -85,20 +85,20 @@ void Launch_UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_
 template void Launch_UpdateAttentionMask(int32_t* next_mask_data, int32_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 template void Launch_UpdateAttentionMask(int64_t* next_mask_data, int64_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 
-__global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, int words_per_row, const uint32_t* logits_mask) {
+__global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= batch_beam_size * vocab_size)
     return;
   int batch_index = index / vocab_size;
   int vocab_index = index % vocab_size;
-  if (!(logits_mask[batch_index * words_per_row + vocab_index / 32] & (1 << (vocab_index % 32))))
+  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (1 << (vocab_index % 32))))
     batch_logits[index] = std::numeric_limits<float>::lowest();
 }
 
-void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, int words_per_row, const uint32_t* logits_mask, cudaStream_t stream) {
+void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream) {
   int block_size = 256;
   int num_blocks = (batch_beam_size * vocab_size + block_size - 1) / block_size;
-  AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, words_per_row, logits_mask);
+  AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, logits_mask);
   CUDA_CHECK_LAUNCH();
 }
 
