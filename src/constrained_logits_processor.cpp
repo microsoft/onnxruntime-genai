@@ -186,12 +186,10 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       std::memcpy(dst, row.data(), words_per_row * sizeof(uint32_t));
       dst += words_per_row;
     }
-    if (device_logits_mask_.empty() || device_logits_mask_.size() != total_words) {
-      device_logits_mask_ = params_->p_device->Allocate<uint32_t>(total_words);
-    }
-    auto cpu_span = GetDeviceInterface(DeviceType::CPU)->WrapMemory<uint32_t>(std::span<uint32_t>{flat_masks});
-    device_logits_mask_.CopyFrom(cpu_span);
-    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, device_logits_mask_.Span().data());
+    auto logits_mask_ptr = params_->p_device->Allocate<uint32_t>(total_words);
+    copy(std::span<const uint32_t>{flat_masks}, logits_mask_ptr.CpuSpan());
+    logits_mask_ptr.CopyCpuToDevice();
+    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, logits_mask_ptr.Span().data());
     return;
   }
   size_t vocab_index = 0;

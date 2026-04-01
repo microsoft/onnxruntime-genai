@@ -70,7 +70,6 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   std::shared_ptr<const GeneratorParams> params_;
   uint32_t eos_token_;
   std::vector<std::vector<uint32_t>> masks_;
-  DeviceSpan<uint32_t> device_logits_mask_;
   std::vector<std::unique_ptr<LlgConstraint, LlgConstraintDeleter>> llg_constraints_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
