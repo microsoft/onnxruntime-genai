@@ -134,16 +134,6 @@ jobs:
           ls -l ${{ github.workspace }}/build/cpu/osx-arm64
           ls -l ${{ github.workspace }}/build/cpu/osx-arm64/wheel
 
-      # This will also download all the test models to the test/test_models directory
-      # These models are used by the python tests as well as C#, C++ and others.
-      - name: Restore cached test models
-        uses: actions/cache@v4
-        with:
-          path: |
-            test/test_models/phi-4-mini
-            test/test_models/qwen-2.5-0.5b
-          key: test-models-${{ hashFiles('test/python/_test_utils.py') }}
-
       - name: Run the Python tests
         run: |
           source genai-macos-venv/bin/activate
