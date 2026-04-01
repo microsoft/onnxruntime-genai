@@ -123,7 +123,8 @@ jobs:
             bash -c " \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
-                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} -DENABLE_JAVA=ON "
+                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
+                -DENABLE_JAVA=ON "
 
       - name: Build with CMake in Docker
         run: |
@@ -144,7 +145,7 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              ctest --test-dir build/cuda/src/java --build-config Release --verbose --timeout 10800"
+              /usr/bin/ctest --test-dir build/cuda/src/java --build-config Release --verbose --timeout 10800"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
