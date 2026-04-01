@@ -108,7 +108,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 23, "com.microsoft": 1},
+            opset_imports={"": 21, "com.microsoft": 1},
             name="main_graph",
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")

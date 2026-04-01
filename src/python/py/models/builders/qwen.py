@@ -1403,7 +1403,11 @@ class Qwen35TextModel(Model):
         return interleave("cos", cos_cache), interleave("sin", sin_cache)
 
     def _apply_mrope_rotation(self, layer_id, qk_path, qk_shape, dyn_cos, dyn_sin, num_heads, basename):
-        """Apply mRoPE via RotaryEmbedding (opset 23).
+        """Apply mRoPE via com.microsoft.RotaryEmbedding (4-input variant).
+
+        cos/sin are pre-gathered [B, S, rdim_half].  We flatten them to
+        [B*S, rdim_half] and create synthetic linear position_ids [B, S]
+        so the kernel simply gathers row-by-row from the flat cache.
 
         cos/sin caches are always float32. When io_dtype differs (fp16/bf16),
         cast Q/K to float32 before rotation, then cast back — preserving
@@ -1411,49 +1415,148 @@ class Qwen35TextModel(Model):
         """
         force_fp32 = self.rope_attrs.get("cast_to_fp32", False)
         compute_dtype = ir.DataType.FLOAT if force_fp32 else self.io_dtype
-
-        # Cast Q/K to compute dtype if needed
-        rope_input = qk_path
-        if compute_dtype != self.io_dtype:
-            cast_in_name = f"{basename}/input/Cast"
-            self.make_cast(cast_in_name, qk_path, compute_dtype, qk_shape)
-            rope_input = f"{cast_in_name}/output_0"
-
-        # Cast cos/sin to compute dtype if they differ
-        rope_cos = dyn_cos
-        rope_sin = dyn_sin
         rdim_half = self.mrope_rotary_dim // 2
-        cos_sin_shape = ["batch_size", "sequence_length", rdim_half]
+
+        # --- Flatten cos/sin to [B*S, rdim_half] ---
+        flat_cos_name = f"{basename}/cos_flat/Reshape"
+        self.make_reshape(
+            flat_cos_name,
+            [dyn_cos, f"/model/constants/INT64/[-1, {rdim_half}]"],
+            ir.DataType.FLOAT,
+            ["batch_seq", rdim_half],
+        )
+        flat_cos = f"{flat_cos_name}/output_0"
+
+        flat_sin_name = f"{basename}/sin_flat/Reshape"
+        self.make_reshape(
+            flat_sin_name,
+            [dyn_sin, f"/model/constants/INT64/[-1, {rdim_half}]"],
+            ir.DataType.FLOAT,
+            ["batch_seq", rdim_half],
+        )
+        flat_sin = f"{flat_sin_name}/output_0"
+
+        # Cast flat cos/sin to compute dtype if needed
+        rope_cos = flat_cos
+        rope_sin = flat_sin
         if compute_dtype != ir.DataType.FLOAT:
             cos_cast_name = f"{basename}/cos/Cast"
-            self.make_cast(cos_cast_name, dyn_cos, compute_dtype, cos_sin_shape)
+            self.make_cast(cos_cast_name, flat_cos, compute_dtype, ["batch_seq", rdim_half])
             rope_cos = f"{cos_cast_name}/output_0"
 
             sin_cast_name = f"{basename}/sin/Cast"
-            self.make_cast(sin_cast_name, dyn_sin, compute_dtype, cos_sin_shape)
+            self.make_cast(sin_cast_name, flat_sin, compute_dtype, ["batch_seq", rdim_half])
             rope_sin = f"{sin_cast_name}/output_0"
 
+        # --- Build synthetic position_ids [B, S] = Range(0, B*S).reshape(B, S) ---
+        # Shape(Q/K input) → [B, S, N*H], Gather dim 0 and 1 → B, S
+        shape_name = f"{basename}/qk_shape/Shape"
+        self.make_shape(shape_name, qk_path, [3])
+
+        batch_name = f"{basename}/batch/Gather"
+        self.make_gather(batch_name, [f"{shape_name}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [1], axis=0)
+
+        seq_name = f"{basename}/seq/Gather"
+        self.make_gather(seq_name, [f"{shape_name}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0)
+
+        total_name = f"{basename}/total/Mul"
+        self.make_mul(total_name, [f"{batch_name}/output_0", f"{seq_name}/output_0"], ir.DataType.INT64, [1])
+
+        range_name = f"{basename}/range/Range"
+        self.make_range(
+            range_name,
+            ["/model/constants/INT64/[0]", f"{total_name}/output_0", "/model/constants/INT64/[1]"],
+            ir.DataType.INT64,
+            ["batch_seq"],
+        )
+
+        # Reshape to [B, S]
+        bs_shape_name = f"{basename}/bs_shape/Concat"
+        self.make_concat(
+            bs_shape_name,
+            [f"{batch_name}/output_0", f"{seq_name}/output_0"],
+            ir.DataType.INT64,
+            [2],
+            axis=0,
+        )
+
+        pos_ids_name = f"{basename}/pos_ids/Reshape"
+        self.make_reshape(
+            pos_ids_name,
+            [f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
+            ir.DataType.INT64,
+            ["batch_size", "sequence_length"],
+        )
+        pos_ids = f"{pos_ids_name}/output_0"
+
+        # --- Reshape Q/K to [B, N, S, H] for com.microsoft.RotaryEmbedding ---
+        head_size = qk_shape[-1] // num_heads if isinstance(qk_shape[-1], int) else self.head_size
+        bnsh_shape = ["batch_size", num_heads, "sequence_length", head_size]
+
+        reshape_in_name = f"{basename}/reshape_in/Reshape"
+        self.make_reshape(
+            reshape_in_name,
+            [qk_path, f"/model/constants/INT64/[0, 0, {num_heads}, {head_size}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", num_heads, head_size],
+        )
+        transpose_in_name = f"{basename}/transpose_in/Transpose"
+        self.make_transpose(
+            transpose_in_name,
+            f"{reshape_in_name}/output_0",
+            self.io_dtype,
+            bnsh_shape,
+            perm=[0, 2, 1, 3],
+        )
+
+        rope_input = f"{transpose_in_name}/output_0"
+        if compute_dtype != self.io_dtype:
+            cast_in_name = f"{basename}/input/Cast"
+            self.make_cast(cast_in_name, rope_input, compute_dtype, bnsh_shape)
+            rope_input = f"{cast_in_name}/output_0"
+
+        # --- com.microsoft.RotaryEmbedding ---
         rope_name = f"{basename}/RotaryEmbedding"
         rope_out = f"{rope_name}/output_0"
         self.make_node(
             "RotaryEmbedding",
-            [rope_input, rope_cos, rope_sin],
+            [rope_input, pos_ids, rope_cos, rope_sin],
             [rope_out],
             name=rope_name,
+            domain="com.microsoft",
             num_heads=num_heads,
             rotary_embedding_dim=self.mrope_rotary_dim,
             interleaved=0,
         )
-        self.make_value(rope_out, compute_dtype, qk_shape)
+        self.make_value(rope_out, compute_dtype, bnsh_shape)
 
-        # Cast back to io_dtype if needed
-        final_output = rope_out
+        # --- Reshape back to [B, S, N*H] ---
+        final = rope_out
         if compute_dtype != self.io_dtype:
             cast_out_name = f"{basename}/output/Cast"
-            self.make_cast(cast_out_name, rope_out, self.io_dtype, qk_shape)
-            final_output = f"{cast_out_name}/output_0"
+            self.make_cast(cast_out_name, rope_out, self.io_dtype, bnsh_shape)
+            final = f"{cast_out_name}/output_0"
 
-        return final_output
+        transpose_out_name = f"{basename}/transpose_out/Transpose"
+        bsnhv_shape = ["batch_size", "sequence_length", num_heads, head_size]
+        self.make_transpose(
+            transpose_out_name,
+            final,
+            self.io_dtype,
+            bsnhv_shape,
+            perm=[0, 2, 1, 3],
+        )
+
+        reshape_out_name = f"{basename}/reshape_out/Reshape"
+        total_dim = num_heads * head_size
+        self.make_reshape(
+            reshape_out_name,
+            [f"{transpose_out_name}/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
+            self.io_dtype,
+            qk_shape,
+        )
+
+        return f"{reshape_out_name}/output_0"
 
     def _make_linear_attention(self, layer_id, linear_attn, root_input):
         """Build GatedDeltaNet using fused CausalConvWithState + LinearAttention ops.
@@ -1703,31 +1806,35 @@ class Qwen35TextModel(Model):
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
     def _make_per_head_l2_normalize(self, basename, input_name, n_heads, head_dim):
-        """Per-head L2 normalize: reshape [B, S, N*H] -> [B*S*N, H], norm, reshape back."""
+        """Per-head L2 normalize: reshape [B, S, N*H] -> [B, S, N, H], norm, reshape back.
+
+        Uses [0, 0, N, H] / [0, 0, N*H] reshape targets so all dims are
+        constants or copied from the 3D/4D input, avoiding Shape ops that
+        would run on CPU and block CUDA graph capture.
+        """
         total_dim = n_heads * head_dim
 
-        # Reshape to [B*S*N, H] for per-head normalization
+        # Reshape to [B, S, N, H] for per-head normalization
         flat_name = f"{basename}/flat/Reshape"
         flat_out = f"{flat_name}/output_0"
         self.make_reshape(
             flat_name,
-            [input_name, f"/model/constants/INT64/[-1, {head_dim}]"],
+            [input_name, f"/model/constants/INT64/[0, 0, {n_heads}, {head_dim}]"],
             self.io_dtype,
-            ["flat_tokens", head_dim],
+            ["batch_size", "sequence_length", n_heads, head_dim],
         )
 
-        # L2 normalize along last dim (head_dim) — input is 2D [flat_tokens, head_dim]
-        norm_out = self._make_l2_normalize(basename, flat_out, head_dim, leading_dims=["flat_tokens"])
+        # L2 normalize along last dim (head_dim) — input is 4D [B, S, N, H]
+        norm_out = self._make_l2_normalize(
+            basename, flat_out, head_dim, leading_dims=["batch_size", "sequence_length", n_heads]
+        )
 
-        # Reshape back to [B, S, N*H] using input shape
-        in_shape_name = f"{basename}/in_shape/Shape"
-        self.make_shape(in_shape_name, input_name, [3])
-
+        # Reshape back to [B, S, N*H]
         unflat_name = f"{basename}/unflat/Reshape"
         unflat_out = f"{unflat_name}/output_0"
         self.make_reshape(
             unflat_name,
-            [norm_out, f"{in_shape_name}/output_0"],
+            [norm_out, f"/model/constants/INT64/[0, 0, {total_dim}]"],
             self.io_dtype,
             ["batch_size", "sequence_length", total_dim],
         )
@@ -1776,15 +1883,17 @@ class Qwen35TextModel(Model):
         """
         v_dim = self.linear_value_dim
         hv = self.linear_value_head_dim
+        nv = self.linear_num_value_heads
 
-        # Reshape input to [B*S*N, H] for per-head norm
+        # Reshape input to [B, S, N, H] for per-head norm (avoids Shape ops
+        # that would run on CPU and block CUDA graph capture)
         flat_name = f"{basename}/input_flat/Reshape"
         flat_output = f"{flat_name}/output_0"
         self.make_reshape(
             flat_name,
-            [input_name, f"/model/constants/INT64/[-1, {hv}]"],
+            [input_name, f"/model/constants/INT64/[0, 0, {nv}, {hv}]"],
             self.io_dtype,
-            ["batch_seq_heads", hv],
+            ["batch_size", "sequence_length", nv, hv],
         )
 
         # Norm weight (NO offset — Qwen3_5RMSNormGated uses raw weight, not 1+w)
@@ -1803,18 +1912,14 @@ class Qwen35TextModel(Model):
             axis=-1,
             stash_type=1,
         )
-        self.make_value(norm_output, self.io_dtype, ["batch_seq_heads", hv])
+        self.make_value(norm_output, self.io_dtype, ["batch_size", "sequence_length", nv, hv])
 
-        # Reshape back to [B, S, v_dim] — reuse the original input's shape directly
-        # since input_name is [B, S, v_dim] and v_dim = N * hv.
-        in_shape_name = f"{basename}/in_shape/Shape"
-        self.make_shape(in_shape_name, input_name, [3])
-
+        # Reshape back to [B, S, v_dim]
         unflat_name = f"{basename}/norm_unflat/Reshape"
         unflat_output = f"{unflat_name}/output_0"
         self.make_reshape(
             unflat_name,
-            [norm_output, f"{in_shape_name}/output_0"],
+            [norm_output, f"/model/constants/INT64/[0, 0, {v_dim}]"],
             self.io_dtype,
             ["batch_size", "sequence_length", v_dim],
         )
