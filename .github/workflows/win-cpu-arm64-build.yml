@@ -82,8 +82,7 @@ jobs:
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release `
-            -DENABLE_JAVA=ON
+          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON
 
       - name: Build with CMake
         run: |

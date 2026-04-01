@@ -101,8 +101,7 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release \
-            -DENABLE_JAVA=ON
+          cmake --preset linux_gcc_cpu_release -DENABLE_JAVA=ON
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 

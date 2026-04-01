@@ -73,8 +73,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True `
-            -DENABLE_JAVA=ON
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DENABLE_JAVA=ON
 
       - name: Build with CMake
         run: |
