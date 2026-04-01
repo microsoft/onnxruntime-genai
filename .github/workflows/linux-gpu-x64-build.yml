@@ -124,7 +124,8 @@ jobs:
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
-                -DENABLE_JAVA=ON "
+                -DENABLE_JAVA=ON \
+                -DUSE_GUIDANCE=ON "
 
       - name: Build with CMake in Docker
         run: |
