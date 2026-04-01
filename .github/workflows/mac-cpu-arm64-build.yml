@@ -134,6 +134,8 @@ jobs:
           ls -l ${{ github.workspace }}/build/cpu/osx-arm64
           ls -l ${{ github.workspace }}/build/cpu/osx-arm64/wheel
 
+      # This will also download all the test models to the test/test_models directory
+      # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the Python tests
         run: |
           source genai-macos-venv/bin/activate
