@@ -61,6 +61,12 @@ if(NOT OGA_LIB_DIR)
   set(OGA_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
 endif()
 
+# Print paths to provided directories
+message(STATUS "ORT_INCLUDE_DIR=${ORT_INCLUDE_DIR}")
+message(STATUS "ORT_LIB_DIR=${ORT_LIB_DIR}")
+message(STATUS "OGA_INCLUDE_DIR=${OGA_INCLUDE_DIR}")
+message(STATUS "OGA_LIB_DIR=${OGA_LIB_DIR}")
+
 # Store all library files in each directory
 file(GLOB ort_libs "${ORT_LIB_DIR}/*")
 file(GLOB oga_libs "${OGA_LIB_DIR}/*")
