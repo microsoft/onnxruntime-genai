@@ -95,8 +95,8 @@ jobs:
         run: |
           cmake -S examples\c -B examples\c\build `
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON `
-            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
-            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-x64\native" `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\ort\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\ort\lib" `
             "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
             "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
           cmake --build examples\c\build --config Release
