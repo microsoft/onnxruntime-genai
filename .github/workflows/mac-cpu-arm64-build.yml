@@ -116,8 +116,7 @@ jobs:
             -DORT_INCLUDE_DIR=ort/include \
             -DORT_LIB_DIR=ort/lib \
             -DOGA_INCLUDE_DIR=src \
-            -DOGA_LIB_DIR=build/cpu/osx-arm64 \
-            -DUSE_GUIDANCE=ON
+            -DOGA_LIB_DIR=build/cpu/osx-arm64
           cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
