@@ -39,16 +39,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // that are incompatible with graph capture, so the caller sets
   // disable_graph_capture=true for those sessions.
   if (!disable_graph_capture) {
-    bool config_enables_graph_capture = true;
-    for (const auto& [name, value] : provider_options.options) {
-      if (name == "enable_graph_capture" && value == "0") {
-        config_enables_graph_capture = false;
-        break;
-      }
-    }
-    if (config_enables_graph_capture) {
-      session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-    }
+    session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
   }
 
   SetDmlProvider(session_options);
