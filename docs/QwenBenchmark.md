@@ -13,7 +13,9 @@ uv pip install -r ./docs/requirements.txt
 
 ```
 uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-4B -o docs/4b -p int4 -e cpu
-[WIP] uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-trtrtx -p fp16 -e NvTensorRtRtx
+[WIP] uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-trtrtx -p int4 -e NvTensorRtRtx
+uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-dml -p int4 -e dml
+
 uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-cuda -p int4 -e cuda
 ```
 
@@ -22,12 +24,14 @@ uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-cud
 ```
 uv run examples/python/model-qa.py -m docs/4b
 [WIP] uv run examples/python/model-qa.py -m docs/8b-trtrtx --use_winml --ep_path dummy
+uv run examples/python/model-qa.py -m docs/8b-dml
 ```
 
 ## Benchmark
 
 ```
 uv run benchmark/python/benchmark_e2e.py -i docs/4b --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+uv run benchmark/python/benchmark_e2e.py -i docs/8b-dml --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
 ```
 
 ## Result
@@ -48,6 +52,23 @@ CPU Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz
 | Average Sampling Throughput (per token) | 4663.744022623729 | tps |
 | Average Wall Clock Time | 30.455924940109252 | s |
 | Average Wall Clock Throughput | 9.226447745474118 | tps |
+
+### Qwen/Qwen3-8B + DML
+
+GPU NVIDIA GeForce RTX 4080
+
+| Metric | Value | Unit |
+|---|---:|---|
+| Average Tokenization Latency (per token) | 0.00845359975937754 | ms |
+| Average Tokenization Throughput (per token) | 118292.80170151238 | tps |
+| Average Prompt Processing Latency (per token) | 11.172171999933198 | ms |
+| Average Prompt Processing Throughput (per token) | 89.5081099723473 | tps |
+| Average Token Generation Latency (per token) | 14.748796381705112 | ms |
+| Average Token Generation Throughput (per token) | 67.80214290844998 | tps |
+| Average Sampling Latency (per token) | 0.4394900082843378 | ms |
+| Average Sampling Throughput (per token) | 2275.3645842911355 | tps |
+| Average Wall Clock Time | 3.977200508117676 | s |
+| Average Wall Clock Throughput | 70.65271148046577 | tps |
 
 # onnxruntime CUDA
 
