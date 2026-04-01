@@ -334,8 +334,6 @@ struct DecoderInputs_Element : JSON::Element {
       v_.block_table = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
-    } else if (name == "target_length") {
-      v_.target_length = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
@@ -367,8 +365,6 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
-    } else if (name == "prednet_lengths") {
-      v_.prednet_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
@@ -769,6 +765,8 @@ struct Vision_Element : JSON::Element {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
       v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "window_size") {
+      v_.window_size = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -966,6 +964,43 @@ struct Joiner_Element : JSON::Element {
   JoinerOutputs_Element outputs_{v_.outputs};
 };
 
+struct VAD_Element : JSON::Element {
+  explicit VAD_Element(Config::Model::VAD& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "threshold") {
+      v_.threshold = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "silence_duration_ms") {
+      v_.silence_duration_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "prefix_padding_ms") {
+      v_.prefix_padding_ms = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::VAD& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -1123,6 +1158,9 @@ struct Model_Element : JSON::Element {
     if (name == "joiner") {
       return joiner_;
     }
+    if (name == "vad") {
+      return vad_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1135,6 +1173,7 @@ struct Model_Element : JSON::Element {
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
+  VAD_Element vad_{v_.vad};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {

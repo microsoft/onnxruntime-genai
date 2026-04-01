@@ -95,18 +95,18 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, true);
+    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
     vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
   }
 
   if (speech) {
     speech_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, true);
+    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, /*disable_graph_capture=*/true);
     speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
   }
 
   embedding_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, true);
+  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
@@ -192,8 +192,49 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     return {};
   }
 
-  OrtValue* pv_full = inputs_[pv_idx];
   OrtValue* grid_full = inputs_[grid_idx];
+  const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+
+  // Check if the ONNX model accepts dynamic num_images.
+  // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
+  bool model_supports_batch = false;
+  {
+    auto session_input_names = model_.vision_session_->GetInputNames();
+    for (size_t si = 0; si < session_input_names.size(); ++si) {
+      if (session_input_names[si] == grid_name) {
+        auto grid_input_info = model_.vision_session_->GetInputTypeInfo(si);
+        auto grid_expected_shape = grid_input_info->GetTensorTypeAndShapeInfo().GetShape();
+        if (!grid_expected_shape.empty() && grid_expected_shape[0] <= 0) {
+          model_supports_batch = true;  // dim-0 is symbolic — accepts any N
+        }
+        break;
+      }
+    }
+  }
+
+  // Check if all images share the same (t, h, w) grid.
+  bool uniform_grid = true;
+  if (num_images_ > 1) {
+    int64_t t0 = grid_data[0], h0 = grid_data[1], w0 = grid_data[2];
+    for (int64_t img = 1; img < num_images_; ++img) {
+      if (grid_data[img * 3] != t0 || grid_data[img * 3 + 1] != h0 || grid_data[img * 3 + 2] != w0) {
+        uniform_grid = false;
+        break;
+      }
+    }
+  }
+
+  // --- Batched single-call path (like HuggingFace) ---
+  if (model_supports_batch && uniform_grid) {
+    // The model has dynamic image_grid_thw dim-0 and all images share the
+    // same grid.  Pass all N images' pixel_values and the full [N, 3]
+    // grid_thw in one call — the ONNX graph was vectorized to handle this.
+    State::Run(*model_.vision_session_);
+    return {};
+  }
+
+  // --- Per-image loop path (fallback for different-sized images or static models) ---
+  OrtValue* pv_full = inputs_[pv_idx];
   OrtValue* feat_full = outputs_[0];  // pre-allocated image_features output
 
   // Shapes: pixel_values[total_patches, patch_dim], image_features[total_logical_patches, hidden_size]
@@ -224,7 +265,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   size_t pv_element_size = element_size(pv_type);
   size_t feat_element_size = element_size(feat_type);
 
-  const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
   void* pv_raw = pv_full->GetTensorMutableRawData();
   void* feat_raw = feat_full->GetTensorMutableRawData();
   int64_t spatial_merge_size = model_.config_->model.vision.spatial_merge_size;
@@ -244,6 +284,13 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   }
   bool temporal_padded = (total_patches != total_grid_tokens && total_hw > 0 && total_patches % total_hw == 0);
   int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
+
+  // Validate that the pre-allocated output buffer is large enough for all images
+  int64_t expected_total_feats = total_grid_tokens / merge_sq;
+  if (total_feats < expected_total_feats)
+    throw std::runtime_error("pre-allocated image_features dim 0 (" + std::to_string(total_feats) +
+                             ") is smaller than expected (" + std::to_string(expected_total_feats) +
+                             ") for " + std::to_string(num_images_) + " images");
 
   int64_t patch_offset = 0;
   int64_t feat_offset = 0;

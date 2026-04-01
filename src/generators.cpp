@@ -271,7 +271,7 @@ GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
-      p_device{model.p_device_inputs_} {
+      p_device{model.p_device_scoring_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
   }
@@ -469,10 +469,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  // search_->GetSequenceLength() != next_tokens.size() implies that this is not the first time ComputeLogits
-  // is being called (i.e. we're not computing logits for the initial input tokens), so we need to commit
-  // tokens to the guidance logits processor before running the model.
-  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
+  if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -485,7 +482,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   }
   SetLogits(logits);
 
-  if (guidance_logits_processor_ && search_->GetSequenceLength() != next_tokens.size()) {
+  if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens

@@ -64,11 +64,9 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
 
   // Decoder I/O names (RNNT prediction network)
   dec_in_targets = dec.inputs.targets;
-  dec_in_target_length = dec.inputs.target_length;
   dec_in_lstm_hidden = dec.inputs.lstm_hidden_state;
   dec_in_lstm_cell = dec.inputs.lstm_cell_state;
   dec_out_outputs = dec.outputs.outputs;
-  dec_out_prednet_lengths = dec.outputs.prednet_lengths;
   dec_out_lstm_hidden = dec.outputs.lstm_hidden_state;
   dec_out_lstm_cell = dec.outputs.lstm_cell_state;
 }
@@ -129,19 +127,19 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
 
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true, false);
+                                 *decoder_session_options_, true);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   }
 
   // Load the three ONNX models
@@ -177,19 +175,25 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
 
   cache_.Initialize(cfg, model_.session_info_, allocator, device);
 
-  // Create signal_length tensor
-  auto len_type = model_.session_info_.GetInputDataType(cfg.enc_in_length);
-  auto len_shape = std::array<int64_t, 1>{1};
-  signal_length_ = OrtValue::CreateTensor(allocator, len_shape, len_type);
+  has_length_input_ = model_.session_info_.HasInput(cfg.enc_in_length);
 
-  // Register inputs: mel, length, cache_channel, cache_time, cache_channel_len
+  // Create signal_length tensor if the encoder model expects it
+  if (has_length_input_) {
+    auto len_type = model_.session_info_.GetInputDataType(cfg.enc_in_length);
+    auto len_shape = std::array<int64_t, 1>{1};
+    signal_length_ = OrtValue::CreateTensor(allocator, len_shape, len_type);
+  }
+
+  // Register inputs: mel, [length], cache_channel, cache_time, cache_channel_len
   mel_input_idx_ = inputs_.size();
   input_names_.push_back(cfg.enc_in_audio.c_str());
   inputs_.push_back(nullptr);
 
-  length_input_idx_ = inputs_.size();
-  input_names_.push_back(cfg.enc_in_length.c_str());
-  inputs_.push_back(signal_length_.get());
+  if (has_length_input_) {
+    length_input_idx_ = inputs_.size();
+    input_names_.push_back(cfg.enc_in_length.c_str());
+    inputs_.push_back(signal_length_.get());
+  }
 
   cache_channel_input_idx_ = inputs_.size();
   input_names_.push_back(cfg.enc_in_cache_channel.c_str());
@@ -227,7 +231,9 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
 
 void NemotronEncoderSubState::SetMelInput(OrtValue* mel_tensor, int64_t total_mel_frames) {
   inputs_[mel_input_idx_] = mel_tensor;
-  *signal_length_->GetTensorMutableData<int64_t>() = total_mel_frames;
+  if (has_length_input_) {
+    *signal_length_->GetTensorMutableData<int64_t>() = total_mel_frames;
+  }
 }
 
 void NemotronEncoderSubState::UpdateCacheInputs() {
@@ -250,24 +256,15 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
 
   lstm_state_.Initialize(cfg, model_.session_info_, allocator, device);
 
-  // Create targets and target_length tensors
+  // Create targets tensor
   auto targets_type = model_.session_info_.GetInputDataType(cfg.dec_in_targets);
   auto targets_shape = std::array<int64_t, 2>{1, 1};
   targets_ = OrtValue::CreateTensor(allocator, targets_shape, targets_type);
-
-  auto tgt_len_type = model_.session_info_.GetInputDataType(cfg.dec_in_target_length);
-  auto tgt_len_shape = std::array<int64_t, 1>{1};
-  target_length_ = OrtValue::CreateTensor(allocator, tgt_len_shape, tgt_len_type);
-  *target_length_->GetTensorMutableData<int64_t>() = 1;
 
   // Register inputs
   targets_input_idx_ = inputs_.size();
   input_names_.push_back(cfg.dec_in_targets.c_str());
   inputs_.push_back(targets_.get());
-
-  target_length_input_idx_ = inputs_.size();
-  input_names_.push_back(cfg.dec_in_target_length.c_str());
-  inputs_.push_back(target_length_.get());
 
   lstm_hidden_input_idx_ = inputs_.size();
   input_names_.push_back(cfg.dec_in_lstm_hidden.c_str());
@@ -277,11 +274,8 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
   input_names_.push_back(cfg.dec_in_lstm_cell.c_str());
   inputs_.push_back(lstm_state_.lstm_cell_state.get());
 
-  // Register outputs
+  // Register outputs: outputs, lstm_hidden, lstm_cell
   output_names_.push_back(cfg.dec_out_outputs.c_str());
-  outputs_.push_back(nullptr);
-
-  output_names_.push_back(cfg.dec_out_prednet_lengths.c_str());
   outputs_.push_back(nullptr);
 
   output_names_.push_back(cfg.dec_out_lstm_hidden.c_str());
@@ -511,10 +505,10 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
 
     // Non-blank: emit token, update LSTM state from prediction outputs
     prediction_state_->lstm_state_.last_token = best_token;
-    prediction_state_->lstm_state_.lstm_hidden_state.reset(prediction_state_->outputs_[2]);
+    prediction_state_->lstm_state_.lstm_hidden_state.reset(prediction_state_->outputs_[1]);
+    prediction_state_->outputs_[1] = nullptr;
+    prediction_state_->lstm_state_.lstm_cell_state.reset(prediction_state_->outputs_[2]);
     prediction_state_->outputs_[2] = nullptr;
-    prediction_state_->lstm_state_.lstm_cell_state.reset(prediction_state_->outputs_[3]);
-    prediction_state_->outputs_[3] = nullptr;
 
     symbol_step_++;
     if (symbol_step_ >= cache_config_.max_symbols_per_step) {
