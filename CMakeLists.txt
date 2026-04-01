@@ -200,7 +200,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   )
 
   # nvcc compiles CUDA code with cl.exe, so we need to pass the /Zc:preprocessor option to avoid compilation errors
-  if(MSVC_VERSION GREATER_EQUAL 1925)
+  if(WIN32 AND MSVC AND MSVC_VERSION GREATER_EQUAL 1925)
     add_compile_options(
       $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/Zc:preprocessor>
     )
