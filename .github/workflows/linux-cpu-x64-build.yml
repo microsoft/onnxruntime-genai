@@ -97,7 +97,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release \
+            -DENABLE_JAVA=ON
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
@@ -118,7 +119,7 @@ jobs:
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
 
       # This will also restore all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.

@@ -101,7 +101,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release \
+            -DENABLE_JAVA=ON
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
@@ -120,7 +121,7 @@ jobs:
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja" --use_guidance
+          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python tests
         run: |
