@@ -176,9 +176,9 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
 
 void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
-  const size_t words_per_row = params_->config.model.vocab_size / kBitsPerMaskWord;
 
   if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
+    const size_t words_per_row = params_->config.model.vocab_size / kBitsPerMaskWord;
     const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
     uint32_t* dst = flat_masks.data();
