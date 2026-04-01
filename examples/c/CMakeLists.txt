@@ -78,14 +78,10 @@ function(prepare_executable executable)
   target_link_directories(${executable} PRIVATE ${OGA_LIB_DIR})
   target_link_libraries(${executable} PRIVATE ${OGA_LIB_FILE})
 
-  # Set RPATH so the executable can find shared libraries copied next to it
-  if(UNIX AND NOT APPLE)
+  # Set RPATH so the executable can find shared libraries at their build locations
+  if(UNIX)
     set_target_properties(${executable} PROPERTIES
-      BUILD_RPATH "$ORIGIN"
-    )
-  elseif(APPLE)
-    set_target_properties(${executable} PROPERTIES
-      BUILD_RPATH "@loader_path"
+      BUILD_RPATH "${ORT_LIB_DIR};${OGA_LIB_DIR}"
     )
   endif()
 
