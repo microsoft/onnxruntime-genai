@@ -282,6 +282,15 @@ struct Config {
       } outputs;
     } joiner;
 
+    struct VAD {
+      std::string filename;
+      float threshold{0.5f};
+      int silence_duration_ms{500};
+      int prefix_padding_ms{300};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } vad;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;

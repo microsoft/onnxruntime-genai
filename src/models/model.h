@@ -172,13 +172,15 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   SessionInfo session_info_;
 
- protected:
-  void CreateSessionOptions();
-
+  /// Create session options from config. Public so components like VAD can create
+  /// properly configured sessions using the GenAI infrastructure.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
                                       bool disable_graph_capture = false);
+
+ protected:
+  void CreateSessionOptions();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
