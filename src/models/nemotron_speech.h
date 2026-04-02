@@ -220,6 +220,7 @@ struct NemotronSpeechState : State {
   // Decoder state machine
   int64_t time_step_{0};
   int symbol_step_{0};
+  int chunk_count_{0};  // 0 = first chunk (no frame skip), >0 = subsequent (skip drop_extra frames)
   bool need_encoder_run_{false};
   bool chunk_done_{true};
   std::vector<int32_t> last_tokens_;

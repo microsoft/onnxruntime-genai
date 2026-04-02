@@ -404,6 +404,7 @@ void NemotronSpeechState::ResetStreamingState() {
   encoded_len_ = 0;
   time_step_ = 0;
   symbol_step_ = 0;
+  chunk_count_ = 0;
   need_encoder_run_ = false;
   chunk_done_ = true;
   last_tokens_.clear();
@@ -437,6 +438,18 @@ void NemotronSpeechState::RunEncoder() {
   encoder_state_->cache_.cache_last_channel_len.reset(encoder_state_->outputs_[4]);
   encoder_state_->outputs_[4] = nullptr;
 
+  // NeMo's drop_extra_pre_encoded: skip leading encoder frames that are
+  // contaminated by the pre-encode cache overlap.
+  // First chunk has no cache overlap, so skip 0.  Subsequent chunks skip
+  // 1 + (pre_encode_cache_size - 1) / subsampling_factor frames.
+  if (chunk_count_ > 0 && cache_config_.pre_encode_cache_size > 0) {
+    int drop_extra = 1 + (cache_config_.pre_encode_cache_size - 1) / cache_config_.subsampling_factor;
+    time_step_ = drop_extra;
+  } else {
+    time_step_ = 0;
+  }
+  chunk_count_++;
+
   current_mel_.reset();
 }
 
@@ -444,7 +457,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
   if (need_encoder_run_) {
     RunEncoder();
     need_encoder_run_ = false;
-    time_step_ = 0;
+    // time_step_ is set by RunEncoder() (0 for first chunk, drop_extra for subsequent)
     symbol_step_ = 0;
   }
 
