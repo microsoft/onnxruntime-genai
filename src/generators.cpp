@@ -534,9 +534,6 @@ bool Generator::IsDone() {
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();
-      // guidance_logits_processor_->InitializeLlgConstraints();
-      // guidance_logits_processor_->ResetWithoutCompute();
-      // guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
       last_action_ = Action::standard;
     }
   }
@@ -650,8 +647,7 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
-    // guidance_logits_processor_->ResetWithoutCompute();
-    guidance_logits_processor_->InitializeLlgConstraints();
+    guidance_logits_processor_->Reset();
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;

@@ -85,11 +85,6 @@ void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
 }
 
 void GuidanceLogitsProcessor::InitializeLlgConstraints() {
-  // // Reset masks buffer
-  // if (!masks_.empty()) {
-  //   masks_.clear();
-  // }
-
   // Reset constraints buffer
   if (!llg_constraints_.empty()) {
     // Each element of llg_constraints_ is a std::unique_ptr<LlgConstraint, LlgConstraintDeleter>.
