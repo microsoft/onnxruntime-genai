@@ -44,7 +44,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
-  
+
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
@@ -59,6 +59,15 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
                                                const uint8_t* bytes, size_t bytes_len);
 
  private:
+  // Initialize LlgTokenizer with the given state and params
+  void InitializeLlgTokenizer();
+
+  // Initialize LlgConstraint with the given state and params
+  void InitializeLlgConstraints();
+
+  // Initialize the mask asynchronously to avoid blocking the model inference on device
+  void InitializeMaskAsync();
+
   std::vector<std::vector<uint32_t>> ComputeMask();
   struct LlgConstraintDeleter {
     void operator()(LlgConstraint* lc) const {
