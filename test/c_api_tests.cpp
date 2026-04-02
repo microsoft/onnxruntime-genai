@@ -1365,7 +1365,7 @@ TEST(CAPITests, UseRegexCAPI) {
 #endif
 }
 
-TEST(CAPITests, UseLarkGrammarCAPI) {
+TEST(CAPITests, UseLarkGrammarSingleTurnCAPI) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -1390,7 +1390,7 @@ TEST(CAPITests, UseLarkGrammarCAPI) {
 #endif
 }
 
-TEST(CAPITests, UseJsonSchemaCAPI) {
+TEST(CAPITests, UseJsonSchemaSingleTurnCAPI) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -1413,6 +1413,68 @@ TEST(CAPITests, UseJsonSchemaCAPI) {
   EXPECT_TRUE(std::regex_match(output, R"json([{"name": "get_weather", "parameters": {"city": "San Francisco"}}])json"));
 #endif
 }
+
+TEST(CAPITests, UseLarkGrammarMultiTurnCAPI) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 1024);
+  auto lark_grammar = "start: functioncall" + "\n" + "functioncall: %json " + json_schema;
+  params->SetGuidance("lark_grammar", lark_grammar, false);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<std::string> cities{"San Francisco", "Seattle", "Boston"};
+  for (const auto& city : cities) {
+    auto input_sequences = OgaSequences::Create();
+    auto input_string = "What is the weather in " + city + "?";
+    tokenizer->Encode(input_string.c_str(), *input_sequences);
+
+    generator->AppendTokenSequences(*input_sequences);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+
+    auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+    auto output = std::string(out_string);
+    auto expected_pattern = R"json(\[\{"name": "get_weather", "parameters": \{"city": ")json" + city + R"json("\}\}\])json";
+    EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
+  }
+#endif
+}
+
+TEST(CAPITests, UseJsonSchemaMultiTurnCAPI) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 1024);
+  params->SetGuidance("json_schema", json_schema, false);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<std::string> cities{"San Francisco", "Seattle", "Boston"};
+  for (const auto& city : cities) {
+    auto input_sequences = OgaSequences::Create();
+    auto input_string = "What is the weather in " + city + "?";
+    tokenizer->Encode(input_string.c_str(), *input_sequences);
+
+    generator->AppendTokenSequences(*input_sequences);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+
+    auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+    auto output = std::string(out_string);
+    auto expected_pattern = R"json(\[\{"name": "get_weather", "parameters": \{"city": ")json" + city + R"json("\}\}\])json";
+    EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
+  }
+#endif
+}
+
 #endif
 
 #ifndef STREAMING_ASR_PATH
