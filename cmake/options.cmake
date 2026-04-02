@@ -16,7 +16,7 @@ cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" O
 # testing
 option(ENABLE_TESTS "Enable tests" ON)
 option(TEST_PHI2 "Enable tests for Phi-2" OFF)
-option(TEST_QWEN2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
+option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
