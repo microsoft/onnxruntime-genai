@@ -32,7 +32,7 @@ const std::string json_schema = R"json({"x-guidance": {"whitespace_flexible": fa
 
 TEST(GuidanceTests, UseRegex) {
 #if TEST_QWEN_2_5
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto model = OgaModel::Create(QWEN2_5_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
 
@@ -56,7 +56,7 @@ TEST(GuidanceTests, UseRegex) {
 
 TEST(GuidanceTests, UseLarkGrammarSingleTurn) {
 #if TEST_QWEN_2_5
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto model = OgaModel::Create(QWEN2_5_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
 
@@ -82,7 +82,7 @@ TEST(GuidanceTests, UseLarkGrammarSingleTurn) {
 
 TEST(GuidanceTests, UseJsonSchemaSingleTurn) {
 #if TEST_QWEN_2_5
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto model = OgaModel::Create(QWEN2_5_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
 
@@ -107,7 +107,7 @@ TEST(GuidanceTests, UseJsonSchemaSingleTurn) {
 
 TEST(GuidanceTests, UseLarkGrammarMultiTurn) {
 #if TEST_QWEN_2_5
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto model = OgaModel::Create(QWEN2_5_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
 
@@ -139,7 +139,7 @@ TEST(GuidanceTests, UseLarkGrammarMultiTurn) {
 
 TEST(GuidanceTests, UseJsonSchemaMultiTurn) {
 #if TEST_QWEN_2_5
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto model = OgaModel::Create(QWEN2_5_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
 
