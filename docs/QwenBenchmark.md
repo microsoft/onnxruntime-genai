@@ -12,26 +12,26 @@ uv pip install -r ./docs/requirements.txt
 ## Convert
 
 ```
-uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-4B -o docs/4b -p int4 -e cpu
-[WIP] uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-trtrtx -p int4 -e NvTensorRtRtx
-uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-dml -p int4 -e dml
+uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-4B -o docs/models/3/4b -p int4 -e cpu
+[WIP] uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/models/3/8b-trtrtx -p int4 -e NvTensorRtRtx
+uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/models/3/8b-dml -p int4 -e dml
 
-uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/8b-cuda -p int4 -e cuda
+uv run src/python/py/models/builder.py --model_name Qwen/Qwen3-8B -o docs/models/3/8b-cuda -p int4 -e cuda
 ```
 
 ## Run
 
 ```
-uv run examples/python/model-qa.py -m docs/4b
-[WIP] uv run examples/python/model-qa.py -m docs/8b-trtrtx --use_winml --ep_path dummy
-uv run examples/python/model-qa.py -m docs/8b-dml
+uv run examples/python/model-qa.py -m docs/models/3/4b
+[WIP] uv run examples/python/model-qa.py -m docs/models/3/8b-trtrtx --use_winml --ep_path dummy
+uv run examples/python/model-qa.py -m docs/models/3/8b-dml
 ```
 
 ## Benchmark
 
 ```
-uv run benchmark/python/benchmark_e2e.py -i docs/4b --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
-uv run benchmark/python/benchmark_e2e.py -i docs/8b-dml --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+uv run benchmark/python/benchmark_e2e.py -i docs/models/3/4b --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+uv run benchmark/python/benchmark_e2e.py -i docs/models/3/8b-dml --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
 ```
 
 ## Result
@@ -88,14 +88,14 @@ Download dlls from https://github.com/microsoft/windows-ai-studio-templates/rele
 
 ```
 $env:PATH += ";C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7"
-uv run examples/python/model-qa.py -m docs/8b-cuda -e cuda --ep_path "C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7\onnxruntime_providers_cuda.dll"
+uv run examples/python/model-qa.py -m docs/models/3/8b-cuda -e cuda --ep_path "C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7\onnxruntime_providers_cuda.dll"
 ```
 
 ## Benchmark
 
 ```
 $env:PATH += ";C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7"
-uv run benchmark/python/benchmark_e2e.py -i docs/8b-cuda --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n' -e cuda -epl "C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7\onnxruntime_providers_cuda.dll"
+uv run benchmark/python/benchmark_e2e.py -i docs/models/3/8b-cuda --chat_template '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n' -e cuda -epl "C:\Users\XXX\.aitk\bin\libonnxruntime_cuda_windows\0.0.7\onnxruntime_providers_cuda.dll"
 ```
 
 ## Result
@@ -116,3 +116,34 @@ GPU NVIDIA GeForce RTX 4080
 | Average Sampling Throughput (per token) | 9637.625567738234 | tps |
 | Average Wall Clock Time | 7.342488265037536 | s |
 | Average Wall Clock Throughput | 38.270405053015565 | tps |
+
+# Qwen3.5 (WIP)
+
+## Convert
+
+```
+uv run src/python/py/models/builder.py --model_name Qwen/Qwen3.5-4B -o docs/models/3.5/4b -p int4 -e cpu
+```
+
+## Setup env
+
+```
+uv pip uninstall onnxruntime-windowsml
+uv pip uninstall onnxruntime-genai-winml
+uv pip install onnxruntime==1.25.0.dev20260401004 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ 
+uv pip install onnxruntime-genai==0.13.0.dev20260316 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --no-deps
+```
+
+## Run (Error now)
+
+```
+uv run examples/python/model-qa.py -m docs/models/3.5/4b
+```
+
+```
+uv run python -c "import onnxruntime as ort; s=ort.InferenceSession(r'docs/models/3-5/4b/model.onnx', providers=['CPUExecutionProvider']); print('session ok')"
+```
+
+```
+onnxruntime.capi.onnxruntime_pybind11_state.Fail: [ONNXRuntimeError] : 1 : FAIL : Load model from docs/models/3-5/4b/model.onnx failed:Fatal error: com.microsoft:CausalConvWithState(-1) is not a registered function/op
+```
