@@ -1376,8 +1376,8 @@ TEST(CAPITests, UseLarkGrammarSingleTurnCAPI) {
   tokenizer->Encode(input_string, *input_sequences);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 256);
-  auto lark_grammar = "start: functioncall" + "\n" + "functioncall: %json " + json_schema;
-  params->SetGuidance("lark_grammar", lark_grammar, false);
+  std::string lark_grammar = std::string("start: functioncall\nfunctioncall: %json ") + json_schema;
+  params->SetGuidance("lark_grammar", lark_grammar.c_str(), false);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);
@@ -1386,7 +1386,7 @@ TEST(CAPITests, UseLarkGrammarSingleTurnCAPI) {
   }
   auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());
-  EXPECT_TRUE(std::regex_match(output, R"json([{"name": "get_weather", "parameters": {"city": "San Francisco"}}])json"));
+  EXPECT_TRUE(std::regex_match(output, std::regex(R"(\[{"name": "get_weather", "parameters": {"city": "San Francisco"}}\])")));
 #endif
 }
 
@@ -1401,7 +1401,7 @@ TEST(CAPITests, UseJsonSchemaSingleTurnCAPI) {
   tokenizer->Encode(input_string, *input_sequences);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 256);
-  params->SetGuidance("json_schema", json_schema, false);
+  params->SetGuidance("json_schema", json_schema.c_str(), false);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);
@@ -1410,7 +1410,7 @@ TEST(CAPITests, UseJsonSchemaSingleTurnCAPI) {
   }
   auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());
-  EXPECT_TRUE(std::regex_match(output, R"json([{"name": "get_weather", "parameters": {"city": "San Francisco"}}])json"));
+  EXPECT_TRUE(std::regex_match(output, std::regex(R"(\[{"name": "get_weather", "parameters": {"city": "San Francisco"}}\])")));
 #endif
 }
 
@@ -1422,8 +1422,8 @@ TEST(CAPITests, UseLarkGrammarMultiTurnCAPI) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 1024);
-  auto lark_grammar = "start: functioncall" + "\n" + "functioncall: %json " + json_schema;
-  params->SetGuidance("lark_grammar", lark_grammar, false);
+  std::string lark_grammar = std::string("start: functioncall\nfunctioncall: %json ") + json_schema;
+  params->SetGuidance("lark_grammar", lark_grammar.c_str(), false);
   auto generator = OgaGenerator::Create(*model, *params);
 
   const std::vector<std::string> cities{"San Francisco", "Seattle", "Boston"};
@@ -1439,7 +1439,7 @@ TEST(CAPITests, UseLarkGrammarMultiTurnCAPI) {
 
     auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
     auto output = std::string(out_string);
-    auto expected_pattern = R"json([{"name": "get_weather", "parameters": {"city": ")json" + city + R"json("}}])json";
+    auto expected_pattern = std::string(R"(\[{"name": "get_weather", "parameters": {"city": ")") + city + R"("}}\])";
     EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
   }
 #endif
@@ -1453,7 +1453,7 @@ TEST(CAPITests, UseJsonSchemaMultiTurnCAPI) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 1024);
-  params->SetGuidance("json_schema", json_schema, false);
+  params->SetGuidance("json_schema", json_schema.c_str(), false);
   auto generator = OgaGenerator::Create(*model, *params);
 
   const std::vector<std::string> cities{"San Francisco", "Seattle", "Boston"};
@@ -1469,7 +1469,7 @@ TEST(CAPITests, UseJsonSchemaMultiTurnCAPI) {
 
     auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
     auto output = std::string(out_string);
-    auto expected_pattern = R"json([{"name": "get_weather", "parameters": {"city": ")json" + city + R"json("}}])json";
+    auto expected_pattern = std::string(R"(\[{"name": "get_weather", "parameters": {"city": ")") + city + R"("}}\])";
     EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
   }
 #endif
