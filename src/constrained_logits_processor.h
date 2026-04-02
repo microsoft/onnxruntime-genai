@@ -45,15 +45,6 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
   GuidanceLogitsProcessor(const State& state);
   
-  // Initialize LlgTokenizer with the given state and params
-  void InitializeLlgTokenizer();
-
-  // Initialize LlgConstraint with the given state and params
-  void InitializeLlgConstraints();
-
-  // Initialize the mask asynchronously to avoid blocking the model inference on device
-  void InitializeMaskAsync();
-
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
