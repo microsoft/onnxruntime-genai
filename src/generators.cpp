@@ -533,7 +533,8 @@ bool Generator::IsDone() {
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
-      guidance_logits_processor_->InitializeLlgConstraints();
+      guidance_logits_processor_->Reset();
+      // guidance_logits_processor_->InitializeLlgConstraints();
       // guidance_logits_processor_->ResetWithoutCompute();
       // guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
       last_action_ = Action::standard;

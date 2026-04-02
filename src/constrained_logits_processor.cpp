@@ -33,11 +33,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   tokenizer_ = state.model_.CreateTokenizer();
   InitializeLlgTokenizer();
   InitializeLlgConstraints();
-
-  // Compute the mask asynchronously to avoid blocking the model inference on device
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
+  InitializeMaskAsync();
 }
 
 void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
@@ -89,17 +85,20 @@ void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
 }
 
 void GuidanceLogitsProcessor::InitializeLlgConstraints() {
-  // Reset masks buffer
-  if (!masks_.empty()) {
-    masks_.clear();
-  }
-  
+  // // Reset masks buffer
+  // if (!masks_.empty()) {
+  //   masks_.clear();
+  // }
+
   // Reset constraints buffer
   if (!llg_constraints_.empty()) {
+    // Each element of llg_constraints_ is a std::unique_ptr<LlgConstraint, LlgConstraintDeleter>.
+    // Each pointer has a custom deleter that specifies how to properly free the constraint.
+    // The deleter is automatically called here when the vector is cleared.
     llg_constraints_.clear();
   }
   llg_constraints_.resize(params_->search.batch_size);
-  
+
   // Reset ff_tokens buffers
   for (int i = 0; i < ff_tokens_batch_.size(); i++) {
     ff_tokens_batch_[i].clear();
@@ -125,18 +124,27 @@ void GuidanceLogitsProcessor::InitializeLlgConstraints() {
       throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex, and lark_grammar are supported)");
     }
 
+    // Ensure constraint was created successfully
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
       llg_free_constraint(constraint_ptr);
       throw std::runtime_error("Error creating grammar: " + error_message);
     }
 
-    // Store the constraint in the vector of constraints
+    // Store the constraint in the list of all constraints
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
 
     // Create ff_tokens buffer for each batch item
     ff_tokens_batch_[i] = std::vector<int32_t>();
   }
+}
+
+void GuidanceLogitsProcessor::InitializeMaskAsync() {
+  // Compute the mask asynchronously to avoid blocking the model inference on device
+  mask_future_ = std::async(std::launch::async, [&]() {
+    return ComputeMask();
+  });
+  masks_.clear();
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
@@ -199,10 +207,8 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
       ff_tokens.push_back((int32_t)commit_result.tokens[j]);
     }
   }
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
-  masks_.clear();
+
+  InitializeMaskAsync();
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
@@ -245,12 +251,10 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   }
 }
 
-// Reset the masks and llguidance constraints and then recompute the mask
+// Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   InitializeLlgConstraints();
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
+  InitializeMaskAsync();
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,

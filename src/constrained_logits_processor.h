@@ -25,6 +25,9 @@ struct ConstrainedLogitsProcessor {
   // Initialize LlgConstraint with the given state and params
   virtual void InitializeLlgConstraints() = 0;
 
+  // Initialize the mask asynchronously to avoid blocking the model inference on device
+  virtual void InitializeMaskAsync() = 0;
+
   // Commits the selected tokens to the constrained system and also trigger mask recomputation
   // The input is the current token in the batch and internally verifies that it is valid in the current
   // context and also updates the internal state of the constraint system
@@ -34,7 +37,7 @@ struct ConstrainedLogitsProcessor {
   // Based on the masks which are derived from constraints, it sets the logits to -inf for invalid tokens
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
 
-  // Reset is used to reset the masks and the constrains of the logits processor and then recompute the mask, used after rewinding
+  // Reset is used to reset the constraints of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
 
   // Return a clone of the ff_tokens for the given index
@@ -51,12 +54,15 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   GuidanceLogitsProcessor(const State& state);
   void InitializeLlgTokenizer() override;
   void InitializeLlgConstraints() override;
+  void InitializeMaskAsync() override;
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
+
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
+
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
   // token ids.
   static std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
