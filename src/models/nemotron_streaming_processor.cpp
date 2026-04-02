@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 
 #include "../generators.h"
 #include "nemotron_streaming_processor.h"
@@ -77,11 +78,34 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   auto& allocator = model_.allocator_cpu_;
 
   // Compute mel spectrogram for this chunk: returns [num_mels, num_frames] (frequency-major)
-  auto [mel_data, num_frames] = mel_extractor_.Process(audio_chunk, chunk_samples);
+  auto [mel_data, num_frames_raw] = mel_extractor_.Process(audio_chunk, chunk_samples);
 
   const int cache_size = cache_config_.pre_encode_cache_size;
   const int num_mels = cache_config_.num_mels;
-  const int total_mel_frames = cache_size + num_frames;
+  const int sub = cache_config_.subsampling_factor;
+  // Derive encoder chunk frames from audio config: chunk_samples / hop_length / subsampling_factor
+  const int chunk_enc_frames = cache_config_.chunk_samples / cache_config_.hop_length / sub;
+
+  // NeMo streaming_cfg.chunk_size = [(chunk_frames-1)*sub+1, chunk_frames*sub]
+  // First chunk: only (chunk_frames-1)*sub+1 real mel frames, rest zero-padded
+  // Subsequent chunks: full chunk_frames*sub mel frames + pre-encode cache
+  const int first_chunk_mel = (chunk_enc_frames - 1) * sub + 1;
+  const int rest_chunk_mel = chunk_enc_frames * sub;
+
+  int num_frames;
+  int prepend_cache;
+  int zero_pad_front;
+  if (is_first_chunk_) {
+    num_frames = std::min(num_frames_raw, first_chunk_mel);
+    prepend_cache = 0;
+    // Zero-pad front to keep total = cache_size + rest_chunk_mel (same as subsequent chunks)
+    zero_pad_front = cache_size + rest_chunk_mel - num_frames;
+  } else {
+    num_frames = std::min(num_frames_raw, rest_chunk_mel);
+    prepend_cache = cache_size;
+    zero_pad_front = 0;
+  }
+  const int total_mel_frames = zero_pad_front + prepend_cache + num_frames;
 
   // Create output tensor: [1, total_mel_frames, num_mels] (time-major)
   auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
@@ -94,23 +118,35 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
   float* signal_data = processed_signal->GetTensorMutableData<float>();
 
-  // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
-  // Use at most 2 memcpys instead of per-frame copies
-  int first_run = std::min(cache_size - cache_pos_, cache_size);
-  std::memcpy(signal_data,
-              mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
-              first_run * num_mels * sizeof(float));
-  if (first_run < cache_size) {
-    std::memcpy(signal_data + first_run * num_mels,
-                mel_pre_encode_cache_.data(),
-                (cache_size - first_run) * num_mels * sizeof(float));
+  // Pad front with log(eps) for the first chunk to match NeMo's native [49] behavior.
+  // NeMo feeds only 49 mel frames with no cache on the first chunk, but the ONNX encoder
+  // requires a fixed 65-frame input. Padding with log(eps) (silence-level mel) produces
+  // identical conv subsampling output to NeMo's unpadded path (empirically verified).
+  // Using 0.0 would represent max energy and corrupts the conv subsampling boundary frames.
+  if (zero_pad_front > 0) {
+    const float pad_val = std::log(cache_config_.log_eps);
+    std::fill(signal_data, signal_data + zero_pad_front * num_mels, pad_val);
   }
 
-  // Transpose mel from [num_mels, num_frames] directly into output tensor after cache
-  float* out_ptr = signal_data + cache_size * num_mels;
+  if (!is_first_chunk_) {
+    // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
+    int first_run = std::min(cache_size - cache_pos_, cache_size);
+    std::memcpy(signal_data,
+                mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
+                first_run * num_mels * sizeof(float));
+    if (first_run < cache_size) {
+      std::memcpy(signal_data + first_run * num_mels,
+                  mel_pre_encode_cache_.data(),
+                  (cache_size - first_run) * num_mels * sizeof(float));
+    }
+  }
+
+  // Transpose mel from [num_mels, num_frames_raw] directly into output tensor after front padding + cache
+  // Note: mel_data stride is num_frames_raw even if we only use num_frames
+  float* out_ptr = signal_data + (zero_pad_front + prepend_cache) * num_mels;
   for (int t = 0; t < num_frames; ++t) {
     for (int m = 0; m < num_mels; ++m) {
-      out_ptr[t * num_mels + m] = mel_data[m * num_frames + t];
+      out_ptr[t * num_mels + m] = mel_data[m * num_frames_raw + t];
     }
   }
 
@@ -127,6 +163,8 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
                 (frames_to_cache - frames_to_end) * num_mels * sizeof(float));
   }
   cache_pos_ = (cache_pos_ + frames_to_cache) % cache_size;
+
+  is_first_chunk_ = false;
 
   return processed_signal;
 }
