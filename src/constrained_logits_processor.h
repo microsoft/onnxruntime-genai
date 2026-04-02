@@ -18,17 +18,25 @@ namespace Generators {
 struct ConstrainedLogitsProcessor {
   ConstrainedLogitsProcessor() = default;
   virtual ~ConstrainedLogitsProcessor() = default;
+
+  // Initialize LlgTokenizer with the given state and params
+  virtual void InitializeLlgTokenizer() = 0;
+
+  // Initialize LlgConstraint with the given state and params
+  virtual void InitializeLlgConstraints() = 0;
+
   // Commits the selected tokens to the constrained system and also trigger mask recomputation
   // The input is the current token in the batch and internally verifies that it is valid in the current
   // context and also updates the internal state of the constraint system
   virtual void CommitTokens(std::span<int32_t> tokens) = 0;
+
   // ProcessLogits applies token-level masking to the logits
   // Based on the masks which are derived from constraints, it sets the logits to -inf for invalid tokens
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
+
   // Reset is used to reset the masks and the constrains of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
-  // ResetWithoutCompute is used to reset the masks and constraints for logits processor without computing the mask for chat
-  virtual void ResetWithoutCompute() = 0;
+
   // Return a clone of the ff_tokens for the given index
   virtual std::vector<int32_t> GetFFTokens(size_t index) = 0;
 };
@@ -41,10 +49,11 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
+  void InitializeLlgTokenizer() override;
+  void InitializeLlgConstraints() override;
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
-  void ResetWithoutCompute() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
