@@ -1439,7 +1439,7 @@ TEST(CAPITests, UseLarkGrammarMultiTurnCAPI) {
 
     auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
     auto output = std::string(out_string);
-    auto expected_pattern = R"json(\[\{"name": "get_weather", "parameters": \{"city": ")json" + city + R"json("\}\}\])json";
+    auto expected_pattern = R"json([{"name": "get_weather", "parameters": {"city": ")json" + city + R"json("}}])json";
     EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
   }
 #endif
@@ -1469,7 +1469,7 @@ TEST(CAPITests, UseJsonSchemaMultiTurnCAPI) {
 
     auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
     auto output = std::string(out_string);
-    auto expected_pattern = R"json(\[\{"name": "get_weather", "parameters": \{"city": ")json" + city + R"json("\}\}\])json";
+    auto expected_pattern = R"json([{"name": "get_weather", "parameters": {"city": ")json" + city + R"json("}}])json";
     EXPECT_TRUE(std::regex_match(output, std::regex(expected_pattern)));
   }
 #endif
