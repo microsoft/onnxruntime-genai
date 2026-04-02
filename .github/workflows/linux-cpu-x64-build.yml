@@ -97,7 +97,7 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release -DTEST_PHI2=True -DTEST_QWEN_2_5=True
+          cmake --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
