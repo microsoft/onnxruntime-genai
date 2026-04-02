@@ -101,7 +101,7 @@ RecurrentState::RecurrentState(State& state)
     presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
   }
 
-  // Zero-initialize past states
+  // Zero-initialize past and present states
   ZeroStates(pasts_);
   ZeroStates(presents_);
 }
@@ -146,23 +146,16 @@ void RecurrentState::RewindTo(size_t index) {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  auto& allocator = model_.p_device_kvcache_->GetAllocator();
-
-  for (int i = 0; i < num_layers; ++i) {
-    pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
-    pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
-
-    presents_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
-    presents_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
-
-    state_.inputs_[input_index_ + i * 2] = pasts_[i * 2].get();
-    state_.inputs_[input_index_ + i * 2 + 1] = pasts_[i * 2 + 1].get();
-    state_.outputs_[output_index_ + i * 2] = presents_[i * 2].get();
-    state_.outputs_[output_index_ + i * 2 + 1] = presents_[i * 2 + 1].get();
-  }
-
+  // Zero existing buffers in-place instead of reallocating, to preserve
+  // device pointers and avoid invalidating captured CUDA graphs.
   ZeroStates(pasts_);
   ZeroStates(presents_);
+
+  // Re-bind state pointers (swap may have changed which OrtValue is past vs present)
+  for (int i = 0; i < num_layers * 2; ++i) {
+    state_.inputs_[input_index_ + i] = pasts_[i].get();
+    state_.outputs_[output_index_ + i] = presents_[i].get();
+  }
 }
 
 void RecurrentState::ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states) {
