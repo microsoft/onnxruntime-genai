@@ -36,6 +36,19 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   InitializeMaskAsync();
 }
 
+GuidanceLogitsProcessor::~GuidanceLogitsProcessor() {
+  // Wait for any in-flight async mask computation to complete before
+  // member variables are destroyed, preventing use-after-free.
+  WaitForPendingMask();
+}
+
+void GuidanceLogitsProcessor::WaitForPendingMask() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (mask_future_.valid()) {
+    masks_ = mask_future_.get();
+  }
+}
+
 void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
   // Create the tokenize function for LlgTokenizer
   auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
@@ -135,8 +148,11 @@ void GuidanceLogitsProcessor::InitializeLlgConstraints() {
 }
 
 void GuidanceLogitsProcessor::InitializeMaskAsync() {
+  // Ensure any previous async computation is complete before launching a new one
+  WaitForPendingMask();
   // Compute the mask asynchronously to avoid blocking the model inference on device
-  mask_future_ = std::async(std::launch::async, [&]() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  mask_future_ = std::async(std::launch::async, [this]() {
     return ComputeMask();
   });
   masks_.clear();
@@ -176,6 +192,7 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (index >= ff_tokens_batch_.size()) {
     // in case guidance is not being used, return empty vector
     return std::vector<int32_t>();
@@ -187,19 +204,25 @@ std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
 }
 
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
-  for (int i = 0; i < params_->search.batch_size; i++) {
-    LlgCommitResult commit_result;
-    auto error = llg_commit_token(llg_constraints_[i].get(), static_cast<uint32_t>(tokens[i]), &commit_result);
-    if (error != 0) {
-      std::string error_message = llg_get_error(llg_constraints_[i].get());
-      throw std::runtime_error("Error committing tokens: " + error_message);
-    }
+  // Wait for any pending async mask computation before modifying constraints
+  WaitForPendingMask();
 
-    auto& ff_tokens = ff_tokens_batch_[i];
-    ff_tokens.clear();
-    // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
-    for (size_t j = 1; j < commit_result.n_tokens; j++) {
-      ff_tokens.push_back((int32_t)commit_result.tokens[j]);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int i = 0; i < params_->search.batch_size; i++) {
+      LlgCommitResult commit_result;
+      auto error = llg_commit_token(llg_constraints_[i].get(), static_cast<uint32_t>(tokens[i]), &commit_result);
+      if (error != 0) {
+        std::string error_message = llg_get_error(llg_constraints_[i].get());
+        throw std::runtime_error("Error committing tokens: " + error_message);
+      }
+
+      auto& ff_tokens = ff_tokens_batch_[i];
+      ff_tokens.clear();
+      // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
+      for (size_t j = 1; j < commit_result.n_tokens; j++) {
+        ff_tokens.push_back((int32_t)commit_result.tokens[j]);
+      }
     }
   }
 
@@ -207,7 +230,8 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
-  if (masks_.empty()) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (masks_.empty() && mask_future_.valid()) {
     masks_ = mask_future_.get();
   }
   return masks_;
@@ -248,7 +272,14 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 
 // Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
-  InitializeLlgConstraints();
+  // Wait for any pending async mask computation before modifying constraints
+  WaitForPendingMask();
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    InitializeLlgConstraints();
+  }
+
   InitializeMaskAsync();
 }
 

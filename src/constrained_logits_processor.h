@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <future>
@@ -44,6 +45,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
+  ~GuidanceLogitsProcessor() override;
 
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
@@ -68,6 +70,9 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   // Initialize the mask asynchronously to avoid blocking the model inference on device
   void InitializeMaskAsync();
 
+  // Wait for any pending async mask computation to complete, storing the result in masks_
+  void WaitForPendingMask();
+
   std::vector<std::vector<uint32_t>> ComputeMask();
   struct LlgConstraintDeleter {
     void operator()(LlgConstraint* lc) const {
@@ -88,6 +93,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
 
+  std::mutex mutex_;  // Protects masks_, mask_future_, and ff_tokens_batch_
   std::future<std::vector<std::vector<uint32_t>>> mask_future_;
   std::vector<std::vector<uint32_t>> logits_masks_;
   std::vector<std::vector<int32_t>> ff_tokens_batch_;
