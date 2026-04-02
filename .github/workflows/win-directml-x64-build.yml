@@ -100,7 +100,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_directml_release -DTEST_PHI2=True
+          cmake --preset windows_x64_directml_release -DTEST_PHI2=True -DTEST_QWEN_2_5=True
 
       - name: Build with CMake
         run: |

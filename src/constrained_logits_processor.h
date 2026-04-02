@@ -19,15 +19,6 @@ struct ConstrainedLogitsProcessor {
   ConstrainedLogitsProcessor() = default;
   virtual ~ConstrainedLogitsProcessor() = default;
 
-  // Initialize LlgTokenizer with the given state and params
-  virtual void InitializeLlgTokenizer() = 0;
-
-  // Initialize LlgConstraint with the given state and params
-  virtual void InitializeLlgConstraints() = 0;
-
-  // Initialize the mask asynchronously to avoid blocking the model inference on device
-  virtual void InitializeMaskAsync() = 0;
-
   // Commits the selected tokens to the constrained system and also trigger mask recomputation
   // The input is the current token in the batch and internally verifies that it is valid in the current
   // context and also updates the internal state of the constraint system
@@ -48,13 +39,21 @@ struct ConstrainedLogitsProcessor {
 struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   // llguidance need to use tokenizer.json to add special tokens
   static constexpr const char* kDefaultVocabFile = "tokenizer.json";
+
   // tokenizer need to tokenize token with special prefix
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
-  void InitializeLlgTokenizer() override;
-  void InitializeLlgConstraints() override;
-  void InitializeMaskAsync() override;
+  
+  // Initialize LlgTokenizer with the given state and params
+  void InitializeLlgTokenizer();
+
+  // Initialize LlgConstraint with the given state and params
+  void InitializeLlgConstraints();
+
+  // Initialize the mask asynchronously to avoid blocking the model inference on device
+  void InitializeMaskAsync();
+
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;

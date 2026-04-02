@@ -95,7 +95,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DTEST_QWEN_2_5=True
 
       - name: Build with CMake
         run: |
