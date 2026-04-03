@@ -116,12 +116,14 @@ void BeamSearch_Cpu::SelectTop() {
 
   // Use partial_sort to find only the top 2*num_beams elements per batch,
   // instead of heapifying the entire vocab*beams array via priority_queue.
+  const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
+  assert(total_elements >= top_k);
+  std::vector<int32_t> idx(total_elements);
+
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->search.batch_size); batch_index++) {
-    const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
     auto token_scores_sub = next_token_scores.subspan(batch_index * total_elements, total_elements);
 
     // Build index array and partial_sort to find top_k elements
-    std::vector<int32_t> idx(total_elements);
     std::iota(idx.begin(), idx.end(), 0);
     std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(),
                       [&token_scores_sub](int32_t a, int32_t b) { return token_scores_sub[a] > token_scores_sub[b]; });

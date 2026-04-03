@@ -440,10 +440,10 @@ TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
 
   // With penalty=2.0, tokens 0-9 (which appeared in the sequence) should have
   // their scores divided by 2.0 (since scores are positive: 5.0 -> 2.5),
-  // while tokens 10-999 keep score 5.0. After softmax, unpenalized tokens should
-  // be sampled much more frequently than penalized tokens.
-  int penalized_count = 0;    // tokens 0-9
-  int unpenalized_count = 0;  // tokens 10+
+  // while tokens 10-999 keep score 5.0. Compare per-token average frequency
+  // to detect actual penalty effect vs. mere count imbalance (990 vs 10 tokens).
+  int penalized_count = 0;    // tokens 0-9 (10 tokens)
+  int unpenalized_count = 0;  // tokens 10-999 (990 tokens)
   for (auto& [token, count] : token_counts) {
     if (token < 10)
       penalized_count += count;
@@ -451,10 +451,16 @@ TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
       unpenalized_count += count;
   }
 
-  // Unpenalized tokens should be sampled significantly more (at least 2x)
-  EXPECT_GT(unpenalized_count, penalized_count * 2)
+  // Compare per-token average: unpenalized_avg vs penalized_avg.
+  // Without penalty, both groups have equal logits so per-token avg would be similar.
+  // With penalty=2.0 on positive scores (5.0 -> 2.5), exp(5)/exp(2.5) ≈ 12x ratio.
+  // Use a conservative 3x threshold that clearly separates "penalty working" from "no penalty".
+  double penalized_avg = static_cast<double>(penalized_count) / 10.0;       // 10 penalized tokens
+  double unpenalized_avg = static_cast<double>(unpenalized_count) / 990.0;  // 990 unpenalized tokens
+  EXPECT_GT(unpenalized_avg, penalized_avg * 3.0)
       << "Repetition penalty doesn't appear to suppress repeated tokens. "
-      << "Penalized=" << penalized_count << " Unpenalized=" << unpenalized_count;
+      << "Penalized per-token avg=" << penalized_avg
+      << " Unpenalized per-token avg=" << unpenalized_avg;
 }
 
 #if USE_CUDA
