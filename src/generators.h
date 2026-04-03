@@ -6,6 +6,7 @@
 #include <array>
 #include <assert.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -99,6 +100,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
@@ -123,6 +125,14 @@ struct Generator : LeakChecked<Generator> {
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
+
+  // Telemetry tracking
+  uint32_t telemetry_generator_id_{0};
+  int telemetry_prompt_tokens_{0};
+  int telemetry_generated_tokens_{0};
+  std::chrono::steady_clock::time_point telemetry_start_time_;
+  std::chrono::steady_clock::time_point telemetry_first_token_time_;
+  bool telemetry_first_token_logged_{false};
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);

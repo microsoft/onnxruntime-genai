@@ -10,6 +10,15 @@ endif()
 
 include(FetchContent)
 include(CMakeDependentOption)
+
+# Activate the vcpkg "telemetry" manifest feature when telemetry is requested.
+# Must run before project() so vcpkg installs cpp-client-telemetry during configure.
+# ENABLE_TELEMETRY is supplied on the command line (-DENABLE_TELEMETRY=ON); its
+# default (OFF) is defined later in cmake/options.cmake.
+if(ENABLE_TELEMETRY)
+  list(APPEND VCPKG_MANIFEST_FEATURES "telemetry")
+endif()
+
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
@@ -153,6 +162,12 @@ if(ENABLE_TRACING)
   add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
+if(ENABLE_TELEMETRY)
+  message(STATUS "Telemetry is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TELEMETRY)
+  include(cmake/telemetry.cmake)
+endif()
+
 find_package(Threads REQUIRED)
 
 if(WIN32)
@@ -172,6 +187,11 @@ target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SO
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
+target_compile_definitions(onnxruntime-genai PRIVATE ORTGENAI_VERSION="${VERSION_INFO}")
+
+if(ENABLE_TELEMETRY)
+  target_link_libraries(onnxruntime-genai PRIVATE MSTelemetry::mat)
+endif()
 
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")

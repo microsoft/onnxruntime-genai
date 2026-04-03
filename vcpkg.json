@@ -1,0 +1,17 @@
+{
+  "name": "onnxruntime-genai",
+  "version": "0.14.0",
+  "description": "ONNX Runtime GenAI - generative AI inference library.",
+  "homepage": "https://github.com/microsoft/onnxruntime-genai",
+  "license": "MIT",
+  "builtin-baseline": "22b8d099947ea6ee2fcb1aa1124b21f48f84232d",
+  "dependencies": [],
+  "features": {
+    "telemetry": {
+      "description": "1DS telemetry support via the Microsoft cpp-client-telemetry (1DS C++) SDK.",
+      "dependencies": [
+        "cpp-client-telemetry"
+      ]
+    }
+  }
+}

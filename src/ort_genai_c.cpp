@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
+#include "telemetry/telemetry.h"
 
 namespace Generators {
 
@@ -93,7 +95,12 @@ extern "C" {
   }
 
 void OGA_API_CALL OgaShutdown() {
+  Generators::GenAiTelemetry::Instance().Shutdown();
   Generators::Shutdown();
+}
+
+void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
+  Generators::GenAiTelemetry::Instance().SetEnabled(enabled);
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -226,9 +233,43 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
-  *out = ReturnShared<OgaModel>(model);
-  return nullptr;
+  auto& telemetry = Generators::GenAiTelemetry::Instance();
+  telemetry.Initialize();
+  telemetry.LogProcessInfo();
+
+  auto session_id = telemetry.AllocateSessionId();
+  telemetry.LogModelLoadStart(session_id);
+
+  auto start = std::chrono::steady_clock::now();
+  try {
+    auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
+
+    // Log model details after successful config parse
+    std::string providers_str;
+    for (const auto& p : model->config_->model.decoder.session_options.providers) {
+      if (!providers_str.empty()) providers_str += ",";
+      providers_str += p;
+    }
+    telemetry.LogModelLoad(session_id,
+                           model->config_->model.type,
+                           providers_str,
+                           Generators::to_string(model->p_device_->GetType()),
+                           model->config_->model.vocab_size,
+                           model->config_->model.context_length,
+                           !model->config_->model_data_spans_.empty());
+
+    auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+
+    model->telemetry_session_id_ = session_id;
+    *out = ReturnShared<OgaModel>(model);
+    return nullptr;
+  } catch (const std::exception& e) {
+    auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+    telemetry.LogRuntimeError(session_id, "std::exception", e.what(), "model_load");
+    throw;
+  }
   OGA_CATCH
 }
 
@@ -339,10 +380,43 @@ OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(Oga
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto config_copy = std::make_unique<Generators::Config>(*config);
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
-  *out = ReturnShared<OgaModel>(model);
-  return nullptr;
+  auto& telemetry = Generators::GenAiTelemetry::Instance();
+  telemetry.Initialize();
+  telemetry.LogProcessInfo();
+
+  auto session_id = telemetry.AllocateSessionId();
+  telemetry.LogModelLoadStart(session_id);
+
+  auto start = std::chrono::steady_clock::now();
+  try {
+    auto config_copy = std::make_unique<Generators::Config>(*config);
+    auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+
+    std::string providers_str;
+    for (const auto& p : model->config_->model.decoder.session_options.providers) {
+      if (!providers_str.empty()) providers_str += ",";
+      providers_str += p;
+    }
+    telemetry.LogModelLoad(session_id,
+                           model->config_->model.type,
+                           providers_str,
+                           Generators::to_string(model->p_device_->GetType()),
+                           model->config_->model.vocab_size,
+                           model->config_->model.context_length,
+                           !model->config_->model_data_spans_.empty());
+
+    auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+
+    model->telemetry_session_id_ = session_id;
+    *out = ReturnShared<OgaModel>(model);
+    return nullptr;
+  } catch (const std::exception& e) {
+    auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+    telemetry.LogRuntimeError(session_id, "std::exception", e.what(), "model_load");
+    throw;
+  }
   OGA_CATCH
 }
 
@@ -416,7 +490,22 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams
 
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
+  auto generator = CreateGenerator(*model, *params);
+
+  // Log generator creation telemetry
+  auto& telemetry = Generators::GenAiTelemetry::Instance();
+  telemetry.LogGeneratorCreate(
+      model->telemetry_session_id_,
+      params->search.batch_size,
+      params->search.num_beams,
+      params->search.max_length,
+      static_cast<float>(params->search.top_k),
+      params->search.top_p,
+      params->search.temperature,
+      params->use_graph_capture,
+      !params->guidance_type.empty());
+
+  *out = ReturnUnique<OgaGenerator>(std::move(generator));
   return nullptr;
   OGA_CATCH
 }

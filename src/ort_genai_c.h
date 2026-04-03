@@ -93,6 +93,16 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /**
+ * \brief Enable or disable telemetry data collection.
+ *
+ * Telemetry can also be disabled at compile time (ENABLE_TELEMETRY=OFF) or via
+ * the environment variable ORTGENAI_TELEMETRY_ENABLED=0.
+ *
+ * \param[in] enabled true to enable telemetry, false to disable.
+ */
+OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
+
+/**
  * \param[in] result OgaResult that contains the error message.
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
  *         and can will be freed when the OgaResult is destroyed.
