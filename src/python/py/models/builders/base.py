@@ -397,6 +397,8 @@ class Model:
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             del self.input_names["input_ids"]
+        else:
+            del self.input_names["inputs_embeds"]
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
@@ -958,6 +960,11 @@ class Model:
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
+    def make_and(self, name, inputs, shape):
+        output = f"{name}/output_0"
+        self.make_node("And", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
+
     def make_isinf(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
@@ -996,6 +1003,14 @@ class Model:
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_rsqrt(self, name, inputs, dtype, shape):
+        """Reciprocal square root: 1 / sqrt(x)."""
+        sqrt_name = f"{name}/Sqrt"
+        self.make_sqrt(sqrt_name, inputs, dtype, shape)
+        output = f"{name}/output_0"
+        self.make_node("Reciprocal", inputs=[f"{sqrt_name}/output_0"], outputs=[output], name=f"{name}/Reciprocal")
         self.make_value(output, dtype, shape=shape)
 
     def make_cast(self, name, root_input, dtype, shape):
@@ -1056,6 +1071,26 @@ class Model:
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_cos(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Cos", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_sin(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Sin", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_softplus(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Softplus", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_reduce_l2(self, name, inputs, dtype, shape, keepdims=False):
+        output = f"{name}/output_0"
+        self.make_node("ReduceL2", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_conv(self, name, inputs, dtype, shape, **kwargs):
@@ -2732,6 +2767,54 @@ class Model:
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
+
+    def make_causal_conv_with_state(self, name, **kwargs):
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        output = f"{name}/output_0"
+        present_conv = kwargs["present_conv_state"]
+        outputs = [output, present_conv]
+        self.make_node(
+            "CausalConvWithState",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            ndim=kwargs.get("ndim", 1),
+            activation=kwargs.get("activation", "silu"),
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
+
+    def make_linear_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["past_recurrent_state"],
+            kwargs["decay"],
+            kwargs["beta"],
+        ]
+        output = f"{name}/output_0"
+        present_recurrent = kwargs["present_recurrent_state"]
+        outputs = [output, present_recurrent]
+        self.make_node(
+            "LinearAttention",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            q_num_heads=kwargs["q_num_heads"],
+            kv_num_heads=kwargs["kv_num_heads"],
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [

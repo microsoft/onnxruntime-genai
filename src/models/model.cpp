@@ -25,6 +25,7 @@
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
 #include "../ryzenai/interface.h"
+#include "session_options.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -199,7 +200,7 @@ void State::SetRunOption(const char* key, const char* value) {
  */
 void State::SetRunOptions(const Config::RunOptions& config_run_options) {
   for (auto& config_entry : config_run_options) {
-    run_options_->AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    SetRunOption(config_entry.first.c_str(), config_entry.second.c_str());
   }
 }
 
@@ -392,489 +393,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-/**
- * @brief Creates profile shapes for NvTensorRtRtx execution provider optimization.
- *
- * This function generates profiles for TensorRT execution provider optimization.
- * If multi-profile is enabled, it creates separate profiles for context and generation phases.
- * If multi-profile is disabled, it creates a single profile with simple shapes.
- *
- */
-void ConfigureNvTensorRtRtxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
-  // Get model parameters from decoder config
-  const int num_layers = config.model.decoder.num_hidden_layers;
-  const int num_kv_heads = config.model.decoder.num_key_value_heads;
-  const int head_dim = config.model.decoder.head_size;
-  const int batch_size = config.search.batch_size * config.search.num_beams;
-
-  // Get max context length from config
-  const int max_context_len = config.model.context_length;
-
-  // Extract KV cache name patterns from decoder config
-  std::string_view past_key_pattern = config.model.decoder.inputs.past_key_names;
-  std::string_view past_value_pattern = config.model.decoder.inputs.past_value_names;
-
-  // Helper function to add KV cache with sequence length
-  const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                             int batch_size,
-                                             std::string_view key_pattern,
-                                             std::string_view value_pattern,
-                                             int seq_len,
-                                             int num_layers,
-                                             int num_kv_heads,
-                                             int head_dim) {
-    for (int i = 0; i < num_layers; i++) {
-      // Use the existing function to format the key/value names
-      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-      shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-      shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-    }
-  };
-
-  if (is_multi_profile_enabled) {
-    // Multi-profile mode: existing logic for context and generation phases
-    const int opt_context_len = config.model.context_length / 2;
-    const int min_seq_len = 1;
-
-    // Helper function to add input shapes (input_ids, attention_mask, position_ids)
-    const auto add_input_shapes = [](std::ostringstream& shapes, int batch_size, int seq_len, bool append = false) {
-      if (append) shapes << ",";
-      shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << seq_len << ","
-             << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << seq_len;
-    };
-
-    // Helper function to add generation phase input shapes
-    const auto add_generation_input_shapes = [](std::ostringstream& shapes, int batch_size, int context_len) {
-      shapes << "," << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << context_len << ","
-             << Config::Defaults::InputIdsName << ":" << batch_size << "x1";
-    };
-
-    // Helper function to add empty KV cache shapes for all layers
-    const auto add_empty_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                                     int batch_size,
-                                                     std::string_view key_pattern,
-                                                     std::string_view value_pattern,
-                                                     int num_layers,
-                                                     int num_kv_heads,
-                                                     int head_dim) {
-      for (int i = 0; i < num_layers; i++) {
-        // Use the existing function to format the key/value names
-        const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-        const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-        shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x0x" << head_dim;
-        shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x0x" << head_dim;
-      }
-    };
-
-    std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-    // MIN SHAPES (context phase and first token generation)
-    add_input_shapes(min_shapes, batch_size, min_seq_len);
-    add_empty_key_value_cache_shapes(min_shapes, batch_size, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(min_shapes, batch_size, min_seq_len);
-    add_key_value_cache_shapes(min_shapes, batch_size, past_key_pattern, past_value_pattern, min_seq_len, num_layers, num_kv_heads, head_dim);
-
-    // OPT SHAPES (prefill with medium context and generation after medium context)
-    add_input_shapes(opt_shapes, batch_size, opt_context_len);
-    add_empty_key_value_cache_shapes(opt_shapes, batch_size, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(opt_shapes, batch_size, opt_context_len);
-    add_key_value_cache_shapes(opt_shapes, batch_size, past_key_pattern, past_value_pattern, opt_context_len - 1, num_layers, num_kv_heads, head_dim);
-
-    // MAX SHAPES (prefill with maximum context and generation after maximum context)
-    add_input_shapes(max_shapes, batch_size, max_context_len);
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
-    add_generation_input_shapes(max_shapes, batch_size, max_context_len);
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
-
-    // Add the constructed profiles to session options
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
-  } else {
-    // Single profile mode: simple shapes with batch_dim=[1,1,batch_size] and seq_dim=[1,1024,max_context_len]
-    std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-    // MIN SHAPES: batch_dim=1, seq_dim=1
-    constexpr int min_context_len = 1;
-    constexpr int min_batch_size = 1;
-    min_shapes << Config::Defaults::InputIdsName << ":" << min_batch_size << "x" << min_context_len << ","
-               << Config::Defaults::AttentionMaskName << ":" << min_batch_size << "x" << min_context_len;
-    add_key_value_cache_shapes(min_shapes, min_batch_size, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
-
-    // OPT SHAPES: batch_dim=1, seq_dim=1024
-    const int opt_context_len = std::min(max_context_len / 2, 1024);  // Use a reasonable opt context length
-    constexpr int opt_batch_size = 1;                                 // Use a opt batch size of 1
-    // keeping seq length to 1 as optimizing for the gen phase
-    opt_shapes << Config::Defaults::InputIdsName << ":" << opt_batch_size << "x" << 1 << ","
-               << Config::Defaults::AttentionMaskName << ":" << opt_batch_size << "x" << opt_context_len;
-    add_key_value_cache_shapes(opt_shapes, opt_batch_size, past_key_pattern, past_value_pattern, opt_context_len, num_layers, num_kv_heads, head_dim);
-
-    // MAX SHAPES: seq_dim=max_context_len
-    max_shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << max_context_len << ","
-               << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << max_context_len;
-    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len, num_layers, num_kv_heads, head_dim);
-
-    // Add the constructed profiles to session options
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-    session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
-  }
-}
-
-namespace {
-
-// Helper to check if a provider is pre-registered and get the matching EP device
-const OrtEpDevice* FindPreRegisteredEpDevice(const std::string& ep_name) {
-  auto device_ptrs = GetOrtEnv().GetEpDevices();
-  auto it = std::find_if(device_ptrs.begin(), device_ptrs.end(),
-                         [&ep_name](const OrtEpDevice* device) {
-                           return device->Name() == ep_name;
-                         });
-  return (it != device_ptrs.end()) ? *it : nullptr;
-}
-
-// Helper to handle pre-registered plugin provider via V2 API
-// Returns true if the provider was pre-registered and handled, false otherwise
-bool IsProviderRegistered(
-    OrtSessionOptions& session_options,
-    const Config::ProviderOptions& provider_options,
-    DeviceType device_type,
-    const std::string& ep_name,
-    bool is_primary_session_options,
-    DeviceInterface*& p_device) {
-  const OrtEpDevice* ep_device = FindPreRegisteredEpDevice(ep_name);
-  if (!ep_device) return false;  // Not pre-registered
-
-  std::unordered_map<std::string, std::string> options;
-  for (auto& option : provider_options.options) {
-    options.insert(option);
-  }
-
-  if (is_primary_session_options) {
-    p_device = GetDeviceInterface(device_type);
-    if (p_device) {
-      void* stream_ptr = p_device->GetCudaStream();
-      std::stringstream stream_value;
-      stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-      options.insert({"user_compute_stream", stream_value.str()});
-    }
-  }
-
-  std::vector<const OrtEpDevice*> ep_devices_ptrs = {ep_device};
-  session_options.AppendExecutionProvider_V2(GetOrtEnv(), ep_devices_ptrs, options);
-  return true;  // Handled
-}
-
-}  // namespace
-
-DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
-                                           const std::vector<std::string>& providers,
-                                           const std::vector<Config::ProviderOptions>& provider_options_list,
-                                           bool is_primary_session_options,
-                                           bool disable_graph_capture,
-                                           const Config& config,
-                                           std::unique_ptr<OrtArenaCfg>& arena_cfg) {
-  DeviceInterface* p_device{};
-
-  auto providers_list = providers;
-  if (!is_primary_session_options) {
-    // Providers specified in a non-primary provider options list are added
-    // to the primary providers. They are considered immutable and implicitly
-    // added as providers.
-    std::transform(provider_options_list.begin(), provider_options_list.end(), std::back_inserter(providers_list),
-                   [](const auto& provider_options) { return provider_options.name; });
-  }
-
-  for (auto& provider : providers_list) {
-    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
-                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
-
-    if (provider_options_it == provider_options_list.end()) {
-      throw std::runtime_error("Provider options not found for provider: " + provider);
-    }
-    const auto& provider_options = *provider_options_it;
-
-    if (provider_options.name == "cuda") {
-      // Try pre-registered plugin path first
-      if (IsProviderRegistered(session_options, provider_options,
-                               DeviceType::CUDA, "CUDAExecutionProvider",
-                               is_primary_session_options, p_device)) {
-        continue;  // Handled via V2 API, skip built-in path
-      }
-
-      // Built-in CUDA path
-      {
-        auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
-        std::vector<const char*> keys, values;
-
-        // Memory management settings
-        const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
-        size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
-        bool use_arena_management = false;
-
-        for (auto& option : provider_options.options) {
-          auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
-
-          if (it == std::end(arena_keys)) {
-            keys.emplace_back(option.first.c_str());
-            values.emplace_back(option.second.c_str());
-          } else {
-            size_t idx = std::distance(std::begin(arena_keys), it);
-            arena_values[idx] = static_cast<size_t>(std::stoull(option.second));
-            use_arena_management = true;
-          }
-        }
-        ort_provider_options->Update(keys.data(), values.data(), keys.size());
-
-        // Device type determines the scoring device.
-        // Only use the primary session options to determine the device type
-        if (is_primary_session_options) {
-          p_device = GetDeviceInterface(DeviceType::CUDA);
-
-          // Create and set our cudaStream_t
-          ort_provider_options->UpdateValue("user_compute_stream", p_device->GetCudaStream());
-        }
-
-        // Use fine-grained memory management of BFC Arena
-        if (use_arena_management) {
-          if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, 5);
-          ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
-        }
-
-        session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-      }
-    } else if (provider_options.name == "rocm") {
-      OrtROCMProviderOptions ort_provider_options;
-
-      std::vector<const char*> keys, values;
-      for (auto& option : provider_options.options) {
-        keys.emplace_back(option.first.c_str());
-        values.emplace_back(option.second.c_str());
-      }
-
-      Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
-      session_options.AppendExecutionProvider_ROCM(ort_provider_options);
-    } else if (provider_options.name == "DML") {
-#if USE_DML
-      if (!GetDmlInterface()) {
-        LUID device_luid{};
-        LUID* p_device_luid{};
-        uint32_t device_index{};
-        uint32_t* p_device_index{};
-        for (const auto& [name, value] : provider_options.options) {
-          if (name == "luid") {
-            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
-              device_luid.HighPart = std::stol(value.substr(0, separator_position));
-              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
-              p_device_luid = &device_luid;
-            }
-          } else if (name == "device_index") {
-            device_index = std::stoi(value);
-            p_device_index = &device_index;
-          }
-        }
-
-        InitDmlInterface(p_device_luid, p_device_index);
-      }
-
-      if (!disable_graph_capture) {
-        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      }
-
-      SetDmlProvider(session_options);
-
-      if (is_primary_session_options)
-        p_device = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
-#else
-      throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
-#endif
-    } else if (provider_options.name == "OpenVINO") {
-      p_device = GetDeviceInterface(DeviceType::OpenVINO);
-      OpenVINO_AppendProviderOptions(session_options, config, provider_options);
-    } else if (provider_options.name == "RyzenAI") {
-      p_device = GetDeviceInterface(DeviceType::RyzenAI);
-
-      session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
-
-      GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
-    } else if (provider_options.name == "NvTensorRtRtx") {
-      // Configure NvTensorRT-specific settings (needed for both pre-registered and built-in paths)
-      bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-      ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
-      if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
-      }
-
-      // Try pre-registered plugin path first
-      if (IsProviderRegistered(session_options, provider_options,
-                               DeviceType::NvTensorRtRtx, "NvTensorRTRTXExecutionProvider",
-                               is_primary_session_options, p_device)) {
-        continue;  // Handled via V2 API
-      }
-
-      // Built-in path: Configure stream via config entry (generic AppendExecutionProvider will be called below)
-      if (is_primary_session_options) {
-        p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
-        if (p_device) {
-          void* stream_ptr = p_device->GetCudaStream();
-          std::stringstream stream_value;
-          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-          std::string stream_value_str = stream_value.str();
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
-        }
-      }
-      // Fall through to generic provider registration below
-    }
-
-    // Generic provider registration for all providers not handled by specific blocks above
-    // This handles: QNN, WebGPU, VitisAI, and NvTensorRtRtx (when not pre-registered)
-    // Note: cuda, rocm, DML, OpenVINO and RyzenAI are handled by their own specific blocks above
-    if (provider_options.name != "cuda" && provider_options.name != "rocm" && provider_options.name != "DML" &&
-        provider_options.name != "OpenVINO" && provider_options.name != "RyzenAI") {
-      // Skip if NvTensorRtRtx was already handled via pre-registered plugin
-      if (provider_options.name == "NvTensorRtRtx" && FindPreRegisteredEpDevice("NvTensorRTRTXExecutionProvider")) {
-        continue;
-      }
-
-      // For providers that go through the extensible AppendExecutionProvider API:
-      if (provider_options.name == "QNN") {
-        session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-        // TODO set device_type_ in a less hacky way.
-        // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
-        // on the other hand, not sure if is_primary_session_options is the right thing to check here.
-        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                             [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
-            opt_it != provider_options.options.end() && opt_it->second == "1") {
-          p_device = GetDeviceInterface(DeviceType::QNN);
-        }
-      } else if (provider_options.name == "WebGPU")
-        p_device = GetDeviceInterface(DeviceType::WEBGPU);
-      else if (provider_options.name == "VitisAI") {
-        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
-        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-        session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
-      }
-
-#if USE_WINML
-      // Get device filtering config
-      Config::DeviceFilteringOptions resolved_device_filtering;
-      if (provider_options.device_filtering_options.has_value()) {
-        resolved_device_filtering = provider_options.device_filtering_options.value();
-      }
-
-      std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
-      std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
-      std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
-
-      // Match EP device with EP name in provider options and model device config
-      // include\onnxruntime\core\graph\constants.h
-      const static std::unordered_map<std::string, std::string> s_providerNameToExecutionProvider{
-          {"QNN", "QNNExecutionProvider"},
-          {"WebGPU", "WebGpuExecutionProvider"},
-          {"VitisAI", "VitisAIExecutionProvider"},
-          {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
-      };
-      std::string ep_name{};
-      if (auto search = s_providerNameToExecutionProvider.find(provider_options.name); search != s_providerNameToExecutionProvider.end()) {
-        ep_name = search->second;
-      }
-
-      size_t num_devices = 0;
-      const OrtEpDevice* const* device_ptrs = nullptr;
-      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
-
-      std::vector<const OrtEpDevice*> ep_devices_ptrs;
-      ep_devices_ptrs.reserve(num_devices);
-
-      for (size_t i = 0; i < num_devices; ++i) {
-        const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
-        const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
-        const uint32_t hardware_vendor_id = Ort::api->HardwareDevice_VendorId(hardware_device);
-        const OrtHardwareDeviceType hardware_device_type = Ort::api->HardwareDevice_Type(hardware_device);
-
-        bool hardware_device_id_matched = (!config_device_id.has_value()) || config_device_id.value() == hardware_device_id;
-        bool hardware_vendor_id_matched = (!config_vendor_id.has_value()) || config_vendor_id.value() == hardware_vendor_id;
-        bool hardware_device_type_matched = (!config_device_type_enum.has_value()) ||
-                                            config_device_type_enum.value() == hardware_device_type;
-
-        // Append matched EP device
-        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
-            hardware_device_id_matched &&
-            hardware_vendor_id_matched &&
-            hardware_device_type_matched) {
-          ep_devices_ptrs.push_back(device_ptrs[i]);
-          // WinML Hotfix: DML and WebGPU EP factories currently only support one device at a time
-          if (provider_options.name == "DML" || provider_options.name == "WebGPU") {
-            break;
-          }
-        }
-      }
-
-      // No need to append if we can't find a device.
-      if (!ep_devices_ptrs.empty()) {
-        std::vector<const char*> keys, values;
-        for (auto& option : provider_options.options) {
-          // WinML Hotfix: remove backend_type and backend_path from QNN provider options
-          static const std::set<std::string> qnn_options_to_remove{"backend_type", "backend_path"};
-          if (provider_options.name == "QNN" &&
-              qnn_options_to_remove.find(option.first) != qnn_options_to_remove.end()) {
-            continue;
-          }
-
-          keys.emplace_back(option.first.c_str());
-          values.emplace_back(option.second.c_str());
-        }
-
-        Ort::api->SessionOptionsAppendExecutionProvider_V2(
-            &session_options,
-            &GetOrtEnv(),
-            ep_devices_ptrs.data(), ep_devices_ptrs.size(),
-            keys.data(), values.data(), keys.size());
-      } else if (provider_options.name == "NvTensorRtRtx") {
-        // Fallback to legacy API for built-in NvTensorRtRtx when no pre-registered device found
-        // This handles the case when using the built-in provider (not loaded as a plugin)
-        std::vector<const char*> keys, values;
-        for (auto& option : provider_options.options) {
-          keys.emplace_back(option.first.c_str());
-          values.emplace_back(option.second.c_str());
-        }
-        session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
-      }
-#else
-      std::vector<const char*> keys, values;
-
-      for (auto& option : provider_options.options) {
-        keys.emplace_back(option.first.c_str());
-        values.emplace_back(option.second.c_str());
-      }
-      session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
-#endif
-#if defined(_WIN32)
-      if (provider_options.name == "VitisAI") {
-        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                             [](const auto& pair) { return pair.first == "external_ep_libray"; });
-            opt_it != provider_options.options.end()) {
-          auto lib_name = opt_it->second;
-          auto lib = LoadLibrary(lib_name.c_str());
-          if (const auto func = (void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*))GetProcAddress(lib, "CreateEpFactories")) {
-            OrtEpFactory* factory = nullptr;
-            size_t num = 1;
-
-            func(nullptr, OrtGetApiBase(), nullptr, &factory, num, &num);
-          }
-          fs::path custom_ops_lib_path(lib_name);
-          session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
-        }
-      }
-#endif  // WIN32
-    }  // end if (provider not cuda/rocm/DML)
-  }
-  return p_device;
-}
-
 // Trivial ONNX model that just returns a single float constant. Used below to create an OrtSession that
 // lets us get a device Ort::Allocator for each device type. This is necessary because the Ort::Allocator
 // needs to persist and is valid for the lifetime of this OrtSession.
@@ -890,7 +408,7 @@ static const uint8_t g_trivial_model[] = {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::unique_ptr<OrtArenaCfg>& arena_cfg) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -920,7 +438,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
     provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
   }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
-  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config, arena_cfg);
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -931,8 +449,28 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
-  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+  try {
+    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
+                                             0, OrtMemType::OrtMemTypeDefault);
+    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+  } catch (const Ort::Exception& e) {
+    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
+    // Try the old name before giving up.
+    if (type == DeviceType::WEBGPU) {
+      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      try {
+        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
+      } catch (const Ort::Exception& fallback_e) {
+        throw std::runtime_error(
+            "Failed to create allocator for WebGPU. "
+            "Primary name '" +
+            std::string(name) + "' error: " + std::string(e.what()) +
+            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
+      }
+    } else {
+      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
+    }
+  }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
@@ -1020,7 +558,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, *config_, arena_cfg_);
+  EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
@@ -1050,7 +588,6 @@ Model::~Model() {
     allocator.session_.reset();
     allocator.allocator_.reset();
     session_options_.reset();
-    arena_cfg_.reset();
     // DML objects are globally scoped and launch background threads that retain hardware resources.
     // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
     // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
@@ -1189,7 +726,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
-                                                  disable_graph_capture, *config_, arena_cfg_);
+                                                  *config_, disable_graph_capture);
 
   if (!p_device_) {
     p_device_ = session_device;
@@ -1202,12 +739,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
     }
   }
 

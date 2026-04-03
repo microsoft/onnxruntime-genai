@@ -39,8 +39,9 @@ from builders import (
     Phi4MMModel,
     PhiModel,
     Qwen3Model,
-    Qwen25VLTextModel,
     Qwen3VLTextModel,
+    Qwen25VLTextModel,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     WhisperModel,
@@ -87,10 +88,7 @@ def check_extra_options(kv_pairs, execution_provider):
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
 
     if "int4_nodes_to_exclude" in kv_pairs:
-        nodes_to_exclude = []
-        for node in kv_pairs["int4_nodes_to_exclude"].split(","):
-            nodes_to_exclude.append(node)
-        kv_pairs["int4_nodes_to_exclude"] = nodes_to_exclude
+        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -295,6 +293,8 @@ def create_model(
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
