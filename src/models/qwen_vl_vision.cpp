@@ -20,7 +20,7 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        int64_t spatial_merge_size,
                                        int64_t patch_size,
                                        int64_t window_size,
-                                       OrtSessionOptions* vision_attn_session_options)
+                                       const OrtSessionOptions* vision_attn_session_options)
     // Match declaration order to avoid MSVC C5038 warning-as-error
     : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),

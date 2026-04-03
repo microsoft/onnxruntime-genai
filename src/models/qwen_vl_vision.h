@@ -21,8 +21,8 @@ struct QwenVisionPipeline {
                      int64_t spatial_merge_size,
                      int64_t patch_size = 14,
                      int64_t window_size = 0,
-                     OrtSessionOptions* vision_attn_session_options = nullptr);
-  OrtSessionOptions* vision_attn_session_options_{};
+                     const OrtSessionOptions* vision_attn_session_options = nullptr);
+  const OrtSessionOptions* vision_attn_session_options_{};
 
   QwenVisionPipeline(const QwenVisionPipeline&) = delete;
   QwenVisionPipeline& operator=(const QwenVisionPipeline&) = delete;

@@ -28,10 +28,15 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
 
   OrtSessionOptions* vision_attn_so = nullptr;
   for (auto& stage : config_->model.vision.pipeline) {
-    if (stage.model_id == "vision_attn" && !stage.run_on_cpu && stage.session_options.has_value()) {
-      auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
-      vision_attn_so = emplaced.first->second.get();
+    if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
+      if (stage.session_options.has_value()) {
+        auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
+        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
+        vision_attn_so = emplaced.first->second.get();
+      } else {
+        // Fall back to primary session options when run_on_cpu=false but no stage-specific options
+        vision_attn_so = session_options_.get();
+      }
       break;
     }
   }
