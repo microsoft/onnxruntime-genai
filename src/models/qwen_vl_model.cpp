@@ -26,12 +26,16 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
 
   if (patch_embed_path.empty() || vision_attn_path.empty() || patch_merger_path.empty()) return;
 
-  // Check if QNN should be used for vision attention
-  bool use_qnn_attn = std::any_of(config_->model.vision.pipeline.begin(),
-                                  config_->model.vision.pipeline.end(),
-                                  [](const auto& stage) {
-                                    return stage.model_id == "vision_attn" && !stage.run_on_cpu;
-                                  });
+  // Build session options for the vision_attn stage from config (supports VitisAI, QNN, etc.)
+  OrtSessionOptions* vision_attn_so = nullptr;
+  for (auto& stage : config_->model.vision.pipeline) {
+    if (stage.model_id == "vision_attn" && !stage.run_on_cpu && stage.session_options.has_value()) {
+      auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
+      vision_attn_so = emplaced.first->second.get();
+      break;
+    }
+  }
 
   // Read vision geometry from genai_config.json; fall back to sensible defaults.
   int64_t spatial_merge = config_->model.vision.spatial_merge_size;  // default 2
@@ -41,7 +45,7 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
 
   vision_pipeline_ = std::make_unique<QwenVisionPipeline>(
       ort_env, patch_embed_path, vision_attn_path, patch_merger_path,
-      spatial_merge, patch_size, window_size, use_qnn_attn);
+      spatial_merge, patch_size, window_size, vision_attn_so);
 }
 
 std::unique_ptr<State> Qwen2_5_VL_PipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
