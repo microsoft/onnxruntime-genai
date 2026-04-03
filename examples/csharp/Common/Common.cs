@@ -427,7 +427,8 @@ namespace CommonUtils
                     {
                         { "type", tool.Function.Parameters.GetValueOrDefault("type", "object") },
                         { "properties", tool.Function.Parameters.GetValueOrDefault("properties", new Dictionary<string, object>{}) },
-                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) }
+                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) },
+                        { "additionalProperties", tool.Function.Parameters.GetValueOrDefault("additionalProperties", false) }
                     };
                     properties.Add("parameters", parameters);
                 }
