@@ -33,20 +33,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   tokenizer_ = state.model_.CreateTokenizer();
   InitializeLlgTokenizer();
   InitializeLlgConstraints();
-  InitializeMaskAsync();
-}
-
-GuidanceLogitsProcessor::~GuidanceLogitsProcessor() {
-  // Wait for any in-flight async mask computation to complete before
-  // member variables are destroyed, preventing use-after-free.
-  WaitForPendingMask();
-}
-
-void GuidanceLogitsProcessor::WaitForPendingMask() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (mask_future_.valid()) {
-    masks_ = mask_future_.get();
-  }
+  ComputeMask();
 }
 
 void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
@@ -147,19 +134,8 @@ void GuidanceLogitsProcessor::InitializeLlgConstraints() {
   }
 }
 
-void GuidanceLogitsProcessor::InitializeMaskAsync() {
-  // Ensure any previous async computation is complete before launching a new one
-  WaitForPendingMask();
-  // Compute the mask asynchronously to avoid blocking the model inference on device
-  std::lock_guard<std::mutex> lock(mutex_);
-  mask_future_ = std::async(std::launch::async, [this]() {
-    return ComputeMask();
-  });
+void GuidanceLogitsProcessor::ComputeMask() {
   masks_.clear();
-}
-
-std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
-  std::vector<std::vector<uint32_t>> masks;
   for (int batch_idx = 0; batch_idx < params_->search.batch_size; batch_idx++) {
     LlgMaskResult mask_result;
     auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
@@ -174,25 +150,24 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
       }
     }
 
-    std::vector<uint32_t> mask;
     if (mask_result.is_stop) {
       // when logits processor decides to stop, we mask all tokens except the EOS token
-      mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
+      auto mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
       uint32_t eos_mask32 = 1 << (eos_token_ % 32);
       mask[eos_token_ / 32] = eos_mask32;
+      masks_.push_back(std::move(mask));
     } else {
+      std::vector<uint32_t> mask;
       mask.reserve((params_->config.model.vocab_size - 1) / 32 + 1);
       for (int i = 0; i < (params_->config.model.vocab_size - 1) / 32 + 1; i++) {
         mask.push_back(mask_result.sample_mask[i]);
       }
+      masks_.push_back(std::move(mask));
     }
-    masks.push_back(mask);
   }
-  return masks;
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
-  std::lock_guard<std::mutex> lock(mutex_);
   if (index >= ff_tokens_batch_.size()) {
     // in case guidance is not being used, return empty vector
     return std::vector<int32_t>();
@@ -204,36 +179,26 @@ std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
 }
 
 void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
-  // Wait for any pending async mask computation before modifying constraints
-  WaitForPendingMask();
+  for (int i = 0; i < params_->search.batch_size; i++) {
+    LlgCommitResult commit_result;
+    auto error = llg_commit_token(llg_constraints_[i].get(), static_cast<uint32_t>(tokens[i]), &commit_result);
+    if (error != 0) {
+      std::string error_message = llg_get_error(llg_constraints_[i].get());
+      throw std::runtime_error("Error committing tokens: " + error_message);
+    }
 
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (int i = 0; i < params_->search.batch_size; i++) {
-      LlgCommitResult commit_result;
-      auto error = llg_commit_token(llg_constraints_[i].get(), static_cast<uint32_t>(tokens[i]), &commit_result);
-      if (error != 0) {
-        std::string error_message = llg_get_error(llg_constraints_[i].get());
-        throw std::runtime_error("Error committing tokens: " + error_message);
-      }
-
-      auto& ff_tokens = ff_tokens_batch_[i];
-      ff_tokens.clear();
-      // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
-      for (size_t j = 1; j < commit_result.n_tokens; j++) {
-        ff_tokens.push_back((int32_t)commit_result.tokens[j]);
-      }
+    auto& ff_tokens = ff_tokens_batch_[i];
+    ff_tokens.clear();
+    // Store forced tokens (i.e. index >= 1) to process outside of this logits processor
+    for (size_t j = 1; j < commit_result.n_tokens; j++) {
+      ff_tokens.push_back((int32_t)commit_result.tokens[j]);
     }
   }
 
-  InitializeMaskAsync();
+  ComputeMask();
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (masks_.empty() && mask_future_.valid()) {
-    masks_ = mask_future_.get();
-  }
   return masks_;
 }
 
@@ -276,15 +241,8 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 
 // Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
-  // Wait for any pending async mask computation before modifying constraints
-  WaitForPendingMask();
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    InitializeLlgConstraints();
-  }
-
-  InitializeMaskAsync();
+  InitializeLlgConstraints();
+  ComputeMask();
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
