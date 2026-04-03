@@ -1,22 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <cmath>
-#include <cstdlib>
-#include <cstring>  // for memcmp
-#include <filesystem>
-#include <fstream>
-#include <numeric>
-#include <iostream>
+#include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 #include <regex>
-#include "span.h"
-#include <list>
 
 #define OGA_USE_SPAN 1
-#include "models/onnxruntime_api.h"
 #include "ort_genai.h"
 
 #include <gtest/gtest.h>
