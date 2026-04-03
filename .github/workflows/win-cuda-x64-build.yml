@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ github.sha }}
+          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
           restore-keys: |
             sccache-win-cuda-
 
@@ -125,7 +125,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ github.sha }}
+          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
 
       - name: Add CUDA to PATH
         run: |

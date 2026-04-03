@@ -98,9 +98,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-macos-arm64-${{ github.ref }}-${{ github.sha }}
+          key: ccache-macos-arm64-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-macos-arm64-${{ github.ref }}-
             ccache-macos-arm64-
 
       - name: Install and configure ccache
