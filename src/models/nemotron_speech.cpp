@@ -39,7 +39,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
-  blank_penalty = config.model.blank_penalty;
+  blank_penalty = config.search.blank_penalty;
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
