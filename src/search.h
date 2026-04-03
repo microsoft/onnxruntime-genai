@@ -61,6 +61,10 @@ struct Search_Cpu : Search {
 
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
+  // Pre-allocated flat boolean array for ApplyRepetitionPenalty to avoid per-call unordered_set construction.
+  // Lazily initialized on first use to vocab_size. Reset cost is O(seq_len), not O(vocab_size).
+  std::vector<bool> repetition_penalty_visited_;
+
   bool done_{};
 };
 

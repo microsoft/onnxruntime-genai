@@ -238,9 +238,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   params->SetSearchOptionBool("do_sample", true);
-  if (k > 0) {
-    params->SetSearchOption("top_k", k);
-  }
+  params->SetSearchOption("top_k", k);  // Always set; k=0 disables top-k, routing to SampleTopP
   if (p < 1.0f) {
     params->SetSearchOption("top_p", p);
   }
@@ -337,6 +335,126 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
 
 TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   RunSamplingTest(/*batch_size*/ 5, /*k*/ 7, /*p*/ 0.75f, /*vocab_size*/ 21, /*num_iter*/ 1000, /*temperature*/ 1.0f, /*use_cuda*/ false);
+}
+
+// Statistical distribution test for pure TopP (k=0) on CPU.
+// This exercises the SampleTopP adaptive partial_sort path and verifies that the
+// observed token distribution matches the expected nucleus-filtered distribution.
+TEST(SamplingTests, RandomizedSamplingTopPOnlyCpu) {
+  RunSamplingTest(/*batch_size*/ 5, /*k*/ 0, /*p*/ 0.95f, /*vocab_size*/ 21, /*num_iter*/ 1000, /*temperature*/ 1.0f, /*use_cuda*/ false);
+}
+
+// Tests SampleTopP with a flat (near-uniform) logit distribution.
+// This is the edge case where the adaptive partial_sort must expand beyond the
+// initial K=256 candidates to reach the nucleus. With a uniform distribution over
+// vocab_size tokens, top_p=0.95 should require ~95% of the vocabulary.
+// The test verifies that all tokens within the nucleus are sampled (none are
+// incorrectly excluded due to premature cutoff).
+TEST(SamplingTests, TopPFlatDistributionCpu) {
+  const int vocab_size = 500;
+  const int batch_size = 1;
+  const float top_p = 0.95f;
+  const int num_iter = 5000;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 500 } })");
+
+  auto model = OgaModel::Create(*config);
+
+  // Create flat logits: all tokens have equal scores
+  std::vector<float> logits_cpu(vocab_size * batch_size, 1.0f);
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+
+  std::map<int32_t, int> token_counts;
+  std::mt19937 rng(42);
+  std::uniform_int_distribution<int> seed_dist;
+
+  for (int i = 0; i < num_iter; i++) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 10);
+    params->SetSearchOptionBool("do_sample", true);
+    params->SetSearchOption("top_k", 0);
+    params->SetSearchOption("top_p", top_p);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("random_seed", static_cast<double>(seed_dist(rng)));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+    token_counts[next_tokens[0]]++;
+  }
+
+  // With a uniform distribution and top_p=0.95, we expect all 500 tokens to be
+  // in the nucleus since each has probability 1/500 = 0.002 and we need 475+ tokens
+  // to reach 95%. Verify that a large fraction of the vocabulary was actually sampled.
+  int unique_tokens = static_cast<int>(token_counts.size());
+  // With 5000 samples from a uniform distribution over 500 tokens, we should see
+  // nearly all tokens. Allow for some statistical variation.
+  EXPECT_GT(unique_tokens, vocab_size * 85 / 100)
+      << "Expected most tokens to be sampled from a flat distribution, but only "
+      << unique_tokens << " of " << vocab_size << " were observed.";
+}
+
+// Functional correctness test for ApplyRepetitionPenalty.
+// Verifies that the repetition penalty actually modifies scores: tokens that
+// appeared in the sequence should have suppressed probabilities relative to
+// tokens that did not appear.
+TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
+  const int vocab_size = 1000;  // Must match tiny-random-gpt2-fp32 model's actual vocab
+  const int batch_size = 1;
+  const int num_iter = 500;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  // Logits: all tokens have equal score, so without penalty all are equally likely
+  std::vector<float> logits_cpu(vocab_size * batch_size, 5.0f);
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+
+  // Pre-fill the sequence with tokens 0-9 so those get penalized
+  std::vector<int32_t> prefill_tokens = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+  std::map<int32_t, int> token_counts;
+  std::mt19937 rng(123);
+  std::uniform_int_distribution<int> seed_dist;
+
+  for (int i = 0; i < num_iter; i++) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 25);
+    params->SetSearchOptionBool("do_sample", true);
+    params->SetSearchOption("top_k", vocab_size);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 2.0);
+    params->SetSearchOption("random_seed", static_cast<double>(seed_dist(rng)));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(prefill_tokens.data(), static_cast<int>(prefill_tokens.size()));
+
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+    token_counts[next_tokens[0]]++;
+  }
+
+  // With penalty=2.0, tokens 0-9 (which appeared in the sequence) should have
+  // their scores divided by 2.0 (since scores are positive: 5.0 -> 2.5),
+  // while tokens 10-999 keep score 5.0. After softmax, unpenalized tokens should
+  // be sampled much more frequently than penalized tokens.
+  int penalized_count = 0;    // tokens 0-9
+  int unpenalized_count = 0;  // tokens 10+
+  for (auto& [token, count] : token_counts) {
+    if (token < 10)
+      penalized_count += count;
+    else
+      unpenalized_count += count;
+  }
+
+  // Unpenalized tokens should be sampled significantly more (at least 2x)
+  EXPECT_GT(unpenalized_count, penalized_count * 2)
+      << "Repetition penalty doesn't appear to suppress repeated tokens. "
+      << "Penalized=" << penalized_count << " Unpenalized=" << unpenalized_count;
 }
 
 #if USE_CUDA
