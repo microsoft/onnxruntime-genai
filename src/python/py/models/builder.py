@@ -13,6 +13,7 @@ Run the model builder to create the desired ONNX model.
 import argparse
 import os
 import textwrap
+import time
 from typing import Any
 
 import onnx_ir as ir
@@ -331,18 +332,42 @@ def create_model(
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
-    if not config_only:
-        # Make ONNX model
-        onnx_model.make_model(input_path)
+    # Determine source format for telemetry
+    source_format = "huggingface"
+    if input_path and input_path.lower().endswith(".gguf"):
+        source_format = "gguf"
 
-        # Save ONNX model
-        onnx_model.save_model(output_dir)
+    build_success = True
+    try:
+        if not config_only:
+            # Make ONNX model
+            onnx_model.make_model(input_path)
 
-    # Make GenAI config
-    onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
+            # Save ONNX model
+            onnx_model.save_model(output_dir)
 
-    # Copy Hugging Face processing files to output folder
-    onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+        # Make GenAI config
+        onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
+
+        # Copy Hugging Face processing files to output folder
+        onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+    except Exception:
+        build_success = False
+        raise
+    finally:
+        overall_duration_ms = (time.perf_counter() - overall_start) * 1000
+        _emit_model_build_telemetry(
+            action_name="create_model",
+            duration_ms=overall_duration_ms,
+            success=build_success,
+            config=config,
+            onnx_model=onnx_model,
+            precision=precision,
+            execution_provider=execution_provider,
+            output_dir=output_dir,
+            extra_options=extra_options,
+            source_format=source_format,
+        )
 
 
 def get_args():

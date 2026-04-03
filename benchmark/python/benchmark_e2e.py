@@ -226,9 +226,27 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             config.append_provider(args.execution_provider)
     if args.verbose:
         print("Loading model... ")
+    model_load_start = time.time()
     model = og.Model(config)
+    model_load_time_ms = (time.time() - model_load_start) * 1000
     if args.verbose:
-        print("Model loaded")
+        print(f"Model loaded in {model_load_time_ms:.1f} ms")
+
+    # Emit model load telemetry
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+        from telemetry import GenAITelemetry
+
+        telemetry = GenAITelemetry()
+        telemetry.log_model_load(
+            model_name=args.model_name,
+            execution_provider=args.execution_provider,
+            total_load_time_ms=model_load_time_ms,
+        )
+    except Exception:
+        pass
+
     tokenizer = og.Tokenizer(model)
 
     # Get model type
@@ -465,6 +483,39 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
+
+    # Emit telemetry for this benchmark run
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+        from telemetry import GenAITelemetry
+
+        telemetry = GenAITelemetry()
+        telemetry.log_benchmark(
+            model_name=args.model_name,
+            precision=args.precision,
+            backend="onnxruntime-genai",
+            device=args.execution_provider,
+            batch_size=batch_size,
+            prompt_length=prompt_length,
+            tokens_generated=generation_length,
+            tokenization_latency_ms=avg_tokenization_latency_ms,
+            tokenization_throughput=avg_tokenization_thrpt,
+            prompt_processing_latency_ms=avg_per_token_prompt_latency_ms,
+            prompt_processing_throughput=avg_per_token_prompt_thrpt,
+            token_generation_latency_ms=avg_token_gen_latency_ms,
+            token_generation_throughput=avg_token_gen_thrpt,
+            sampling_latency_ms=avg_sampling_latency_ms,
+            sampling_throughput=avg_sampling_thrpt,
+            wall_clock_time_ms=avg_wall_clock_time * 1000,
+            wall_clock_throughput=avg_wall_clock_thrpt,
+            time_to_first_token_ms=avg_sampling_latency_ms,
+            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=peak_cpu_memory * 1024,
+        )
+    except Exception:
+        pass
+
     return metrics
 
 
