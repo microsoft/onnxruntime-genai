@@ -170,8 +170,8 @@ TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
     EXPECT_EQ(output, expected_output);
   }
 }
-#endif  // USE_DML
-#endif  // #if 0
+#endif        // USE_DML
+#endif        // #if 0
 
 #endif  // TEST_QWEN_2_5
 
