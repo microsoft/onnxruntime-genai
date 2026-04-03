@@ -23,10 +23,6 @@
 
 #include "test_utils.h"
 
-#ifndef PHI2_PATH
-#define PHI2_PATH test_utils::GetModelPath("phi-2").c_str()
-#endif
-
 TEST(CAPITests, Config) {
 #if TEST_PHI2
   // Test modifying config settings

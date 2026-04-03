@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+// Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -52,3 +53,11 @@ inline bool IsEngineTestsEnabled() {
 }
 
 }  // namespace test_utils
+
+#ifndef PHI2_PATH
+#define PHI2_PATH test_utils::GetModelPath("phi-2").c_str()
+#endif
+
+#ifndef QWEN_2_5_PATH
+#define QWEN_2_5_PATH test_utils::GetModelPath("qwen-2.5-0.5b").c_str()
+#endif
