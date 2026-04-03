@@ -23,3 +23,7 @@ option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)
+
+# telemetry
+option(ENABLE_TELEMETRY "Enable telemetry data collection via 1DS SDK" OFF)
+set(ORTGENAI_TELEMETRY_TOKEN "" CACHE STRING "Override the compiled-in 1DS telemetry ingestion token (sourced from a CI secret in official builds)")

@@ -140,6 +140,21 @@ def _parse_args():
         "--use_guidance", action="store_true", help="Whether to add guidance support. Default is False."
     )
 
+    parser.add_argument(
+        "--use_telemetry",
+        action="store_true",
+        help="Enable telemetry via the 1DS cpp-client-telemetry vcpkg port. Requires a vcpkg "
+        "toolchain (see --vcpkg_path). Defaults to a static triplet so the SDK is statically "
+        "linked and dead-stripped for minimum binary footprint.",
+    )
+    parser.add_argument(
+        "--vcpkg_path",
+        type=Path,
+        default=None,
+        help="Path to a vcpkg root. Read from the VCPKG_INSTALLATION_ROOT or VCPKG_ROOT environment "
+        "variable if not specified. Used when --use_telemetry is specified.",
+    )
+
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -493,6 +508,52 @@ def _get_windows_build_args(args: argparse.Namespace):
     return win_args
 
 
+def _get_telemetry_cmake_args(args: argparse.Namespace) -> list[str]:
+    """Resolve the vcpkg toolchain and a static triplet for a telemetry-enabled build.
+
+    Telemetry links the 1DS SDK from the cpp-client-telemetry vcpkg port. A static
+    triplet (static libs, dynamic CRT) is used so the SDK is linked into
+    onnxruntime-genai and dead-stripped, rather than shipping mat.dll + its
+    dependencies, keeping the size added by telemetry minimal.
+    """
+    if args.android or args.ios:
+        raise ValueError(
+            "--use_telemetry via build.py is currently supported only for desktop "
+            "(Windows/Linux/macOS) builds."
+        )
+
+    vcpkg_root = args.vcpkg_path
+    if vcpkg_root is None:
+        for env_var in ("VCPKG_INSTALLATION_ROOT", "VCPKG_ROOT"):
+            value = os.environ.get(env_var)
+            if value:
+                vcpkg_root = Path(value)
+                break
+    if vcpkg_root is None:
+        raise ValueError(
+            "--use_telemetry requires vcpkg. Pass --vcpkg_path or set the "
+            "VCPKG_INSTALLATION_ROOT or VCPKG_ROOT environment variable."
+        )
+
+    toolchain_file = vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake"
+    if not toolchain_file.is_file():
+        raise ValueError(f"vcpkg toolchain file not found at '{toolchain_file}'.")
+
+    is_arm64 = platform.machine().lower() in ("arm64", "aarch64")
+    if util.is_windows():
+        # *-static-md: static libraries with the dynamic CRT (matches the genai /MD build).
+        triplet = "arm64-windows-static-md" if is_arm64 else "x64-windows-static-md"
+    elif util.is_mac():
+        triplet = "arm64-osx" if is_arm64 else "x64-osx"
+    else:  # Linux: vcpkg's default triplets already build static libraries.
+        triplet = "arm64-linux" if is_arm64 else "x64-linux"
+
+    return [
+        f"-DCMAKE_TOOLCHAIN_FILE={toolchain_file}",
+        f"-DVCPKG_TARGET_TRIPLET={triplet}",
+    ]
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -538,7 +599,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
         f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
+        f"-DENABLE_TELEMETRY={'ON' if args.use_telemetry else 'OFF'}",
     ]
+
+    if args.use_telemetry:
+        command += _get_telemetry_cmake_args(args)
 
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]

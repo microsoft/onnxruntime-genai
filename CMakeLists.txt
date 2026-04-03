@@ -10,6 +10,15 @@ endif()
 
 include(FetchContent)
 include(CMakeDependentOption)
+
+# Activate the vcpkg "telemetry" manifest feature when telemetry is requested.
+# Must run before project() so vcpkg installs cpp-client-telemetry during configure.
+# ENABLE_TELEMETRY is supplied on the command line (-DENABLE_TELEMETRY=ON); its
+# default (OFF) is defined later in cmake/options.cmake.
+if(ENABLE_TELEMETRY)
+  list(APPEND VCPKG_MANIFEST_FEATURES "telemetry")
+endif()
+
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
@@ -153,6 +162,17 @@ if(ENABLE_TRACING)
   add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
+if(ENABLE_TELEMETRY)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR
+      "ENABLE_TELEMETRY is not supported for Android/iOS builds. Configure without "
+      "-DENABLE_TELEMETRY (or omit --use_telemetry).")
+  endif()
+  message(STATUS "Telemetry is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TELEMETRY)
+  include(cmake/telemetry.cmake)
+endif()
+
 find_package(Threads REQUIRED)
 
 if(WIN32)
@@ -172,6 +192,29 @@ target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SO
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
+target_compile_definitions(onnxruntime-genai PRIVATE ORTGENAI_VERSION="${VERSION_INFO}")
+
+if(ENABLE_TELEMETRY)
+  target_link_libraries(onnxruntime-genai PRIVATE MSTelemetry::mat)
+
+  # Official builds override the embedded default ingestion token with a CI secret
+  # via -DORTGENAI_TELEMETRY_TOKEN=...; otherwise the in-repo default is used.
+  if(ORTGENAI_TELEMETRY_TOKEN)
+    target_compile_definitions(onnxruntime-genai PRIVATE ORTGENAI_TELEMETRY_TENANT_TOKEN="${ORTGENAI_TELEMETRY_TOKEN}")
+  endif()
+
+  # The 1DS SDK (cpp-client-telemetry >= 3.10.173.1) is compiled with per-function
+  # and per-data sections, so let the linker dead-strip the (large) portion of the
+  # SDK that onnxruntime-genai never references. Combined with a static triplet
+  # (see cmake/telemetry.cmake) this keeps the binary-size added by telemetry minimal.
+  if(MSVC)
+    target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
+  elseif(APPLE)
+    target_link_options(onnxruntime-genai PRIVATE LINKER:-dead_strip)
+  else()
+    target_link_options(onnxruntime-genai PRIVATE LINKER:--gc-sections)
+  endif()
+endif()
 
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")

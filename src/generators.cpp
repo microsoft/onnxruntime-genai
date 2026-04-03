@@ -17,6 +17,7 @@
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
+#include "telemetry/telemetry.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
@@ -368,11 +369,17 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+  // Initialize telemetry tracking
+  static std::atomic<uint32_t> next_generator_id{1};
+  telemetry_generator_id_ = next_generator_id.fetch_add(1);
+  telemetry_start_time_ = std::chrono::steady_clock::now();
+
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    telemetry_input_modality_ = "audio";  // transducers transcribe audio input
     return;
   }
 
@@ -430,6 +437,34 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   }
 }
 
+Generator::~Generator() {
+  // Emit GenerateEnd telemetry with accumulated stats. Times are generator-
+  // lifetime aggregates measured up to the last generated token (not destruction),
+  // so post-generation idle before the generator is freed is excluded.
+  // Guard against access during static deinitialization
+  if (telemetry_generated_tokens_ > 0 && !GenAiTelemetry::IsDestroyed()) {
+    auto& telemetry = GenAiTelemetry::Instance();
+    auto total_time_ms = std::chrono::duration<double, std::milli>(
+                             telemetry_last_token_time_ - telemetry_start_time_)
+                             .count();
+    double ttft_ms = 0.0;
+    if (telemetry_first_token_logged_) {
+      ttft_ms = std::chrono::duration<double, std::milli>(
+                    telemetry_first_token_time_ - telemetry_start_time_)
+                    .count();
+    }
+    double tps = total_time_ms > 0 ? (telemetry_generated_tokens_ * 1000.0 / total_time_ms) : 0.0;
+
+    telemetry.LogGenerateEnd(
+        model_->telemetry_session_id_,
+        telemetry_generator_id_,
+        telemetry_generated_tokens_,
+        ttft_ms,
+        total_time_ms,
+        tps);
+  }
+}
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
@@ -458,6 +493,29 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
+
+  // Accumulate prompt tokens and capture the input modality for telemetry until
+  // generation begins. GenerateStart is emitted later, on the first generated
+  // token, so the prompt count is complete and it pairs 1:1 with GenerateEnd.
+  if (telemetry_generated_tokens_ == 0) {
+    telemetry_prompt_tokens_ += static_cast<int>(input_ids.size());
+
+    bool used_vision = false, used_audio = false;
+    for (const auto& extra : extra_inputs_) {
+      std::string name = extra.name;
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name.find("image") != std::string::npos || name.find("pixel") != std::string::npos ||
+          name.find("vision") != std::string::npos)
+        used_vision = true;
+      else if (name.find("audio") != std::string::npos)
+        used_audio = true;
+    }
+    telemetry_input_modality_ = (used_vision && used_audio) ? "multimodal"
+                                : used_vision               ? "vision"
+                                : used_audio                ? "audio"
+                                                            : "text";
+  }
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
@@ -636,6 +694,22 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     transducer_state_->StepToken();
+
+    // Telemetry: count transcribed tokens and emit GenerateStart once on the first
+    // token. GenerateEnd is emitted from the destructor (gated on tokens > 0), so
+    // streaming-transcription usage is captured with one Generate pair per request.
+    telemetry_generated_tokens_++;
+    auto telemetry_now = std::chrono::steady_clock::now();
+    telemetry_last_token_time_ = telemetry_now;
+    if (!telemetry_first_token_logged_) {
+      telemetry_first_token_time_ = telemetry_now;
+      telemetry_first_token_logged_ = true;
+      if (!GenAiTelemetry::IsDestroyed()) {
+        GenAiTelemetry::Instance().LogGenerateStart(
+            model_->telemetry_session_id_, telemetry_generator_id_,
+            telemetry_prompt_tokens_, telemetry_input_modality_);
+      }
+    }
     return;
   }
 
@@ -676,6 +750,25 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
+
+  // Track token generation for telemetry. On the first generated token, emit
+  // GenerateStart once (the prompt is now complete) so it pairs 1:1 with the
+  // GenerateEnd emitted from the destructor.
+  telemetry_generated_tokens_++;
+  auto telemetry_now = std::chrono::steady_clock::now();
+  telemetry_last_token_time_ = telemetry_now;
+  if (!telemetry_first_token_logged_) {
+    telemetry_first_token_time_ = telemetry_now;
+    telemetry_first_token_logged_ = true;
+    if (!GenAiTelemetry::IsDestroyed()) {
+      GenAiTelemetry::Instance().LogGenerateStart(
+          model_->telemetry_session_id_,
+          telemetry_generator_id_,
+          telemetry_prompt_tokens_,
+          telemetry_input_modality_);
+    }
+  }
+
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:
       search_->SelectTop();

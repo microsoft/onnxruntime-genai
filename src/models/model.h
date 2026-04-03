@@ -171,6 +171,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   DeviceInterface* p_device_scoring_{};  // Device for search/scoring (sequences, token allocation).
   DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
 
+  uint32_t telemetry_session_id_{0};     // Session ID for telemetry event correlation
+
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
