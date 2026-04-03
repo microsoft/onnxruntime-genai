@@ -55,6 +55,9 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
  private:
   std::vector<std::vector<uint32_t>> ComputeMask();
+  // Recreates all llg_constraints_ and clears ff_tokens_batch_. Must only be called
+  // when no background ComputeMask task is running (i.e. mask_future_ is not active).
+  void CreateConstraints();
   struct LlgConstraintDeleter {
     void operator()(LlgConstraint* lc) const {
       llg_free_constraint(lc);

@@ -94,7 +94,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   }
 
   // Compute the mask asynchronously to avoid blocking the model inference on device
-  mask_future_ = std::async(std::launch::async, [&]() {
+  mask_future_ = std::async(std::launch::async, [this]() {
     return ComputeMask();
   });
 }
@@ -107,7 +107,10 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
     if (error != 0) {
       // If the mask computation fails, we need to reset the constraint
       // and try again. LLGuidance needs to be reset for every new prompt.
-      ResetWithoutCompute();
+      // NOTE: We call CreateConstraints() directly here rather than ResetWithoutCompute()
+      // because ComputeMask() runs inside mask_future_, and ResetWithoutCompute() waits on
+      // mask_future_ to prevent races — calling it here would deadlock.
+      CreateConstraints();
       auto retry_error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
       if (retry_error != 0) {
         std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
@@ -159,7 +162,7 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
       ff_tokens.push_back((int32_t)commit_result.tokens[j]);
     }
   }
-  mask_future_ = std::async(std::launch::async, [&]() {
+  mask_future_ = std::async(std::launch::async, [this]() {
     return ComputeMask();
   });
   masks_.clear();
@@ -167,7 +170,15 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
   if (masks_.empty()) {
-    masks_ = mask_future_.get();
+    // mask_future_ may be invalid when a new turn begins after a reset-without-compute:
+    // ResetWithoutCompute() clears masks_ but does not launch a new async task, and
+    // the first ComputeLogits call for a new prompt does not call CommitTokens (so no
+    // new future is launched). Compute synchronously in that case.
+    if (mask_future_.valid()) {
+      masks_ = mask_future_.get();
+    } else {
+      masks_ = ComputeMask();
+    }
   }
   return masks_;
 }
@@ -205,14 +216,14 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   }
 }
 
-void GuidanceLogitsProcessor::ResetWithoutCompute() {
-  masks_.clear();
+void GuidanceLogitsProcessor::CreateConstraints() {
   llg_constraints_.clear();
   llg_constraints_.resize(params_->search.batch_size);
   for (int i = 0; i < params_->search.batch_size; i++) {
     LlgConstraintInit constraint_init;
     llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
-    LlgConstraint* constraint_ptr;
+    constraint_init.ff_tokens_ok = params_->guidance_ff_tokens_enabled && params_->search.batch_size == 1 && params_->search.num_beams == 1;
+    LlgConstraint* constraint_ptr = nullptr;
     if (params_->guidance_type == "json_schema") {
       constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "regex") {
@@ -229,15 +240,27 @@ void GuidanceLogitsProcessor::ResetWithoutCompute() {
     }
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
   }
-  for (int i = 0; i < ff_tokens_batch_.size(); i++) {
+  for (size_t i = 0; i < ff_tokens_batch_.size(); i++) {
     ff_tokens_batch_[i].clear();
   }
+}
+
+// Reset the masks and llguidance constraints without recomputing the mask
+void GuidanceLogitsProcessor::ResetWithoutCompute() {
+  // Wait for any background mask computation to finish before touching llg_constraints_.
+  // Without this wait, ResetWithoutCompute() would destroy constraint objects that the
+  // background ComputeMask() thread is still accessing, causing a data race.
+  if (mask_future_.valid()) {
+    mask_future_.wait();
+  }
+  masks_.clear();
+  CreateConstraints();
 }
 
 // Reset the masks and llguidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   ResetWithoutCompute();
-  mask_future_ = std::async(std::launch::async, [&]() {
+  mask_future_ = std::async(std::launch::async, [this]() {
     return ComputeMask();
   });
 }
