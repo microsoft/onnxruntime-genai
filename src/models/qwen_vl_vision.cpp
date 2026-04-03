@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Qwen VL Vision pipeline implementation with configurable EP for vision attention stage.
+// Qwen VL Vision pipeline implementation.
 
 #include "qwen_vl_vision.h"
 #include "../generators.h"
@@ -94,15 +94,25 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 
   size_t pixel_count = 1;
   for (auto d : pixel_shape) pixel_count *= static_cast<size_t>(d);
-  auto pixel_tensor = CreateTensor(pixel_data, pixel_count, pixel_shape);
+
+  // Match pixel_values rank to what patch_embed expects
+  auto pe_input_info = patch_embed_session_->GetInputTypeInfo(0);
+  auto pe_expected_rank = pe_input_info->GetTensorTypeAndShapeInfo().GetShape().size();
+  std::vector<int64_t> actual_shape = pixel_shape;
+  while (actual_shape.size() < pe_expected_rank) {
+    actual_shape.insert(actual_shape.begin(), 1);
+  }
+  while (actual_shape.size() > pe_expected_rank && actual_shape[0] == 1) {
+    actual_shape.erase(actual_shape.begin());
+  }
+
+  auto pixel_tensor = CreateTensor(pixel_data, pixel_count, actual_shape);
 
   auto pe_in_name = patch_embed_session_->GetInputName(0);
   const char* pe_input_names[] = {pe_in_name.c_str()};
   OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
-  // pixel_values layout is [num_patches, channels] — dim[0] is the patch count.
-  // (dim[1] is channels per patch, e.g. 1176 for Qwen2.5-VL, 1536 for Qwen3-VL.)
-  const int64_t num_patches = pixel_shape[0];
+  const int64_t num_patches = actual_shape.size() >= 2 ? actual_shape[actual_shape.size() - 2] : actual_shape[0];
   if (hidden_dim_ <= 0) {
     throw std::runtime_error(
         "Vision pipeline: patch_embed hidden dimension unknown - check patch_embed model output shape");
