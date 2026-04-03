@@ -341,6 +341,7 @@ def tools_to_schemas(tools: list[Tool]) -> list[ToolSchema]:
                 "type": tool.function.parameters.get("type", "object"),
                 "properties": tool.function.parameters.get("properties", {}),
                 "required": tool.function.parameters.get("required", []),
+                "additionalProperties": tool.function.parameters.get("additionalProperties", False),
             }
             properties["parameters"] = parameters
 

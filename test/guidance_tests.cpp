@@ -14,7 +14,7 @@
 #include "test_utils.h"
 
 #if USE_GUIDANCE
-const std::string json_schema = R"json({"x-guidance": {"whitespace_flexible": false, "key_separator": ": ", "item_separator": ", "}, "type": "array", "items": {"anyOf": [{"description": "How to get the statistics for a city", "type": "object", "properties": {"name": {"const": "get_statistics"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the weather for a city", "type": "object", "properties": {"name": {"const": "get_weather"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the population for a city", "type": "object", "properties": {"name": {"const": "get_population"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}, "required": ["name", "parameters"], "additionalProperties": false}]}, "minItems": 1})json";
+const std::string json_schema = R"json({"x-guidance": {"whitespace_flexible": false, "key_separator": ": ", "item_separator": ", "}, "type": "array", "items": {"anyOf": [{"description": "How to get the statistics for a city", "type": "object", "properties": {"name": {"const": "get_statistics"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the weather for a city", "type": "object", "properties": {"name": {"const": "get_weather"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}}, "required": ["name", "parameters"], "additionalProperties": false}, {"description": "How to get the population for a city", "type": "object", "properties": {"name": {"const": "get_population"}, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}}, "required": ["name", "parameters"], "additionalProperties": false}]}, "minItems": 1})json";
 
 #if TEST_QWEN_2_5
 class GuidanceTests : public ::testing::Test {
@@ -69,7 +69,7 @@ TEST_F(GuidanceTests, UseRegex) {
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 }
 
-#if 0  // Temporarily disable JSON schema and LARK grammar tests
+// #if 0  // Temporarily disable JSON schema and LARK grammar tests
 TEST_F(GuidanceTests, UseLarkGrammarSingleTurn) {
   auto input_string = get_qwen_2_5_prompt("What is the weather in Seattle?");
   auto input_sequences = OgaSequences::Create();
@@ -171,7 +171,7 @@ TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
   }
 }
 #endif        // USE_DML
-#endif        // #if 0
+// #endif        // #if 0
 
 #endif  // TEST_QWEN_2_5
 
