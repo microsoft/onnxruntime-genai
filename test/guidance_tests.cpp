@@ -69,7 +69,6 @@ TEST_F(GuidanceTests, UseRegex) {
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 }
 
-#if !USE_DML  // TODO(Copilot): Find out why this fails in the Windows DirectML CI
 TEST_F(GuidanceTests, UseLarkGrammarSingleTurn) {
   auto input_string = get_qwen_2_5_prompt("What is the weather in Seattle?");
   auto input_sequences = OgaSequences::Create();
@@ -110,7 +109,6 @@ TEST_F(GuidanceTests, UseJsonSchemaSingleTurn) {
   const std::string expected_output = R"([{"name": "get_weather", "parameters": {"city": "Seattle"}}])";
   EXPECT_EQ(output, expected_output);
 }
-#endif
 
 #if !USE_DML  // DML doesn't support continuous decoding
 TEST_F(GuidanceTests, UseLarkGrammarMultiTurn) {
