@@ -49,10 +49,8 @@ const auto get_qwen_2_5_prompt = [](const std::string& user_content) {
   auto user_prompt = get_qwen_2_5_user_prompt(user_content);
   return qwen_2_5_system_prompt + user_prompt;
 };
-#endif
 
 TEST_F(GuidanceTests, UseRegex) {
-#if TEST_QWEN_2_5
   const char* input_string = "who are you?";
   auto input_sequences = OgaSequences::Create();
   tokenizer_->Encode(input_string, *input_sequences);
@@ -69,11 +67,9 @@ TEST_F(GuidanceTests, UseRegex) {
     output += stream_->Decode(new_token);
   }
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
-#endif
 }
 
 TEST_F(GuidanceTests, UseLarkGrammarSingleTurn) {
-#if TEST_QWEN_2_5
   auto input_string = get_qwen_2_5_prompt("What is the weather in Seattle?");
   auto input_sequences = OgaSequences::Create();
   tokenizer_->Encode(input_string.c_str(), *input_sequences);
@@ -92,11 +88,9 @@ TEST_F(GuidanceTests, UseLarkGrammarSingleTurn) {
   }
   const std::string expected_output = R"([{"name": "get_weather", "parameters": {"city": "Seattle"}}])";
   EXPECT_EQ(output, expected_output);
-#endif
 }
 
 TEST_F(GuidanceTests, UseJsonSchemaSingleTurn) {
-#if TEST_QWEN_2_5
   auto input_string = get_qwen_2_5_prompt("What is the weather in Seattle?");
   auto input_sequences = OgaSequences::Create();
   tokenizer_->Encode(input_string.c_str(), *input_sequences);
@@ -114,11 +108,9 @@ TEST_F(GuidanceTests, UseJsonSchemaSingleTurn) {
   }
   const std::string expected_output = R"([{"name": "get_weather", "parameters": {"city": "Seattle"}}])";
   EXPECT_EQ(output, expected_output);
-#endif
 }
 
 TEST_F(GuidanceTests, UseLarkGrammarMultiTurn) {
-#if TEST_QWEN_2_5
   auto params = OgaGeneratorParams::Create(*model_);
   params->SetSearchOption("max_length", 1024);
   std::string lark_grammar = std::string("start: functioncall\nfunctioncall: %json ") + json_schema;
@@ -146,11 +138,9 @@ TEST_F(GuidanceTests, UseLarkGrammarMultiTurn) {
     auto expected_output = std::string(R"([{"name": "get_weather", "parameters": {"city": ")") + city + R"("}}])";
     EXPECT_EQ(output, expected_output);
   }
-#endif
 }
 
 TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
-#if TEST_QWEN_2_5
   auto params = OgaGeneratorParams::Create(*model_);
   params->SetSearchOption("max_length", 1024);
   params->SetGuidance("json_schema", json_schema.c_str(), false);
@@ -177,7 +167,8 @@ TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
     auto expected_output = std::string(R"([{"name": "get_weather", "parameters": {"city": ")") + city + R"("}}])";
     EXPECT_EQ(output, expected_output);
   }
-#endif
 }
 
-#endif
+#endif  // TEST_QWEN_2_5
+
+#endif  // USE_GUIDANCE
