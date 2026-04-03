@@ -100,12 +100,22 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_directml_release -DTEST_PHI2=True
+          cmake --preset windows_x64_directml_release -DTEST_PHI2=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
           cmake --build --preset windows_x64_directml_release --parallel
           cmake --build --preset windows_x64_directml_release --target PyPackageBuild
+
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-x64\native" `
+            "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -114,9 +124,9 @@ jobs:
           python -m pip install -r test\python\directml\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel --use_guidance
+          ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python Tests
         run: |

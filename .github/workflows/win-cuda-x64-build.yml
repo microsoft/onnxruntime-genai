@@ -78,18 +78,68 @@ jobs:
           & $exePath -y --default-toolchain=1.86.0
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
+      # Restore sccache from a previous run so the C/C++ compile step gets cache hits.
+      # restore-keys allow a partial match from any prior run on this branch or main.
+      - name: Restore sccache
+        id: restore-sccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}\sccache
+          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
+          restore-keys: |
+            sccache-win-cuda-
+
+      - name: Install sccache
+        run: |
+          $version = "0.9.0"
+          $url = "https://github.com/mozilla/sccache/releases/download/v${version}/sccache-v${version}-x86_64-pc-windows-msvc.tar.gz"
+          $dest = "$env:TEMP\sccache.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+          tar -xzf $dest -C "$env:TEMP"
+          $binDir = "$env:USERPROFILE\sccache_bin"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Copy-Item "$env:TEMP\sccache-v${version}-x86_64-pc-windows-msvc\sccache.exe" "$binDir\sccache.exe"
+          echo $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$binDir\sccache.exe" --version
+
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+          $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
+          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build with CMake
         run: |
+          $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
           cmake --build --preset windows_x64_cuda_release --parallel
           cmake --build --preset windows_x64_cuda_release --target PyPackageBuild
+
+      - name: Show sccache stats
+        run: sccache --show-stats
+
+      # Save sccache inline (before the test steps) so the cache is written even if
+      # a later step kills the runner. Skip if we had a full key hit (nothing new to store).
+      - name: Save sccache
+        if: steps.restore-sccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\sccache
+          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
 
       - name: Add CUDA to PATH
         run: |
           echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\ort\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\ort\lib" `
+            "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -98,9 +148,9 @@ jobs:
           python -m pip install -r test\python\cuda\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel --use_guidance
+          ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python Tests
         run: |

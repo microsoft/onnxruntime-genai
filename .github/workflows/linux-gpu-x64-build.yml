@@ -123,7 +123,9 @@ jobs:
             bash -c " \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
-                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
+                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
+                -DENABLE_JAVA=ON \
+                -DUSE_GUIDANCE=ON "
 
       - name: Build with CMake in Docker
         run: |
@@ -136,21 +138,32 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
 
-      - name: Build the Java API and Run the Java Tests in Docker
+      - name: Build the C Examples in Docker
         run: |
           set -e -x
           docker run \
             --gpus all \
             --rm \
-            --user 0 \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake -S examples/c -B examples/c/build \
+                -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+                -DORT_INCLUDE_DIR=/ort_genai_src/ort/include \
+                -DORT_LIB_DIR=/ort_genai_src/ort/lib \
+                -DOGA_INCLUDE_DIR=/ort_genai_src/src \
+                -DOGA_LIB_DIR=/ort_genai_src/build/cuda && \
+              /usr/bin/cmake --build examples/c/build --config Release"
+
+      - name: Run the Java tests in Docker
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              alias python3=${{ env.PYTHON_EXECUTABLE }} && \
-              dnf -y update && dnf install -y python3.11-devel && dnf install -y python3-pip python3-setuptools python3-wheel && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} build.py --config=Release --build_dir build/cuda --build_java --parallel --cmake_generator Ninja --use_guidance --cmake_extra_defines PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }}"
+              /usr/bin/ctest --test-dir build/cuda/src/java --build-config Release --verbose --timeout 10800"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |

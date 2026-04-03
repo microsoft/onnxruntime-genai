@@ -61,6 +61,12 @@ if(NOT OGA_LIB_DIR)
   set(OGA_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
 endif()
 
+# Print paths to provided directories
+message(STATUS "ORT_INCLUDE_DIR: ${ORT_INCLUDE_DIR}")
+message(STATUS "ORT_LIB_DIR: ${ORT_LIB_DIR}")
+message(STATUS "OGA_INCLUDE_DIR: ${OGA_INCLUDE_DIR}")
+message(STATUS "OGA_LIB_DIR: ${OGA_LIB_DIR}")
+
 # Store all library files in each directory
 file(GLOB ort_libs "${ORT_LIB_DIR}/*")
 file(GLOB oga_libs "${OGA_LIB_DIR}/*")
@@ -71,6 +77,13 @@ function(prepare_executable executable)
   target_link_libraries(${executable} PRIVATE ${ORT_LIB_FILE})
   target_link_directories(${executable} PRIVATE ${OGA_LIB_DIR})
   target_link_libraries(${executable} PRIVATE ${OGA_LIB_FILE})
+
+  # Set RPATH so the executable can find shared libraries at their build locations
+  if(UNIX)
+    set_target_properties(${executable} PROPERTIES
+      BUILD_RPATH "${ORT_LIB_DIR};${OGA_LIB_DIR}"
+    )
+  endif()
 
   # Add include directories for each executable
   target_include_directories(${executable} PRIVATE ${ORT_INCLUDE_DIR})
