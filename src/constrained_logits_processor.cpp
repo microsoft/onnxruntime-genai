@@ -108,7 +108,7 @@ void GuidanceLogitsProcessor::InitializeLlgConstraints() {
   llg_constraints_.resize(params_->search.batch_size);
 
   // Reset ff_tokens buffers
-  for (int i = 0; i < ff_tokens_batch_.size(); i++) {
+  for (size_t i = 0; i < ff_tokens_batch_.size(); i++) {
     ff_tokens_batch_[i].clear();
   }
   ff_tokens_batch_.resize(params_->search.batch_size);
@@ -241,6 +241,10 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
 
   if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
+    // TODO(copilot):
+    // On the GPU path, words_per_row is computed as vocab_size / 32 (floor), but ComputeMask() produces masks sized (vocab_size - 1) / 32 + 1 (ceil).
+    // For vocab sizes not divisible by 32 this will under-copy each row, leaving the tail words as zeros and potentially masking valid tokens (or producing incorrect masking).
+    // Use a ceil division (e.g., (vocab_size + 31) / 32) and consider validating row.size() before memcpy.
     const size_t words_per_row = params_->config.model.vocab_size / 32;
     const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
