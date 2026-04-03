@@ -508,7 +508,7 @@ std::vector<ToolSchema> ToolsToSchemas(std::vector<Tool>& tools) {
       parameters["properties"] = tool.function.parameters.contains("properties") ? tool.function.parameters["properties"] : empty_map;
       std::vector<std::string> empty_list;
       parameters["required"] = tool.function.parameters.contains("required") ? tool.function.parameters["required"].get<std::vector<std::string>>() : empty_list;
-      parameters["additionalProperties"] = tool.function.parameters.contains("additionalProperties") ? tool.function.parameters["additionalProperties"] : false;
+      parameters["additionalProperties"] = false;
 
       properties["parameters"] = parameters;
     }
