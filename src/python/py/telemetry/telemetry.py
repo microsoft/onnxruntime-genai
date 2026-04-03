@@ -1,0 +1,385 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+
+"""GenAI Telemetry singleton with OneCollector integration.
+
+Provides high-level telemetry for:
+- MAD/DAD tracking via heartbeat events with system metadata
+- ModelBuilder instrumentation (model structure, architecture, precision, kernels)
+- Benchmark instrumentation (latency, throughput, memory, TTFT)
+- Model loading performance (session creation time, TTFT)
+- Error/crash reporting
+"""
+
+import base64
+import os
+import platform
+import threading
+import traceback
+from typing import Any, Optional
+
+from .constants import CONNECTION_STRING
+from .deviceid import get_encrypted_device_id_and_status
+from .library.event_source import event_source
+from .library.telemetry_logger import TelemetryLogger, get_telemetry_logger, set_app_version
+from .system_info import get_execution_provider_info, get_system_info
+
+# Event names
+HEARTBEAT_EVENT = "GenAIHeartbeat"
+MODEL_BUILD_EVENT = "GenAIModelBuild"
+BENCHMARK_EVENT = "GenAIBenchmark"
+MODEL_LOAD_EVENT = "GenAIModelLoad"
+INFERENCE_EVENT = "GenAIInference"
+ACTION_EVENT = "GenAIAction"
+ERROR_EVENT = "GenAIError"
+
+# CI environment variables that auto-disable telemetry
+_CI_ENV_VARS = {"CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL", "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID"}
+
+
+def _is_ci_environment() -> bool:
+    return any(os.environ.get(var) for var in _CI_ENV_VARS)
+
+
+def _get_app_version() -> str:
+    try:
+        import onnxruntime_genai
+
+        return getattr(onnxruntime_genai, "__version__", "unknown")
+    except ImportError:
+        return "unknown"
+
+
+def _format_exception_message(ex: BaseException, tb=None) -> str:
+    """Format an exception and trim local paths for privacy."""
+    formatted = traceback.format_exception(type(ex), ex, tb, limit=5)
+    lines = []
+    for line in formatted:
+        line_trunc = line.strip()
+        # Trim paths to relative paths within the package
+        if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
+            idx = line_trunc.find("onnxruntime_genai")
+            if idx != -1:
+                line_trunc = line_trunc[idx:]
+        elif line_trunc.startswith('File "'):
+            idx = line_trunc[len('File "') :].find('"')
+            line_trunc = line_trunc[idx + len('File "') :]
+        lines.append(line_trunc)
+    return "\n".join(lines)
+
+
+class GenAITelemetry:
+    """Singleton telemetry manager for ONNX Runtime GenAI.
+
+    Thread-safe singleton that sends telemetry to Microsoft OneCollector.
+    Auto-disabled in CI environments. Opt-out via ORTGENAI_DISABLE_TELEMETRY=1.
+    """
+
+    _instance: Optional["GenAITelemetry"] = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    cls._instance = instance
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._initialized = True
+        self._enabled = True
+
+        # Check opt-out conditions
+        if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1":
+            self._enabled = False
+        elif _is_ci_environment():
+            self._enabled = False
+
+        if not self._enabled:
+            self._logger = None
+            return
+
+        try:
+            version = _get_app_version()
+            set_app_version(version)
+            connection_string = base64.b64decode(CONNECTION_STRING).decode()
+            self._logger = get_telemetry_logger(connection_string)
+            event_source.disable()
+            self._log_heartbeat()
+        except Exception:
+            self._logger = None
+            self._enabled = False
+
+    def _log_heartbeat(self) -> None:
+        """Log initial heartbeat with system info for MAD/DAD tracking."""
+        if not self._enabled or not self._logger:
+            return
+
+        try:
+            device_id, id_status = get_encrypted_device_id_and_status()
+            sys_info = get_system_info()
+            ep_info = get_execution_provider_info()
+
+            attributes = {
+                "device_id": device_id,
+                "device_id_status": id_status.value,
+                "os": sys_info.get("os", ""),
+                "os_version": sys_info.get("os_version", ""),
+                "os_release": sys_info.get("os_release", ""),
+                "os_arch": sys_info.get("os_arch", ""),
+                "processor_count": sys_info.get("processor_count", 0),
+                "cpu_model": sys_info.get("cpu_model", ""),
+                "total_memory_mb": sys_info.get("total_memory_mb", 0),
+                "gpu_name": sys_info.get("gpu_name", ""),
+                "gpu_driver_version": sys_info.get("gpu_driver_version", ""),
+                "gpu_memory_mb": sys_info.get("gpu_memory_mb", 0),
+                "gpu_count": sys_info.get("gpu_count", 0),
+                "device_manufacturer": sys_info.get("device_manufacturer", ""),
+                "device_model": sys_info.get("device_model", ""),
+                "python_version": sys_info.get("python_version", ""),
+                "ort_version": sys_info.get("ort_version", ""),
+                "user_locale": sys_info.get("user_locale", ""),
+                "user_timezone": sys_info.get("user_timezone", ""),
+                "process_name": sys_info.get("process_name", ""),
+                "available_providers": ",".join(ep_info.get("available_providers", [])),
+            }
+            self._logger.log(HEARTBEAT_EVENT, attributes)
+        except Exception:
+            pass
+
+    def log(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
+        """Log a generic telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            self._logger.log(event_name, attributes)
+        except Exception:
+            pass
+
+    def log_model_build(
+        self,
+        action: str,
+        duration_ms: float,
+        success: bool,
+        model_name: str = "",
+        model_type: str = "",
+        hidden_size: int = 0,
+        num_layers: int = 0,
+        num_attn_heads: int = 0,
+        num_kv_heads: int = 0,
+        vocab_size: int = 0,
+        context_length: int = 0,
+        io_dtype: str = "",
+        quant_type: str = "",
+        execution_provider: str = "",
+        output_model_size_bytes: int = 0,
+        num_onnx_operators: int = 0,
+        operator_types: str = "",
+        has_custom_ops: bool = False,
+        source_format: str = "",
+        has_adapter: bool = False,
+        extra_options: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Log a ModelBuilder telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            attributes = {
+                "action": action,
+                "duration_ms": duration_ms,
+                "success": success,
+                "model_name": model_name,
+                "model_type": model_type,
+                "hidden_size": hidden_size,
+                "num_layers": num_layers,
+                "num_attn_heads": num_attn_heads,
+                "num_kv_heads": num_kv_heads,
+                "vocab_size": vocab_size,
+                "context_length": context_length,
+                "io_dtype": io_dtype,
+                "quant_type": quant_type,
+                "execution_provider": execution_provider,
+                "output_model_size_bytes": output_model_size_bytes,
+                "num_onnx_operators": num_onnx_operators,
+                "operator_types": operator_types,
+                "has_custom_ops": has_custom_ops,
+                "source_format": source_format,
+                "has_adapter": has_adapter,
+            }
+            if extra_options:
+                attributes["extra_options"] = str(extra_options)
+            self._logger.log(MODEL_BUILD_EVENT, attributes)
+        except Exception:
+            pass
+
+    def log_benchmark(
+        self,
+        model_name: str = "",
+        precision: str = "",
+        backend: str = "",
+        device: str = "",
+        batch_size: int = 0,
+        prompt_length: int = 0,
+        tokens_generated: int = 0,
+        tokenization_latency_ms: float = 0.0,
+        tokenization_throughput: float = 0.0,
+        prompt_processing_latency_ms: float = 0.0,
+        prompt_processing_throughput: float = 0.0,
+        token_generation_latency_ms: float = 0.0,
+        token_generation_throughput: float = 0.0,
+        sampling_latency_ms: float = 0.0,
+        sampling_throughput: float = 0.0,
+        wall_clock_time_ms: float = 0.0,
+        wall_clock_throughput: float = 0.0,
+        time_to_first_token_ms: float = 0.0,
+        peak_memory_gpu_mb: float = 0.0,
+        peak_memory_cpu_mb: float = 0.0,
+    ) -> None:
+        """Log a benchmark telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            attributes = {
+                "model_name": model_name,
+                "precision": precision,
+                "backend": backend,
+                "device": device,
+                "batch_size": batch_size,
+                "prompt_length": prompt_length,
+                "tokens_generated": tokens_generated,
+                "tokenization_latency_ms": tokenization_latency_ms,
+                "tokenization_throughput": tokenization_throughput,
+                "prompt_processing_latency_ms": prompt_processing_latency_ms,
+                "prompt_processing_throughput": prompt_processing_throughput,
+                "token_generation_latency_ms": token_generation_latency_ms,
+                "token_generation_throughput": token_generation_throughput,
+                "sampling_latency_ms": sampling_latency_ms,
+                "sampling_throughput": sampling_throughput,
+                "wall_clock_time_ms": wall_clock_time_ms,
+                "wall_clock_throughput": wall_clock_throughput,
+                "time_to_first_token_ms": time_to_first_token_ms,
+                "peak_memory_gpu_mb": peak_memory_gpu_mb,
+                "peak_memory_cpu_mb": peak_memory_cpu_mb,
+            }
+            self._logger.log(BENCHMARK_EVENT, attributes)
+        except Exception:
+            pass
+
+    def log_model_load(
+        self,
+        model_name: str = "",
+        model_type: str = "",
+        execution_provider: str = "",
+        total_load_time_ms: float = 0.0,
+        num_sessions: int = 0,
+        model_file_size_bytes: int = 0,
+    ) -> None:
+        """Log a model loading telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            attributes = {
+                "model_name": model_name,
+                "model_type": model_type,
+                "execution_provider": execution_provider,
+                "total_load_time_ms": total_load_time_ms,
+                "num_sessions": num_sessions,
+                "model_file_size_bytes": model_file_size_bytes,
+            }
+            self._logger.log(MODEL_LOAD_EVENT, attributes)
+        except Exception:
+            pass
+
+    def log_inference(
+        self,
+        model_name: str = "",
+        model_type: str = "",
+        execution_provider: str = "",
+        time_to_first_token_ms: float = 0.0,
+        total_generation_time_ms: float = 0.0,
+        total_tokens_generated: int = 0,
+        input_token_count: int = 0,
+        memory_used_mb: float = 0.0,
+        gpu_memory_used_mb: float = 0.0,
+    ) -> None:
+        """Log an inference telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            attributes = {
+                "model_name": model_name,
+                "model_type": model_type,
+                "execution_provider": execution_provider,
+                "time_to_first_token_ms": time_to_first_token_ms,
+                "total_generation_time_ms": total_generation_time_ms,
+                "total_tokens_generated": total_tokens_generated,
+                "input_token_count": input_token_count,
+                "memory_used_mb": memory_used_mb,
+                "gpu_memory_used_mb": gpu_memory_used_mb,
+            }
+            self._logger.log(INFERENCE_EVENT, attributes)
+        except Exception:
+            pass
+
+    def log_error(
+        self,
+        exception_type: str,
+        exception_message: str,
+        action: str = "",
+        model_name: str = "",
+        execution_provider: str = "",
+    ) -> None:
+        """Log an error/crash telemetry event."""
+        if not self._enabled or not self._logger:
+            return
+        try:
+            attributes = {
+                "exception_type": exception_type,
+                "exception_message": exception_message,
+                "action": action,
+                "model_name": model_name,
+                "execution_provider": execution_provider,
+            }
+            self._logger.log(ERROR_EVENT, attributes)
+        except Exception:
+            pass
+
+    def disable_telemetry(self) -> None:
+        """Disable telemetry."""
+        self._enabled = False
+        if self._logger:
+            self._logger.disable_telemetry()
+
+    def enable_telemetry(self) -> None:
+        """Enable telemetry."""
+        self._enabled = True
+        if self._logger:
+            self._logger.enable_telemetry()
+
+    def shutdown(self) -> None:
+        """Shutdown the telemetry system and flush pending events."""
+        if self._logger:
+            self._logger.shutdown()
+
+
+# Module-level convenience functions
+def _get_telemetry() -> GenAITelemetry:
+    """Get the telemetry singleton."""
+    return GenAITelemetry()
+
+
+def disable_telemetry() -> None:
+    """Disable GenAI telemetry."""
+    _get_telemetry().disable_telemetry()
+
+
+def enable_telemetry() -> None:
+    """Enable GenAI telemetry."""
+    _get_telemetry().enable_telemetry()
