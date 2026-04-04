@@ -14,10 +14,7 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
-// Our working directory is generators/build so one up puts us in the root directory:
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
+#include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;

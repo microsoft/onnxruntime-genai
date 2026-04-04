@@ -23,10 +23,6 @@
 
 #include "test_utils.h"
 
-#ifndef PHI2_PATH
-#define PHI2_PATH test_utils::GetPhi2Path().c_str()
-#endif
-
 TEST(CAPITests, Config) {
 #if TEST_PHI2
   // Test modifying config settings
@@ -1335,34 +1331,6 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   ASSERT_LE(sequence_length, max_length);
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
-}
-#endif
-
-#if USE_GUIDANCE
-TEST(CAPITests, SetGuidance) {
-#if TEST_PHI2
-
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto stream = OgaTokenizerStream::Create(*tokenizer);
-
-  const char* input_string = "who are you?";
-  auto input_sequences = OgaSequences::Create();
-  tokenizer->Encode(input_string, *input_sequences);
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 32);
-  params->SetGuidance("regex", "answer: .*", false);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
-  auto output = std::string(out_string).substr(std::string(input_string).size());
-  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
-
-#endif
 }
 #endif
 

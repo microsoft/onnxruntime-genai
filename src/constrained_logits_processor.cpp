@@ -22,7 +22,7 @@ namespace Generators {
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
       eos_token_(state.params_->config.model.eos_token_id[0]) {
-  if (params_->guidance_type.empty() || params_->guidance_type.empty()) {
+  if (params_->guidance_type.empty() || params_->guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
 
@@ -30,6 +30,14 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex and lark_grammar are supported)");
   }
 
+  tokenizer_ = state.model_.CreateTokenizer();
+  InitializeLlgTokenizer();
+  InitializeLlgConstraints();
+  ComputeMask();
+}
+
+void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
+  // Create the tokenize function for LlgTokenizer
   auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
                                           size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len)
       -> unsigned long {
@@ -42,14 +50,18 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     return static_cast<unsigned long>(output_ids.size());
   };
 
-  auto tokenizer_path = state.params_->config.config_path.string();
+  // Find the path to the tokenizer.json file
+  auto tokenizer_path = params_->config.config_path.string();
   fs::path tokenizer_path_fs(tokenizer_path);
   fs::path json_path(tokenizer_path_fs / kDefaultVocabFile);
+
+  // Read the tokenizer.json file
   std::ifstream json_file(json_path.string());
   std::stringstream json_buffer;
   json_buffer << json_file.rdbuf();
   std::string json_data = json_buffer.str();
-  tokenizer_ = state.model_.CreateTokenizer();
+
+  // Create LlgTokenizer initializer
   auto prefix_len = tokenizer_->Encode(kTokenizePrefixStr).size();
   tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
@@ -64,17 +76,38 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       &tokenize_data_,                                          // user_data
   };
 
+  // Create LlgTokenizer
   char error_buf[256];
   llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init, error_buf, sizeof(error_buf)));
   if (!llg_tokenizer_) {
     throw std::runtime_error("Error creating llg_tokenizer: " + std::string(error_buf));
   }
+}
 
+void GuidanceLogitsProcessor::InitializeLlgConstraints() {
+  // Reset constraints buffer
+  if (!llg_constraints_.empty()) {
+    // Each element of llg_constraints_ is a std::unique_ptr<LlgConstraint, LlgConstraintDeleter>.
+    // Each pointer has a custom deleter that specifies how to properly free the constraint.
+    // The deleter is automatically called here when the vector is cleared.
+    llg_constraints_.clear();
+  }
   llg_constraints_.resize(params_->search.batch_size);
+
+  // Reset ff_tokens buffers
+  for (size_t i = 0; i < ff_tokens_batch_.size(); i++) {
+    ff_tokens_batch_[i].clear();
+  }
+  ff_tokens_batch_.resize(params_->search.batch_size);
+
+  // Create a constraint for each batch item
   for (int i = 0; i < params_->search.batch_size; i++) {
+    // Create LlgConstraint initializer
     LlgConstraintInit constraint_init;
     llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
     constraint_init.ff_tokens_ok = params_->guidance_ff_tokens_enabled && params_->search.batch_size == 1 && params_->search.num_beams == 1;
+
+    // Create a new constraint based on the guidance type
     LlgConstraint* constraint_ptr = nullptr;
     if (params_->guidance_type == "json_schema") {
       constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
@@ -82,32 +115,34 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       constraint_ptr = llg_new_constraint_regex(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "lark_grammar") {
       constraint_ptr = llg_new_constraint_lark(&constraint_init, params_->guidance_data.data());
+    } else {
+      throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex, and lark_grammar are supported)");
     }
+
+    // Ensure constraint was created successfully
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
       llg_free_constraint(constraint_ptr);
       throw std::runtime_error("Error creating grammar: " + error_message);
     }
-    llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
-    // create ff_tokens buffer for each batch item
-    ff_tokens_batch_.push_back(std::vector<int32_t>());
-  }
 
-  // Compute the mask asynchronously to avoid blocking the model inference on device
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
+    // Store the constraint in the list of all constraints
+    llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
+
+    // Create ff_tokens buffer for each batch item
+    ff_tokens_batch_[i] = std::vector<int32_t>();
+  }
 }
 
-std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
-  std::vector<std::vector<uint32_t>> masks;
+void GuidanceLogitsProcessor::ComputeMask() {
+  masks_.clear();
   for (int batch_idx = 0; batch_idx < params_->search.batch_size; batch_idx++) {
     LlgMaskResult mask_result;
     auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
     if (error != 0) {
       // If the mask computation fails, we need to reset the constraint
       // and try again. LLGuidance needs to be reset for every new prompt.
-      ResetWithoutCompute();
+      InitializeLlgConstraints();
       auto retry_error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
       if (retry_error != 0) {
         std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
@@ -115,21 +150,21 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
       }
     }
 
-    std::vector<uint32_t> mask;
     if (mask_result.is_stop) {
       // when logits processor decides to stop, we mask all tokens except the EOS token
-      mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
+      auto mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
       uint32_t eos_mask32 = 1 << (eos_token_ % 32);
       mask[eos_token_ / 32] = eos_mask32;
+      masks_.push_back(std::move(mask));
     } else {
+      std::vector<uint32_t> mask;
       mask.reserve((params_->config.model.vocab_size - 1) / 32 + 1);
       for (int i = 0; i < (params_->config.model.vocab_size - 1) / 32 + 1; i++) {
         mask.push_back(mask_result.sample_mask[i]);
       }
+      masks_.push_back(std::move(mask));
     }
-    masks.push_back(mask);
   }
-  return masks;
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::GetFFTokens(size_t index) {
@@ -159,23 +194,22 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
       ff_tokens.push_back((int32_t)commit_result.tokens[j]);
     }
   }
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
-  masks_.clear();
+
+  ComputeMask();
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
-  if (masks_.empty()) {
-    masks_ = mask_future_.get();
-  }
   return masks_;
 }
 
 void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
 
-  if (params_->p_device->GetType() == DeviceType::CUDA) {
+  if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
+    // TODO(copilot):
+    // On the GPU path, words_per_row is computed as vocab_size / 32 (floor), but ComputeMask() produces masks sized (vocab_size - 1) / 32 + 1 (ceil).
+    // For vocab sizes not divisible by 32 this will under-copy each row, leaving the tail words as zeros and potentially masking valid tokens (or producing incorrect masking).
+    // Use a ceil division (e.g., (vocab_size + 31) / 32) and consider validating row.size() before memcpy.
     const size_t words_per_row = params_->config.model.vocab_size / 32;
     const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
@@ -184,10 +218,10 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       std::memcpy(dst, row.data(), words_per_row * sizeof(uint32_t));
       dst += words_per_row;
     }
-    auto cuda_logits_mask_ptr_ = params_->p_device->Allocate<uint32_t>(total_words);
-    copy(std::span<const uint32_t>{flat_masks}, cuda_logits_mask_ptr_.CpuSpan());
-    cuda_logits_mask_ptr_.CopyCpuToDevice();
-    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, cuda_logits_mask_ptr_.Span().data());
+    auto logits_mask_ptr = params_->p_device->Allocate<uint32_t>(total_words);
+    copy(std::span<const uint32_t>{flat_masks}, logits_mask_ptr.CpuSpan());
+    logits_mask_ptr.CopyCpuToDevice();
+    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), params_->search.batch_size, params_->config.model.vocab_size, logits_mask_ptr.Span().data());
     return;
   }
   size_t vocab_index = 0;
@@ -205,41 +239,10 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   }
 }
 
-void GuidanceLogitsProcessor::ResetWithoutCompute() {
-  masks_.clear();
-  llg_constraints_.clear();
-  llg_constraints_.resize(params_->search.batch_size);
-  for (int i = 0; i < params_->search.batch_size; i++) {
-    LlgConstraintInit constraint_init;
-    llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
-    LlgConstraint* constraint_ptr;
-    if (params_->guidance_type == "json_schema") {
-      constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
-    } else if (params_->guidance_type == "regex") {
-      constraint_ptr = llg_new_constraint_regex(&constraint_init, params_->guidance_data.data());
-    } else if (params_->guidance_type == "lark_grammar") {
-      constraint_ptr = llg_new_constraint_lark(&constraint_init, params_->guidance_data.data());
-    } else {
-      throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex and lark_grammar are supported)");
-    }
-    if (llg_get_error(constraint_ptr) != nullptr) {
-      std::string error_message = llg_get_error(constraint_ptr);
-      llg_free_constraint(constraint_ptr);
-      throw std::runtime_error("Error creating grammar: " + error_message);
-    }
-    llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
-  }
-  for (int i = 0; i < ff_tokens_batch_.size(); i++) {
-    ff_tokens_batch_[i].clear();
-  }
-}
-
-// Reset the masks and llguidance constraints and then recompute the mask
+// Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
-  ResetWithoutCompute();
-  mask_future_ = std::async(std::launch::async, [&]() {
-    return ComputeMask();
-  });
+  InitializeLlgConstraints();
+  ComputeMask();
 }
 
 std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,

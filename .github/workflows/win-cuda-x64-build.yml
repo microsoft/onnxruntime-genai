@@ -105,7 +105,7 @@ jobs:
       - name: Configure CMake
         run: |
           $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
-          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
+          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=True -DTEST_QWEN_2_5=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
             -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
