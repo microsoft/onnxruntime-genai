@@ -86,9 +86,13 @@ class HunyuanDenseV1Model(Model):
             )
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
-        # Step 2: QK norm AFTER RoPE — alias Hunyuan's attribute names to what make_qk_norm expects
-        attention.q_norm = attention.query_layernorm
-        attention.k_norm = attention.key_layernorm
+        # Step 2: QK norm AFTER RoPE — alias to what make_qk_norm expects.
+        # Non-quantized models use query_layernorm/key_layernorm;
+        # quantized models already map to q_norm/k_norm via tensor_map keys.
+        if not hasattr(attention, "q_norm"):
+            attention.q_norm = attention.query_layernorm
+        if not hasattr(attention, "k_norm"):
+            attention.k_norm = attention.key_layernorm
         self.make_qk_norm(layer_id, attention)
 
         # Step 3: Repeat KV (for GQA with MultiHeadAttention op)
