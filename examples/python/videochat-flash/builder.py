@@ -58,7 +58,7 @@ def prepare_model(input_dir):
     print("\n[1/4] Loading model config...")
     # trust_remote_code=False: config.json is standard JSON — no need for
     # the custom modeling code (which requires av/cv2/decord).
-    config = AutoConfig.from_pretrained(input_dir, trust_remote_code=False)
+    config = AutoConfig.from_pretrained(input_dir, trust_remote_code=True)
     print(f"  architecture : {config.architectures[0]}")
     print(f"  hidden_size  : {config.hidden_size}")
     print(f"  num_layers   : {config.num_hidden_layers}")
@@ -122,7 +122,7 @@ def export_text_model(input_dir, output_dir, precision, text_only):
         precision,
         "cpu",
         os.path.join(output_dir, ".cache"),
-        exclude_embeds="false" if text_only else "true",
+        exclude_embeds=not text_only,
     )
     print(f"  [OK] Text decoder: {os.path.join(output_dir, 'model.onnx')}")
 
@@ -169,7 +169,7 @@ def update_genai_config(output_dir, text_only):
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
-    print(f"  [OK] Updated: genai_config.json  (type=videochat_flash_qwen)")
+    print(f"  [OK] Updated: genai_config.json  (type={config['model']['type']})")
 
 
 def run_e2e_smoke(output_dir, prompt):
