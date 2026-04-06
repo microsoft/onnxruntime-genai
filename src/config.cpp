@@ -1377,12 +1377,12 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
                                                });
     if (provider_options != session_options.provider_options.end()) {
       if (provider_options->name == "cuda") {
-        // Graph Capture is currently broken for CUDA
         for (const auto& value : provider_options->options) {
           if (value.first == "enable_cuda_graph" && value.second == "1") {
-            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+            return true;
           }
         }
+        return false;
       } else if (provider_options->name == "DML") {
         return true;
       } else if (provider_options->name == "WebGPU") {

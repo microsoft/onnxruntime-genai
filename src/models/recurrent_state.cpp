@@ -125,10 +125,22 @@ void RecurrentState::Update() {
   if (layer_indices_.empty()) return;
 
   const int num_layers = static_cast<int>(layer_indices_.size());
-  for (int i = 0; i < num_layers * 2; ++i) {
-    std::swap(pasts_[i], presents_[i]);
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
-    state_.outputs_[output_index_ + i] = presents_[i].get();
+
+  if (state_.params_->use_graph_capture) {
+    // When CUDA graph capture is enabled, we must not swap pointers because
+    // the graph has captured the original memory addresses. Instead, copy
+    // present→past in-place so the pointers remain stable.
+    auto& device = *model_.p_device_kvcache_;
+    for (int i = 0; i < num_layers * 2; ++i) {
+      ByteWrapTensor(device, *pasts_[i]).CopyFrom(ByteWrapTensor(device, *presents_[i]));
+    }
+    // No need to rebind state_.inputs_/outputs_ — pointers are unchanged.
+  } else {
+    for (int i = 0; i < num_layers * 2; ++i) {
+      std::swap(pasts_[i], presents_[i]);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
   }
 }
 

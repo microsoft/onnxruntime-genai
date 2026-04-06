@@ -81,15 +81,27 @@ void AddCudaStreamConfig(OrtSessionOptions& session_options, DeviceInterface* de
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
                                          const Config& /*config*/,
-                                         bool /*disable_graph_capture*/) {
+                                         bool disable_graph_capture) {
   auto device = GetDeviceInterface(DeviceType::CUDA);
   AddCudaStreamConfig(session_options, device);
+
+  // For non-decoder sessions (vision, embedding), disable CUDA graph capture
+  // since they have dynamic shapes incompatible with graph capture.
+  Config::ProviderOptions effective_options = provider_options;
+  if (disable_graph_capture) {
+    for (auto& option : effective_options.options) {
+      if (option.first == "enable_cuda_graph") {
+        option.second = "0";
+      }
+    }
+  }
+
   // Try pre-registered plugin path first
-  if (!AppendExecutionProviderV2(session_options, provider_options,
+  if (!AppendExecutionProviderV2(session_options, effective_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {
     // Register the CUDA execution provider as a provider-bridge provider.
     CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
-        session_options, provider_options, device);
+        session_options, effective_options, device);
   }
 
   return device;
