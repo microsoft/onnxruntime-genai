@@ -119,6 +119,19 @@ void RecurrentState::Add() {
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
   }
+
+  // Cache byte spans for the graph-capture copy path. These tensors are
+  // fixed-shape and never reallocated, so the spans remain valid for the
+  // entire generation lifetime.
+  if (state_.params_->use_graph_capture) {
+    auto& device = *model_.p_device_kvcache_;
+    past_byte_spans_.reserve(num_layers * 2);
+    present_byte_spans_.reserve(num_layers * 2);
+    for (int i = 0; i < num_layers * 2; ++i) {
+      past_byte_spans_.push_back(ByteWrapTensor(device, *pasts_[i]));
+      present_byte_spans_.push_back(ByteWrapTensor(device, *presents_[i]));
+    }
+  }
 }
 
 void RecurrentState::Update() {
@@ -130,9 +143,9 @@ void RecurrentState::Update() {
     // When CUDA graph capture is enabled, we must not swap pointers because
     // the graph has captured the original memory addresses. Instead, copy
     // present→past in-place so the pointers remain stable.
-    auto& device = *model_.p_device_kvcache_;
+    // Uses cached byte spans to avoid recomputing tensor metadata each step.
     for (int i = 0; i < num_layers * 2; ++i) {
-      ByteWrapTensor(device, *pasts_[i]).CopyFrom(ByteWrapTensor(device, *presents_[i]));
+      past_byte_spans_[i].CopyFrom(present_byte_spans_[i]);
     }
     // No need to rebind state_.inputs_/outputs_ — pointers are unchanged.
   } else {
