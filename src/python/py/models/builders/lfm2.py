@@ -266,3 +266,42 @@ class LFM2Model(Model):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        # Augment the generated config with LFM2-specific fields
+        import json
+        import os
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path, "r") as f:
+            genai_config = json.load(f)
+
+        decoder = genai_config["model"]["decoder"]
+        decoder["layer_types"] = self.layer_types
+        decoder["conv_cache_size"] = self.conv_L_cache
+        decoder["inputs"]["past_conv_names"] = "past_conv.%d"
+        decoder["outputs"]["present_conv_names"] = "present_conv.%d"
+
+        # Hybrid models don't support shared past/present buffer
+        genai_config["search"]["past_present_share_buffer"] = False
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        import json
+        import os
+
+        super().save_processing(model_name_or_path, extra_kwargs, out_dir)
+
+        # Fix tokenizer_class if needed (TokenizersBackend is not recognized by ort-extensions)
+        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
+        if os.path.exists(tokenizer_config_path):
+            with open(tokenizer_config_path, "r") as f:
+                tok_config = json.load(f)
+            if tok_config.get("tokenizer_class") == "TokenizersBackend":
+                tok_config["tokenizer_class"] = "PreTrainedTokenizerFast"
+                with open(tokenizer_config_path, "w") as f:
+                    json.dump(tok_config, f, indent=2)

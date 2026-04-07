@@ -17,6 +17,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
@@ -1274,6 +1275,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
+  if (config->model.type == "lfm2")
+    return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))

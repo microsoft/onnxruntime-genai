@@ -315,6 +315,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "past_conv_names") {
+      v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -340,6 +342,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
       v_.rnn_states = JSON::Get<std::string_view>(value);
+    } else if (name == "present_conv_names") {
+      v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -563,6 +567,8 @@ struct Decoder_Element : JSON::Element {
       v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv_cache_size") {
+      v_.conv_cache_size = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -599,6 +605,10 @@ struct Decoder_Element : JSON::Element {
     if (name == "pipeline") {
       return pipeline_;
     }
+    if (name == "layer_types") {
+      layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
+      return *layer_types_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -611,6 +621,7 @@ struct Decoder_Element : JSON::Element {
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
+  std::unique_ptr<StringArray_Element> layer_types_;
 };
 
 struct VisionInputs_Element : JSON::Element {

@@ -225,6 +225,10 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
+      // Hybrid SSM+Attention (LFM2) parameters
+      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
         int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
@@ -255,6 +259,7 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
       } inputs;
 
       struct Outputs {
@@ -264,6 +269,7 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
       } outputs;
 
       struct PipelineModel {

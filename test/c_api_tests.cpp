@@ -1333,6 +1333,47 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+
+TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify generation completed and produced output
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, static_cast<size_t>(input_ids_shape[1]));
+  ASSERT_LE(sequence_length, max_length);
+}
+
+TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate a few tokens
+  generator->GenerateNextToken();
+
+  // RewindTo should throw for LFM2 because conv state cannot be rewound
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
+}
 #endif
 
 #if USE_GUIDANCE
