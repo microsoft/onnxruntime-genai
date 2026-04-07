@@ -3,6 +3,9 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import json
+import os
+
 import torch
 import onnx_ir as ir
 
@@ -271,9 +274,6 @@ class LFM2Model(Model):
         super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
 
         # Augment the generated config with LFM2-specific fields
-        import json
-        import os
-
         config_path = os.path.join(out_dir, "genai_config.json")
         with open(config_path, "r") as f:
             genai_config = json.load(f)
@@ -291,9 +291,6 @@ class LFM2Model(Model):
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        import json
-        import os
-
         super().save_processing(model_name_or_path, extra_kwargs, out_dir)
 
         # Fix tokenizer_class if needed (TokenizersBackend is not recognized by ort-extensions)
