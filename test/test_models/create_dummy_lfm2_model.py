@@ -96,13 +96,7 @@ def main():
             past_name = "past_key_values.%d.%s" % (layer_idx, kv_type)
             present_name = "present.%d.%s" % (layer_idx, kv_type)
 
-            # Create new KV from embeddings reshaped to [batch, heads, seq, head_size]
-            reshape_name = "reshape_%d_%s" % (layer_idx, kv_type)
-            shape_tensor_name = "kv_shape_%d_%s" % (layer_idx, kv_type)
-
-            # Shape for reshape: [0, seq_len, num_heads, head_size] then transpose
-            # Use a simpler approach: expand embeddings to KV shape
-            # First reshape embeddings [B, S, H] -> [B, S, num_heads, head_size]
+            # Reshape embeddings [B, S, H] -> [B, S, num_heads, head_size]
             reshape_4d_name = "reshape_4d_%d_%s" % (layer_idx, kv_type)
             shape_4d = numpy_helper.from_array(
                 np.array([0, 0, num_heads, head_size], dtype=np.int64),
