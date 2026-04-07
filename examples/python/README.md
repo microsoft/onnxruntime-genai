@@ -18,7 +18,7 @@ python model-chat.py -m {path to model folder} -e {execution provider}
 ```
 
 ```bash
-# The `model-generate` script generates the entire output sequence in one function call
+# The `model-generate` script generates the entire output sequence in one function call.
 python model-generate.py -m {path to model folder} -e {execution provider}
 ```
 
@@ -30,6 +30,12 @@ python model-qa.py -m {path to model folder} -e {execution provider}
 ```bash
 # The `model-mm` script works for multi-modal models and streams the output text token by token.
 python model-mm.py -m {path to model folder} -e {execution provider}
+```
+
+```bash
+# Pass one or more images via --image_paths (space-separated). Supported by Qwen2.5-VL, Qwen3-VL, Phi-3-vision, etc.
+# In non-interactive mode the default prompt is "What color is the sky?" (override with --user_prompt).
+python model-mm.py -m {path to model folder} -e {execution provider} --image_paths image1.jpg image2.jpg --non_interactive
 ```
 
 ## Tool Calling

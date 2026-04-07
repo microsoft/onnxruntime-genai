@@ -61,6 +61,7 @@ struct Memory : DeviceBuffer {
 
 struct Interface : RyzenAIInterface {
   Interface() {
+    ep_path_ = ep_filename_;
     // If already loaded then nothing to do
 #if defined(_WIN32)
     if (GetModuleHandleA(ep_filename_))

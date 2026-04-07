@@ -467,8 +467,8 @@ nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_ima
     content = image_tags + audio_tags + prompt;
     content_json = nlohmann::ordered_json(content);
 
-  } else if (model_type == "qwen2_5_vl" || model_type == "fara") {
-    // Qwen-2.5 VL, Fara
+  } else if (model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "fara") {
+    // Qwen-2.5 VL, Qwen-3 VL, Fara
     for (int i = 0; i < num_images; i++) {
       image_tags += "<|vision_start|><|image_pad|><|vision_end|>";
     }
@@ -508,6 +508,7 @@ std::vector<ToolSchema> ToolsToSchemas(std::vector<Tool>& tools) {
       parameters["properties"] = tool.function.parameters.contains("properties") ? tool.function.parameters["properties"] : empty_map;
       std::vector<std::string> empty_list;
       parameters["required"] = tool.function.parameters.contains("required") ? tool.function.parameters["required"].get<std::vector<std::string>>() : empty_list;
+      parameters["additionalProperties"] = false;
 
       properties["parameters"] = parameters;
     }

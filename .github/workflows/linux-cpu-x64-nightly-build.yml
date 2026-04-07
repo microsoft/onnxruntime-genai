@@ -84,7 +84,7 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
@@ -101,9 +101,20 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
+
+      - name: Build the C Examples
+        run: |
+          set -e -x
+          cmake -S examples/c -B examples/c/build \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
+            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
+          cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
         run: |
@@ -117,10 +128,10 @@ jobs:
         run: |
           ls -l ${{ github.workspace }}/build
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
           set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja" --use_guidance
+          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python tests
         run: |
