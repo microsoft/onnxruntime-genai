@@ -170,8 +170,8 @@ struct LFM2Cache : KeyValueCache {
   int layer_count_;
 
   // KV cache (only for attention layers)
-  int kv_layer_count_{};                   // Number of attention layers
-  std::vector<int> kv_layer_indices_;      // Original layer indices for attention layers
+  int kv_layer_count_{};
+  std::vector<int> kv_layer_indices_;
   std::array<int64_t, 4> kv_shape_;
   ONNXTensorElementDataType kv_type_;
   std::unique_ptr<OrtValue> kv_empty_past_;
@@ -181,8 +181,8 @@ struct LFM2Cache : KeyValueCache {
   bool kv_is_first_update_{true};
 
   // Conv state cache (only for conv layers)
-  int conv_layer_count_{};                 // Number of conv layers
-  std::vector<int> conv_layer_indices_;    // Original layer indices for conv layers
+  int conv_layer_count_{};
+  std::vector<int> conv_layer_indices_;
   std::vector<std::array<int64_t, 3>> conv_shapes_;  // Per-layer conv state shape [B, H, L]
   ONNXTensorElementDataType conv_type_;
   std::vector<std::unique_ptr<OrtValue>> conv_pasts_, conv_presents_;
