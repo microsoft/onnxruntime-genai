@@ -60,6 +60,25 @@ struct Config {
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+
+    // Cache-aware streaming encoder names
+    static constexpr std::string_view EncoderInputLengthsName = "length";
+    static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
+    static constexpr std::string_view CacheLastTimeName = "cache_last_time";
+    static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
+    static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
+    static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
+    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_len_next";
+
+    // Cross present key/value names
+    static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
+    static constexpr std::string_view CrossPresentValueName = "present_value_cross_%d";
+
+    // Joiner names
+    static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
+    static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -116,6 +135,22 @@ struct Config {
     int vocab_size{};
     int context_length{};
 
+    // Streaming ASR / RNNT model parameters
+    int num_mels{};
+    int fft_size{};
+    int hop_length{};
+    int win_length{};
+    float preemph{};
+    float log_eps{};
+    int subsampling_factor{};
+    int left_context{};
+    int conv_context{};
+    int pre_encode_cache_size{};
+    int sample_rate{};
+    int chunk_samples{};
+    int blank_id{};
+    int max_symbols_per_step{};
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;
@@ -133,12 +168,22 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        // Cache-aware streaming encoder I/O names
+        std::string input_lengths{Defaults::EncoderInputLengthsName};
+        std::string cache_last_channel{Defaults::CacheLastChannelName};
+        std::string cache_last_time{Defaults::CacheLastTimeName};
+        std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
-        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        std::string cross_present_key_names{Defaults::CrossPresentKeyName}, cross_present_value_names{Defaults::CrossPresentValueName};
+        // Cache-aware streaming encoder output names
+        std::string output_lengths{Defaults::EncoderOutputLengthsName};
+        std::string cache_last_channel_next{Defaults::CacheLastChannelNextName};
+        std::string cache_last_time_next{Defaults::CacheLastTimeNextName};
+        std::string cache_last_channel_len_next{Defaults::CacheLastChannelLenNextName};
       } outputs;
     } encoder;
 
@@ -163,9 +208,17 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
-      // Qwen2.5-VL specific vision config values
+      // Qwen VL specific vision config values.
+      // These are only needed for the QNN 3-stage pipeline (patch_embed → vision_attn → patch_merger),
+      // where the C++ runtime computes window attention indices between stages.
+      // For standard single-ONNX CUDA/CPU models, windowing is baked into the ONNX graph
+      // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
+      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
+                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -214,6 +267,30 @@ struct Config {
       } outputs;
     } speech;
 
+    struct Joiner {
+      std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string encoder_outputs{Defaults::JoinerEncoderOutputsName};
+        std::string decoder_outputs{Defaults::JoinerDecoderOutputsName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::JoinerLogitsName};
+      } outputs;
+    } joiner;
+
+    struct VAD {
+      std::string filename;
+      float threshold{0.5f};
+      int silence_duration_ms{500};
+      int prefix_padding_ms{300};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } vad;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
@@ -260,6 +337,11 @@ struct Config {
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+
+        // RNNT decoder inputs
+        std::string targets;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } inputs;
 
       struct Outputs {
@@ -270,6 +352,11 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
+
+        // RNNT decoder outputs
+        std::string outputs;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } outputs;
 
       struct PipelineModel {

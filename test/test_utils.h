@@ -7,42 +7,43 @@
 #include <string>
 #include <vector>
 
+// Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
 namespace test_utils {
 
-// Helper function to get the appropriate PHI2 model path based on available models
-inline const std::string& GetPhi2Path() {
-  static std::string phi2_path;
-  if (!phi2_path.empty()) {
-    return phi2_path;
+// Helper function to get the appropriate model path based on available models
+inline const std::string& GetModelPath(const std::string& model_type) {
+  static std::string model_path;
+  if (!model_path.empty()) {
+    return model_path;
   }
 
   std::vector<std::string> candidate_paths = {
-      MODEL_PATH "phi-2/int4/cuda",
-      MODEL_PATH "phi-2/int4/dml",
-      MODEL_PATH "phi-2/int4/webgpu",
-      MODEL_PATH "phi-2/int4/cpu"};
+      std::string(MODEL_PATH) + model_type + "/int4/cuda",
+      std::string(MODEL_PATH) + model_type + "/int4/dml",
+      std::string(MODEL_PATH) + model_type + "/int4/webgpu",
+      std::string(MODEL_PATH) + model_type + "/int4/cpu"};
 
   for (const auto& path : candidate_paths) {
-    std::filesystem::path model_path(path);
-    if (std::filesystem::exists(model_path / "genai_config.json")) {
-      phi2_path = path;
-      return phi2_path;
+    std::filesystem::path model_path_fs(path);
+    if (std::filesystem::exists(model_path_fs / "genai_config.json")) {
+      model_path = path;
+      return model_path;
     }
   }
 
   // Fallback to CPU path
-  phi2_path = MODEL_PATH "phi-2/int4/cpu";
-  return phi2_path;
+  model_path = std::string(MODEL_PATH) + model_type + "/int4/cpu";
+  return model_path;
 }
 
 // Helper to detect if we're using WebGPU or DML EP based on the model path
 inline bool IsEngineTestsEnabled() {
 #if TEST_PHI2
-  std::string path = GetPhi2Path();
+  std::string path = GetModelPath("phi-2");
   // Skip engine tests for DML and WebGPU (batching not fully tested)
   return path.find("/dml") == std::string::npos &&
          path.find("/webgpu") == std::string::npos;
@@ -52,3 +53,11 @@ inline bool IsEngineTestsEnabled() {
 }
 
 }  // namespace test_utils
+
+#ifndef PHI2_PATH
+#define PHI2_PATH test_utils::GetModelPath("phi-2").c_str()
+#endif
+
+#ifndef QWEN_2_5_PATH
+#define QWEN_2_5_PATH test_utils::GetModelPath("qwen-2.5-0.5b").c_str()
+#endif

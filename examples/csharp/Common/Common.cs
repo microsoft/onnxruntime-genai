@@ -367,9 +367,9 @@ namespace CommonUtils
                 }
                 content = image_tags + audio_tags + prompt;
             }
-            else if (model_type == "qwen2_5_vl" || model_type == "fara")
+            else if (model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "fara")
             {
-                // Qwen-2.5 VL, Fara
+                // Qwen-2.5 VL, Qwen-3 VL, Fara
                 var image_tags = "";
                 for (int i = 0; i < num_images; i++)
                 {
@@ -427,7 +427,8 @@ namespace CommonUtils
                     {
                         { "type", tool.Function.Parameters.GetValueOrDefault("type", "object") },
                         { "properties", tool.Function.Parameters.GetValueOrDefault("properties", new Dictionary<string, object>{}) },
-                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) }
+                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) },
+                        { "additionalProperties", false }
                     };
                     properties.Add("parameters", parameters);
                 }

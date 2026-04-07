@@ -6,6 +6,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
+#include "../qnn/interface.h"
 #include <algorithm>
 
 namespace Generators {
@@ -155,18 +156,54 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
+  // Auto-discover which layer indices have KV cache inputs
+  kv_layer_indices_.clear();
+  {
+    const auto& key_template = model_.config_->model.decoder.inputs.past_key_names;
+    auto prefix = key_template.substr(0, key_template.find('%'));
+    auto suffix = key_template.substr(key_template.find('%') + 2);
+    for (const auto& name : model_.session_info_.GetInputNames()) {
+      if (name.size() > prefix.size() + suffix.size() &&
+          name.compare(0, prefix.size(), prefix) == 0 &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+        kv_layer_indices_.push_back(std::stoi(idx_str));
+      }
+    }
+    std::sort(kv_layer_indices_.begin(), kv_layer_indices_.end());
+  }
+
+  if (!kv_layer_indices_.empty()) {
+    layer_count_ = static_cast<int>(kv_layer_indices_.size());
+  }
+
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i));
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, i));
+    int layer_idx = kv_layer_indices_.empty() ? i : kv_layer_indices_[i];
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, layer_idx));
 
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, layer_idx));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, layer_idx));
   }
 
-  // Derive the KV data type from the KV input 0
+  if (g_log.enabled && !kv_layer_indices_.empty()) {
+    bool is_sequential = true;
+    for (int i = 0; i < layer_count_; ++i) {
+      if (kv_layer_indices_[i] != i) {
+        is_sequential = false;
+        break;
+      }
+    }
+    if (!is_sequential) {
+      Log("info", "DefaultKeyValueCache: Auto-discovered " + std::to_string(layer_count_) +
+                      " KV cache layers at non-sequential indices");
+    }
+  }
+
+  // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
@@ -192,9 +229,19 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         layer_shapes_[layer_idx][2] = max_length;
       }
 
+      // Build model-layer-index to cache-slot-index mapping for sparse KV layouts
+      std::unordered_map<int, int> model_layer_to_cache_slot;
+      for (int slot = 0; slot < layer_count_; ++slot) {
+        int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
+        model_layer_to_cache_slot[model_idx] = slot;
+      }
+
       // Update sliding window layers with constrained cache size
-      for (int layer_idx : model_.config_->model.decoder.sliding_window->layers) {
-        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
+      for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
+        auto it = model_layer_to_cache_slot.find(model_layer_idx);
+        if (it != model_layer_to_cache_slot.end()) {
+          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+        }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;
@@ -703,7 +750,16 @@ void LFM2Cache::PickConvState(DeviceSpan<int32_t> beam_indices_device, int conv_
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  return model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+  const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
+  auto prefix = key_template.substr(0, key_template.find('%'));
+  auto suffix = key_template.substr(key_template.find('%') + 2);
+  for (const auto& name : model.session_info_.GetInputNames()) {
+    if (name.size() > prefix.size() + suffix.size() &&
+        name.compare(0, prefix.size(), prefix) == 0 &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+      return true;
+  }
+  return false;
 }
 
 bool IsLFM2Model(const Model& model) {
@@ -725,10 +781,10 @@ bool IsLFM2CacheNeeded(const Model& model) {
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
-  // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
+  // For OpenVINO and QNN Stateful models, they do not contain exposed past/present KV tensors.
   // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
   // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
-  if (IsOpenVINOStatefulModel(state.model_)) {
+  if (IsOpenVINOStatefulModel(state.model_) || IsQNNStatefulModel(state.model_)) {
     if (g_log.enabled)
       Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
     return std::make_unique<ModelManagedKeyValueCache>(state);

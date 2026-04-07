@@ -173,9 +173,9 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 Currently, the JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-4 multimodal model.
 
-- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json`
-- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/speech_processor.json) is an example for `speech_processor.json`
-- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/vision_processor.json) is an example for `vision_processor.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/gpu/gpu-int4-rtn-block-32/genai_config.json) is an example for `genai_config.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/gpu/gpu-int4-rtn-block-32/speech_processor.json) is an example for `speech_processor.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/gpu/gpu-int4-rtn-block-32/vision_processor.json) is an example for `vision_processor.json`
 
 ## 4. Run Phi-4 Multimodal ONNX models
 

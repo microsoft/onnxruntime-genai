@@ -14,6 +14,7 @@
 #include "windowed_kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "recurrent_state.h"
 
 namespace Generators {
 
@@ -103,6 +104,7 @@ struct DecoderOnlyPipelineState : State {
   const bool do_key_value_cache_partial_update_;
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
+  std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
