@@ -49,6 +49,30 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::QNN; }
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo(const Config& config) const override {
+    // Note: "QnnHtpShared" allocator is the correct name even when using the GPU backend. Eventually, the plan is to
+    // migrate to "QnnShared".
+    return OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  }
+
+  Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& config) const override {
+    auto provider_options = Config::ProviderOptions{"QNN", {}};
+
+    // QNN has separate allocators for NPU and GPU, and chooses which one to use based on the selected backend.
+    // So, we must use device_filtering_options to ensure the allocator session is created with the correct device.
+    // Otherwise, a conflict could arise between the allocator session and the main inference session (e.g. HTP
+    // allocations provided to a GPU session).
+    if (Generators::IsQNNGPUBackend(config)) {
+      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_GPU };
+    } else {
+      // For the HTP backend, thea allocator for QnnHtpShared is only made available when the provider option
+      // 'enable_htp_shared_memory_allocator' is set to 1.
+      provider_options.options.emplace_back("enable_htp_shared_memory_allocator", "1");
+      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_NPU };
+    }
+    return provider_options;
+  }
+
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
