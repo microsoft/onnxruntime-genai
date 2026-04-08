@@ -236,6 +236,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     for (int i = 0; i < vocab_size; ++i) {
       global_exp_sum += std::exp((scores[i] - max_score) * inv_temp);
     }
+    float inv_global_exp_sum = 1.0f / global_exp_sum;
 
     // Step 2: Adaptive partial sort to find nucleus candidates.
     //
@@ -257,10 +258,10 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
                         [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
 
       // Accumulate true probabilities for the newly sorted elements [sorted_count, k).
-      // Each probability = exp((score - max_score) * inv_temp) / global_exp_sum.
+      // Each probability = exp((score - max_score) * inv_temp) * inv_global_exp_sum.
       cutoff_index = k;
       for (int i = sorted_count; i < k; ++i) {
-        cumulative_prob += std::exp((scores[indices[i]] - max_score) * inv_temp) / global_exp_sum;
+        cumulative_prob += std::exp((scores[indices[i]] - max_score) * inv_temp) * inv_global_exp_sum;
         if (cumulative_prob >= p) {
           cutoff_index = i + 1;
           break;
