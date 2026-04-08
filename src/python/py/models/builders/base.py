@@ -1289,6 +1289,9 @@ class Model:
         return matmul
     
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
+        if not hasattr(q_matmul, "qweight"):
+            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
