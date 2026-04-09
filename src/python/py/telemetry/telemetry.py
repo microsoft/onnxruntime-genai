@@ -44,12 +44,43 @@ def _is_ci_environment() -> bool:
 
 
 def _get_app_version() -> str:
+    """Resolve the onnxruntime-genai version.
+
+    Tries three sources in order:
+    1. The installed onnxruntime_genai package (__version__ attribute)
+    2. importlib.metadata (works even when native ext isn't loadable)
+    3. VERSION_INFO file at the repo root
+    """
+    # 1. Try the package attribute (fastest when native ext is loaded)
     try:
         import onnxruntime_genai
-
-        return getattr(onnxruntime_genai, "__version__", "unknown")
+        v = getattr(onnxruntime_genai, "__version__", None)
+        if v:
+            return v
     except ImportError:
-        return "unknown"
+        pass
+
+    # 2. Try importlib.metadata (works for pip-installed packages)
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version("onnxruntime-genai")
+    except Exception:
+        pass
+
+    # 3. Fall back to VERSION_INFO file at repository root
+    try:
+        # Walk up from this file to find VERSION_INFO
+        import pathlib
+        d = pathlib.Path(__file__).resolve().parent
+        for _ in range(10):
+            candidate = d / "VERSION_INFO"
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8").strip()
+            d = d.parent
+    except Exception:
+        pass
+
+    return "unknown"
 
 
 def _format_exception_message(ex: BaseException, tb=None) -> str:
