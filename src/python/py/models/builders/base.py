@@ -466,6 +466,18 @@ class Model:
                 "ntk_beta": beta_fast,
             }
 
+        elif (
+            config.rope_scaling.get("rope_type", config.rope_scaling.get("type")) == "linear"
+            and "factor" in config.rope_scaling
+        ):
+            print("Linear RoPE scaling is used in this model.")
+            # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
+            # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.
+            factor = float(config.rope_scaling["factor"])
+            if factor <= 0:
+                raise ValueError(f"rope_scaling.factor must be positive for linear RoPE scaling, got {factor}")
+            self.rope_attrs["rescale_factors"] = factor
+
         elif "mrope_section" in config.rope_scaling:
             # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
             self.rope_attrs["mrope"] = {
