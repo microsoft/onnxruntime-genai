@@ -17,10 +17,14 @@ class SmolLM3Model(LlamaModel):
         # So, we temporarily modify the model's attributes before calling the
         # base `make_attention` method, then restore them immediately after.
         original_use_rope = self.attention_attrs["use_rope_in_attn"]
+        original_rope = self.attention_attrs["rope"]
         original_window_size = self.window_size
 
         # Enable/disable RoPE for the current layer.
-        self.attention_attrs["use_rope_in_attn"] = bool(self.no_rope_layers[layer_id])
+        # no_rope_layers[i] = 1 means layer i uses RoPE; 0 means no RoPE.
+        has_rope = bool(self.no_rope_layers[layer_id])
+        self.attention_attrs["rope"] = has_rope
+        self.attention_attrs["use_rope_in_attn"] = has_rope and original_use_rope
 
         # Set the sliding window size for the current layer.
         assert self.layer_types[layer_id] in {"sliding_attention", "full_attention"}
@@ -32,4 +36,5 @@ class SmolLM3Model(LlamaModel):
 
         # Restore original values
         self.attention_attrs["use_rope_in_attn"] = original_use_rope
+        self.attention_attrs["rope"] = original_rope
         self.window_size = original_window_size

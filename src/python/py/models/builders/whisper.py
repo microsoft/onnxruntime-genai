@@ -3,14 +3,15 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # -------------------------------------------------------------------------
-from .base import Model
-
 import copy
 import json
 import os
 
 import onnx_ir as ir
 import torch
+
+from .base import Model
+
 
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
@@ -31,8 +32,8 @@ class WhisperEncoder(Model):
         self.max_source_positions = config.max_source_positions
 
         extra_options["include_hidden_states"] = True  # Include hidden states as output
-        extra_options["exclude_lm_head"] = True        # Exclude LM head since it's not used in the encoder
-        extra_options["filename"] = "encoder.onnx"     # Label encoder ONNX model
+        extra_options["exclude_lm_head"] = True  # Exclude LM head since it's not used in the encoder
+        extra_options["filename"] = "encoder.onnx"  # Label encoder ONNX model
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -42,6 +43,10 @@ class WhisperEncoder(Model):
 
     def is_gqa_supported(self):
         # GQA is not supported in Whisper since there is no attention mask input
+        return False
+
+    def is_packed_attn_supported(self):
+        # Packed Attention is not supported in the encoder
         return False
 
     def make_inputs_and_outputs(self):
@@ -56,15 +61,21 @@ class WhisperEncoder(Model):
             "present_key_cross": [f"present_key_cross_{i}" for i in range(self.num_layers)],
             "present_value_cross": [f"present_value_cross_{i}" for i in range(self.num_layers)],
         }
-        self.output_types = {
-            "hidden_states": self.io_dtype,
-            "present_key_cross": self.io_dtype,
-            "present_value_cross": self.io_dtype,
-        }
+        self.output_types = {"hidden_states": self.io_dtype, "present_key_cross": self.io_dtype, "present_value_cross": self.io_dtype}
         self.output_shapes = {
             "hidden_states": ["batch_size", self.max_source_positions, self.hidden_size],  # ['batch_size', 'num_frames / 2', 'hidden_size']
-            "present_key_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
-            "present_value_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size]  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "present_key_cross": [
+                "batch_size",
+                self.num_attn_heads,
+                self.max_source_positions,
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "present_value_cross": [
+                "batch_size",
+                self.num_attn_heads,
+                self.max_source_positions,
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
         }
 
         # Now set inputs and outputs
@@ -83,11 +94,21 @@ class WhisperEncoder(Model):
 
         conv_1_name = f"{basename}/Conv_1"
         conv_1_inputs = ["audio_features", conv_1_weight, conv_1_bias]
-        self.make_conv(conv_1_name, conv_1_inputs, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, 3000], dilations=[1], group=1, kernel_shape=[3], pads=[1, 1], strides=[1])
+        self.make_conv(
+            conv_1_name,
+            conv_1_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", self.hidden_size, 3000],
+            dilations=[1],
+            group=1,
+            kernel_shape=[3],
+            pads=[1, 1],
+            strides=[1],
+        )
 
         gelu_1_name = f"{basename}/Gelu_1"
         gelu_1_output = f"{gelu_1_name}/output_0"
-        self.make_node("Gelu", inputs=[f"{conv_1_name}/output_0"], outputs=[gelu_1_output], name=gelu_1_name, approximate="none")
+        self.make_node("Gelu", inputs=[f"{conv_1_name}/output_0"], outputs=[gelu_1_output], name=gelu_1_name)
         self.make_value(gelu_1_output, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, 3000])
 
         conv_2_weight = "encoder.conv2.weight"
@@ -97,21 +118,42 @@ class WhisperEncoder(Model):
 
         conv_2_name = f"{basename}/Conv_2"
         conv_2_inputs = [f"{gelu_1_name}/output_0", conv_2_weight, conv_2_bias]
-        self.make_conv(conv_2_name, conv_2_inputs, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, self.max_source_positions], dilations=[1], group=1, kernel_shape=[3], pads=[1, 1], strides=[2])
+        self.make_conv(
+            conv_2_name,
+            conv_2_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", self.hidden_size, self.max_source_positions],
+            dilations=[1],
+            group=1,
+            kernel_shape=[3],
+            pads=[1, 1],
+            strides=[2],
+        )
 
         gelu_2_name = f"{basename}/Gelu_2"
         gelu_2_output = f"{gelu_2_name}/output_0"
-        self.make_node("Gelu", inputs=[f"{conv_2_name}/output_0"], outputs=[gelu_2_output], name=gelu_2_name, approximate="none")
+        self.make_node("Gelu", inputs=[f"{conv_2_name}/output_0"], outputs=[gelu_2_output], name=gelu_2_name)
         self.make_value(gelu_2_output, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, self.max_source_positions])
 
         transpose_name = f"{basename}/Transpose"
-        self.make_transpose(transpose_name, root_input=gelu_2_output, dtype=self.io_dtype, shape=["batch_size", self.max_source_positions, self.hidden_size], perm=[0, 2, 1])
+        self.make_transpose(
+            transpose_name,
+            root_input=gelu_2_output,
+            dtype=self.io_dtype,
+            shape=["batch_size", self.max_source_positions, self.hidden_size],
+            perm=[0, 2, 1],
+        )
 
         position_embeds = "encoder.embed_positions.weight"
         self.make_initializer(self.weights.model.encoder.embed_positions.weight, position_embeds, to=self.io_dtype)
 
         add_name = f"{basename}/Add"
-        self.make_add(add_name, inputs=[f"{transpose_name}/output_0", position_embeds], dtype=self.io_dtype, shape=["batch_size", self.max_source_positions, self.hidden_size])
+        self.make_add(
+            add_name,
+            inputs=[f"{transpose_name}/output_0", position_embeds],
+            dtype=self.io_dtype,
+            shape=["batch_size", self.max_source_positions, self.hidden_size],
+        )
 
         self.layernorm_attrs["root_input"] = f"{add_name}/output_0"
         self.layernorm_attrs["skip_input"] = f"{add_name}/output_0"
@@ -166,7 +208,10 @@ class WhisperEncoder(Model):
                 reshape_name = f"{basename}/Reshape"
                 self.make_reshape(
                     reshape_name,
-                    [f"{add_name if proj_type == 'v_proj' else matmul_name}/output_0", f"/model/constants/INT64/[-1, {self.max_source_positions}, {self.num_attn_heads}, {self.head_size}]"],
+                    [
+                        f"{add_name if proj_type == 'v_proj' else matmul_name}/output_0",
+                        f"/model/constants/INT64/[-1, {self.max_source_positions}, {self.num_attn_heads}, {self.head_size}]",
+                    ],
                     dtype=self.io_dtype,
                     shape=["batch_size", self.max_source_positions, self.num_attn_heads, self.head_size],
                 )
@@ -174,18 +219,19 @@ class WhisperEncoder(Model):
                 transpose_name = f"{basename}/Transpose"
                 output_name = f"present_{'key' if proj_type == 'k_proj' else 'value'}_cross_{i}"
                 self.make_node(
-                    "Transpose",
-                    inputs=[f"{reshape_name}/output_0"],
-                    outputs=[output_name],
-                    name=transpose_name,
-                    perm=[0, 2, 1, 3],
+                    "Transpose", inputs=[f"{reshape_name}/output_0"], outputs=[output_name], name=transpose_name, perm=[0, 2, 1, 3]
                 )
 
     def is_layer(self, module):
         return module.__class__.__name__.endswith("EncoderLayer")
 
     def has_final_norm(self, module, model):
-        hf_norm = hasattr(model, "model") and hasattr(model.model, "encoder") and hasattr(model.model.encoder, "layer_norm") and module == model.model.encoder.layer_norm
+        hf_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "encoder")
+            and hasattr(model.model.encoder, "layer_norm")
+            and module == model.model.encoder.layer_norm
+        )
         return hf_norm
 
 
@@ -243,10 +289,30 @@ class WhisperDecoder(Model):
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],
-            "past_key_self": ["batch_size", self.num_attn_heads, "past_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
-            "past_value_self": ["batch_size", self.num_attn_heads, "past_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
-            "past_key_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
-            "past_value_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "past_key_self": [
+                "batch_size",
+                self.num_attn_heads,
+                "past_sequence_length",
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "past_value_self": [
+                "batch_size",
+                self.num_attn_heads,
+                "past_sequence_length",
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "past_key_cross": [
+                "batch_size",
+                self.num_attn_heads,
+                self.max_source_positions,
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
+            "past_value_cross": [
+                "batch_size",
+                self.num_attn_heads,
+                self.max_source_positions,
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
         }
 
         # Set output dicts
@@ -265,8 +331,18 @@ class WhisperDecoder(Model):
         self.output_shapes = {
             "hidden_states": ["batch_size", "sequence_length", self.hidden_size],
             "logits": ["batch_size", "sequence_length", self.vocab_size],
-            "present_key_self": ["batch_size", self.num_attn_heads, "total_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
-            "present_value_self": ["batch_size", self.num_attn_heads, "total_sequence_length", self.head_size],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
+            "present_key_self": [
+                "batch_size",
+                self.num_attn_heads,
+                "total_sequence_length",
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
+            "present_value_self": [
+                "batch_size",
+                self.num_attn_heads,
+                "total_sequence_length",
+                self.head_size,
+            ],  # ['batch_size', 'num_heads', 'total_sequence_length', 'head_size']
         }
         self.make_outputs_init()
 
@@ -314,20 +390,39 @@ class WhisperDecoder(Model):
         self.make_unsqueeze(unsqueeze_0_name, [f"{add_1_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
 
         unsqueeze_1_name = f"{past_key_basename}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_1_name, [f"{past_key_gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
+        self.make_unsqueeze(
+            unsqueeze_1_name, [f"{past_key_gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1]
+        )
 
         position_embeds = "decoder.embed_positions.weight"
         self.make_initializer(self.weights.model.decoder.embed_positions.weight, position_embeds, to=self.io_dtype)
         slice_name = f"{basename}/Slice"
-        slice_inputs = [position_embeds, f"{unsqueeze_1_name}/output_0", f"{unsqueeze_0_name}/output_0", "/model/constants/INT64/[0]", "/model/constants/INT64/[1]"]
+        slice_inputs = [
+            position_embeds,
+            f"{unsqueeze_1_name}/output_0",
+            f"{unsqueeze_0_name}/output_0",
+            "/model/constants/INT64/[0]",
+            "/model/constants/INT64/[1]",
+        ]
         self.make_slice(slice_name, slice_inputs, dtype=self.io_dtype, shape=["sequence_length", self.hidden_size])
 
         token_embeds = "decoder.embed_tokens.weight"
         self.make_initializer(self.weights.model.decoder.embed_tokens.weight, token_embeds, to=self.io_dtype)
         gather_1_name = f"{basename}/Gather_1"
-        self.make_gather(gather_1_name, [token_embeds, "input_ids"], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size], axis=0)
+        self.make_gather(
+            gather_1_name,
+            [token_embeds, "input_ids"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+            axis=0,
+        )
         add_2_name = f"{basename}/Add"
-        self.make_add(add_2_name, [f"{gather_1_name}/output_0", f"{slice_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_add(
+            add_2_name,
+            [f"{gather_1_name}/output_0", f"{slice_name}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
 
         self.layernorm_attrs["root_input"] = f"{add_2_name}/output_0"
         self.layernorm_attrs["skip_input"] = f"{add_2_name}/output_0"
@@ -335,7 +430,7 @@ class WhisperDecoder(Model):
     def make_embedding(self, embedding):
         # Embedding is already created in preprocessing
         pass
-    
+
     def make_layer(self, layer_id, layer):
         # Each Whisper decoder layer is typically defined as:
         # self_attn_layernorm --> self-attention --> cross_attn_layernorm --> cross-attention --> output_layernorm --> MLP
@@ -353,11 +448,7 @@ class WhisperDecoder(Model):
 
         # Encoder layernorm
         self.make_layernorm(
-            layer_id,
-            layer.encoder_attn_layer_norm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="cross_attn",
+            layer_id, layer.encoder_attn_layer_norm, skip=True, simple=self.layernorm_attrs["simple"], location="cross_attn"
         )
 
         # Cross-attention (unidirectional = False)
@@ -366,13 +457,7 @@ class WhisperDecoder(Model):
         self.attention_attrs["unidirectional"] = True
 
         # Output layernorm
-        self.make_layernorm(
-            layer_id,
-            layer.final_layer_norm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
-        )
+        self.make_layernorm(layer_id, layer.final_layer_norm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
 
         # MLP
         class WhisperDecoderMLP(torch.nn.Module):
@@ -456,7 +541,12 @@ class WhisperDecoder(Model):
         return module.__class__.__name__.endswith("DecoderLayer")
 
     def has_final_norm(self, module, model):
-        hf_norm = hasattr(model, "model") and hasattr(model.model, "decoder") and hasattr(model.model.decoder, "layer_norm") and module == model.model.decoder.layer_norm
+        hf_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "decoder")
+            and hasattr(model.model.decoder, "layer_norm")
+            and module == model.model.decoder.layer_norm
+        )
         return hf_norm
 
 
@@ -927,7 +1017,9 @@ class WhisperModel(Model):
                 "decoder": {
                     "session_options": {
                         "log_id": "onnxruntime-genai",
-                        "provider_options": [{self.decoder.ep: self.decoder.ep_attrs[self.decoder.ep]}] if self.decoder.ep != "cpu" else [],
+                        "provider_options": (
+                            [{self.decoder.ep: self.decoder.ep_attrs[self.decoder.ep]}] if self.decoder.ep != "cpu" else []
+                        ),
                     },
                     "filename": self.decoder.filename,
                     "head_size": self.decoder.head_size,
@@ -951,7 +1043,9 @@ class WhisperModel(Model):
                 "encoder": {
                     "session_options": {
                         "log_id": "onnxruntime-genai",
-                        "provider_options": [{self.encoder.ep: self.encoder.ep_attrs[self.encoder.ep]}] if self.encoder.ep != "cpu" else [],
+                        "provider_options": (
+                            [{self.encoder.ep: self.encoder.ep_attrs[self.encoder.ep]}] if self.encoder.ep != "cpu" else []
+                        ),
                     },
                     "filename": self.encoder.filename,
                     "head_size": self.encoder.head_size,

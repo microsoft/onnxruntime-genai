@@ -6,11 +6,52 @@
 from .llama import LlamaModel
 
 
+class NemotronHModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # NemotronH uses `mlp_hidden_act` instead of `hidden_act`
+        if not hasattr(config, "hidden_act"):
+            config.hidden_act = getattr(config, "mlp_hidden_act", "relu2")
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # NemotronH attention does not use rotary position embeddings (NoPE)
+        self.attention_attrs["rope"] = False
+        self.attention_attrs["use_rope_in_attn"] = False
+        # NemotronH uses RMSNorm (simplified, no bias)
+        self.layernorm_attrs["simple"] = True
+        self.layernorm_attrs["epsilon"] = config.layer_norm_epsilon
+
+    def is_layer(self, module):
+        return module.__class__.__name__ == "NemotronHBlock"
+
+    def has_final_norm(self, module, orig_model):
+        return hasattr(orig_model, "model") and hasattr(orig_model.model, "norm_f") and module == orig_model.model.norm_f
+
+    def make_layer(self, layer_id, layer):
+        # Each NemotronH decoder block is defined as:
+        # pre_norm --> mixer (attention / mamba / moe) --> residual add
+        #
+        # Only attention blocks are supported for ONNX export.
+        if layer.block_type != "attention":
+            raise NotImplementedError(
+                f"NemotronH block type '{layer.block_type}' is not supported for ONNX export. "
+                "Only 'attention' layers are currently supported."
+            )
+
+        self.make_layernorm(layer_id, layer.norm, skip=not self.layernorm_attrs["first_layernorm"], simple=True, location="input")
+        self.make_attention(layer_id, layer.mixer, root_input=self.layernorm_attrs["output_0"])
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+
 class NemotronModel(LlamaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["add_offset"] = 1
+        if hasattr(config, "norm_eps"):
+            self.layernorm_attrs["epsilon"] = config.norm_eps
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph

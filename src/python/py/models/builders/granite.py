@@ -32,20 +32,13 @@ class GraniteModel(MistralModel):
             f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.residual_scale}",
         ]
         self.make_mul(
-            residual_mul_1_name,
-            residual_mul_1_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            residual_mul_1_name, residual_mul_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
         )
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_1_name}/output_0"
 
         self.make_layernorm(
-            layer_id,
-            layer.post_attention_layernorm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
+            layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention"
         )
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
@@ -55,10 +48,7 @@ class GraniteModel(MistralModel):
             f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.residual_scale}",
         ]
         self.make_mul(
-            residual_mul_2_name,
-            residual_mul_2_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            residual_mul_2_name, residual_mul_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
         )
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_2_name}/output_0"

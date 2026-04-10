@@ -16,6 +16,8 @@ src/csharp/AssemblyInfo.cs
 *.csv
 .idea
 cache_dir
+dump_models
+stats
 example-models
 *.onnx
 *.onnx.data

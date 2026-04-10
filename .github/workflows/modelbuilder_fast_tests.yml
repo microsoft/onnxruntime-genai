@@ -1,0 +1,61 @@
+name: Fast Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ci (${{ matrix.os }}, py${{ matrix.python-version }}, torch-${{ matrix.torch-version || 'stable' }}, transformers-${{ matrix.transformers-version || 'latest' }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: ["3.13"]
+        transformers-version: ["4.57", "5.5"]
+        torch-version: ["2.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # we install torch first to avoid downloading any CUDA dependency
+
+      - name: Install nightly pytorch (cpu)
+        if: matrix.torch-version == 'nightly'
+        run: pip install --pre --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
+
+      - name: Install pytorch 2.11 (Linux/Windows)
+        if: matrix.torch-version == '2.11' && matrix.os != 'macos-latest'
+        run: pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl pytest huggingface_hub onnxruntime onnxruntime-genai peft py-cpuinfo pytest-cov pytest-subtests tabulate
+
+      - name: Run fast tests
+        run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=modelbuilder --cov-report=xml --cov-report=term-missing
+
+      # Code to upload coverage report.
+      # - name: Upload coverage reports to Codecov
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #    token: ${{ secrets.CODECOV_TOKEN }}
+      #     flags: modelbuilder-fast-tests
+
+      - name: Upload stats artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-${{ matrix.os }}-py${{ matrix.python-version }}-torch${{ matrix.torch-version }}-transformers${{ matrix.transformers-version }}
+          path: stats/
+          if-no-files-found: ignore

@@ -12,7 +12,7 @@ def pytest_addoption(parser):
         "--test_models",
         help="Path to the current working directory",
         type=str,
-        required=True,
+        required=False,
     )
 
 

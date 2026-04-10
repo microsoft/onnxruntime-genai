@@ -16,39 +16,8 @@ from typing import Any
 
 import onnx_ir as ir
 import torch
-from builders import (
-    ChatGLMModel,
-    ErnieModel,
-    Gemma2Model,
-    Gemma3Model,
-    GemmaModel,
-    GPTOSSModel,
-    GraniteModel,
-    InternLM2Model,
-    LlamaModel,
-    MistralModel,
-    Model,
-    NemotronModel,
-    OLMoModel,
-    Phi3MiniLongRoPEModel,
-    Phi3MiniModel,
-    Phi3MoELongRoPEModel,
-    Phi3SmallLongRoPEModel,
-    Phi3SmallModel,
-    Phi3VModel,
-    Phi4MMModel,
-    PhiModel,
-    Qwen3Model,
-    Qwen3VLTextModel,
-    Qwen25VLTextModel,
-    Qwen35TextModel,
-    QwenModel,
-    SmolLM3Model,
-    WhisperModel,
-)
-from transformers import (
-    AutoConfig,
-)
+from transformers import AutoConfig
+from .builders import Model
 
 
 def check_extra_options(kv_pairs, execution_provider):
@@ -211,17 +180,31 @@ def create_model(
         # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
+        from .builders.chatglm import ChatGLMModel
+
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
     elif config.architectures[0] == "Ernie4_5ForCausalLM":
+        from .builders.ernie import ErnieModel
+
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GemmaForCausalLM":
+        from .builders.gemma import GemmaModel
+
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        from .builders.gemma import Gemma2Model
+
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        from .builders.gemma import Gemma3Model
+
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -229,76 +212,192 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
+        from .builders.gemma import Gemma3Model
+
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
             delattr(config, "quantization_config")
+        from .builders.gptoss import GPTOSSModel
+
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
+        from .builders.granite import GraniteModel
+
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
+        from .builders.internlm import InternLM2Model
+
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
+        from .builders.llama import LlamaModel
+
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
+        from .builders.mistral import MistralModel
+
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Ministral3ForCausalLM":
+        from .builders.mistral import Ministral3TextModel
+
+        if hasattr(config, "quantization_config"):
+            # Remove FP8 quantization_config to avoid wrong weight loading via
+            # QuantModel; Ministral3TextModel.load_weights handles dequantization.
+            delattr(config, "quantization_config")
+        onnx_model = Ministral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        if hasattr(config, "quantization_config"):
+            # Remove FP8 quantization_config to avoid wrong weight loading via
+            # QuantModel; Ministral3TextModel.load_weights handles dequantization.
+            delattr(config, "quantization_config")
+        print(
+            "WARNING: Exporting the text decoder with `exclude_embeds=true` and a separate "
+            "vision encoder (vision_encoder.onnx) for Mistral3ForConditionalGeneration."
+        )
+        from .builders.mistral import Ministral3ConditionalGenerationModel
+
+        onnx_model = Ministral3ConditionalGenerationModel(
+            config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options
+        )
+    elif config.architectures[0] == "MistralNeMoForCausalLM":
+        from .builders.mistral import MistralNeMoModel
+
+        onnx_model = MistralNeMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
+        from .builders.nemotron import NemotronModel
+
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronHForCausalLM":
+        from .builders.nemotron import NemotronHModel
+
+        onnx_model = NemotronHModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
+        from .builders.olmo import OLMoModel
+
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Olmo2ForCausalLM":
+        from .builders.olmo import OLMo2Model
+
+        onnx_model = OLMo2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Olmo3ForCausalLM":
+        from .builders.olmo import OLMo3Model
+
+        onnx_model = OLMo3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
+        from .builders.phi import PhiModel
+
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
+        from .builders.phi import Phi3MiniModel
+
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        from .builders.phi import Phi3MiniLongRoPEModel
+
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
+    elif (
+        config.architectures[0] == "PhiMoEForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        print(
+            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
+        )
+        print(
+            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
+        )
+        from .builders.phi import Phi3MoELongRoPEModel
+
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
+        from .builders.phi import Phi3SmallModel
+
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        from .builders.phi import Phi3SmallLongRoPEModel
+
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
+        from .builders.phi import Phi3VModel
+
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
+        from .builders.phi import Phi4MMModel
+
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
+        from .builders.qwen import QwenModel
+
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
+        from .builders.qwen import Qwen25VLTextModel
+
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
+        from .builders.qwen import Qwen3Model
+
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        from .builders.qwen import Qwen35TextModel
+
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
+        from .builders.qwen import Qwen3VLTextModel
+
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
+        from .builders.smollm import SmolLM3Model
+
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "WhisperForConditionalGeneration":
+        from .builders.whisper import WhisperModel
+
         onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
         # Create base Model class to guess model attributes
