@@ -8,8 +8,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda, requires_yobx
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_yobx, run_session_or_io_binding
 
 MISTRAL_NEMO_MODEL_NAME = "mistralai/Mistral-Nemo-Instruct-2407"
 
@@ -17,11 +16,10 @@ MISTRAL_NEMO_MODEL_NAME = "mistralai/Mistral-Nemo-Instruct-2407"
 class TestMistralNeMo(ExtTestCase):
     def common_fast_mistral_nemo_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, MistralConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = MistralConfig(
@@ -161,11 +159,10 @@ class TestMistralNeMo(ExtTestCase):
 
     def common_mistral_nemo_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, MistralConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = MistralConfig(
@@ -516,8 +513,8 @@ class TestMistralNeMo(ExtTestCase):
         """
         import torch
         from transformers import AutoModelForCausalLM, MistralConfig
-        from yobx.torch.in_transformers.cache_helper import make_dynamic_cache
         from yobx.torch import register_flattening_functions
+        from yobx.torch.in_transformers.cache_helper import make_dynamic_cache
 
         num_hidden_layers = 1
         config = MistralConfig(
@@ -654,8 +651,8 @@ class TestMistralNeMo(ExtTestCase):
         """
         import torch
         import transformers
-        from transformers import AutoModelForCausalLM, MistralConfig
         from models.helpers.cache_helper import registers_dynamic_cache
+        from transformers import AutoModelForCausalLM, MistralConfig
 
         num_hidden_layers = 1
         config = MistralConfig(
@@ -934,11 +931,10 @@ class TestMistralNeMo(ExtTestCase):
           original PyTorch model.
         """
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, MistralConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         head_dim = 48  # intentionally != hidden_size // num_attention_heads (64)
         num_hidden_layers = 1
@@ -1023,7 +1019,6 @@ class TestMistralNeMo(ExtTestCase):
     def test_dequantize_fp8_weights_no_op_when_no_fp8(self):
         """_dequantize_fp8_weights leaves normal float32 weights unchanged."""
         import torch
-
         from models.builders.mistral import _dequantize_fp8_weights
 
         linear = torch.nn.Linear(8, 4, bias=False)

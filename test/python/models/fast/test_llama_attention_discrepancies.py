@@ -8,7 +8,6 @@ import unittest
 
 import numpy as np
 import onnx_ir as ir
-
 from builders.llama import LlamaModel
 from ext_test_case import ExtTestCase, hide_stdout, requires_transformers
 

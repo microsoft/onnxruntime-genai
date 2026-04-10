@@ -8,7 +8,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 ZAI_CHATGLM_MODEL_NAME = "zai-org/chatglm3-6b"

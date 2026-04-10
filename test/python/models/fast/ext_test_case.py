@@ -7,7 +7,8 @@ import re
 import shutil
 import unittest
 import warnings
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple, Union
+from collections.abc import Callable
+from typing import Any, Union
 
 import numpy as np
 import onnx
@@ -145,7 +146,7 @@ def requires_cuda(version: str = "", msg: str = "", memory: int = 0):
     return lambda x: x
 
 
-def ignore_warnings(warns: List[Warning]) -> Callable:
+def ignore_warnings(warns: list[Warning]) -> Callable:
     """
     Catches warnings.
 
@@ -166,7 +167,7 @@ def ignore_warnings(warns: List[Warning]) -> Callable:
     return wrapper
 
 
-def hide_stdout(f: Optional[Callable] = None) -> Callable:
+def hide_stdout(f: Callable | None = None) -> Callable:
     """
     Catches warnings, hides standard output.
     The function may be disabled by setting ``UNHIDE=1``
@@ -202,7 +203,7 @@ def hide_stdout(f: Optional[Callable] = None) -> Callable:
     return wrapper
 
 
-def _msg(msg: Union[Callable[[], str], str], add_bracket: bool = True) -> str:
+def _msg(msg: Callable[[], str] | str, add_bracket: bool = True) -> str:
     if add_bracket:
         m = _msg(msg, add_bracket=False)
         if m:
@@ -215,7 +216,7 @@ def _msg(msg: Union[Callable[[], str], str], add_bracket: bool = True) -> str:
     return msg or ""
 
 
-def long_test(msg: Optional[Union[Callable[[], str], str]] = None) -> Callable:
+def long_test(msg: Callable[[], str] | str | None = None) -> Callable:
     """Skips a unit test if it runs on :epkg:`azure pipeline` on :epkg:`Windows`."""
     if os.environ.get("LONGTEST", "0") in ("0", 0, False, "False", "false"):
         msg = f"Skipped (set LONGTEST=1 to run it. {_msg(msg)}"
@@ -236,7 +237,7 @@ class ExtTestCase(unittest.TestCase):
         if os.path.exists(path):
             shutil.rmtree(path)
 
-    def get_dirs(self, prefix: str, clean: bool = True) -> Tuple[str]:
+    def get_dirs(self, prefix: str, clean: bool = True) -> tuple[str]:
         output_dir = f"dump_models/{prefix}/output"
         cache_dir = os.path.expanduser(f"~/.cache/modelbuilder/{prefix}")
         os.makedirs(output_dir, exist_ok=True)
@@ -245,7 +246,7 @@ class ExtTestCase(unittest.TestCase):
             self.addCleanup(self.clean_dir, f"dump_models/{prefix}/output_dir")
         return output_dir, cache_dir
 
-    def get_model_dir(self, prefix: str, clean: bool = False) -> Tuple[str]:
+    def get_model_dir(self, prefix: str, clean: bool = False) -> tuple[str]:
         model_dir = f"dump_models/{prefix}/checkpoint"
         os.makedirs(model_dir, exist_ok=True)
         if clean or self._do_clean:
@@ -268,7 +269,7 @@ class ExtTestCase(unittest.TestCase):
             value = np.array(value).astype(expected.dtype)
         self.assertEqualArray(expected, value, atol=atol, rtol=rtol)
 
-    def assertRaise(self, fct: Callable, exc_type: Exception, msg: Optional[str] = None):
+    def assertRaise(self, fct: Callable, exc_type: Exception, msg: str | None = None):
         try:
             fct()
         except exc_type as e:
@@ -303,7 +304,7 @@ class ExtTestCase(unittest.TestCase):
         return self._check_with_ort(onx, cpu=True)
 
     def _check_with_ort(
-        self, proto: Union["onnx.ModelProto", str], cpu: bool = False  # noqa: F821
+        self, proto: Union["onnx.ModelProto", str], cpu: bool = False
     ) -> "onnxruntime.InferenceSession":  # noqa: F821
         from onnxruntime import InferenceSession, get_available_providers
 
@@ -321,7 +322,7 @@ class ExtTestCase(unittest.TestCase):
     def first_token_diff(self, expected, values):
         return first_token_diff(expected, values)
 
-    def log_results(self, data: Dict[str, Any]):
+    def log_results(self, data: dict[str, Any]):
         stat_folder = "stats"
         os.makedirs(stat_folder, exist_ok=True)
         json_path = os.path.join(stat_folder, "end2end_results.json")
@@ -471,7 +472,7 @@ def edit_distance(str1, str2) -> int:
     return dp[m][n]
 
 
-def first_token_diff(expected: List[int], values: List[int]) -> Dict[str, Any]:
+def first_token_diff(expected: list[int], values: list[int]) -> dict[str, Any]:
     delta_length = len(values) - len(expected)
     first_diff = None
     for i, (a, b) in enumerate(zip(expected, values)):
@@ -582,14 +583,14 @@ def _make_json_serializable(value: Any) -> Any:
     return value
 
 
-def _read_results(json_path: str) -> List[Dict[str, Any]]:
+def _read_results(json_path: str) -> list[dict[str, Any]]:
     """Read all newline-delimited JSON records from *json_path*.
 
     Lines that cannot be parsed (legacy ``str(dict)`` format) are loaded with
     :func:`ast.literal_eval` as a fallback; any value that is still
     un-evaluable is stored as the raw string.
     """
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     with open(json_path) as f:
         for line in f:
             line = line.strip()
@@ -607,8 +608,8 @@ def _read_results(json_path: str) -> List[Dict[str, Any]]:
 
 def torch_dtype_to_ort_element_type(dtype):
     """Map a :class:`torch.dtype` to the corresponding ORT TensorProto element type int."""
-    from onnx import TensorProto
     import torch
+    from onnx import TensorProto
 
     return {
         torch.float32: TensorProto.FLOAT,
@@ -668,7 +669,7 @@ def _ort_io_binding_helper(sess, input_tensors, output_tensors, device="cuda:0")
     sess.run_with_iobinding(bind)
 
 
-def results_to_dataframe(results: List[Dict[str, Any]]) -> str:
+def results_to_dataframe(results: list[dict[str, Any]]) -> str:
     """Convert a list of result dictionaries to a DataFrame."""
     import pandas
 
@@ -693,13 +694,13 @@ def run_session_or_io_binding(
     use_iobinding: bool,
     precision: str,
     provider: str,
-    feed: Dict[str, np.ndarray],
+    feed: dict[str, np.ndarray],
     sess: "onnxruntime.InferenceSession",  # noqa: F821
     vocab_size: int,
-    results: Optional[Dict[str, np.ndarray]] = None,
-) -> Tuple[Dict[str, "torch.Tensor"], np.ndarray]:  # noqa: F821
-    import torch
+    results: dict[str, np.ndarray] | None = None,
+) -> tuple[dict[str, "torch.Tensor"], np.ndarray]:
     import ml_dtypes
+    import torch
 
     device = f"{provider}:0" if use_iobinding else provider
     # Build torch input tensors on the CUDA device.
@@ -799,7 +800,7 @@ def fill_with_empty_cache(onnx_feed, session, provider, batch_size=1):
 
 
 
-def _flatten_key_value_cache(cache: transformers.cache_utils.DynamicCache) -> Tuple[List[Any], torch.utils._pytree.Context]:
+def _flatten_key_value_cache(cache: transformers.cache_utils.DynamicCache) -> tuple[list[Any], torch.utils._pytree.Context]:
     keys = [lay.keys for lay in cache.layers]
     values = [lay.values for lay in cache.layers]
     flat = list(itertools.chain.from_iterable(zip(keys, values)))
@@ -811,12 +812,12 @@ def _flatten_key_value_cache(cache: transformers.cache_utils.DynamicCache) -> Tu
 
 def _flatten_with_keys_cache(
     cache: transformers.cache_utils.DynamicCache,
-) -> Tuple[List[Tuple[torch.utils._pytree.MappingKey, Any]], torch.utils._pytree.Context]:
+) -> tuple[list[tuple[torch.utils._pytree.MappingKey, Any]], torch.utils._pytree.Context]:
     values, context = _flatten_key_value_cache(cache)
     return [(torch.utils._pytree.MappingKey(k), v) for k, v in zip(context, values)], context
 
 
-def _unflatten_cache(values: List[Any], context: torch.utils._pytree.Context, output_type=None) -> transformers.cache_utils.DynamicCache:
+def _unflatten_cache(values: list[Any], context: torch.utils._pytree.Context, output_type=None) -> transformers.cache_utils.DynamicCache:
     """Restores a cache from python objects."""
     expected = list(itertools.chain.from_iterable((f"key_{i}", f"value_{i}") for i in range(len(values) // 2)))
     assert expected == context, f"Does not seem to be a dynamic cache {expected} != {context}"
@@ -843,7 +844,7 @@ def registers_dynamic_cache():
 # OnnxRuntime type-string → numpy dtype mapping
 # ---------------------------------------------------------------------------
 
-_ORT_TYPE_TO_NUMPY: Dict[str, type] = {
+_ORT_TYPE_TO_NUMPY: dict[str, type] = {
     "tensor(float)": np.float32,
     "tensor(float32)": np.float32,
     "tensor(float16)": np.float16,
@@ -878,10 +879,10 @@ def _ort_type_to_numpy_dtype(ort_type: str) -> type:
                 return ml_dtypes.bfloat16
             except ImportError:
                 pass
-        raise ValueError(f"Unknown OnnxRuntime type string {ort_type!r}. " f"Known types: {sorted(_ORT_TYPE_TO_NUMPY)}") from None
+        raise ValueError(f"Unknown OnnxRuntime type string {ort_type!r}. Known types: {sorted(_ORT_TYPE_TO_NUMPY)}") from None
 
 
-def _get_dim(i: int, s: Optional[Union[str, int]], batch: int = 1) -> int:
+def _get_dim(i: int, s: str | int | None, batch: int = 1) -> int:
     """Returns a concrete integer dimension from a symbolic or integer shape element.
 
     :param i: position of the dimension (0 = batch)
@@ -899,10 +900,10 @@ def _get_dim(i: int, s: Optional[Union[str, int]], batch: int = 1) -> int:
 
 
 # Inputs that are never treated as KV-cache slots.
-_KNOWN_NON_CACHE: FrozenSet[str] = frozenset({"input_ids", "attention_mask", "position_ids", "token_type_ids", "cache_position"})
+_KNOWN_NON_CACHE: frozenset[str] = frozenset({"input_ids", "attention_mask", "position_ids", "token_type_ids", "cache_position"})
 
 
-def _make_empty_cache(batch: int, cache_names: List[str], cache_shapes: List[Tuple], cache_types: List[str]) -> Dict[str, np.ndarray]:
+def _make_empty_cache(batch: int, cache_names: list[str], cache_shapes: list[tuple], cache_types: list[str]) -> dict[str, np.ndarray]:
     """Creates zero-filled KV-cache arrays for the first generation step.
 
     :param batch: batch size
@@ -911,11 +912,11 @@ def _make_empty_cache(batch: int, cache_names: List[str], cache_shapes: List[Tup
     :param cache_types: ORT type strings for those inputs
     :return: dict ``{name: zero ndarray}``
     """
-    feeds: Dict[str, np.ndarray] = {}
+    feeds: dict[str, np.ndarray] = {}
     for name, shape, ort_type in zip(cache_names, cache_shapes, cache_types):
         new_shape = tuple(_get_dim(i, s, batch=batch) for i, s in enumerate(shape))
         if not new_shape or new_shape[0] <= 0:
-            raise ValueError(f"new_shape={new_shape} cannot have a null batch size, " f"name={name!r}, shape={shape}")
+            raise ValueError(f"new_shape={new_shape} cannot have a null batch size, name={name!r}, shape={shape}")
         dtype = _ort_type_to_numpy_dtype(ort_type)
         feeds[name] = np.zeros(new_shape, dtype=dtype)
     return feeds
@@ -924,13 +925,13 @@ def _make_empty_cache(batch: int, cache_names: List[str], cache_shapes: List[Tup
 def onnx_generate(
     model_or_session: Union[str, onnx.ModelProto, "onnxruntime.InferenceSession"],  # noqa: F821
     input_ids: np.ndarray,
-    attention_mask: Optional[np.ndarray] = None,
-    eos_token_id: Optional[int] = None,
+    attention_mask: np.ndarray | None = None,
+    eos_token_id: int | None = None,
     max_new_tokens: int = 20,
     do_sample: bool = False,
     return_session: bool = False,
     verbose: int = 0,
-) -> Union[np.ndarray, Tuple]:
+) -> np.ndarray | tuple:
     """
     Performs auto-regressive token generation using an exported ONNX model
     and :class:`onnxruntime.InferenceSession`.
@@ -1027,9 +1028,9 @@ def onnx_generate(
         session = model_or_session
 
     input_meta = session.get_inputs()
-    input_names: List[str] = [m.name for m in input_meta]
+    input_names: list[str] = [m.name for m in input_meta]
     input_shapes = [m.shape for m in input_meta]
-    input_types: List[str] = [m.type for m in input_meta]
+    input_types: list[str] = [m.type for m in input_meta]
 
     has_position_ids = "position_ids" in input_names
     has_cache_position = "cache_position" in input_names
@@ -1055,7 +1056,7 @@ def onnx_generate(
     # ------------------------------------------------------------------ #
     # Prefill step                                                         #
     # ------------------------------------------------------------------ #
-    feeds: Dict[str, np.ndarray] = {"input_ids": input_ids}
+    feeds: dict[str, np.ndarray] = {"input_ids": input_ids}
     if has_attention_mask:
         feeds["attention_mask"] = attention_mask
     feeds.update(empty_cache)

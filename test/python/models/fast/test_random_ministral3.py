@@ -7,8 +7,13 @@ import os
 import unittest
 
 import numpy as np
-
-from models.ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda, requires_transformers
+from models.ext_test_case import (
+    ExtTestCase,
+    hide_stdout,
+    requires_cuda,
+    requires_transformers,
+    run_session_or_io_binding,
+)
 
 MINISTRAL3_MODEL_NAME = "mistralai/Ministral-3-3B-Instruct-2512"
 
@@ -17,11 +22,10 @@ MINISTRAL3_MODEL_NAME = "mistralai/Ministral-3-3B-Instruct-2512"
 class TestMinistral3(ExtTestCase):
     def common_fast_ministral3_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Ministral3Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = Ministral3Config(
@@ -160,11 +164,10 @@ class TestMinistral3(ExtTestCase):
 
     def common_ministral3_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Ministral3Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = Ministral3Config(
@@ -361,6 +364,7 @@ class TestMinistral3(ExtTestCase):
         * The text decoder produces output when fed ``inputs_embeds``.
         """
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import (
@@ -370,8 +374,6 @@ class TestMinistral3(ExtTestCase):
             PixtralVisionConfig,
             PreTrainedTokenizerFast,
         )
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         # Use a small image size (56×56) so the test stays fast; patch_size=14
@@ -494,7 +496,6 @@ class TestMinistral3(ExtTestCase):
     def test_dequantize_fp8_weights_no_op_when_no_fp8(self):
         """_dequantize_fp8_weights leaves normal float32 weights unchanged."""
         import torch
-
         from models.builders.mistral import _dequantize_fp8_weights
 
         linear = torch.nn.Linear(8, 4, bias=False)

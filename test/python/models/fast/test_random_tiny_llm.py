@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "arnir0/Tiny-LLM"
 
@@ -16,10 +15,10 @@ MODEL_NAME = "arnir0/Tiny-LLM"
 class TestRandomTinyLLM(ExtTestCase):
     def common_fast_tiny_llm_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, LlamaConfig, PreTrainedTokenizerFast
-        from models.builder import create_model
 
         # Config matching the arnir0/Tiny-LLM architecture (LlamaForCausalLM)
         # but with a single hidden layer to keep the test fast.  These values
@@ -195,11 +194,10 @@ class TestRandomTinyLLM(ExtTestCase):
 
     def common_tiny_llm_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, LlamaConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = LlamaConfig(

@@ -9,7 +9,9 @@ from .base import Model
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.rope_attrs["partial_rotary_factor"] = 0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
+        self.rope_attrs["partial_rotary_factor"] = (
+            0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
+        )
         self.rope_attrs["num_heads"] = self.num_attn_heads
         self.rope_attrs["rotary_embedding_dim"] = int(self.head_size * self.rope_attrs["partial_rotary_factor"])
         self.rope_attrs["interleaved"] = 1

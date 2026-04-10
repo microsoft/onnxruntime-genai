@@ -9,7 +9,6 @@ import textwrap
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 PHI3_SMALL_MODEL_NAME = "microsoft/Phi-3-small-8k-instruct"
@@ -441,7 +440,6 @@ class TestPhi3Small(ExtTestCase):
 
     def common_fast_phi3_small_random_weights(self, precision, provider):
         import torch
-
         from models.builder import create_model
 
         num_hidden_layers = 1
@@ -557,7 +555,6 @@ class TestPhi3Small(ExtTestCase):
 
     def common_phi3_small_greedy_generation(self, precision, provider):
         import torch
-
         from models.builder import create_model
 
         num_hidden_layers = 1
@@ -729,7 +726,6 @@ class TestPhi3Small(ExtTestCase):
         RoPE exactly, enabling a numerical comparison of logits.
         """
         import torch
-
         from models.builder import set_io_dtype, set_onnx_dtype
         from models.builders.phi import Phi3SmallLongRoPEModel
 

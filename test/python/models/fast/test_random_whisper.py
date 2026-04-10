@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda
 
 WHISPER_MODEL_NAME = "openai/whisper-tiny"
@@ -16,11 +15,10 @@ WHISPER_MODEL_NAME = "openai/whisper-tiny"
 class TestWhisperModel(ExtTestCase):
     def common_fast_whisper_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import PreTrainedTokenizerFast, WhisperConfig, WhisperForConditionalGeneration
-
-        from models.builder import create_model
 
         # Tiny Whisper config: 1 encoder layer, 1 decoder layer, small d_model.
         # num_mel_bins and max_source_positions are kept at standard values

@@ -62,7 +62,11 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
         self.layernorm_attrs["cast"]["output_0"] = False
         self.make_layernorm(
-            layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention"
+            layer_id,
+            layer.post_attention_layernorm,
+            skip=False,
+            simple=self.layernorm_attrs["simple"],
+            location="post_attention",
         )
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
@@ -73,7 +77,11 @@ class Gemma2Model(GemmaModel):
         original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
         self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
         self.make_layernorm(
-            layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward"
+            layer_id,
+            layer.pre_feedforward_layernorm,
+            skip=True,
+            simple=self.layernorm_attrs["simple"],
+            location="pre_feedforward",
         )
         self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
 
@@ -88,7 +96,11 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
         self.layernorm_attrs["cast"]["output_0"] = False
         self.make_layernorm(
-            layer_id, layer.post_feedforward_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_feedforward"
+            layer_id,
+            layer.post_feedforward_layernorm,
+            skip=False,
+            simple=self.layernorm_attrs["simple"],
+            location="post_feedforward",
         )
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
@@ -101,7 +113,9 @@ class Gemma2Model(GemmaModel):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         original_window_size = self.window_size
-        self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
+        self.window_size = (
+            original_window_size if self.is_local(layer_id) else -1
+        )  # default is -1 in GroupQueryAttention kernel
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
 
@@ -141,14 +155,18 @@ class Gemma3Model(Gemma2Model):
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = ("cos_cache_global", "sin_cache_global")
-        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name)
+        super().make_rotary_embedding_caches(
+            cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name
+        )
 
         # Create the new cos/sin caches for local attention layers with its own theta value
         self.rope_attrs["create_caches"] = True
         self.rope_attrs["theta"] = self.rope_local_theta
 
         self.cos_cache_local_name, self.sin_cache_local_name = ("cos_cache_local", "sin_cache_local")
-        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name)
+        super().make_rotary_embedding_caches(
+            cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
+        )
 
     def load_weights(self, input_path):
         # Gemma3ForConditionalGeneration (VLM) does not accept the
@@ -166,6 +184,10 @@ class Gemma3Model(Gemma2Model):
         return super().load_weights(input_path)
 
     def make_rotary_embedding_caches(self, **kwargs):
-        cos_cache_name = kwargs.get("cos_cache_name", (self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name))
-        sin_cache_name = kwargs.get("sin_cache_name", (self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name))
+        cos_cache_name = kwargs.get(
+            "cos_cache_name", (self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
+        )
+        sin_cache_name = kwargs.get(
+            "sin_cache_name", (self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
+        )
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)

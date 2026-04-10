@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"
@@ -16,11 +15,10 @@ MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"
 class TestRandomPhi3MiniLongRoPE(ExtTestCase):
     def common_fast_phi3_mini_longrope_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -43,7 +41,11 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
             num_hidden_layers=num_hidden_layers,
             num_key_value_heads=4,
             rms_norm_eps=1e-05,
-            rope_scaling={"type": "longrope", "short_factor": [1.0] * (head_size // 2), "long_factor": [1.0] * (head_size // 2)},
+            rope_scaling={
+                "type": "longrope",
+                "short_factor": [1.0] * (head_size // 2),
+                "long_factor": [1.0] * (head_size // 2),
+            },
             vocab_size=32064,
         )
 
@@ -57,7 +59,10 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -72,7 +77,13 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
         )
 
         log_data = dict(
-            precision=precision, model_id=MODEL_NAME, experiment="forward", provider=provider, test=basename, input_type="text", kind="fast"
+            precision=precision,
+            model_id=MODEL_NAME,
+            experiment="forward",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="fast",
         )
 
         onnx_path = os.path.join(output_dir, "model.onnx")
@@ -159,11 +170,10 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
 
     def common_phi3_mini_longrope_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         head_size = 64
@@ -180,7 +190,11 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
             num_hidden_layers=num_hidden_layers,
             num_key_value_heads=4,
             rms_norm_eps=1e-05,
-            rope_scaling={"type": "longrope", "short_factor": [1.0] * (head_size // 2), "long_factor": [1.0] * (head_size // 2)},
+            rope_scaling={
+                "type": "longrope",
+                "short_factor": [1.0] * (head_size // 2),
+                "long_factor": [1.0] * (head_size // 2),
+            },
             vocab_size=32064,
         )
 
@@ -195,7 +209,10 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -222,7 +239,9 @@ class TestRandomPhi3MiniLongRoPE(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)

@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
@@ -17,12 +16,11 @@ MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 class TestNemotronH(ExtTestCase):
     def common_fast_nemotron_h_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
         from transformers.models.nemotron_h import NemotronHConfig
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = NemotronHConfig(
@@ -160,12 +158,11 @@ class TestNemotronH(ExtTestCase):
 
     def common_nemotron_h_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
         from transformers.models.nemotron_h import NemotronHConfig
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = NemotronHConfig(

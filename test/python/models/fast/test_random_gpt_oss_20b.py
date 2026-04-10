@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -16,11 +15,10 @@ MODEL_NAME = "openai/gpt-oss-20b"
 class TestGptOss20b(ExtTestCase):
     def common_fast_gpt_oss_20b_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, GptOssConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         # Two layers: layer 0 is local (sliding-window) attention,
         # layer 1 is full attention, matching the is_local = lambda i: i % 2 == 0
@@ -53,7 +51,10 @@ class TestGptOss20b(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -161,11 +162,10 @@ class TestGptOss20b(ExtTestCase):
 
     def common_gpt_oss_20b_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, GptOssConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         # Two layers: layer 0 is local (sliding-window) attention,
         # layer 1 is full attention, matching the is_local = lambda i: i % 2 == 0
@@ -202,7 +202,10 @@ class TestGptOss20b(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -229,7 +232,9 @@ class TestGptOss20b(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)
@@ -358,11 +363,10 @@ class TestGptOss20b(ExtTestCase):
             raise unittest.SkipTest("onnxruntime-genai is not installed; skipping genai comparison test.")
 
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, GptOssConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         prefix = "test_gpt_oss_20b_fp32_cpu_genai_generate"
         num_hidden_layers = 2
@@ -393,7 +397,10 @@ class TestGptOss20b(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -425,7 +432,9 @@ class TestGptOss20b(ExtTestCase):
         # transformers greedy generation (reference)
         # ------------------------------------------------------------------
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         # ------------------------------------------------------------------

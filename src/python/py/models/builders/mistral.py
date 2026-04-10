@@ -124,7 +124,9 @@ class Ministral3VisionEncoderModel:
         self.vis_hidden_size = vc.hidden_size
         self.vis_intermediate_size = vc.intermediate_size
         self.vis_num_heads = vc.num_attention_heads
-        self.vis_head_dim = vc.head_dim if hasattr(vc, "head_dim") and vc.head_dim else vc.hidden_size // vc.num_attention_heads
+        self.vis_head_dim = (
+            vc.head_dim if hasattr(vc, "head_dim") and vc.head_dim else vc.hidden_size // vc.num_attention_heads
+        )
         self.vis_num_layers = vc.num_hidden_layers
         self.vis_rms_norm_eps = 1e-5  # hardcoded in PixtralRMSNorm
         self.vis_attn_scale = float(self.vis_head_dim**-0.5)
@@ -137,7 +139,9 @@ class Ministral3VisionEncoderModel:
         self.projector_hidden_act = config.projector_hidden_act
 
         # onnx_ir graph state
-        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="pixtral_vision_encoder")
+        self.graph = ir.Graph(
+            inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="pixtral_vision_encoder"
+        )
         self.onnx_model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values = {}
         self.node_names = set()
@@ -329,7 +333,9 @@ class Ministral3VisionEncoderModel:
         freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         freqs_h = torch.outer(h_idx, freqs[::2]).float()
         freqs_w = torch.outer(w_idx, freqs[1::2]).float()
-        inv_freq = torch.cat([freqs_h[:, None, :].repeat(1, n, 1), freqs_w[None, :, :].repeat(n, 1, 1)], dim=-1).reshape(-1, head_dim // 2)
+        inv_freq = torch.cat(
+            [freqs_h[:, None, :].repeat(1, n, 1), freqs_w[None, :, :].repeat(n, 1, 1)], dim=-1
+        ).reshape(-1, head_dim // 2)
         inv_freq = torch.cat((inv_freq, inv_freq), dim=-1)
         # inv_freq: [n_patches, head_dim]
 
@@ -361,10 +367,22 @@ class Ministral3VisionEncoderModel:
 
         # rotate_half: split last dim in two halves, negate second, swap
         q1 = self._slice(
-            f"{prefix}/rope/q1", q_or_k_name, starts=[0], ends=[half], axes=[-1], dtype=self.io_dtype, out_shape=shape[:-1] + [half]
+            f"{prefix}/rope/q1",
+            q_or_k_name,
+            starts=[0],
+            ends=[half],
+            axes=[-1],
+            dtype=self.io_dtype,
+            out_shape=shape[:-1] + [half],
         )
         q2 = self._slice(
-            f"{prefix}/rope/q2", q_or_k_name, starts=[half], ends=[hd], axes=[-1], dtype=self.io_dtype, out_shape=shape[:-1] + [half]
+            f"{prefix}/rope/q2",
+            q_or_k_name,
+            starts=[half],
+            ends=[hd],
+            axes=[-1],
+            dtype=self.io_dtype,
+            out_shape=shape[:-1] + [half],
         )
         neg_q2 = self._neg(f"{prefix}/rope/neg_q2", q2, self.io_dtype, shape[:-1] + [half])
         q_rot = self._concat(f"{prefix}/rope/q_rot", [neg_q2, q1], self.io_dtype, shape, axis=-1)
@@ -391,9 +409,15 @@ class Ministral3VisionEncoderModel:
         hd = self.vis_head_dim
 
         # Q / K / V projections (no bias in Pixtral attention)
-        q = self._matmul(f"{b}/q_proj/MatMul", root_input, attn.q_proj.weight, f"{b}/q_proj/MatMul.weight", out_shape=[1, n_p, d])
-        k = self._matmul(f"{b}/k_proj/MatMul", root_input, attn.k_proj.weight, f"{b}/k_proj/MatMul.weight", out_shape=[1, n_p, d])
-        v = self._matmul(f"{b}/v_proj/MatMul", root_input, attn.v_proj.weight, f"{b}/v_proj/MatMul.weight", out_shape=[1, n_p, d])
+        q = self._matmul(
+            f"{b}/q_proj/MatMul", root_input, attn.q_proj.weight, f"{b}/q_proj/MatMul.weight", out_shape=[1, n_p, d]
+        )
+        k = self._matmul(
+            f"{b}/k_proj/MatMul", root_input, attn.k_proj.weight, f"{b}/k_proj/MatMul.weight", out_shape=[1, n_p, d]
+        )
+        v = self._matmul(
+            f"{b}/v_proj/MatMul", root_input, attn.v_proj.weight, f"{b}/v_proj/MatMul.weight", out_shape=[1, n_p, d]
+        )
 
         qkv_shape_4d = [1, n_p, nh, hd]
         q_4d = self._reshape(f"{b}/q_reshape", q, [1, n_p, nh, hd], self.io_dtype, qkv_shape_4d)
@@ -415,16 +439,22 @@ class Ministral3VisionEncoderModel:
         k_T = self._transpose(f"{b}/k_T", k_rope, perm=[0, 1, 3, 2], dtype=self.io_dtype, out_shape=[1, nh, hd, n_p])
         attn_w = self._matmul_raw(f"{b}/attn_w/MatMul", q_rope, k_T, shape=[1, nh, n_p, n_p])
         # Scale
-        attn_ws = self._scale_mul(f"{b}/attn_scale", attn_w, scale=self.vis_attn_scale, dtype=self.io_dtype, shape=[1, nh, n_p, n_p])
+        attn_ws = self._scale_mul(
+            f"{b}/attn_scale", attn_w, scale=self.vis_attn_scale, dtype=self.io_dtype, shape=[1, nh, n_p, n_p]
+        )
         attn_probs = self._softmax(f"{b}/attn_softmax", attn_ws, dtype=self.io_dtype, shape=[1, nh, n_p, n_p])
         attn_out_t = self._matmul_raw(f"{b}/attn_out/MatMul", attn_probs, v_t, shape=qkv_t_shape)
 
         # Transpose + Reshape back to [1, n_patches, hidden_size]
-        attn_out = self._transpose(f"{b}/attn_out_t", attn_out_t, perm=[0, 2, 1, 3], dtype=self.io_dtype, out_shape=[1, n_p, nh, hd])
+        attn_out = self._transpose(
+            f"{b}/attn_out_t", attn_out_t, perm=[0, 2, 1, 3], dtype=self.io_dtype, out_shape=[1, n_p, nh, hd]
+        )
         attn_out_2d = self._reshape(f"{b}/attn_out_reshape", attn_out, [1, n_p, d], self.io_dtype, [1, n_p, d])
 
         # O projection (no bias in Pixtral attention)
-        o = self._matmul(f"{b}/o_proj/MatMul", attn_out_2d, attn.o_proj.weight, f"{b}/o_proj/MatMul.weight", out_shape=[1, n_p, d])
+        o = self._matmul(
+            f"{b}/o_proj/MatMul", attn_out_2d, attn.o_proj.weight, f"{b}/o_proj/MatMul.weight", out_shape=[1, n_p, d]
+        )
         return o
 
     # ------------------------------------------------------------------ #
@@ -445,9 +475,15 @@ class Ministral3VisionEncoderModel:
         ff = self.vis_intermediate_size
 
         gate = self._matmul(
-            f"{b}/gate_proj/MatMul", root_input, mlp.gate_proj.weight, f"{b}/gate_proj/MatMul.weight", out_shape=[1, n_p, ff]
+            f"{b}/gate_proj/MatMul",
+            root_input,
+            mlp.gate_proj.weight,
+            f"{b}/gate_proj/MatMul.weight",
+            out_shape=[1, n_p, ff],
         )
-        up = self._matmul(f"{b}/up_proj/MatMul", root_input, mlp.up_proj.weight, f"{b}/up_proj/MatMul.weight", out_shape=[1, n_p, ff])
+        up = self._matmul(
+            f"{b}/up_proj/MatMul", root_input, mlp.up_proj.weight, f"{b}/up_proj/MatMul.weight", out_shape=[1, n_p, ff]
+        )
 
         # SiLU(gate) * up  (SiLU(x) = x * Sigmoid(x))
         sig_name = f"{b}/act/Sigmoid"
@@ -458,7 +494,13 @@ class Ministral3VisionEncoderModel:
         silu_out = self._mul(f"{b}/act/Mul_silu", gate, sig_out, self.io_dtype, [1, n_p, ff])
         gate_up = self._mul(f"{b}/gate_up/Mul", silu_out, up, self.io_dtype, [1, n_p, ff])
 
-        down = self._matmul(f"{b}/down_proj/MatMul", gate_up, mlp.down_proj.weight, f"{b}/down_proj/MatMul.weight", out_shape=[1, n_p, d])
+        down = self._matmul(
+            f"{b}/down_proj/MatMul",
+            gate_up,
+            mlp.down_proj.weight,
+            f"{b}/down_proj/MatMul.weight",
+            out_shape=[1, n_p, d],
+        )
         return down
 
     # ------------------------------------------------------------------ #
@@ -616,7 +658,11 @@ class Ministral3VisionEncoderModel:
         r1 = self._reshape("/vision/projector/merge/Reshape1", squeeze_out, [n_h, n_w, d], self.io_dtype, [n_h, n_w, d])
         r2 = self._reshape("/vision/projector/merge/Reshape2", r1, [mh, s, mw, s, d], self.io_dtype, [mh, s, mw, s, d])
         tp = self._transpose(
-            "/vision/projector/merge/Transpose", r2, perm=[0, 2, 4, 1, 3], dtype=self.io_dtype, out_shape=[mh, mw, d, s, s]
+            "/vision/projector/merge/Transpose",
+            r2,
+            perm=[0, 2, 4, 1, 3],
+            dtype=self.io_dtype,
+            out_shape=[mh, mw, d, s, s],
         )
         merged = self._reshape("/vision/projector/merge/Reshape3", tp, [nm, d * s * s], self.io_dtype, [nm, d * s * s])
 
@@ -644,7 +690,9 @@ class Ministral3VisionEncoderModel:
 
         # GELU activation (default projector_hidden_act is "gelu")
         gelu_out = "/vision/projector/gelu/output_0"
-        self._node("Gelu", inputs=[lin1_out], outputs=[gelu_out], name="/vision/projector/gelu/Gelu", domain="com.microsoft")
+        self._node(
+            "Gelu", inputs=[lin1_out], outputs=[gelu_out], name="/vision/projector/gelu/Gelu", domain="com.microsoft"
+        )
         self._val(gelu_out, self.io_dtype, shape=[nm, t_hid])
 
         # linear_2: [nm, text_hidden_size] -> [nm, text_hidden_size]
@@ -669,7 +717,9 @@ class Ministral3VisionEncoderModel:
 
         src = input_path if os.path.isdir(input_path) else self.model_name_or_path
         extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": self.cache_dir}
-        return Mistral3ForConditionalGeneration.from_pretrained(src, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
+        return Mistral3ForConditionalGeneration.from_pretrained(
+            src, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
 
     def make_model(self, input_path):
         """Load HF weights and build the ONNX graph in-memory."""
@@ -680,7 +730,9 @@ class Ministral3VisionEncoderModel:
         proj = hf_model.model.multi_modal_projector  # Mistral3MultiModalProjector
 
         # Graph input
-        pixel_values_in = self._val("pixel_values", self.io_dtype, shape=[1, self.num_channels, self.image_size, self.image_size])
+        pixel_values_in = self._val(
+            "pixel_values", self.io_dtype, shape=[1, self.num_channels, self.image_size, self.image_size]
+        )
         self.graph.inputs.append(pixel_values_in)
 
         # Pre-compute 2-D RoPE cos/sin (shared across all layers)
@@ -731,7 +783,13 @@ class Ministral3VisionEncoderModel:
                 pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
-            ir.save(self.onnx_model, out_path, external_data=os.path.basename(data_path), size_threshold_bytes=0, callback=callback)
+            ir.save(
+                self.onnx_model,
+                out_path,
+                external_data=os.path.basename(data_path),
+                size_threshold_bytes=0,
+                callback=callback,
+            )
 
 
 class Ministral3ConditionalGenerationModel:
@@ -786,7 +844,7 @@ class Ministral3ConditionalGenerationModel:
     # ------------------------------------------------------------------
 
     def make_model(self, input_path):
-        print("Building vision encoder (Pixtral + multimodal projector) for " "Mistral3ForConditionalGeneration...")
+        print("Building vision encoder (Pixtral + multimodal projector) for Mistral3ForConditionalGeneration...")
         self.vision_encoder.make_model(input_path)
         print("Building text decoder for Mistral3ForConditionalGeneration...")
         self.text_model.make_model(input_path)

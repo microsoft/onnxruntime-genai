@@ -13,7 +13,6 @@ import numpy as np
 import onnx
 import onnx.helper as oh
 import onnx.numpy_helper as onh
-
 from ext_test_case import ExtTestCase, hide_stdout, onnx_generate
 
 TINT64 = onnx.TensorProto.INT64
@@ -155,11 +154,10 @@ class TestOnnxGenerate(ExtTestCase):
         import os
 
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, LlamaConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         config = LlamaConfig(

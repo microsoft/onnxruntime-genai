@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "google/gemma-2-2b"
@@ -16,11 +15,10 @@ MODEL_NAME = "google/gemma-2-2b"
 class TestRandomGemma2(ExtTestCase):
     def common_fast_gemma2_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Gemma2Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         # Use 2 hidden layers so both the global-attention layer (layer_id=0)
         # and the local-attention layer (layer_id=1) are exercised.
@@ -60,7 +58,10 @@ class TestRandomGemma2(ExtTestCase):
 
         vocab = {"<unk>": 0, "</s>": 1, "<bos>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<bos>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<bos>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -172,11 +173,10 @@ class TestRandomGemma2(ExtTestCase):
 
     def common_gemma2_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Gemma2Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         # Use 2 hidden layers so both the global-attention layer (layer_id=0)
         # and the local-attention layer (layer_id=1) are exercised.
@@ -214,7 +214,10 @@ class TestRandomGemma2(ExtTestCase):
 
         vocab = {"<unk>": 0, "</s>": 1, "<bos>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<bos>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<bos>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -242,7 +245,9 @@ class TestRandomGemma2(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)

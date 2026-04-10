@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 MODEL_NAME = "google/gemma-3-4b-it"
@@ -17,11 +16,10 @@ MODEL_NAME = "google/gemma-3-4b-it"
 class TestRandomGemma3(ExtTestCase):
     def common_fast_gemma3_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Gemma3TextConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -165,11 +163,10 @@ class TestRandomGemma3(ExtTestCase):
 
     def common_gemma3_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Gemma3TextConfig, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

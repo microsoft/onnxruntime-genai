@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 _MODEL_NAME = "microsoft/Phi-3.5-MoE-instruct"
@@ -227,7 +226,6 @@ def _make_phimoe_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_opti
     complexity of the real ``microsoft/Phi-3.5-MoE-instruct`` model.
     """
     import torch
-
     from models.builders.phi import Phi3MoELongRoPEModel
 
     class _PhiMoEBuilderWithSyntheticWeights(Phi3MoELongRoPEModel):
@@ -236,7 +234,7 @@ def _make_phimoe_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_opti
         graph construction, rotary caches, QMoE quantisation) runs as in
         production."""
 
-        def load_weights(self, input_path):  # noqa: ARG002
+        def load_weights(self, input_path):
             torch.manual_seed(0)
             model = _make_phimoe_torch_model(config)
             model.eval()

@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from builders.phi import Phi4MMModel
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda
 
@@ -110,7 +109,7 @@ class _Phi4MMModelWithSyntheticWeights(Phi4MMModel):
         super().__init__(*args, **kwargs)
         self._synthetic_weights = synthetic_weights
 
-    def load_weights(self, input_path):  # noqa: ARG002
+    def load_weights(self, input_path):
         return self._synthetic_weights
 
 

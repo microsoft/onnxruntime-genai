@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 SMOLLM3_MODEL_NAME = "HuggingFaceTB/SmolLM3-3B"
 
@@ -16,12 +15,11 @@ SMOLLM3_MODEL_NAME = "HuggingFaceTB/SmolLM3-3B"
 class TestSmolLM3(ExtTestCase):
     def common_fast_smollm3_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
         from transformers.models.smollm3.configuration_smollm3 import SmolLM3Config
-
-        from models.builder import create_model
 
         # num_hidden_layers=4 is required so that both rope and no-rope
         # layers are exercised (no_rope_layers=[1,1,1,0] by default).
@@ -154,12 +152,11 @@ class TestSmolLM3(ExtTestCase):
 
     def common_smollm3_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
         from transformers.models.smollm3.configuration_smollm3 import SmolLM3Config
-
-        from models.builder import create_model
 
         # num_hidden_layers=4 is required so that both rope and no-rope
         # layers are exercised (no_rope_layers=[1,1,1,0] by default).

@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 QWEN3_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -16,11 +15,10 @@ QWEN3_MODEL_NAME = "Qwen/Qwen3-0.6B"
 class TestRandomQwen3(ExtTestCase):
     def common_fast_qwen3_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3Config
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -159,11 +157,10 @@ class TestRandomQwen3(ExtTestCase):
 
     def common_qwen3_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3Config
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

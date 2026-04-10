@@ -23,7 +23,9 @@ class NemotronHModel(LlamaModel):
         return module.__class__.__name__ == "NemotronHBlock"
 
     def has_final_norm(self, module, orig_model):
-        return hasattr(orig_model, "model") and hasattr(orig_model.model, "norm_f") and module == orig_model.model.norm_f
+        return (
+            hasattr(orig_model, "model") and hasattr(orig_model.model, "norm_f") and module == orig_model.model.norm_f
+        )
 
     def make_layer(self, layer_id, layer):
         # Each NemotronH decoder block is defined as:
@@ -36,7 +38,9 @@ class NemotronHModel(LlamaModel):
                 "Only 'attention' layers are currently supported."
             )
 
-        self.make_layernorm(layer_id, layer.norm, skip=not self.layernorm_attrs["first_layernorm"], simple=True, location="input")
+        self.make_layernorm(
+            layer_id, layer.norm, skip=not self.layernorm_attrs["first_layernorm"], simple=True, location="input"
+        )
         self.make_attention(layer_id, layer.mixer, root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False

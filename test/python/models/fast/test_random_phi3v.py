@@ -8,8 +8,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 PHI3V_MODEL_NAME = "microsoft/Phi-3-vision-128k-instruct"
 
@@ -17,11 +16,10 @@ PHI3V_MODEL_NAME = "microsoft/Phi-3-vision-128k-instruct"
 class TestRandomPhi3V(ExtTestCase):
     def common_fast_phi3v_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         # Build a tiny Phi-3-vision config that is structurally identical to
         # microsoft/Phi-3-vision-128k-instruct but uses a single hidden layer
@@ -212,11 +210,10 @@ class TestRandomPhi3V(ExtTestCase):
 
     def common_phi3v_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
         head_size = 64

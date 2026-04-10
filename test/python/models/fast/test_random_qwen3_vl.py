@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda, requires_transformers
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 QWEN3_VL_MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 
@@ -17,12 +16,11 @@ QWEN3_VL_MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 class TestRandomQwen3VL(ExtTestCase):
     def common_fast_qwen3_vl_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
-        from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration, PreTrainedTokenizerFast
+        from transformers import PreTrainedTokenizerFast, Qwen3VLConfig, Qwen3VLForConditionalGeneration
         from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

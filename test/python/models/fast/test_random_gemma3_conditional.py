@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 MODEL_NAME = "google/gemma-3-4b-it"
@@ -48,11 +47,10 @@ class TestRandomGemma3Conditional(ExtTestCase):
 
     def common_fast_gemma3_conditional_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Gemma3ForConditionalGeneration, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         config = self._make_config()
         num_hidden_layers = config.text_config.num_hidden_layers
@@ -68,7 +66,10 @@ class TestRandomGemma3Conditional(ExtTestCase):
 
         vocab = {"<unk>": 0, "</s>": 1, "<bos>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<bos>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<bos>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -189,11 +190,10 @@ class TestRandomGemma3Conditional(ExtTestCase):
 
     def common_gemma3_conditional_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Gemma3ForConditionalGeneration, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         config = self._make_config()
         num_hidden_layers = config.text_config.num_hidden_layers
@@ -209,7 +209,10 @@ class TestRandomGemma3Conditional(ExtTestCase):
 
         vocab = {"<unk>": 0, "</s>": 1, "<bos>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<bos>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<bos>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -242,7 +245,9 @@ class TestRandomGemma3Conditional(ExtTestCase):
         # PyTorch reference: greedy generation using the full model directly
         # (text-only path, no image required).
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         # ONNX greedy generation (manual auto-regressive loop).

@@ -7,8 +7,7 @@ import os
 import unittest
 
 import numpy as np
-
-from ext_test_case import ExtTestCase, run_session_or_io_binding, hide_stdout, requires_cuda
+from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "Olmo2ForCausalLM"
 
@@ -16,11 +15,10 @@ MODEL_NAME = "Olmo2ForCausalLM"
 class TestOLMo2(ExtTestCase):
     def common_fast_olmo2_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Olmo2Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -154,11 +152,10 @@ class TestOLMo2(ExtTestCase):
 
     def common_olmo2_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Olmo2Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

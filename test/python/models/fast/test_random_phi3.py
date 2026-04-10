@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
@@ -16,11 +15,10 @@ MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 class TestRandomPhi3(ExtTestCase):
     def common_fast_phi3_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -158,11 +156,10 @@ class TestRandomPhi3(ExtTestCase):
 
     def common_phi3_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import Phi3Config, Phi3ForCausalLM, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

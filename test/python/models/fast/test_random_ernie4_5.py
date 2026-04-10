@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 ERNIE_MODEL_NAME = "baidu/ERNIE-4.5-0.3B-PT"
@@ -17,11 +16,10 @@ ERNIE_MODEL_NAME = "baidu/ERNIE-4.5-0.3B-PT"
 class TestErnie4_5(ExtTestCase):
     def common_fast_ernie4_5_random_weights(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Ernie4_5Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 
@@ -165,11 +163,10 @@ class TestErnie4_5(ExtTestCase):
 
     def common_ernie4_5_greedy_generation(self, precision, provider):
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForCausalLM, Ernie4_5Config, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         num_hidden_layers = 1
 

@@ -7,7 +7,6 @@ import os
 import unittest
 
 import numpy as np
-
 from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers
 
 QWEN3_5_MODEL_NAME = "Qwen/Qwen3.5-3B"
@@ -70,11 +69,10 @@ class TestRandomQwen3_5(ExtTestCase):
         Returns the (model, output_dir) tuple so callers can run inference.
         """
         import torch
+        from models.builder import create_model
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
-
-        from models.builder import create_model
 
         basename = f"test_qwen3_5_{precision}_{provider}_{'_'.join(config.text_config.layer_types)}"
         model_dir_full = self.get_model_dir(basename)
