@@ -35,12 +35,15 @@ jobs:
         if: matrix.torch-version == 'nightly'
         run: pip install --pre --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
 
-      - name: Install pytorch 2.11 (Linux/Windows)
+      - name: Install pytorch 2.11 (cpu)
         if: matrix.torch-version == '2.11' && matrix.os != 'macos-latest'
         run: pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
         run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl pytest huggingface_hub onnx onnxscript optree onnxruntime onnxruntime-genai peft py-cpuinfo pytest-cov pytest-subtests tabulate
+
+      - name: ls
+        run: ls . -l
 
       - name: Run fast tests
         run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=modelbuilder --cov-report=xml --cov-report=term-missing
