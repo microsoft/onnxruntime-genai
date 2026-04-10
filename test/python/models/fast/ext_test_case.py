@@ -611,6 +611,7 @@ def _read_results(json_path: str) -> list[dict[str, Any]]:
                 try:
                     results.append(ast.literal_eval(line))
                 except Exception:
+                    # unable to interpret as a literal, is it really json format?
                     results.append(line)
     return results
 
