@@ -6,6 +6,7 @@
 import unittest
 
 from ext_test_case import ExtTestCase
+from models.builders.base.genai_config_utils import fix_genai_config
 
 
 class TestFixGenaiConfig(ExtTestCase):
@@ -55,7 +56,6 @@ class TestFixGenaiConfig(ExtTestCase):
     def test_fix_genai_config_replaces_null_search_values(self):
         """fix_genai_config replaces every null in the search section with
         the onnxruntime-genai default value."""
-        from models.genai_config_utils import fix_genai_config
 
         config = self._make_config_with_nulls()
         result = fix_genai_config(config)
@@ -76,8 +76,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_preserves_non_null_search_values(self):
         """fix_genai_config must not overwrite already-set search values."""
-        from models.genai_config_utils import fix_genai_config
-
         config = self._make_config_with_nulls()
         config["search"]["temperature"] = 0.7
         config["search"]["top_k"] = 40
@@ -94,8 +92,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_preserves_extra_keys(self):
         """Keys that are not in the defaults dict must not be touched."""
-        from models.genai_config_utils import fix_genai_config
-
         config = self._make_config_with_nulls()
         # max_length and past_present_share_buffer are not in the defaults
         result = fix_genai_config(config)
@@ -105,7 +101,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_returns_same_dict(self):
         """fix_genai_config modifies the dict in-place and returns it."""
-        from models.genai_config_utils import fix_genai_config
 
         config = self._make_config_with_nulls()
         result = fix_genai_config(config)
@@ -113,7 +108,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_no_search_section(self):
         """fix_genai_config is a no-op when there is no search section."""
-        from models.genai_config_utils import fix_genai_config
 
         config = {"model": {"type": "llama"}}
         result = fix_genai_config(config)
@@ -122,7 +116,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_already_valid(self):
         """fix_genai_config leaves a fully-populated config unchanged."""
-        from models.genai_config_utils import fix_genai_config
 
         config = {
             "search": {
@@ -150,7 +143,6 @@ class TestFixGenaiConfig(ExtTestCase):
 
     def test_fix_genai_config_importable(self):
         """fix_genai_config is accessible from models.genai_config_utils."""
-        from models.genai_config_utils import fix_genai_config
 
         self.assertTrue(callable(fix_genai_config))
 

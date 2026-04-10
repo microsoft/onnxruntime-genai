@@ -432,7 +432,10 @@ class TestPhi3Small(ExtTestCase):
         # Minimal tokenizer (only BOS/EOS/UNK needed)
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -446,7 +449,9 @@ class TestPhi3Small(ExtTestCase):
         basename = f"test_discrepancies_phi3_small_{precision}_{provider}"
 
         torch.manual_seed(0)
-        model_dir, output_dir, cache_dir, model, config_obj = self._prepare_model_dir(basename, num_hidden_layers=num_hidden_layers)
+        model_dir, output_dir, cache_dir, model, config_obj = self._prepare_model_dir(
+            basename, num_hidden_layers=num_hidden_layers
+        )
         model = model.to(provider)
 
         create_model(
@@ -561,7 +566,9 @@ class TestPhi3Small(ExtTestCase):
         basename = f"test_generation_phi3_small_{precision}_{provider}"
 
         torch.manual_seed(42)
-        model_dir, output_dir, cache_dir, model, config_obj = self._prepare_model_dir(basename, num_hidden_layers=num_hidden_layers)
+        model_dir, output_dir, cache_dir, model, config_obj = self._prepare_model_dir(
+            basename, num_hidden_layers=num_hidden_layers
+        )
         model = model.to(provider)
 
         create_model(

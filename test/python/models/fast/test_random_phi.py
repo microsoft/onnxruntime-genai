@@ -50,7 +50,10 @@ class TestPhi(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -64,7 +67,13 @@ class TestPhi(ExtTestCase):
         )
 
         log_data = dict(
-            precision=precision, model_id=MODEL_NAME, experiment="forward", provider=provider, test=basename, input_type="text", kind="fast"
+            precision=precision,
+            model_id=MODEL_NAME,
+            experiment="forward",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="fast",
         )
 
         onnx_path = os.path.join(output_dir, "model.onnx")
@@ -187,7 +196,10 @@ class TestPhi(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -214,7 +226,9 @@ class TestPhi(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)

@@ -72,7 +72,10 @@ class TestRandomQwen25VL(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -118,7 +121,9 @@ class TestRandomQwen25VL(ExtTestCase):
         # Qwen2.5-VL uses 3D position_ids: [3, batch_size, seq_len]
         # The three dims correspond to temporal, height, and width.
         # For text-only inference all three dims use the same arange.
-        position_ids_3d = np.arange(seq_len, dtype=np.int64).reshape(1, 1, seq_len).repeat(3, axis=0).repeat(batch_size, axis=1)
+        position_ids_3d = (
+            np.arange(seq_len, dtype=np.int64).reshape(1, 1, seq_len).repeat(3, axis=0).repeat(batch_size, axis=1)
+        )
 
         with self.subTest(step="prefill"):
             prefill_feed = {
@@ -128,10 +133,12 @@ class TestRandomQwen25VL(ExtTestCase):
             }
             for i in range(num_hidden_layers):
                 prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
-                    (batch_size, text_config.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+                    (batch_size, text_config.num_key_value_heads, 0, head_size),
+                    dtype=self.get_input_np_dtype(precision),
                 )
                 prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
-                    (batch_size, text_config.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+                    (batch_size, text_config.num_key_value_heads, 0, head_size),
+                    dtype=self.get_input_np_dtype(precision),
                 )
             prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
 
@@ -231,7 +238,9 @@ class TestRandomQwen25VL(ExtTestCase):
     def test_fast_discrepancy_qwen25vl_fp16_cuda(self):
         self.common_fast_qwen25vl_random_weights("fp16", "cuda")
 
-    @unittest.skip("Could not find an implementation for MatMul(13) node with name '/model/layers.0/attn/q_proj/MatMul'")
+    @unittest.skip(
+        "Could not find an implementation for MatMul(13) node with name '/model/layers.0/attn/q_proj/MatMul'"
+    )
     @hide_stdout()
     @requires_cuda()
     def test_fast_discrepancy_qwen25vl_bf16_cuda(self):

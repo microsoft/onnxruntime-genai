@@ -187,7 +187,10 @@ class TestOnnxGenerate(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -213,11 +216,15 @@ class TestOnnxGenerate(ExtTestCase):
 
         # --- transformers greedy reference ---
         with torch.no_grad():
-            pt_output = pt_model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = pt_model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         # --- onnx_generate helper ---
-        tokens = onnx_generate(onnx_path, prompt_np, max_new_tokens=max_new_tokens, eos_token_id=config.eos_token_id, do_sample=False)
+        tokens = onnx_generate(
+            onnx_path, prompt_np, max_new_tokens=max_new_tokens, eos_token_id=config.eos_token_id, do_sample=False
+        )
 
         self.assertEqual(pt_tokens, tokens[0].tolist())
 

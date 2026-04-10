@@ -52,16 +52,26 @@ class _AttentionOnlyLlamaModel(LlamaModel):
         g_outputs = self.model.graph.outputs
 
         # Input: hidden_states (output of LayerNorm in the full pipeline)
-        g_inputs.append(self.make_value("hidden_states", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]))
+        g_inputs.append(
+            self.make_value(
+                "hidden_states", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
+            )
+        )
         # Input: attention_mask needed to compute seqlens_k / total_seq_len
-        g_inputs.append(self.make_value("attention_mask", dtype=ir.DataType.INT64, shape=["batch_size", "total_sequence_length"]))
+        g_inputs.append(
+            self.make_value("attention_mask", dtype=ir.DataType.INT64, shape=["batch_size", "total_sequence_length"])
+        )
         # Input: past KV cache for layer 0
         kv_shape = ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]
         g_inputs.append(self.make_value("past_key_values.0.key", dtype=self.io_dtype, shape=kv_shape))
         g_inputs.append(self.make_value("past_key_values.0.value", dtype=self.io_dtype, shape=kv_shape))
 
         # Output: attention output (before residual connection)
-        g_outputs.append(self.make_value("attn_output", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]))
+        g_outputs.append(
+            self.make_value(
+                "attn_output", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
+            )
+        )
         # Output: updated KV cache
         kv_out_shape = ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]
         g_outputs.append(self.make_value("present.0.key", dtype=self.io_dtype, shape=kv_out_shape))
@@ -90,7 +100,12 @@ class _AttentionOnlyLlamaModel(LlamaModel):
 
         # Connect the final attention output (stored in layernorm_attrs after
         # make_attention_output_proj) to the named graph output.
-        self.make_node("Identity", inputs=[self.layernorm_attrs["skip_input"]], outputs=["attn_output"], name="/model/attn_output_identity")
+        self.make_node(
+            "Identity",
+            inputs=[self.layernorm_attrs["skip_input"]],
+            outputs=["attn_output"],
+            name="/model/attn_output_identity",
+        )
 
         self.save_model(out_dir)
 
@@ -156,7 +171,10 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
     def _empty_past_kv(config, batch_size, head_size):
         """Return zero-length KV-cache arrays for layer 0."""
         shape = (batch_size, config.num_key_value_heads, 0, head_size)
-        return {"past_key_values.0.key": np.zeros(shape, dtype=np.float32), "past_key_values.0.value": np.zeros(shape, dtype=np.float32)}
+        return {
+            "past_key_values.0.key": np.zeros(shape, dtype=np.float32),
+            "past_key_values.0.value": np.zeros(shape, dtype=np.float32),
+        }
 
     # ------------------------------------------------------------------
     # Test: prefill discrepancies
@@ -192,7 +210,10 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
 
         # ONNX inference
         onnx_input_names = {inp.name for inp in sess.get_inputs()}
-        feed = {"hidden_states": hidden_states.numpy(), "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64)}
+        feed = {
+            "hidden_states": hidden_states.numpy(),
+            "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
+        }
         feed.update(self._empty_past_kv(config, batch_size, head_size))
         feed = {k: v for k, v in feed.items() if k in onnx_input_names}
 
@@ -200,7 +221,14 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
 
         disc = self.get_numpy_discrepancy(pt_out, onnx_out)
         disc.update(
-            dict(precision="fp32", model_id=_MODEL_ID, experiment="attention_prefill", provider="cpu", test=test_name, input_type="text")
+            dict(
+                precision="fp32",
+                model_id=_MODEL_ID,
+                experiment="attention_prefill",
+                provider="cpu",
+                test=test_name,
+                input_type="text",
+            )
         )
         self.log_results(disc)
         self.assertLess(disc["max_abs_err"], 1e-3)
@@ -244,7 +272,10 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
         # ------------------------------------------------------------------
         # Step 1: ONNX prefill (populate KV cache)
         # ------------------------------------------------------------------
-        prefill_feed = {"hidden_states": hidden_states.numpy(), "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64)}
+        prefill_feed = {
+            "hidden_states": hidden_states.numpy(),
+            "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
+        }
         prefill_feed.update(self._empty_past_kv(config, batch_size, head_size))
         prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
         prefill_results = dict(zip(onnx_output_names, sess.run(None, prefill_feed)))
@@ -274,7 +305,14 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
 
         disc = self.get_numpy_discrepancy(pt_decode_out, onnx_decode_out)
         disc.update(
-            dict(precision="fp32", model_id=_MODEL_ID, experiment="attention_decode", provider="cpu", test=test_name, input_type="text")
+            dict(
+                precision="fp32",
+                model_id=_MODEL_ID,
+                experiment="attention_decode",
+                provider="cpu",
+                test=test_name,
+                input_type="text",
+            )
         )
         self.log_results(disc)
         self.assertLess(disc["max_abs_err"], 1e-3)

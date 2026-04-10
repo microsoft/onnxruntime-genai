@@ -55,7 +55,10 @@ class TestRandomQwen3VL(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -110,8 +113,12 @@ class TestRandomQwen3VL(ExtTestCase):
                 "position_ids": position_ids,
             }
             for i in range(num_hidden_layers):
-                prefill_feed[f"past_key_values.{i}.key"] = np.zeros((batch_size, num_kv_heads, 0, head_size), dtype=np_dtype)
-                prefill_feed[f"past_key_values.{i}.value"] = np.zeros((batch_size, num_kv_heads, 0, head_size), dtype=np_dtype)
+                prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
+                    (batch_size, num_kv_heads, 0, head_size), dtype=np_dtype
+                )
+                prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
+                    (batch_size, num_kv_heads, 0, head_size), dtype=np_dtype
+                )
             prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
 
             prefill_results, ort_logits_np = run_session_or_io_binding(

@@ -64,7 +64,11 @@ def _make_phimoe_config():
     )
     # Set rope_scaling directly to bypass version-specific constructor
     # validation.  Both transformers 4.x and 5.x accept attribute assignment.
-    config.rope_scaling = {"type": "longrope", "short_factor": [1.0] * _ROTARY_DIM_HALF, "long_factor": [1.0] * _ROTARY_DIM_HALF}
+    config.rope_scaling = {
+        "type": "longrope",
+        "short_factor": [1.0] * _ROTARY_DIM_HALF,
+        "long_factor": [1.0] * _ROTARY_DIM_HALF,
+    }
     # Override architectures so the builder dispatches to Phi3MoELongRoPEModel.
     # Done after rope_scaling is set to avoid version-specific validation.
     config.architectures = ["PhiMoEForCausalLM"]
@@ -350,7 +354,12 @@ class TestPhiMoE(ExtTestCase):
             prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
 
             prefill_results, prefill_logits = run_session_or_io_binding(
-                use_iobinding=False, precision=precision, provider="cuda", feed=prefill_feed, sess=sess, vocab_size=config.vocab_size
+                use_iobinding=False,
+                precision=precision,
+                provider="cuda",
+                feed=prefill_feed,
+                sess=sess,
+                vocab_size=config.vocab_size,
             )
             self.assertEqual(prefill_logits.shape, (batch_size, seq_len, config.vocab_size))
 

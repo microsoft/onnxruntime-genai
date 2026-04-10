@@ -51,7 +51,10 @@ class TestNemotronH(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -66,7 +69,13 @@ class TestNemotronH(ExtTestCase):
         )
 
         log_data = dict(
-            precision=precision, model_id=MODEL_NAME, experiment="forward", provider=provider, test=basename, input_type="text", kind="fast"
+            precision=precision,
+            model_id=MODEL_NAME,
+            experiment="forward",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="fast",
         )
 
         onnx_path = os.path.join(output_dir, "model.onnx")
@@ -194,7 +203,10 @@ class TestNemotronH(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -226,7 +238,11 @@ class TestNemotronH(ExtTestCase):
             # _update_mamba_mask raises ValueError when past_key_values is a
             # DynamicCache containing only attention layers (no Mamba layers).
             pt_output = model.generate(
-                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id, use_cache=False
+                prompt_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=config.eos_token_id,
+                use_cache=False,
             )
         pt_tokens = pt_output[0].tolist()
 

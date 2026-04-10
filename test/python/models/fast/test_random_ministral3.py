@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from models.ext_test_case import (
+from ext_test_case import (
     ExtTestCase,
     hide_stdout,
     requires_cuda,
@@ -55,7 +55,10 @@ class TestMinistral3(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -198,7 +201,10 @@ class TestMinistral3(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -226,7 +232,9 @@ class TestMinistral3(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)
@@ -406,7 +414,9 @@ class TestMinistral3(ExtTestCase):
             sliding_window=None,
             vocab_size=32000,
         )
-        config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
+        config = Mistral3Config(
+            text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size
+        )
         config.architectures = ["Mistral3ForConditionalGeneration"]
 
         model_dir = self.get_model_dir("test_ministral3_conditional_generation_fp32_cpu_random_weights")
@@ -418,7 +428,10 @@ class TestMinistral3(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -484,7 +497,9 @@ class TestMinistral3(ExtTestCase):
             "position_ids": np.arange(seq_len, dtype=np.int64).reshape(batch_size, seq_len),
         }
         for i in range(num_hidden_layers):
-            onnx_feed[f"past_key_values.{i}.key"] = np.zeros((batch_size, text_config.num_key_value_heads, 0, head_size), dtype=np.float32)
+            onnx_feed[f"past_key_values.{i}.key"] = np.zeros(
+                (batch_size, text_config.num_key_value_heads, 0, head_size), dtype=np.float32
+            )
             onnx_feed[f"past_key_values.{i}.value"] = np.zeros(
                 (batch_size, text_config.num_key_value_heads, 0, head_size), dtype=np.float32
             )

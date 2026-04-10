@@ -50,7 +50,10 @@ class TestMistralNeMo(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -194,7 +197,10 @@ class TestMistralNeMo(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -222,7 +228,9 @@ class TestMistralNeMo(ExtTestCase):
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 5)).to(provider)
 
         with torch.no_grad():
-            pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id)
+            pt_output = model.generate(
+                prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=config.eos_token_id
+            )
         pt_tokens = pt_output[0].tolist()
 
         current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)
@@ -607,13 +615,20 @@ class TestMistralNeMo(ExtTestCase):
             expected = model(
                 input_ids=decode_ids,
                 attention_mask=decode_mask,
-                past_key_values=make_dynamic_cache([(torch.from_numpy(onnx_present_key), torch.from_numpy(onnx_present_value))]),
+                past_key_values=make_dynamic_cache(
+                    [(torch.from_numpy(onnx_present_key), torch.from_numpy(onnx_present_value))]
+                ),
             )
 
         feeds = dict(
             zip(
                 [i.name for i in sess.get_inputs()],
-                [decode_ids.numpy().astype(np.int64), decode_mask.numpy().astype(np.int64), onnx_present_key, onnx_present_value],
+                [
+                    decode_ids.numpy().astype(np.int64),
+                    decode_mask.numpy().astype(np.int64),
+                    onnx_present_key,
+                    onnx_present_value,
+                ],
             )
         )
 
@@ -748,7 +763,12 @@ class TestMistralNeMo(ExtTestCase):
         feeds = dict(
             zip(
                 [i.name for i in sess.get_inputs()],
-                [decode_ids.numpy().astype(np.int64), decode_mask.numpy().astype(np.int64), onnx_present_key, onnx_present_value],
+                [
+                    decode_ids.numpy().astype(np.int64),
+                    decode_mask.numpy().astype(np.int64),
+                    onnx_present_key,
+                    onnx_present_value,
+                ],
             )
         )
 
@@ -837,7 +857,10 @@ class TestMistralNeMo(ExtTestCase):
                 past_value=inputs["past_key_values"].layers[0].values,
             ),
             dynamic_shapes=dict(
-                input_ids={0: DYN, 1: DYN}, attention_mask={0: DYN, 1: DYN}, past_key={0: DYN, 2: DYN}, past_value={0: DYN, 2: DYN}
+                input_ids={0: DYN, 1: DYN},
+                attention_mask={0: DYN, 1: DYN},
+                past_key={0: DYN, 2: DYN},
+                past_value={0: DYN, 2: DYN},
             ),
         )
         with open(ep_path, "w") as f:
@@ -867,7 +890,9 @@ class TestMistralNeMo(ExtTestCase):
             res = transformers.cache_utils.DynamicCache()
             for i in range(len(values) // 2):
                 res.update(values[i * 2], values[i * 2 + 1], layer_idx=i)
-            assert output_type is None or isinstance(res, output_type), f"Type mismatch between {output_type} (expected) and {type(res)}"
+            assert output_type is None or isinstance(res, output_type), (
+                f"Type mismatch between {output_type} (expected) and {type(res)}"
+            )
             return res
 
         def registers_dynamic_cache():
@@ -896,7 +921,9 @@ class TestMistralNeMo(ExtTestCase):
             (),
             kwargs=inputs,
             dynamic_shapes=dict(
-                input_ids={0: DYN, 1: DYN}, attention_mask={0: DYN, 1: DYN}, past_key_values=[{0: DYN, 2: DYN}, {0: DYN, 2: DYN}]
+                input_ids={0: DYN, 1: DYN},
+                attention_mask={0: DYN, 1: DYN},
+                past_key_values=[{0: DYN, 2: DYN}, {0: DYN, 2: DYN}],
             ),
         )
         with open(ep_flatten_path, "w") as f:
@@ -968,7 +995,10 @@ class TestMistralNeMo(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir)
 
@@ -1002,8 +1032,12 @@ class TestMistralNeMo(ExtTestCase):
             "position_ids": np.arange(seq_len, dtype=np.int64).reshape(batch_size, seq_len),
         }
         for i in range(num_hidden_layers):
-            prefill_feed[f"past_key_values.{i}.key"] = np.zeros((batch_size, config.num_key_value_heads, 0, head_dim), dtype=np.float32)
-            prefill_feed[f"past_key_values.{i}.value"] = np.zeros((batch_size, config.num_key_value_heads, 0, head_dim), dtype=np.float32)
+            prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
+                (batch_size, config.num_key_value_heads, 0, head_dim), dtype=np.float32
+            )
+            prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
+                (batch_size, config.num_key_value_heads, 0, head_dim), dtype=np.float32
+            )
         prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
 
         onnx_out = sess.run(None, prefill_feed)

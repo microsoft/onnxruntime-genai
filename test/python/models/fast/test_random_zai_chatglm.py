@@ -376,7 +376,10 @@ def _save_mini_zai_chatglm(model_dir, num_layers=1):
     # ------------------------------------------------------------------
     vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
     tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+        tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+        bos_token="<s>",
+        eos_token="</s>",
+        unk_token="<unk>",
     )
     tokenizer.save_pretrained(model_dir)
 

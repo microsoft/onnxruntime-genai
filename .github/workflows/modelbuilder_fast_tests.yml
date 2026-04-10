@@ -40,7 +40,7 @@ jobs:
         run: pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl pytest huggingface_hub onnx optree onnxruntime onnxruntime-genai peft py-cpuinfo pytest-cov pytest-subtests tabulate
+        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl pytest huggingface_hub onnx onnxscript optree onnxruntime onnxruntime-genai peft py-cpuinfo pytest-cov pytest-subtests tabulate
 
       - name: Run fast tests
         run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=modelbuilder --cov-report=xml --cov-report=term-missing

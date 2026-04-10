@@ -6,7 +6,6 @@
 # Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # -------------------------------------------------------------------------
-from ..genai_config_utils import fix_genai_config
 from .base import Model
 
-__all__ = ["Model", "fix_genai_config"]
+__all__ = ["Model"]

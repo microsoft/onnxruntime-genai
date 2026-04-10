@@ -54,7 +54,11 @@ def _make_phi4mm_config():
     )
     # Set rope_scaling directly to bypass version-specific constructor
     # validation.  Both transformers 4.x and 5.x accept attribute assignment.
-    config.rope_scaling = {"type": "longrope", "short_factor": [1.0] * _ROTARY_DIM_HALF, "long_factor": [1.0] * _ROTARY_DIM_HALF}
+    config.rope_scaling = {
+        "type": "longrope",
+        "short_factor": [1.0] * _ROTARY_DIM_HALF,
+        "long_factor": [1.0] * _ROTARY_DIM_HALF,
+    }
     # Override architectures so the builder dispatches to Phi4MMModel.
     config.architectures = ["Phi4MMForCausalLM"]
     return config

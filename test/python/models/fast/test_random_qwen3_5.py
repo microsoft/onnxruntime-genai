@@ -31,7 +31,13 @@ def _make_qwen3_5_config(layer_types, num_hidden_layers=None):
 
     # partial_rotary_factor=0.25, head_dim=64 → rdim=16, rdim_half=8.
     # mrope_section=[2, 3, 3]: height positions at stride-1 offsets within rdim_half.
-    rope_cfg = {"type": "mrope", "rope_type": "default", "mrope_section": [2, 3, 3], "rope_theta": 10000.0, "partial_rotary_factor": 0.25}
+    rope_cfg = {
+        "type": "mrope",
+        "rope_type": "default",
+        "mrope_section": [2, 3, 3],
+        "rope_theta": 10000.0,
+        "partial_rotary_factor": 0.25,
+    }
 
     text_config = Qwen3_5TextConfig(
         hidden_size=256,
@@ -85,7 +91,10 @@ class TestRandomQwen3_5(ExtTestCase):
 
         vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
         )
         tokenizer.save_pretrained(model_dir_full)
 
@@ -120,7 +129,9 @@ class TestRandomQwen3_5(ExtTestCase):
         torch.manual_seed(0)
         input_ids = torch.randint(0, text_cfg.vocab_size, (batch_size, seq_len))
         with torch.no_grad():
-            inputs_embeds = model.model.language_model.embed_tokens(input_ids).numpy().astype(self.get_input_np_dtype(precision))
+            inputs_embeds = (
+                model.model.language_model.embed_tokens(input_ids).numpy().astype(self.get_input_np_dtype(precision))
+            )
 
         # 3D position_ids [3, batch_size, seq_len] for mRoPE.
         # For a plain text prompt all three rows (temporal / height / width) are identical.
@@ -153,9 +164,16 @@ class TestRandomQwen3_5(ExtTestCase):
                 )
             else:
                 # linear_attention: conv_state + recurrent_state
-                onnx_feed[f"past_key_values.{i}.conv_state"] = np.zeros((batch_size, linear_conv_dim, conv_kernel_minus1), dtype=np_dtype)
+                onnx_feed[f"past_key_values.{i}.conv_state"] = np.zeros(
+                    (batch_size, linear_conv_dim, conv_kernel_minus1), dtype=np_dtype
+                )
                 onnx_feed[f"past_key_values.{i}.recurrent_state"] = np.zeros(
-                    (batch_size, text_cfg.linear_num_value_heads, text_cfg.linear_key_head_dim, text_cfg.linear_value_head_dim),
+                    (
+                        batch_size,
+                        text_cfg.linear_num_value_heads,
+                        text_cfg.linear_key_head_dim,
+                        text_cfg.linear_value_head_dim,
+                    ),
                     dtype=np_dtype,
                 )
 
@@ -207,7 +225,9 @@ class TestRandomQwen3_5(ExtTestCase):
         config = _make_qwen3_5_config(["full_attention", "full_attention"])
         model, output_dir = self._build_and_save_model(config, "fp16", "cuda")
 
-        outputs = self._run_text_decoder(model, output_dir, config, "fp16", ["full_attention", "full_attention"], cpu=False)
+        outputs = self._run_text_decoder(
+            model, output_dir, config, "fp16", ["full_attention", "full_attention"], cpu=False
+        )
         self.assertIsNotNone(outputs[0])
         self.assertEqual(outputs[0].shape, (1, 5, 32000))
 
