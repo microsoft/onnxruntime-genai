@@ -77,13 +77,13 @@ class _AttentionOnlyLlamaModel(LlamaModel):
         g_outputs.append(self.make_value("present.0.key", dtype=self.io_dtype, shape=kv_out_shape))
         g_outputs.append(self.make_value("present.0.value", dtype=self.io_dtype, shape=kv_out_shape))
 
-    def make_model(self, attn_module, out_dir):
+    def make_model(self, out_dir, attn_module=None):
         """Build and save an attention-only ONNX model.
 
         Args:
-            attn_module: The PyTorch ``LlamaAttention`` module whose weights
-                are used to initialise the ONNX operators.
             out_dir: Directory where ``model.onnx`` will be written.
+            attn_module: Optional PyTorch ``LlamaAttention`` module whose weights
+                are used to initialise the ONNX operators.
         """
         self.make_inputs_and_outputs()
 
@@ -94,6 +94,11 @@ class _AttentionOnlyLlamaModel(LlamaModel):
 
         # Set the root input for make_attention (normally LayerNorm output).
         self.layernorm_attrs["output_0"] = "hidden_states"
+
+        if attn_module is None:
+            attn_module = getattr(self, "attn_module", None)
+        if attn_module is None:
+            raise ValueError("attn_module must be provided to build attention-only model.")
 
         # Build the attention subgraph: Q/K/V projections → GQA → O projection.
         self.make_attention(0, attn_module, root_input="hidden_states")
