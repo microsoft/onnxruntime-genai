@@ -77,7 +77,7 @@ class _AttentionOnlyLlamaModel(LlamaModel):
         g_outputs.append(self.make_value("present.0.key", dtype=self.io_dtype, shape=kv_out_shape))
         g_outputs.append(self.make_value("present.0.value", dtype=self.io_dtype, shape=kv_out_shape))
 
-    def make_model(self, out_dir, attn_module=None):
+    def build_attention_model(self, out_dir, attn_module=None):
         """Build and save an attention-only ONNX model.
 
         Args:
@@ -151,7 +151,7 @@ class TestLlamaAttentionDiscrepancies(ExtTestCase):
         attn_module = inner.layers[0].self_attn
 
         builder = _AttentionOnlyLlamaModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", cache_dir, {})
-        builder.make_model(attn_module, output_dir)
+        builder.build_attention_model(output_dir, attn_module)
 
         onnx_path = os.path.join(output_dir, "model.onnx")
         self.assertExists(onnx_path)
