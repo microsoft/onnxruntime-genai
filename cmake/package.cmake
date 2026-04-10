@@ -162,7 +162,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
-  cmake/onnxruntime-genai-config.cmake.in
+  ${CMAKE_CURRENT_LIST_DIR}/onnxruntime-genai-config.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genai-config.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime-genai
 )
