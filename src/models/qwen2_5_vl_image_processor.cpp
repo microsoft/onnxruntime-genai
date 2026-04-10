@@ -51,8 +51,7 @@ std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
-                   Ort::Allocator& allocator, int64_t spatial_merge_size,
-                   int64_t fixed_tokens_per_image = 0, int64_t fixed_num_images = 0) {
+                   Ort::Allocator& allocator, int64_t spatial_merge_size) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
@@ -61,11 +60,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   int64_t total_image_tokens = 0;
   const int64_t* image_grid_thw_data = nullptr;
 
-  if (fixed_tokens_per_image > 0) {
-    // Passthrough mode: fixed visual tokens per image, no grid computation
-    num_images = fixed_num_images;
-    total_image_tokens = fixed_tokens_per_image * num_images;
-  } else if (pixel_values) {
+  if (pixel_values) {
     // Grid-based mode: compute token count from image_grid_thw
     if (image_grid_thw) {
       const int64_t* image_grid_thw_shape{};
@@ -109,9 +104,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   }
 
   // Replace vision markers with the correct number of image_pad tokens per image.
-  // In passthrough mode, each image gets exactly fixed_tokens_per_image pads.
-  // In grid mode, the count is derived from (T*H*W) / spatial_merge_size^2.
-  if (num_images > 0 && (image_grid_thw_data || fixed_tokens_per_image > 0)) {
+  // The count is derived from (T*H*W) / spatial_merge_size^2.
+  if (num_images > 0 && image_grid_thw_data) {
     std::string modified_text;
     size_t last_pos = 0;
     size_t image_idx = 0;
@@ -121,15 +115,10 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     while (std::regex_search(temp_text, match, vision_start_regex)) {
       modified_text += text.substr(last_pos, match.position() - (last_pos - (text.size() - temp_text.size())));
 
-      int64_t num_pads;
-      if (fixed_tokens_per_image > 0) {
-        num_pads = fixed_tokens_per_image;
-      } else {
-        int64_t t = image_grid_thw_data[image_idx * 3 + 0];
-        int64_t h = image_grid_thw_data[image_idx * 3 + 1];
-        int64_t w = image_grid_thw_data[image_idx * 3 + 2];
-        num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
-      }
+      int64_t t = image_grid_thw_data[image_idx * 3 + 0];
+      int64_t h = image_grid_thw_data[image_idx * 3 + 1];
+      int64_t w = image_grid_thw_data[image_idx * 3 + 2];
+      int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
 
       modified_text += vision_start_token;
       for (int64_t i = 0; i < num_pads; ++i) {
@@ -169,8 +158,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},
       spatial_merge_size_{config.model.vision.spatial_merge_size},
-      patch_size_{config.model.vision.patch_size},
-      num_visual_tokens_{config.model.vision.num_visual_tokens} {
+      patch_size_{config.model.vision.patch_size} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -204,83 +192,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
   OrtxTensor* pixel_values = nullptr;
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
-
-  // Passthrough mode: vision model takes raw pixels (e.g. InternVideo2), not patches.
-  // Transpose HWC → CHW and reshape to [batch, num_frames, C, H, W].
-  if (num_visual_tokens_ > 0) {
-    const float* pv_data{};
-    const int64_t* pv_shape{};
-    size_t pv_ndims;
-    CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pv_data),
-                                  &pv_shape, &pv_ndims));
-
-    // Determine H, W, C from the processor output (HWC layout).
-    // Possible shapes: [H,W,C], [1,H,W,C], or [N,H,W,C].
-    int64_t num_imgs, height, width, channels;
-    if (pv_ndims == 3) {
-      num_imgs = 1;
-      height = pv_shape[0];
-      width = pv_shape[1];
-      channels = pv_shape[2];
-    } else if (pv_ndims == 4) {
-      num_imgs = pv_shape[0];
-      height = pv_shape[1];
-      width = pv_shape[2];
-      channels = pv_shape[3];
-    } else {
-      throw std::runtime_error("Passthrough mode: unexpected pixel_values rank " +
-                               std::to_string(pv_ndims) + " (expected 3 or 4)");
-    }
-
-    // Build [1, num_frames, C, H, W] tensor with HWC → CHW transpose
-    std::vector<int64_t> target_shape = {1, num_imgs, channels, height, width};
-    auto float_tensor = OrtValue::CreateTensor<float>(allocator, target_shape);
-    float* dst = float_tensor->GetTensorMutableData<float>();
-
-    for (int64_t n = 0; n < num_imgs; ++n) {
-      const float* src_img = pv_data + n * height * width * channels;
-      float* dst_img = dst + n * channels * height * width;
-      for (int64_t c = 0; c < channels; ++c) {
-        for (int64_t h = 0; h < height; ++h) {
-          for (int64_t w = 0; w < width; ++w) {
-            dst_img[c * height * width + h * width + w] = src_img[h * width * channels + w * channels + c];
-          }
-        }
-      }
-    }
-
-    auto converted_pv = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(std::move(converted_pv)));
-
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(
-        tokenizer, prompt, pixel_values, nullptr, nullptr, 0,
-        allocator, spatial_merge_size_,
-        num_visual_tokens_, static_cast<int64_t>(images->num_images_));
-    named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
-                           std::make_shared<Tensor>(std::move(input_ids)));
-    named_tensors->emplace(std::string(Config::Defaults::NumImageTokens),
-                           std::make_shared<Tensor>(std::move(num_img_tokens)));
-
-    // Emit image_grid_thw so that GetImageFeatureBatchSize (multi_modal.cpp) can
-    // determine num_images.  The pixel_values name gets remapped by AddMapping
-    // (e.g. "pixel_values" → "images"), so the rank-based lookup in
-    // GetImageFeatureBatchSize never matches; it falls through to image_grid_thw
-    // whose name is not remapped.  The actual grid values are unused by the
-    // vision model — only shape[0] (num_images) matters downstream.
-    auto grid_thw = OrtValue::CreateTensor<int64_t>(
-        allocator, std::vector<int64_t>{num_imgs, 3});
-    auto* grid_ptr = grid_thw->GetTensorMutableData<int64_t>();
-    for (int64_t i = 0; i < num_imgs; ++i) {
-      grid_ptr[i * 3 + 0] = 1;       // T
-      grid_ptr[i * 3 + 1] = height;   // H
-      grid_ptr[i * 3 + 2] = width;    // W
-    }
-    named_tensors->emplace("image_grid_thw",
-                           std::make_shared<Tensor>(std::move(grid_thw)));
-
-    return named_tensors;
-  }
 
   OrtxTensor* image_grid_thw = nullptr;
   // Try to get image_grid_thw from processor (second output)

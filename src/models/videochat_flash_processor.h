@@ -9,17 +9,16 @@
 
 namespace Generators {
 
-struct QwenImageProcessor : Processor {
-  QwenImageProcessor(Config& config, const SessionInfo& session_info);
+struct VideoChatFlashProcessor : Processor {
+  VideoChatFlashProcessor(Config& config, const SessionInfo& session_info);
 
-  virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
  private:
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
-  int64_t spatial_merge_size_;
-  int64_t patch_size_{14};
+  int64_t num_visual_tokens_;
 };
 
 }  // namespace Generators

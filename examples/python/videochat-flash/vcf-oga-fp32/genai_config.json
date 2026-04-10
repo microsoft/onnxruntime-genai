@@ -27,14 +27,12 @@
     },
     "eos_token_id": 151645,
     "pad_token_id": 151643,
-    "type": "qwen3_vl",
+    "type": "videochat_flash_qwen",
     "vocab_size": 152064,
     "vision": {
       "filename": "vcf-vision.onnx",
       "config_filename": "processor_config.json",
       "num_visual_tokens": 64,
-      "spatial_merge_size": 2,
-      "patch_size": 16,
       "inputs": {
         "pixel_values": "images"
       },
