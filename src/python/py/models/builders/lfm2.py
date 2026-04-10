@@ -35,6 +35,7 @@ class LFM2Model(Model):
         # Hybrid attention/convolution architecture
         self.layer_types = config.layer_types
         self.conv_L_cache = config.conv_L_cache
+        self.kv_layer_indices = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
@@ -42,51 +43,41 @@ class LFM2Model(Model):
         super().make_attention_init()
 
     def make_inputs_and_outputs(self):
-        # Add model-specific inputs to list of model inputs
-        inputs = self.model.graph.inputs
-        for name in self.input_names:
-            dtype = self.input_types[name]
-            shape = self.input_shapes[name]
-            inputs.append(self.make_value(name, dtype=dtype, shape=shape))
+        # Replace the base class's all-layer KV lists with attention-layer-only lists,
+        # then add conv cache entries as additional scalar (non-list) entries.
+        attn_indices = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
+        conv_indices = [i for i, t in enumerate(self.layer_types) if t == "conv"]
 
-        # Add model-specific outputs to list of model outputs
-        outputs = self.model.graph.outputs
-        for name in self.output_names:
-            dtype = self.output_types[name]
-            shape = self.output_shapes[name]
-            outputs.append(self.make_value(name, dtype=dtype, shape=shape))
+        # Rewrite KV names to only include attention layers
+        self.input_names["past_key_values.key"] = [f"past_key_values.{i}.key" for i in attn_indices]
+        self.input_names["past_key_values.value"] = [f"past_key_values.{i}.value" for i in attn_indices]
+        self.output_names["present.key"] = [f"present.{i}.key" for i in attn_indices]
+        self.output_names["present.value"] = [f"present.{i}.value" for i in attn_indices]
 
-        # Add per-layer cache inputs and outputs
-        for i in range(self.num_layers):
-            if self.layer_types[i] == "full_attention":
-                # Add KV cache inputs
-                key_in_name = f"past_key_values.{i}.key"
-                key_in_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.key"])
-                inputs.append(self.make_value(key_in_name, dtype=self.input_types["past_key_values.key"], shape=key_in_shape))
+        # Add conv cache entries as individual (non-list) inputs/outputs
+        conv_cache_shape = ["batch_size", self.hidden_size, self.conv_L_cache]
+        for i in conv_indices:
+            past_name = f"past_conv.{i}"
+            self.input_names[past_name] = past_name
+            self.input_types[past_name] = self.io_dtype
+            self.input_shapes[past_name] = conv_cache_shape
 
-                value_in_name = f"past_key_values.{i}.value"
-                value_in_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.value"])
-                inputs.append(self.make_value(value_in_name, dtype=self.input_types["past_key_values.value"], shape=value_in_shape))
+            present_name = f"present_conv.{i}"
+            self.output_names[present_name] = present_name
+            self.output_types[present_name] = self.io_dtype
+            self.output_shapes[present_name] = conv_cache_shape
 
-                # Add KV cache outputs
-                key_out_name = f"present.{i}.key"
-                key_out_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.key"])
-                outputs.append(self.make_value(key_out_name, dtype=self.output_types["present.key"], shape=key_out_shape))
+        super().make_inputs_and_outputs()
 
-                value_out_name = f"present.{i}.value"
-                value_out_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
-                outputs.append(self.make_value(value_out_name, dtype=self.output_types["present.value"], shape=value_out_shape))
-
-            elif self.layer_types[i] == "conv":
-                conv_cache_shape = ["batch_size", self.hidden_size, self.conv_L_cache]
-
-                # Add conv cache input
-                past_conv_name = f"past_conv.{i}"
-                inputs.append(self.make_value(past_conv_name, dtype=self.io_dtype, shape=conv_cache_shape))
-
-                # Add conv cache output
-                present_conv_name = f"present_conv.{i}"
-                outputs.append(self.make_value(present_conv_name, dtype=self.io_dtype, shape=conv_cache_shape))
+    def make_key_value_cache_names(self, layer_id):
+        # The base class indexes the filtered KV lists by layer_id, but our lists
+        # only contain attention layers. Map layer_id to its position in the filtered list.
+        attn_index = self.kv_layer_indices.index(layer_id)
+        past_k = self.input_names["past_key_values.key"][attn_index]
+        past_v = self.input_names["past_key_values.value"][attn_index]
+        present_k = self.output_names["present.key"][attn_index]
+        present_v = self.output_names["present.value"][attn_index]
+        return past_k, past_v, present_k, present_v
 
     def make_past_key_subgraph(self, basename):
         # Find the first attention layer index (may not be layer 0)
