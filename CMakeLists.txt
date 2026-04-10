@@ -137,6 +137,12 @@ if(ENABLE_TESTS)
     add_compile_definitions(TEST_PHI2=0)
   endif()
 
+  if (TEST_QWEN_2_5)
+    add_compile_definitions(TEST_QWEN_2_5=1)
+  else()
+    add_compile_definitions(TEST_QWEN_2_5=0)
+  endif()
+
   if (USE_WEBGPU)
     add_compile_definitions(USE_WEBGPU=1)
   else()

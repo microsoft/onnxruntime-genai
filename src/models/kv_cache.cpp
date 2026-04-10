@@ -6,6 +6,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
+#include "../qnn/interface.h"
 #include <algorithm>
 
 namespace Generators {
@@ -562,10 +563,10 @@ bool IsCacheNeeded(const Model& model) {
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
-  // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
+  // For OpenVINO and QNN Stateful models, they do not contain exposed past/present KV tensors.
   // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
   // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
-  if (IsOpenVINOStatefulModel(state.model_)) {
+  if (IsOpenVINOStatefulModel(state.model_) || IsQNNStatefulModel(state.model_)) {
     if (g_log.enabled)
       Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
     return std::make_unique<ModelManagedKeyValueCache>(state);

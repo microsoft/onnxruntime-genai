@@ -942,6 +942,22 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
+def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+
+    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
+    audios = og.Audios.open(audio_path)
+
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    prompt = "".join(decoder_prompt_tokens)
+    _ = processor(prompt, audios=audios)
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
@@ -1064,6 +1080,58 @@ def test_streaming_asr_config_model_type(nemotron_speech_model_path):
     """Test that a nemotron_speech model reports the correct type."""
     model = og.Model(nemotron_speech_model_path)
     assert model.type == "nemotron_speech"
+
+
+def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
+    """Test that VAD can be controlled via set_option/get_option on StreamingProcessor."""
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+
+    # Default: VAD disabled
+    assert processor.get_option("use_vad") == "false"
+
+    # Set and get min_silence_chunks
+    processor.set_option("silence_duration_ms", "1000")
+    assert processor.get_option("silence_duration_ms") == "1000"
+
+    # Enable VAD if silero model is available
+    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    if os.path.exists(vad_path):
+        processor.set_option("use_vad", "true")
+        assert processor.get_option("use_vad") == "true"
+
+        processor.set_option("vad_threshold", "0.8")
+        assert processor.get_option("use_vad") == "true"
+
+        # Disable
+        processor.set_option("use_vad", "false")
+        assert processor.get_option("use_vad") == "false"
+
+
+def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
+    """Test that VAD uses consecutive silence logic — doesn't drop until min_silence_chunks exceeded."""
+    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    if not os.path.exists(vad_path):
+        pytest.skip("silero_vad.onnx not found in model dir")
+
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    processor.set_option("use_vad", "true")
+    processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
+
+    silence = np.zeros(chunk_samples, dtype=np.float32)
+
+    # First 2 silence chunks should still be processed
+    mel1 = processor.process(silence)
+    assert mel1 is not None  # Chunk 1: processed (1 consecutive)
+
+    mel2 = processor.process(silence)
+    assert mel2 is not None  # Chunk 2: processed (2 consecutive)
+
+    # Third silence chunk should be dropped
+    mel3 = processor.process(silence)
+    assert mel3 is None  # Chunk 3: dropped (> min_silence_chunks)
 
 
 def _word_error_rate(reference: str, hypothesis: str) -> float:

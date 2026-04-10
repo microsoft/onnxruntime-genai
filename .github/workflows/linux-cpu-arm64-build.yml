@@ -62,7 +62,7 @@ jobs:
           ls -R microsoft.ml.onnxruntime
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
@@ -85,13 +85,26 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON"
 
       - name: Docker -- Build with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild"
+
+      - name: Docker -- Build the C Examples
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            /usr/bin/cmake -S examples/c -B examples/c/build \
+              -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+              -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/build/native/include \
+              -DORT_LIB_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/runtimes/linux-arm64/native \
+              -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
+              -DOGA_LIB_DIR=/onnxruntime_src/build/cpu && \
+            /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Docker -- Check test directory
         run: |
