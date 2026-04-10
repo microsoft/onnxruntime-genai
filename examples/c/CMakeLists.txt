@@ -44,8 +44,17 @@ find_package(onnxruntime-genai REQUIRED)
 
 function(genai_add_example target)
   add_executable(${target} ${ARGN})
-  target_link_libraries(${target} PRIVATE onnxruntime::onnxruntime-genai onnxruntime::onnxruntime
-          nlohmann_json::nlohmann_json CLI11::CLI11)
+  target_link_libraries(${target} PRIVATE onnxruntime::onnxruntime-genai
+          onnxruntime::onnxruntime nlohmann_json::nlohmann_json CLI11::CLI11)
+  # Set RPATH so the executable can find shared libraries at their build locations
+  if(UNIX)
+    get_target_property(_ort_path onnxruntime::onnxruntime LOCATION)
+    cmake_path(GET _ort_path PARENT_PATH _ort_bin_dir)
+    get_target_property(_oga_path onnxruntime-genai::onnxruntime-genai LOCATION)
+    cmake_path(GET _oga_path PARENT_PATH _oga_bin_dir)
+    set_target_properties(${target} PROPERTIES
+            BUILD_RPATH "${_ort_bin_dir};${_oga_bin_dir}")
+  endif()
 endfunction()
 
 set(EXAMPLES_SOURCE_DIR ${PROJECT_SOURCE_DIR}/src)

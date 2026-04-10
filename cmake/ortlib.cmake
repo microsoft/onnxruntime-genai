@@ -73,7 +73,6 @@ function(_get_target_location_property variable target property)
   set(${variable} ${_result} PARENT_SCOPE)
 endfunction()
 
-
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
   message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [as provided]")
