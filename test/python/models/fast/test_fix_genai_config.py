@@ -6,7 +6,7 @@
 import unittest
 
 from ext_test_case import ExtTestCase
-from models.builders.base.genai_config_utils import fix_genai_config
+from models.builders.base import fix_genai_config
 
 
 class TestFixGenaiConfig(ExtTestCase):

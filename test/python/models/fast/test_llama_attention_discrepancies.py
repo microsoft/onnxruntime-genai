@@ -8,8 +8,8 @@ import unittest
 
 import numpy as np
 import onnx_ir as ir
-from models.builders.llama import LlamaModel
 from ext_test_case import ExtTestCase, hide_stdout, requires_transformers
+from models.builders.llama import LlamaModel
 
 # LlamaForCausalLM architecture matching arnir0/Tiny-LLM but with a single
 # hidden layer and smaller dimensions to keep tests fast and completely offline.
