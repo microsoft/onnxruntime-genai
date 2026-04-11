@@ -125,6 +125,9 @@ struct BeamSearch_Cpu : Search_Cpu {
   std::unique_ptr<int32_t[]> next_tokens_buffer_;  // prevents freeing of next_tokens buffer for setting user tokens
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
+
+  // Reusable index buffer for SelectTop (avoids re-allocation on each call).
+  std::vector<int32_t> select_top_idx_;
 };
 
 }  // namespace Generators

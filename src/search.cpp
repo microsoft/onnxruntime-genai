@@ -118,23 +118,25 @@ void BeamSearch_Cpu::SelectTop() {
   // instead of heapifying the entire vocab*beams array via priority_queue.
   const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
   assert(total_elements >= top_k);
-  std::vector<int32_t> idx(total_elements);
+
+  // Reuse class member to avoid re-allocating on every call (size is constant).
+  select_top_idx_.resize(total_elements);
 
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->search.batch_size); batch_index++) {
     auto token_scores_sub = next_token_scores.subspan(batch_index * total_elements, total_elements);
 
     // Build index array and partial_sort to find top_k elements
-    std::iota(idx.begin(), idx.end(), 0);
-    std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(),
+    std::iota(select_top_idx_.begin(), select_top_idx_.end(), 0);
+    std::partial_sort(select_top_idx_.begin(), select_top_idx_.begin() + top_k, select_top_idx_.end(),
                       [&token_scores_sub](int32_t a, int32_t b) { return token_scores_sub[a] > token_scores_sub[b]; });
 
     auto next_indices_sub = next_indices.subspan(top_k * batch_index, top_k);
     auto next_tokens_sub = next_tokens.subspan(top_k * batch_index, top_k);
     auto next_scores_sub = next_scores.subspan(top_k * batch_index, top_k);
     for (size_t i = 0; i < top_k; i++) {
-      next_indices_sub[i] = idx[i] / params_->config.model.vocab_size;
-      next_tokens_sub[i] = idx[i] % params_->config.model.vocab_size;
-      next_scores_sub[i] = token_scores_sub[idx[i]];
+      next_indices_sub[i] = select_top_idx_[i] / params_->config.model.vocab_size;
+      next_tokens_sub[i] = select_top_idx_[i] % params_->config.model.vocab_size;
+      next_scores_sub[i] = token_scores_sub[select_top_idx_[i]];
     }
   }
 
@@ -190,21 +192,77 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     AppendNextTokensToSequences();
 }
 
+// Adaptive partial-sort nucleus (top-p) search.
+//
+// Given a score array and precomputed global partition stats (max_score, inv_temp,
+// inv_global_exp_sum), finds the minimal set of tokens whose cumulative true
+// probability >= p using adaptive partial_sort with geometrically growing K.
+//
+// Returns the number of tokens in the nucleus (cutoff_index).
+// On return, indices[0..cutoff_index-1] are the nucleus token indices sorted by
+// descending score.
+//
+// Complexity (V = vocab_size, typically 128K-200K):
+//   - Best case (common):  O(V log K0) where K0=256 — covers p>=0.99 for most LLM distributions
+//   - Rare fallback:       O(V log 1024)             — very flat distributions
+//   - Worst case:          O(V log V)                — uniform distribution (essentially never)
+static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices,
+                       float p, float max_score, float inv_temp, float inv_global_exp_sum) {
+  const int vocab_size = static_cast<int>(scores.size());
+
+  // 256 covers p>=0.99 for most LLM distributions. 4x geometric growth handles
+  // the rare case of unusually flat distributions without over-sorting.
+  constexpr int kInitialCandidateCount = 256;
+  constexpr int kCandidateCountGrowthFactor = 4;
+
+  std::iota(indices.begin(), indices.end(), 0);
+
+  int sorted_count = 0;
+  int k = std::min(kInitialCandidateCount, vocab_size);
+  float cumulative_prob = 0.0f;
+  int cutoff_index = 0;
+
+  while (k <= vocab_size) {
+    // Partial sort: place the top-k elements (by score, descending) at indices[0..k-1].
+    // Only the range [sorted_count, k) is newly sorted; [0, sorted_count) is already done.
+    std::partial_sort(indices.begin() + sorted_count, indices.begin() + k, indices.end(),
+                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+    // Accumulate true probabilities for the newly sorted elements [sorted_count, k).
+    // Note: We recompute exp() here rather than caching a V-sized array because
+    // cutoff_index is typically << V (e.g., 10-50 tokens for p=0.95), so the few
+    // recomputed exp() calls are far cheaper than allocating and filling a ~800KB
+    // float array per batch item. The Softmax below (Step 3) only operates on the
+    // nucleus, not the full vocab.
+    cutoff_index = k;
+    for (int i = sorted_count; i < k; ++i) {
+      cumulative_prob += std::exp((scores[indices[i]] - max_score) * inv_temp) * inv_global_exp_sum;
+      if (cumulative_prob >= p) {
+        cutoff_index = i + 1;
+        break;
+      }
+    }
+    sorted_count = k;
+
+    if (cumulative_prob >= p || k == vocab_size)
+      break;
+
+    k = std::min(k * kCandidateCountGrowthFactor, vocab_size);
+  }
+
+  return cutoff_index;
+}
+
 // Top-P (nucleus) sampling using adaptive partial sort.
 //
-// Instead of fully sorting the entire vocabulary O(V log V), this uses std::partial_sort
-// with an adaptive K that starts small (256) and grows geometrically (4x) only when the
-// cumulative probability of the top-K candidates hasn't yet reached the threshold p.
+// Instead of fully sorting the entire vocabulary O(V log V), this uses
+// FindNucleus() which applies std::partial_sort with an adaptive K that starts
+// small and grows geometrically only when needed.
 //
 // Correctness: A single O(V) pass computes the global softmax partition function
 // (max + sum-of-exp) before sorting. Cumulative probabilities are then measured
 // against the true full-vocab distribution, ensuring the nucleus contains exactly
 // the minimal set of tokens whose true probabilities sum to >= p.
-//
-// Complexity analysis (V = vocab_size, typically 128K-200K):
-//   - Best case (common):  O(V) + O(V log 256) ≈ O(9V) — one pass for partition + partial sort
-//   - Rare fallback:       O(V) + O(V log 1024)         — very flat distributions
-//   - Worst case:          O(V) + O(V log V)             — uniform distribution (essentially never)
 //
 // Additional optimizations over the previous implementation:
 //   - Buffers (indices, top_logits) are allocated once outside the batch loop,
@@ -238,45 +296,8 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     }
     float inv_global_exp_sum = 1.0f / global_exp_sum;
 
-    // Step 2: Adaptive partial sort to find nucleus candidates.
-    //
-    // Initialize index array [0, 1, 2, ..., V-1] for indirect sorting.
-    // We partial_sort to place the top-K highest-scoring indices at the front,
-    // then accumulate their true probabilities (using global_exp_sum) until
-    // the cumulative mass reaches p.  If not, grow K by 4x and repeat.
-    std::iota(indices.begin(), indices.end(), 0);
-
-    int sorted_count = 0;               // Number of indices fully sorted so far
-    int k = std::min(256, vocab_size);  // Initial candidate count (covers p>=0.99 for most LLM distributions)
-    float cumulative_prob = 0.0f;
-    int cutoff_index = 0;  // Number of tokens in the final nucleus
-
-    while (k <= vocab_size) {
-      // Partial sort: place the top-k elements (by score, descending) at indices[0..k-1].
-      // Only the range [sorted_count, k) is newly sorted; [0, sorted_count) is already done.
-      std::partial_sort(indices.begin() + sorted_count, indices.begin() + k, indices.end(),
-                        [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-      // Accumulate true probabilities for the newly sorted elements [sorted_count, k).
-      // Each probability = exp((score - max_score) * inv_temp) * inv_global_exp_sum.
-      cutoff_index = k;
-      for (int i = sorted_count; i < k; ++i) {
-        cumulative_prob += std::exp((scores[indices[i]] - max_score) * inv_temp) * inv_global_exp_sum;
-        if (cumulative_prob >= p) {
-          cutoff_index = i + 1;
-          break;
-        }
-      }
-      sorted_count = k;
-
-      // If we've accumulated enough probability, or we've exhausted the entire vocab, stop.
-      if (cumulative_prob >= p || k == vocab_size)
-        break;
-
-      // The nucleus wasn't reached with the current K candidates. This means the
-      // distribution is unusually flat. Grow K by 4x and try again.
-      k = std::min(k * 4, vocab_size);
-    }
+    // Step 2: Find the nucleus via adaptive partial sort.
+    int cutoff_index = FindNucleus(scores, indices, p, max_score, inv_temp, inv_global_exp_sum);
 
     // Step 3: Re-normalize the nucleus probabilities and sample a token.
     // Build softmax over only the cutoff_index elements for proper sampling.
