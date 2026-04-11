@@ -32,7 +32,7 @@ struct ModelType {
 
   inline static bool IsALM(const std::string& model_type) {
     // Audio-language model (ALM)
-    static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
+    static constexpr std::array<std::string_view, 2> ALM = {"whisper", "cohere_transcribe"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
   }
 

@@ -916,6 +916,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"cohere_transcribe", Processor::Create<CohereProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},

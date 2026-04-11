@@ -161,6 +161,7 @@ struct Config {
       int num_hidden_layers{};
       int num_key_value_heads{};
       int head_size{};
+      int audio_stride{};  // Raw audio samples per encoder output frame (0 = disabled, e.g. 1280 for Cohere Transcribe)
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
