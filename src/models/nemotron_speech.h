@@ -48,6 +48,7 @@ struct NemotronCacheConfig {
   std::string enc_in_cache_channel;
   std::string enc_in_cache_time;
   std::string enc_in_cache_channel_len;
+  std::string enc_in_drop_count;
   std::string enc_out_encoded;
   std::string enc_out_length;
   std::string enc_out_cache_channel;
@@ -118,6 +119,12 @@ struct NemotronEncoderSubState : State {
   /// Set mel input and update registered input pointers.
   void SetMelInput(OrtValue* mel_tensor, int64_t total_mel_frames);
 
+  /// Set drop_count value for pre-transformer frame dropping.
+  void SetDropCount(int64_t drop);
+
+  /// Whether the encoder model supports the drop_count input.
+  bool HasDropCountInput() const { return has_drop_count_input_; }
+
   /// Update registered input pointers after cache is modified.
   void UpdateCacheInputs();
 
@@ -127,13 +134,17 @@ struct NemotronEncoderSubState : State {
   const NemotronSpeechModel& model_;
   NemotronEncoderCache cache_;
   std::unique_ptr<OrtValue> signal_length_;
+  std::unique_ptr<OrtValue> drop_count_;
 
   // Whether the encoder model has a "length" input
   bool has_length_input_{};
+  // Whether the encoder model has a "drop_count" input
+  bool has_drop_count_input_{};
 
   // Indices into inputs_/outputs_ vectors
   size_t mel_input_idx_{};
   size_t length_input_idx_{};
+  size_t drop_count_input_idx_{};
   size_t cache_channel_input_idx_{};
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
@@ -220,6 +231,7 @@ struct NemotronSpeechState : State {
   // Decoder state machine
   int64_t time_step_{0};
   int symbol_step_{0};
+  int chunk_count_{0};  // 0 = first chunk (no frame skip), >0 = subsequent (skip drop_extra frames)
   bool need_encoder_run_{false};
   bool chunk_done_{true};
   std::vector<int32_t> last_tokens_;

@@ -32,6 +32,10 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   // Mel pre-encode cache: ring buffer of last pre_encode_cache_size frames.
   std::vector<float> mel_pre_encode_cache_;
   int cache_pos_{0};
+  bool is_first_chunk_{true};
+
+  // First chunk needs fewer samples to match NeMo: (chunk_enc_frames-1)*sub+1 mel frames
+  int first_chunk_samples_{};
 
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;

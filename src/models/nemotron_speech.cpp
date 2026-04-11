@@ -52,6 +52,7 @@ void NemotronCacheConfig::PopulateFromConfig(const Config& config) {
   enc_in_cache_channel = enc.inputs.cache_last_channel;
   enc_in_cache_time = enc.inputs.cache_last_time;
   enc_in_cache_channel_len = enc.inputs.cache_last_channel_len;
+  enc_in_drop_count = enc.inputs.drop_count;
   enc_out_length = enc.outputs.output_lengths;
   enc_out_cache_channel = enc.outputs.cache_last_channel_next;
   enc_out_cache_time = enc.outputs.cache_last_time_next;
@@ -207,6 +208,19 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   input_names_.push_back(cfg.enc_in_cache_channel_len.c_str());
   inputs_.push_back(cache_.cache_last_channel_len.get());
 
+  // Detect and register drop_count input (for surgically modified encoder)
+  has_drop_count_input_ = model_.session_info_.HasInput(cfg.enc_in_drop_count);
+  if (has_drop_count_input_) {
+    auto dc_type = model_.session_info_.GetInputDataType(cfg.enc_in_drop_count);
+    auto dc_shape = std::array<int64_t, 1>{1};
+    drop_count_ = OrtValue::CreateTensor(allocator, dc_shape, dc_type);
+    *drop_count_->GetTensorMutableData<int64_t>() = 0;
+
+    drop_count_input_idx_ = inputs_.size();
+    input_names_.push_back(cfg.enc_in_drop_count.c_str());
+    inputs_.push_back(drop_count_.get());
+  }
+
   // Register outputs: encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next
   output_names_.push_back(cfg.enc_out_encoded.c_str());
   outputs_.push_back(nullptr);
@@ -233,6 +247,12 @@ void NemotronEncoderSubState::SetMelInput(OrtValue* mel_tensor, int64_t total_me
   inputs_[mel_input_idx_] = mel_tensor;
   if (has_length_input_) {
     *signal_length_->GetTensorMutableData<int64_t>() = total_mel_frames;
+  }
+}
+
+void NemotronEncoderSubState::SetDropCount(int64_t drop) {
+  if (has_drop_count_input_) {
+    *drop_count_->GetTensorMutableData<int64_t>() = drop;
   }
 }
 
@@ -404,6 +424,7 @@ void NemotronSpeechState::ResetStreamingState() {
   encoded_len_ = 0;
   time_step_ = 0;
   symbol_step_ = 0;
+  chunk_count_ = 0;
   need_encoder_run_ = false;
   chunk_done_ = true;
   last_tokens_.clear();
@@ -416,7 +437,14 @@ void NemotronSpeechState::RunEncoder() {
   OrtValue* mel_tensor = current_mel_->ort_tensor_.get();
   int64_t total_mel_frames = mel_tensor->GetTensorTypeAndShapeInfo()->GetShape()[1];
 
+  // Compute drop_extra: 0 for first chunk, drop_extra_pre_encoded for subsequent
+  int drop_extra = 0;
+  if (chunk_count_ > 0 && cache_config_.pre_encode_cache_size > 0) {
+    drop_extra = 1 + (cache_config_.pre_encode_cache_size - 1) / cache_config_.subsampling_factor;
+  }
+
   encoder_state_->SetMelInput(mel_tensor, total_mel_frames);
+  encoder_state_->SetDropCount(static_cast<int64_t>(drop_extra));
   encoder_state_->UpdateCacheInputs();
 
   DeviceSpan<int32_t> dummy_tokens;
@@ -437,6 +465,16 @@ void NemotronSpeechState::RunEncoder() {
   encoder_state_->cache_.cache_last_channel_len.reset(encoder_state_->outputs_[4]);
   encoder_state_->outputs_[4] = nullptr;
 
+  // When the encoder model has drop_count input, the ONNX graph handles
+  // the pre-transformer frame drop internally — start from frame 0.
+  // Otherwise fall back to C++ frame-skipping (old model without surgery).
+  if (encoder_state_->HasDropCountInput()) {
+    time_step_ = 0;
+  } else {
+    time_step_ = drop_extra;
+  }
+  chunk_count_++;
+
   current_mel_.reset();
 }
 
@@ -444,7 +482,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
   if (need_encoder_run_) {
     RunEncoder();
     need_encoder_run_ = false;
-    time_step_ = 0;
+    // time_step_ is set by RunEncoder() (0 for first chunk, drop_extra for subsequent)
     symbol_step_ = 0;
   }
 

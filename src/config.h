@@ -70,6 +70,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
     static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_len_next";
+    static constexpr std::string_view DropCountName = "drop_count";
 
     // Cross present key/value names
     static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
@@ -173,6 +174,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string drop_count{Defaults::DropCountName};
       } inputs;
 
       struct Outputs {
