@@ -252,7 +252,7 @@ def _validate_build_dir(args: argparse.Namespace):
     # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
     args.build_dir = args.build_dir.resolve(strict=is_strict)
-    if not 'Visual Studio' in args.cmake_generator and not 'Multi-Config' in args.cmake_generator:
+    if all(s not in args.cmake_generator for s in ['Visual Studio', 'Multi-Config', 'Xcode']):
         args.build_dir = args.build_dir / args.config
 
 
