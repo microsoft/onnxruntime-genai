@@ -405,7 +405,7 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     )
     ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    msbuild_extra_options = args.msbuild_extra_options
+    msbuild_extra_options = list(args.msbuild_extra_options)
     if args.config == "Release" and not [opt for opt in msbuild_extra_options if 'IsReleaseBuild' in opt]:
         msbuild_extra_options.append("IsReleaseBuild=True")
 
