@@ -4,8 +4,8 @@
 include_guard()
 
 # Define the Version Info
-file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver})
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../VERSION_INFO" ver)
+string(STRIP "${ver}" VERSION_INFO)
 
 # Example:
 # VERSION_INFO: 0.4.0-dev
