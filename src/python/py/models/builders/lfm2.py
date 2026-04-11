@@ -8,7 +8,6 @@ import os
 
 import torch
 import onnx_ir as ir
-from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
 
 from .base import Model
 
@@ -37,28 +36,6 @@ class LFM2Model(Model):
         self.layer_types = config.layer_types
         self.conv_L_cache = config.conv_L_cache
         self.kv_layer_indices = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
-
-        # Mixed-precision quantization: use INT8 for conv layer projections during
-        # INT4 quantization. Conv state accumulates across steps (like recurrence),
-        # so lower precision causes error buildup over long sequences.
-        int8_nodes = {}
-        for i, lt in enumerate(self.layer_types):
-            if lt == "conv":
-                # Conv projections: INT8
-                for proj in ("in_proj", "out_proj"):
-                    int8_nodes[f"/model/layers.{i}/conv/{proj}/MatMul"] = {"bits": 8}
-                # MLP projections in conv layers: INT8
-                for proj in ("gate_proj", "up_proj", "down_proj"):
-                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-
-        if int8_nodes:
-            algo_config = self.quant_attrs["int4"].get("algo_config")
-            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-                algo_config.customized_weight_config.update(int8_nodes)
-            else:
-                self.quant_attrs["int4"]["algo_config"] = RTNWeightOnlyQuantConfig(
-                    customized_weight_config=int8_nodes
-                )
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
