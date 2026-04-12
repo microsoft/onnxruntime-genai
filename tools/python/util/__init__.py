@@ -4,5 +4,5 @@
 from .android import *
 from .dependency_resolver import copy_dependencies, download_dependencies
 from .logger import get_logger
-from .platform_helpers import is_aix, is_linux, is_mac, is_windows, is_windows_arm
+from .platform_helpers import is_android, is_aix, is_linux, is_linux_arm, is_mac, is_windows, is_windows_arm
 from .run import run

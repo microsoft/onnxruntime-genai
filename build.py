@@ -251,9 +251,7 @@ def _validate_build_dir(args: argparse.Namespace):
 
     # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
-    args.build_dir = args.build_dir.resolve(strict=is_strict)
-    if all(s not in args.cmake_generator for s in ['Visual Studio', 'Multi-Config', 'Xcode']):
-        args.build_dir = args.build_dir / args.config
+    args.build_dir = args.build_dir.resolve(strict=is_strict) / args.config
 
 
 def _validate_cuda_args(args: argparse.Namespace):
@@ -700,7 +698,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
             "build",
             ".",
         ]
-        csharp_build_command += _get_csharp_properties(args, lib_dir)
+        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -744,7 +742,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
-        csharp_test_command += _get_csharp_properties(args, lib_dir)
+        csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
     if args.build_java:
@@ -769,9 +767,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     Build the examples.
     """
     examples_dir = REPO_ROOT / "examples" / "c"
-    build_dir = examples_dir / "build"
-    if not 'Visual Studio' in args.cmake_generator and not 'Multi-Config' in args.cmake_generator:
-        build_dir = build_dir / args.config
+    build_dir = examples_dir / "build" / args.config
 
     # Removing the build directory will no longer work because of
     # the FetchContent used in the examples. It creates the _deps/
@@ -781,7 +777,6 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     #     log.info(f"Removing existing build directory: {build_dir}")
     #     shutil.rmtree(build_dir)
     #
-    # Rezone for commenting out see above.
     # Do not need to create build dir manually. CMake will do that.
     # build_dir.mkdir(parents=True)
 
@@ -796,6 +791,30 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     cmake_prefix_path = str(args.build_dir)
     if args.ort_home:
         cmake_prefix_path += ";" + str(args.ort_home / args.config)
+    else:
+        ortlib_src_dir = args.build_dir / "_deps" / "ortlib-src"
+        ortlib_build_dir = ortlib_src_dir / "build" / "native"
+        ortlib_runtimes_dir = ortlib_src_dir / "runtimes"
+        ort_include_dir = ortlib_build_dir / "include"
+        ort_lib_dir = REPO_ROOT / "ort" / "lib"
+        if util.is_windows():
+            ort_lib_dir = ortlib_runtimes_dir / "win-x64"
+        if util.is_windows_arm():
+            ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
+        elif util.is_android():
+            ort_lib_dir = ortlib_runtimes_dir / "android"
+        elif util.is_linux():
+            ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
+        elif util.is_linux_arm():
+            ort_lib_dir = ortlib_runtimes_dir / "linux-arm64"
+        elif util.is_mac():
+            ort_lib_dir = ortlib_runtimes_dir / "osx-arm64"
+        elif not util.is_aix():
+            raise RuntimeError("Unsupported operating system to build examples for")
+        samples_to_build += [
+            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
+            "-DORT_LIB_DIR=" + str(ort_lib_dir / "native")
+        ]
 
     cmake_command = (
         [
@@ -806,11 +825,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
             str(build_dir),
             "-G",
             args.cmake_generator,
+            "-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
+
         ]
         + samples_to_build
-        + [
-        	"-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
-        ]
     )
 
     if args.cmake_generator.startswith("Visual Studio"):

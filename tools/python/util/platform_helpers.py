@@ -1,8 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import os
 import platform
 import sys
+
+
+def is_android():
+    return "ANDROID_ARGUMENT" in os.environ
 
 
 def is_windows():
@@ -15,6 +20,10 @@ def is_mac():
 
 def is_linux():
     return sys.platform.startswith("linux")
+
+
+def is_linux_arm():
+    return is_linux() and "arm" in platform.marchine().lower()
 
 
 def is_aix():
