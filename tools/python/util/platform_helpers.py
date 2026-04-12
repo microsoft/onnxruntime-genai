@@ -6,10 +6,6 @@ import platform
 import sys
 
 
-def is_android():
-    return "ANDROID_ARGUMENT" in os.environ
-
-
 def is_windows():
     return sys.platform.startswith("win")
 
@@ -23,7 +19,7 @@ def is_linux():
 
 
 def is_linux_arm():
-    return is_linux() and "arm" in platform.marchine().lower()
+    return is_linux() and "arm" in platform.machine().lower()
 
 
 def is_aix():

@@ -793,24 +793,28 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         cmake_prefix_path += ";" + str(args.ort_home / args.config)
     else:
         ortlib_src_dir = args.build_dir / "_deps" / "ortlib-src"
-        ortlib_build_dir = ortlib_src_dir / "build" / "native"
+        ort_include_dir = REPO_ROOT / "ort" / "include"
+        if not ort_include_dir.exists():
+            ort_include_dir = ortlib_src_dir / "build" / "native" / "include"
         ortlib_runtimes_dir = ortlib_src_dir / "runtimes"
-        ort_include_dir = ortlib_build_dir / "include"
         ort_lib_dir = REPO_ROOT / "ort" / "lib"
-        if util.is_windows():
-            ort_lib_dir = ortlib_runtimes_dir / "win-x64"
-        if util.is_windows_arm():
-            ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
-        elif util.is_android():
-            ort_lib_dir = ortlib_runtimes_dir / "android"
-        elif util.is_linux():
-            ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
-        elif util.is_linux_arm():
-            ort_lib_dir = ortlib_runtimes_dir / "linux-arm64"
-        elif util.is_mac():
-            ort_lib_dir = ortlib_runtimes_dir / "osx-arm64"
-        elif not util.is_aix():
-            raise RuntimeError("Unsupported operating system to build examples for")
+        if not ort_lib_dir.exists():
+            if util.is_windows():
+                ort_lib_dir = ortlib_runtimes_dir / "win-x64"
+            if util.is_windows_arm() or (util.is_windows() and (args.amr64 or args.arm64ec)):
+                ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
+            elif args.android:
+                ort_lib_dir = ortlib_runtimes_dir / "android"
+            elif util.is_linux():
+                ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
+            elif util.is_linux_arm() or (util.is_linux() and (args.arm64 or args.arm64ec)):
+                ort_lib_dir = ortlib_runtimes_dir / "linux-arm64"
+            elif util.is_mac() or args.macos:
+                ort_lib_dir = ortlib_runtimes_dir / "osx-arm64"
+            elif args.ios:
+                ort_lib_dir = ortlib_runtimes_dir / "ios"
+            elif not util.is_aix():
+                raise RuntimeError("Unsupported operating system to build examples for")
         samples_to_build += [
             "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
             "-DORT_LIB_DIR=" + str(ort_lib_dir / "native")
