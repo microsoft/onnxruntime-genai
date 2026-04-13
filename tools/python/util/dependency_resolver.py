@@ -157,4 +157,5 @@ def download_dependencies(use_cuda: bool, use_dml: bool, destination_dir: PathLi
 def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
     libs = listdir(lib_dir)
     for file_name in libs:
-        shutil.copy(Path(lib_dir) / file_name, destination_dir)
+        if isfile(Path(lib_dir) / file_name):
+            shutil.copy(Path(lib_dir) / file_name, destination_dir)
