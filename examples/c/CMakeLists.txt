@@ -55,10 +55,12 @@ macro(find_dependency id component)
     add_library(onnxruntime::${component} SHARED IMPORTED)
     set_target_properties(onnxruntime::${component} PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES ${${id}_INCLUDE_DIR})
-    set_property(TARGET onnxruntime::${component} APPEND PROPERTY
-            IMPORTED_CONFIGURATIONS RELEASE)
     set_target_properties(onnxruntime::${component} PROPERTIES
-            IMPORTED_LOCATION_RELEASE "${${id}_LIB_DIR}/${${id}_LIB_FILE}")
+            IMPORTED_LOCATION "${${id}_LIB_DIR}/${${id}_LIB_FILE}")
+    if(WIN32)
+        set_target_properties(onnxruntime::${component} PROPERTIES
+            IMPORTED_IMPLIB "${${id}_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${component}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    endif()
   endif()
 endmacro()
 

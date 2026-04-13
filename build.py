@@ -801,7 +801,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         if not ort_lib_dir.exists():
             if util.is_windows():
                 ort_lib_dir = ortlib_runtimes_dir / "win-x64"
-            if util.is_windows_arm() or (util.is_windows() and (args.amr64 or args.arm64ec)):
+            elif util.is_windows_arm() or (util.is_windows() and (args.arm64 or args.arm64ec)):
                 ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
             elif args.android:
                 ort_lib_dir = ortlib_runtimes_dir / "android"
