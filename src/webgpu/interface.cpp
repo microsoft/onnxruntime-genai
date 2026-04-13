@@ -171,6 +171,7 @@ struct InterfaceImpl : DeviceInterface {
  private:
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
+  std::vector<uint8_t> mask_staging_buffer_;  // Reusable CPU staging buffer for UpdateAttentionMask
 
  public:
   Ort::Allocator& GetAllocator() override {
@@ -189,6 +190,43 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do?
+
+  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (batch_beam_size != 1) {
+      return false;  // Fall back to CPU for multi-beam
+    }
+    // For batch_beam_size == 1 (no padding), the mask is always all 1s for attended positions.
+    // Static path (update_only=true): write 1s to mask_data[0:total_length)
+    // Non-static path (update_only=false): write 1s to next_mask_data[0:total_length)
+    void* dst = update_only ? mask_data : next_mask_data;
+    size_t elem_size = (type == Ort::TypeToTensorType<int32_t>) ? sizeof(int32_t) : sizeof(int64_t);
+    size_t upload_bytes = static_cast<size_t>(total_length) * elem_size;
+
+    // The staging buffer only ever contains 1s and grows monotonically.
+    // Only fill newly extended positions — previous positions are already 1.
+    if (mask_staging_buffer_.size() < upload_bytes) {
+      size_t old_size = mask_staging_buffer_.size();
+      mask_staging_buffer_.resize(upload_bytes);
+      if (type == Ort::TypeToTensorType<int32_t>) {
+        auto* data = reinterpret_cast<int32_t*>(mask_staging_buffer_.data());
+        std::fill_n(data + old_size / sizeof(int32_t), (upload_bytes - old_size) / sizeof(int32_t), static_cast<int32_t>(1));
+      } else {
+        auto* data = reinterpret_cast<int64_t*>(mask_staging_buffer_.data());
+        std::fill_n(data + old_size / sizeof(int64_t), (upload_bytes - old_size) / sizeof(int64_t), static_cast<int64_t>(1));
+      }
+    }
+
+    int64_t shape_val = static_cast<int64_t>(upload_bytes);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, mask_staging_buffer_.data(), upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, dst, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+
+    return true;
+  }
 
   bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (!ort_allocator_) {
