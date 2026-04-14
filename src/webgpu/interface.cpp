@@ -171,7 +171,11 @@ struct InterfaceImpl : DeviceInterface {
  private:
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
-  std::vector<uint8_t> mask_staging_buffer_;  // Reusable CPU staging buffer for UpdateAttentionMask
+  // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
+  // Content is always all 1s so sharing across generators is safe; only upload_bytes
+  // worth of data is copied each call, regardless of buffer capacity.
+  std::vector<int32_t> mask_staging_buffer_i32_;
+  std::vector<int64_t> mask_staging_buffer_i64_;
 
  public:
   Ort::Allocator& GetAllocator() override {
@@ -192,35 +196,36 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
-    if (batch_beam_size != 1) {
-      return false;  // Fall back to CPU for multi-beam
+    if (batch_beam_size != 1 || !update_only) {
+      return false;  // Fall back to CPU for multi-beam or non-static mask
     }
-    // For batch_beam_size == 1 (no padding), the mask is always all 1s for attended positions.
-    // Static path (update_only=true): write 1s to mask_data[0:total_length)
-    // Non-static path (update_only=false): write 1s to next_mask_data[0:total_length)
-    void* dst = update_only ? mask_data : next_mask_data;
-    size_t elem_size = (type == Ort::TypeToTensorType<int32_t>) ? sizeof(int32_t) : sizeof(int64_t);
-    size_t upload_bytes = static_cast<size_t>(total_length) * elem_size;
+    // For batch_beam_size == 1 with static mask (update_only=true, no padding),
+    // the mask is always all 1s for attended positions.
+    size_t num_elements = static_cast<size_t>(total_length);
+    size_t upload_bytes;
+    void* staging_data;
 
-    // The staging buffer only ever contains 1s and grows monotonically.
-    // Only fill newly extended positions — previous positions are already 1.
-    if (mask_staging_buffer_.size() < upload_bytes) {
-      size_t old_size = mask_staging_buffer_.size();
-      mask_staging_buffer_.resize(upload_bytes);
-      if (type == Ort::TypeToTensorType<int32_t>) {
-        auto* data = reinterpret_cast<int32_t*>(mask_staging_buffer_.data());
-        std::fill_n(data + old_size / sizeof(int32_t), (upload_bytes - old_size) / sizeof(int32_t), static_cast<int32_t>(1));
-      } else {
-        auto* data = reinterpret_cast<int64_t*>(mask_staging_buffer_.data());
-        std::fill_n(data + old_size / sizeof(int64_t), (upload_bytes - old_size) / sizeof(int64_t), static_cast<int64_t>(1));
+    // Use the correctly typed staging buffer. Each grows monotonically and
+    // only newly extended positions need to be filled with 1.
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      if (mask_staging_buffer_i32_.size() < num_elements) {
+        mask_staging_buffer_i32_.resize(num_elements, static_cast<int32_t>(1));
       }
+      staging_data = mask_staging_buffer_i32_.data();
+      upload_bytes = num_elements * sizeof(int32_t);
+    } else {
+      if (mask_staging_buffer_i64_.size() < num_elements) {
+        mask_staging_buffer_i64_.resize(num_elements, static_cast<int64_t>(1));
+      }
+      staging_data = mask_staging_buffer_i64_.data();
+      upload_bytes = num_elements * sizeof(int64_t);
     }
 
     int64_t shape_val = static_cast<int64_t>(upload_bytes);
     std::span<const int64_t> shape{&shape_val, 1};
     auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, mask_staging_buffer_.data(), upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, dst, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, staging_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
     const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);

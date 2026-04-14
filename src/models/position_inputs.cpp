@@ -383,21 +383,24 @@ void DefaultPositionInputs::RewindMask(size_t index) {
   if (state_.params_->use_graph_capture) {
     // Static mask layout: [batch_beam_size, max_length]
     // Rewind to index: write 1s for [0, index), 0s for [index, max_length)
-    int max_length = static_cast<int>(state_.params_->search.max_length);
+    size_t max_len = static_cast<size_t>(state_.params_->search.max_length);
+    if (index > max_len) {
+      throw std::runtime_error("RewindMask: index exceeds max_length");
+    }
     int batch_beam_size = static_cast<int>(attention_mask_shape_[0]);
     auto byte_span = attention_mask_->GetByteSpan();
     auto cpu_data = byte_span.CpuSpan();
     if (type_ == Ort::TypeToTensorType<int32_t>) {
       auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
       for (int i = 0; i < batch_beam_size; i++) {
-        std::fill_n(data + i * max_length, index, static_cast<int32_t>(1));
-        std::fill_n(data + i * max_length + index, max_length - index, static_cast<int32_t>(0));
+        std::fill_n(data + i * max_len, index, static_cast<int32_t>(1));
+        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int32_t>(0));
       }
     } else {
       auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
       for (int i = 0; i < batch_beam_size; i++) {
-        std::fill_n(data + i * max_length, index, static_cast<int64_t>(1));
-        std::fill_n(data + i * max_length + index, max_length - index, static_cast<int64_t>(0));
+        std::fill_n(data + i * max_len, index, static_cast<int64_t>(1));
+        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int64_t>(0));
       }
     }
     byte_span.CopyCpuToDevice();
