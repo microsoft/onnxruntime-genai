@@ -123,6 +123,7 @@ class Model:
                 "enable_skip_layer_norm_strict_mode": "1",
             },
             "dml": {},
+            "migraphx": {},
             "webgpu": {
                 "enableGraphCapture": "1" if extra_options.get("enable_webgpu_graph", False) else "0",
                 "validationMode": "disabled" if extra_options.get("enable_webgpu_graph", False) else "basic",
@@ -484,6 +485,7 @@ class Model:
             ("cuda", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.BFLOAT16),
             ("dml", ir.DataType.FLOAT16),
+            ("migraphx", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
             ("trt-rtx", ir.DataType.FLOAT16),
@@ -499,6 +501,8 @@ class Model:
             ("cuda", ir.DataType.BFLOAT16),
             ("dml", ir.DataType.FLOAT16),
             ("dml", ir.DataType.FLOAT),
+            ("migraphx", ir.DataType.FLOAT16),
+            ("migraphx", ir.DataType.FLOAT),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
             ("trt-rtx", ir.DataType.FLOAT),
@@ -518,7 +522,7 @@ class Model:
             # use_packed_matmul can be overrided by upstream quantization choice
             # (e.g., when q_proj, k_proj, v_proj have different quantization settings)
             self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml"]
+                self.ep not in ["dml", "migraphx"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
@@ -526,7 +530,7 @@ class Model:
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "migraphx"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
@@ -2006,7 +2010,7 @@ class Model:
         )
 
         # Determine which EPs don't support the If operator
-        self.eps_without_if_support = ["dml"]
+        self.eps_without_if_support = ["dml", "migraphx"]
         if self.extra_options.get("enable_webgpu_graph", False):
             self.eps_without_if_support.append("webgpu")
 
@@ -2019,7 +2023,7 @@ class Model:
             # Set multiRotaryCacheConcatOffset for WebGPU EP
             if self.ep == "webgpu":
                 self.ep_attrs["webgpu"]["multiRotaryCacheConcatOffset"] = str(self.original_context_length)
-            # Do NOT make the subgraph with the If node for DML EP.
+            # Do NOT make the subgraph with the If node for DML and MIGraphX EP.
             return
 
         # TRT-RTX: Apply padding and create split If nodes with early return
@@ -4096,6 +4100,7 @@ class Model:
             self.extra_options.get("enable_cuda_graph", False)
             or self.extra_options.get("enable_webgpu_graph", False)
             or self.ep == "dml"
+            or self.ep == "migraphx"
         ):
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with graph capture enabled. We've only verified it works with GQA and with
