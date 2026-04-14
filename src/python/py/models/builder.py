@@ -109,9 +109,7 @@ def parse_hf_token(hf_token):
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     int4_cpu = precision == "int4" and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = (
-        precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-    )
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
     if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
         # FP32 precision
@@ -225,7 +223,7 @@ def create_model(
         from .builders.gemma import Gemma3Model
 
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        onnx_model.model_type = "gemma3_text"
+        onnx_model.model_type = "gemma3"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
