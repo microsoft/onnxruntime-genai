@@ -218,6 +218,13 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for name, tensor in weights.items():
+                    # Skip vision tower weights in VLM checkpoints
+                    if name.startswith(("model.visual.", "model.vision.", "visual.")):
+                        continue
+                    # Normalize common VLM prefix so existing LLM regex + parsing keeps working
+                    if name.startswith("model.language_model."):
+                        name = "model." + name[len("model.language_model."):]
+                        
                     # Per-layer quantization support
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
