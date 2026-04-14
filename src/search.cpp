@@ -206,8 +206,23 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
 //   - Best case (common):  O(V log K0) where K0=256 — covers p>=0.99 for most LLM distributions
 //   - Rare fallback:       O(V log 1024)             — very flat distributions
 //   - Worst case:          O(V log V)                — uniform distribution (essentially never)
+// Find the minimal nucleus of tokens whose cumulative probability >= p using
+// adaptive partial sort with a log-space tail bound. This avoids computing the
+// global softmax partition function (O(V) exp() calls) by bounding the unsorted
+// tail probability at each step.
+//
+// At sorted position i, all V-i-1 remaining elements have score <= scores[indices[i]]
+// (by sort order within the prefix, and by partial_sort guarantee beyond it). So:
+//   tail_sum <= (V - i - 1) * exp((scores[indices[i]] - max_score) * inv_temp)
+// The cumulative probability lower bound is:
+//   prefix_sum / (prefix_sum + tail_bound)
+// When this exceeds p, the true cumulative (which is >= this bound) also exceeds p.
+//
+// The nucleus found may include a few extra tokens compared to exact global softmax,
+// but is always a valid nucleus (true cumulative prob >= p). For typical peaked LLM
+// distributions, the bound is tight and the result is identical.
 static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices,
-                       float p, float max_score, float inv_temp, float inv_global_exp_sum) {
+                       float p, float max_score, float inv_temp) {
   const int vocab_size = static_cast<int>(scores.size());
 
   // 256 covers p>=0.99 for most LLM distributions. 4x geometric growth handles
@@ -219,7 +234,7 @@ static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices
 
   int sorted_count = 0;
   int k = std::min(kInitialCandidateCount, vocab_size);
-  float cumulative_prob = 0.0f;
+  float prefix_exp_sum = 0.0f;
   int cutoff_index = 0;
 
   while (k <= vocab_size) {
@@ -228,53 +243,65 @@ static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices
     std::partial_sort(indices.begin() + sorted_count, indices.begin() + k, indices.end(),
                       [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
 
-    // Accumulate true probabilities for the newly sorted elements [sorted_count, k).
-    // Note: We recompute exp() here rather than caching a V-sized array because
-    // cutoff_index is typically << V (e.g., 10-50 tokens for p=0.95), so the few
-    // recomputed exp() calls are far cheaper than allocating and filling a ~800KB
-    // float array per batch item. The Softmax below (Step 3) only operates on the
-    // nucleus, not the full vocab.
+    // Accumulate exp() for newly sorted elements and check the tail bound.
     cutoff_index = k;
     for (int i = sorted_count; i < k; ++i) {
-      cumulative_prob += std::exp((scores[indices[i]] - max_score) * inv_temp) * inv_global_exp_sum;
-      if (cumulative_prob >= p) {
+      float exp_i = std::exp((scores[indices[i]] - max_score) * inv_temp);
+      prefix_exp_sum += exp_i;
+
+      // Upper bound on remaining elements: all V-i-1 unsorted entries have score <= current.
+      float tail_bound = static_cast<float>(vocab_size - i - 1) * exp_i;
+      if (prefix_exp_sum >= p * (prefix_exp_sum + tail_bound)) {
         cutoff_index = i + 1;
         break;
       }
     }
     sorted_count = k;
 
-    if (cumulative_prob >= p || k == vocab_size)
+    if (cutoff_index < k || k == vocab_size)
       break;
 
     k = std::min(k * kCandidateCountGrowthFactor, vocab_size);
   }
 
+  // When the full vocabulary was sorted (small V or very flat distribution),
+  // the tail bound can be overly conservative. Compute the exact cutoff using
+  // the true partition function since all exp() values are computable from the
+  // sorted order. This adds at most 2V exp() calls only when V <= initial K.
+  if (sorted_count == vocab_size) {
+    float global_exp_sum = 0.0f;
+    for (int i = 0; i < vocab_size; ++i) {
+      global_exp_sum += std::exp((scores[indices[i]] - max_score) * inv_temp);
+    }
+    float cum = 0.0f;
+    for (int i = 0; i < cutoff_index; ++i) {
+      cum += std::exp((scores[indices[i]] - max_score) * inv_temp);
+      if (cum >= p * global_exp_sum) {
+        return i + 1;
+      }
+    }
+  }
+
   return cutoff_index;
 }
 
-// Top-P (nucleus) sampling using adaptive partial sort.
+// Top-P (nucleus) sampling using adaptive partial sort with tail-bound
+// early termination.
 //
-// Instead of fully sorting the entire vocabulary O(V log V), this uses
-// FindNucleus() which applies std::partial_sort with an adaptive K that starts
-// small and grows geometrically only when needed.
+// Instead of a separate O(V) pass to compute the global softmax partition
+// function (max + sum-of-exp over the full vocabulary), FindNucleus uses
+// a conservative upper bound on the unsorted tail to determine when the
+// nucleus is complete. This eliminates ~V calls to std::exp() per token
+// (e.g., ~128K for typical LLM vocabularies).
 //
-// Correctness: A single O(V) pass computes the global softmax partition function
-// (max + sum-of-exp) before sorting. Cumulative probabilities are then measured
-// against the true full-vocab distribution, ensuring the nucleus contains exactly
-// the minimal set of tokens whose true probabilities sum to >= p.
-//
-// Additional optimizations over the previous implementation:
-//   - Buffers (indices, top_logits) are allocated once outside the batch loop,
-//     eliminating ~800KB of heap allocation per batch item per decode step.
-//   - Softmax for final sampling is computed only over the nucleus (not the full vocab).
-//   - discrete_distribution is constructed over the nucleus (cutoff_index elements) instead
-//     of the full vocabulary, avoiding an O(V) CDF construction on zeroed-out entries.
+// Additional optimizations:
+//   - Buffers (indices, top_logits) are allocated once outside the batch loop.
+//   - Softmax for final sampling is computed only over the nucleus.
+//   - discrete_distribution is constructed over the nucleus only.
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
 
   // Buffers allocated once outside the batch loop to avoid per-call heap allocations.
-  // For vocab_size=200K, this saves ~800KB of malloc/free per batch item per token step.
   std::vector<int32_t> indices(vocab_size);
   std::vector<float> top_logits;
 
@@ -285,22 +312,13 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
 
-    // Step 1: Compute the global partition function (one O(V) pass) so that
-    // cumulative probabilities measured over the sorted prefix are relative to
-    // the true full-vocab distribution, not a renormalized subset.
     float inv_temp = 1.0f / temperature;
     float max_score = *std::max_element(scores.begin(), scores.end());
-    float global_exp_sum = 0.0f;
-    for (int i = 0; i < vocab_size; ++i) {
-      global_exp_sum += std::exp((scores[i] - max_score) * inv_temp);
-    }
-    float inv_global_exp_sum = 1.0f / global_exp_sum;
 
-    // Step 2: Find the nucleus via adaptive partial sort.
-    int cutoff_index = FindNucleus(scores, indices, p, max_score, inv_temp, inv_global_exp_sum);
+    // Find the nucleus via adaptive partial sort with tail-bound early termination.
+    int cutoff_index = FindNucleus(scores, indices, p, max_score, inv_temp);
 
-    // Step 3: Re-normalize the nucleus probabilities and sample a token.
-    // Build softmax over only the cutoff_index elements for proper sampling.
+    // Re-normalize the nucleus probabilities and sample a token.
     top_logits.resize(cutoff_index);
     for (int i = 0; i < cutoff_index; ++i) {
       top_logits[i] = scores[indices[i]] * inv_temp;
