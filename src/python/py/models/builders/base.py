@@ -677,7 +677,7 @@ class Model:
                 if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
         except Exception as e:
-            print("-- ERROR", e)
+            print(f"Error: {e}")
 
         # Create inputs dict
         inputs = {}
