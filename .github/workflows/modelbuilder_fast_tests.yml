@@ -85,9 +85,9 @@ jobs:
               return;
             }
 
-            const config = 'transformers=${{ matrix.transformers-version }}, torch=${{ matrix.torch-version }}, os=${{ matrix.os }}';
+            const matrixConfig = 'transformers=${{ matrix.transformers-version }}, torch=${{ matrix.torch-version }}, os=${{ matrix.os }}';
             const marker = `<!-- fast-test-results-${{ matrix.transformers-version }}-${{ matrix.torch-version }}-${{ matrix.os }} -->`;
-            let body = `${marker}\n## Fast Test Results\n\n**Config:** ${config}\n\n`;
+            let body = `${marker}\n## Fast Test Results\n\n**Config:** ${matrixConfig}\n\n`;
 
             for (const file of files.sort()) {
               const content = fs.readFileSync(path.join(statsDir, file), 'utf8').trim();
