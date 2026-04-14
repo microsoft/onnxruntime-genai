@@ -225,9 +225,10 @@ static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices
                        float p, float max_score, float inv_temp) {
   const int vocab_size = static_cast<int>(scores.size());
 
-  // 256 covers p>=0.99 for most LLM distributions. 4x geometric growth handles
-  // the rare case of unusually flat distributions without over-sorting.
-  constexpr int kInitialCandidateCount = 256;
+  // Start small (16) to minimize wasted work when the top few tokens dominate
+  // (common at low temperature). Grow 4× to avoid O(V log V) full-sort fallback
+  // that a 2× growth with a hard cap would require for flat distributions.
+  constexpr int kInitialCandidateCount = 16;
   constexpr int kCandidateCountGrowthFactor = 4;
 
   std::iota(indices.begin(), indices.end(), 0);
@@ -264,17 +265,21 @@ static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices
     k = std::min(k * kCandidateCountGrowthFactor, vocab_size);
   }
 
-  // When the full vocabulary was sorted (small V or very flat distribution),
-  // the tail bound can be overly conservative. Compute the exact cutoff using
-  // the true partition function since all exp() values are computable from the
-  // sorted order. This adds at most 2V exp() calls only when V <= initial K.
-  if (sorted_count == vocab_size) {
+  // When the vocabulary is small enough that the tail bound may be loose,
+  // compute the exact cutoff using the true partition function.
+  // For large V this path is never reached (tail bound is tight for peaked distributions).
+  if (vocab_size <= kInitialCandidateCount * kCandidateCountGrowthFactor) {
+    // Ensure all elements are sorted for exact computation
+    if (sorted_count < vocab_size) {
+      std::partial_sort(indices.begin() + sorted_count, indices.begin() + vocab_size, indices.end(),
+                        [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+    }
     float global_exp_sum = 0.0f;
     for (int i = 0; i < vocab_size; ++i) {
       global_exp_sum += std::exp((scores[indices[i]] - max_score) * inv_temp);
     }
     float cum = 0.0f;
-    for (int i = 0; i < cutoff_index; ++i) {
+    for (int i = 0; i < vocab_size; ++i) {
       cum += std::exp((scores[indices[i]] - max_score) * inv_temp);
       if (cum >= p * global_exp_sum) {
         return i + 1;
