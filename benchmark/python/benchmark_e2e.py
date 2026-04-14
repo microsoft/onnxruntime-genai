@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -36,6 +37,18 @@ try:
     IS_NVIDIA_SYSTEM = True
 except Exception:
     IS_NVIDIA_SYSTEM = False
+
+
+def _get_telemetry():
+    try:
+        from onnxruntime_genai.telemetry import GenAITelemetry
+    except ImportError:
+        telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+        if telemetry_root not in sys.path:
+            sys.path.insert(0, telemetry_root)
+        from telemetry import GenAITelemetry
+
+    return GenAITelemetry()
 
 
 # Monitor the GPU memory usage
@@ -234,11 +247,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     # Emit model load telemetry
     try:
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
-        from telemetry import GenAITelemetry
-
-        telemetry = GenAITelemetry()
+        telemetry = _get_telemetry()
         telemetry.log_model_load(
             model_name=args.model_name,
             execution_provider=args.execution_provider,
@@ -486,11 +495,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     # Emit telemetry for this benchmark run
     try:
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
-        from telemetry import GenAITelemetry
-
-        telemetry = GenAITelemetry()
+        telemetry = _get_telemetry()
         telemetry.log_benchmark(
             model_name=args.model_name,
             precision=args.precision,

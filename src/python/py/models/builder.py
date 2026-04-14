@@ -12,6 +12,7 @@ Run the model builder to create the desired ONNX model.
 
 import argparse
 import os
+import sys
 import textwrap
 import time
 from typing import Any
@@ -172,6 +173,91 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def _emit_model_build_telemetry(
+    action_name: str,
+    duration_ms: float,
+    success: bool,
+    config,
+    onnx_model,
+    precision: str,
+    execution_provider: str,
+    output_dir: str,
+    extra_options: dict[str, Any],
+    source_format: str = "huggingface",
+) -> None:
+    try:
+        try:
+            from onnxruntime_genai.telemetry import GenAITelemetry
+        except ImportError:
+            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            if telemetry_root not in sys.path:
+                sys.path.insert(0, telemetry_root)
+            from telemetry import GenAITelemetry
+
+        telemetry = GenAITelemetry()
+
+        model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
+        hidden_size = getattr(config, "hidden_size", 0)
+        num_layers = getattr(config, "num_hidden_layers", 0)
+        num_attn_heads = getattr(config, "num_attention_heads", 0)
+        num_kv_heads = getattr(config, "num_key_value_heads", num_attn_heads)
+        vocab_size = getattr(config, "vocab_size", 0)
+        context_length = getattr(config, "max_position_embeddings", 0)
+
+        output_model_size = 0
+        if os.path.isdir(output_dir):
+            for filename in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, filename)
+                if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):
+                    output_model_size += os.path.getsize(file_path)
+
+        num_ops = 0
+        op_types = ""
+        has_custom_ops = False
+        if hasattr(onnx_model, "model") and onnx_model.model is not None:
+            try:
+                graph = onnx_model.model.graph
+                if graph is not None:
+                    op_type_set = set()
+                    for node in graph:
+                        op_type_set.add(node.op_type)
+                        if node.domain and not node.domain.startswith("ai.onnx"):
+                            has_custom_ops = True
+                    num_ops = len(op_type_set)
+                    op_types = ",".join(sorted(op_type_set))
+            except Exception:
+                pass
+
+        io_dtype_str = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
+        quant_type_str = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
+
+        telemetry.log_model_build(
+            action=action_name,
+            duration_ms=duration_ms,
+            success=success,
+            model_name=getattr(config, "_name_or_path", "") or "",
+            model_type=str(model_type),
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_attn_heads=num_attn_heads,
+            num_kv_heads=num_kv_heads,
+            vocab_size=vocab_size,
+            context_length=context_length,
+            io_dtype=io_dtype_str,
+            quant_type=quant_type_str,
+            execution_provider=execution_provider,
+            output_model_size_bytes=output_model_size,
+            num_onnx_operators=num_ops,
+            operator_types=op_types,
+            has_custom_ops=has_custom_ops,
+            source_format=source_format,
+            has_adapter="adapter_path" in extra_options,
+            extra_options={key: str(value) for key, value in extra_options.items() if key != "hf_token"},
+        )
+    except Exception:
+        pass
+
+
 @torch.no_grad
 def create_model(
     model_name,
@@ -182,6 +268,8 @@ def create_model(
     cache_dir,
     **extra_options,
 ):
+    overall_start = time.perf_counter()
+
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
