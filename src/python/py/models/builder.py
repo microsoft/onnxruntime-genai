@@ -363,7 +363,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "migraphx", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 MIGraphX, INT4 WebGPU)",
     )
 
     parser.add_argument(
