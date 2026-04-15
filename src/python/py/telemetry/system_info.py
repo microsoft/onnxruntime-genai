@@ -54,7 +54,12 @@ def get_system_info() -> dict[str, Any]:
 
     # Locale and timezone
     try:
-        info["user_locale"] = locale.getdefaultlocale()[0] or ""
+        current_locale = locale.getlocale()[0]
+        if current_locale:
+            info["user_locale"] = current_locale
+        else:
+            current_locale = locale.setlocale(locale.LC_CTYPE)
+            info["user_locale"] = current_locale if isinstance(current_locale, str) else ""
     except Exception:
         info["user_locale"] = ""
     info["user_timezone"] = time.tzname[0] if time.tzname else ""

@@ -9,7 +9,9 @@ Provides telemetry integration for ONNX Runtime GenAI via Microsoft OneCollector
 Telemetry is opt-out: set ORTGENAI_DISABLE_TELEMETRY=1 or call disable_telemetry().
 
 Usage:
-    from onnxruntime_genai.telemetry import telemetry, action, ActionContext
+    from onnxruntime_genai.telemetry import GenAITelemetry, action, ActionContext
+
+    telemetry = GenAITelemetry()
 
     # Decorator pattern
     @action
