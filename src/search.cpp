@@ -192,20 +192,6 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     AppendNextTokensToSequences();
 }
 
-// Adaptive partial-sort nucleus (top-p) search.
-//
-// Given a score array and precomputed global partition stats (max_score, inv_temp,
-// inv_global_exp_sum), finds the minimal set of tokens whose cumulative true
-// probability >= p using adaptive partial_sort with geometrically growing K.
-//
-// Returns the number of tokens in the nucleus (cutoff_index).
-// On return, indices[0..cutoff_index-1] are the nucleus token indices sorted by
-// descending score.
-//
-// Complexity (V = vocab_size, typically 128K-200K):
-//   - Best case (common):  O(V log K0) where K0=256 — covers p>=0.99 for most LLM distributions
-//   - Rare fallback:       O(V log 1024)             — very flat distributions
-//   - Worst case:          O(V log V)                — uniform distribution (essentially never)
 // Find the minimal nucleus of tokens whose cumulative probability >= p using
 // adaptive partial sort with a log-space tail bound. This avoids computing the
 // global softmax partition function (O(V) exp() calls) by bounding the unsorted

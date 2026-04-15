@@ -131,9 +131,8 @@ struct Generator : LeakChecked<Generator> {
                 rewound };  // Set after RewindToLength
   Action last_action_{standard};
 
-  // Pre-computed per-token decisions (P1 optimization: avoid repeated checks each token)
+  // Pre-computed per-token decisions: avoid repeated checks each token
   bool is_nemotron_speech_model_{};
-  bool ep_uses_single_rope_factor_{};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy, kTopK, kTopP, kTopKTopP };
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};

@@ -536,7 +536,7 @@ TEST(SamplingBenchmarks, DISABLED_P1_OrchestrationOverhead) {
   };
 
   std::cout << "\n--- P1: GenerateNextToken Orchestration Overhead ---\n"
-            << "Measures SetLogits + GenerateNextToken (no model inference).\n"
+            << "Measures GenerateNextToken only (no model inference).\n"
             << "Vocab=" << vocab_size << ", Batch=1, Runs=" << total_runs << "\n\n";
   std::cout << std::left
             << std::setw(22) << "Method"
@@ -619,7 +619,7 @@ TEST(SamplingBenchmarks, DISABLED_P3_TopPScaling) {
   };
 
   std::cout << "\n--- P3: SampleTopP Scaling Benchmark ---\n"
-            << "Measures SetLogits + GenerateNextToken with top_p sampling.\n"
+            << "Measures GenerateNextToken with top_p sampling (after SetLogits).\n"
             << "Batch=1, Runs=" << total_runs << "\n\n";
   std::cout << std::left
             << std::setw(30) << "Scenario"

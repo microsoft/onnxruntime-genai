@@ -373,13 +373,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::InitPerTokenCache(const GeneratorParams& params) {
-  // Cache device/model checks evaluated every token in GenerateNextToken
-  ep_uses_single_rope_factor_ = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-                                model_->p_device_->GetType() == DeviceType::DML;
+  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
+  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+                                          model_->p_device_->GetType() == DeviceType::DML;
 
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   const auto& model_type = model_->config_->model.type;
-  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor_) {
+  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
     if (model_type == "phi3" || model_type == "phimoe")
       phi3_rope_threshold_ = 4097;
     else if (model_type == "phi3small")
