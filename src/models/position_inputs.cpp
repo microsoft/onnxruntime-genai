@@ -380,25 +380,25 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
 }
 
 void DefaultPositionInputs::RewindMask(size_t index) {
-  if (state_.params_->use_graph_capture) {
+  if (ShouldUseStaticMaskHandling()) {
     // Static mask layout: [batch_beam_size, max_length]
     // Rewind to index: write 1s for [0, index), 0s for [index, max_length)
     size_t max_len = static_cast<size_t>(state_.params_->search.max_length);
     if (index > max_len) {
       throw std::runtime_error("RewindMask: index exceeds max_length");
     }
-    int batch_beam_size = static_cast<int>(attention_mask_shape_[0]);
+    size_t batch_beam_size = static_cast<size_t>(attention_mask_shape_[0]);
     auto byte_span = attention_mask_->GetByteSpan();
     auto cpu_data = byte_span.CpuSpan();
     if (type_ == Ort::TypeToTensorType<int32_t>) {
       auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
-      for (int i = 0; i < batch_beam_size; i++) {
+      for (size_t i = 0; i < batch_beam_size; i++) {
         std::fill_n(data + i * max_len, index, static_cast<int32_t>(1));
         std::fill_n(data + i * max_len + index, max_len - index, static_cast<int32_t>(0));
       }
     } else {
       auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
-      for (int i = 0; i < batch_beam_size; i++) {
+      for (size_t i = 0; i < batch_beam_size; i++) {
         std::fill_n(data + i * max_len, index, static_cast<int64_t>(1));
         std::fill_n(data + i * max_len + index, max_len - index, static_cast<int64_t>(0));
       }
@@ -406,6 +406,11 @@ void DefaultPositionInputs::RewindMask(size_t index) {
     byte_span.CopyCpuToDevice();
     return;
   }
+
+  // Dynamic mask: adjust shape so the next Update() creates the correct-sized tensor.
+  // For batch_beam_size == 1 (the only case RewindTo supports), the CPU UpdateAttentionMask
+  // fills the entire next mask with 1s, so no data fixup is needed — just the shape.
+  attention_mask_shape_[1] = static_cast<int64_t>(index);
 }
 
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
