@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ortgenaiapp)
+project(ortgenaiapp LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,7 +39,7 @@ if(USE_CXX)
   add_compile_definitions(USE_CXX)
 endif()
 
-macro(find_dependency id component)
+macro(genai_find_dependency id component)
   find_package(${component} QUIET HINTS ${${id}_HOME})
   if(NOT ${component}_FOUND)
     if(CMAKE_SYSTEM_NAME MATCHES "AIX")
@@ -64,8 +64,8 @@ macro(find_dependency id component)
   endif()
 endmacro()
 
-find_dependency(ORT onnxruntime)
-find_dependency(OGA onnxruntime-genai)
+genai_find_dependency(ORT onnxruntime)
+genai_find_dependency(OGA onnxruntime-genai)
 
 macro(genai_add_example target)
   add_executable(${target} ${ARGN})
@@ -74,6 +74,10 @@ macro(genai_add_example target)
   if(UNIX)
     set_target_properties(${target} PROPERTIES BUILD_RPATH
       "$<TARGET_FILE_DIR:onnxruntime::onnxruntime>;$<TARGET_FILE_DIR:onnxruntime::onnxruntime-genai>")
+  elseif(WIN32)
+    add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}> COMMAND_EXPAND_LISTS)
   endif()
 endmacro()
 
