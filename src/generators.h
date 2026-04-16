@@ -139,7 +139,8 @@ struct Generator : LeakChecked<Generator> {
                               kTopP,
                               kTopKTopP };
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
-  void InitPerTokenCache(const GeneratorParams& params);
+  void InitializeSamplingMethod(const GeneratorParams& params);
+  void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
 struct OrtGlobals {

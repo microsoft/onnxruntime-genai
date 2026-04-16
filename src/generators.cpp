@@ -369,10 +369,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
-  InitPerTokenCache(params);
+  InitializePhi3RopeThreshold(params);
+  InitializeSamplingMethod(params);
 }
 
-void Generator::InitPerTokenCache(const GeneratorParams& params) {
+void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
   // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
   const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
                                           model_->p_device_->GetType() == DeviceType::DML;
@@ -386,8 +387,9 @@ void Generator::InitPerTokenCache(const GeneratorParams& params) {
     else if (model_type == "phi3small")
       phi3_rope_threshold_ = 8193;
   }
+}
 
-  // Pre-determine sampling method and validate parameters at construction
+void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   const auto& search = params.search;
   if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
     sampling_method_ = SamplingMethod::kGreedy;
