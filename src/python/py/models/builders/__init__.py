@@ -10,6 +10,7 @@ from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
 from .gemma import Gemma2Model, Gemma3Model, GemmaModel
+from .gemma4 import Gemma4TextModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel
 from .internlm import InternLM2Model
@@ -37,6 +38,7 @@ __all__ = [
     "GPTOSSModel",
     "Gemma2Model",
     "Gemma3Model",
+    "Gemma4TextModel",
     "GemmaModel",
     "GraniteModel",
     "InternLM2Model",
