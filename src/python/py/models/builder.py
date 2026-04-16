@@ -71,6 +71,12 @@ def check_extra_options(kv_pairs, execution_provider):
         "disable_qkv_fusion",
         "prune_lm_head",
     ]
+
+    # Validate quant_mode if provided
+    if "quant_mode" in kv_pairs:
+        valid_modes = {"default", "hybrid", "int4"}
+        if kv_pairs["quant_mode"] not in valid_modes:
+            raise ValueError(f"quant_mode must be one of {valid_modes}, got '{kv_pairs['quant_mode']}'")
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
