@@ -378,6 +378,7 @@ void Generator::InitPerTokenCache(const GeneratorParams& params) {
                                           model_->p_device_->GetType() == DeviceType::DML;
 
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
+  // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
   if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
     if (model_type == "phi3" || model_type == "phimoe")
@@ -387,7 +388,7 @@ void Generator::InitPerTokenCache(const GeneratorParams& params) {
   }
 
   // Pre-determine sampling method and validate parameters at construction
-  auto& search = params.search;
+  const auto& search = params.search;
   if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
     sampling_method_ = SamplingMethod::kGreedy;
   } else {
@@ -651,6 +652,8 @@ void Generator::GenerateNextToken() {
     case SamplingMethod::kTopP:
       search_->SampleTopP(search.top_p, search.temperature);
       return;
+    default:
+      throw std::runtime_error("Unknown sampling method");
   }
 }
 
