@@ -369,7 +369,10 @@ class TestYarnRopeCacheParity:
         factor = 16.0
         # When mscale == mscale_all_dim, the ratio is 1.0 (Ministral-3B case)
         result = model.make_mscale(factor, config_mscale=1.0, config_mscale_all_dim=1.0)
-        get_mscale = lambda s, ms: (0.1 * ms * math.log(s) + 1.0) if s > 1 else 1.0
+
+        def get_mscale(s, ms):
+            return (0.1 * ms * math.log(s) + 1.0) if s > 1 else 1.0
+
         expected = get_mscale(factor, 1.0) / get_mscale(factor, 1.0)
         assert abs(result - expected) < 1e-10, f"Expected {expected}, got {result}"
         assert result == 1.0, "Equal mscale and mscale_all_dim should yield 1.0"
