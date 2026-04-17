@@ -48,11 +48,6 @@ parameters:
     type: boolean
     default: true
 
-  - name: enable_win_qnn
-    displayName: 'Whether QNN nuget package should be built.'
-    type: boolean
-    default: true
-
   - name: enable_winml
     displayName: 'Whether Windows WinML package is built.'
     type: boolean
@@ -184,7 +179,6 @@ extends:
           ort_cuda_version: ${{ parameters.ort_cuda_version }}
           ort_dml_version: ${{ parameters.ort_dml_version }}
           build_config: ${{ parameters.build_config }}
-          enable_win_qnn: ${{ parameters.enable_win_qnn }}
           nuget_version_type: ${{ parameters.nuget_version_type }}
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}

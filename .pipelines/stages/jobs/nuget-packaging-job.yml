@@ -47,11 +47,6 @@ parameters:
   type: boolean
   default: false
 
-- name: enable_win_qnn
-  displayName: 'Whether QNN nuget package should be built.'
-  type: boolean
-  default: false
-
 - name: enable_winml
   displayName: 'Whether WinML nuget package should be built.'
   type: boolean
@@ -69,7 +64,7 @@ parameters:
   default: 'stable'
 
 jobs:
-- job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
+- job: nuget_${{ parameters.ep }}_packaging
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
@@ -95,29 +90,25 @@ jobs:
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'onnxruntime-genai-winml'
     ${{ else }}:
-      value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}-nuget'
+      value: 'onnxruntime-genai-${{ parameters.ep }}-nuget'
 
   - name: genai_nuget_package_name
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
+    ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
-      value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
 
   - name: ort_nuget_package_name
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
+    ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
-      value: 'Microsoft.ML.OnnxRuntime.QNN'
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'Microsoft.WindowsAppSDK.ML'
 

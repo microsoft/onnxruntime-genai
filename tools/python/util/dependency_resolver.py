@@ -46,8 +46,6 @@ def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
         package_name = "Microsoft.ML.OnnxRuntime.DirectML"
     else:
         package_name = "Microsoft.ML.OnnxRuntime"
-        if is_windows_arm():
-            package_name = "Microsoft.ML.OnnxRuntime.QNN"
 
     package_path = destination_dir / f"{package_name}.zip"
     if package_path.exists():
