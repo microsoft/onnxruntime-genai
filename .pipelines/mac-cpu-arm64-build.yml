@@ -73,6 +73,12 @@ jobs:
     displayName: 'Install build tools (Java 17 Temurin, cmake, gradle, ccache, jq)'
 
   - task: UseDotNet@2
+    displayName: 'Setup .NET 8.0'
+    inputs:
+      packageType: 'sdk'
+      version: '8.0.x'
+
+  - task: UseDotNet@2
     displayName: 'Setup .NET 9.0'
     inputs:
       packageType: 'sdk'
@@ -80,18 +86,9 @@ jobs:
 
   - bash: |
       set -e -x
-      cat > global.json <<'EOF'
-      {
-        "sdk": {
-          "version": "9.0.306",
-          "rollForward": "latestFeature"
-        }
-      }
-      EOF
-      cat global.json
       dotnet --version
       dotnet --list-sdks
-    displayName: 'Create global.json and verify .NET'
+    displayName: 'Verify .NET SDKs'
     workingDirectory: '$(Build.SourcesDirectory)'
 
   - bash: |
