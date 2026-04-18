@@ -58,13 +58,11 @@ jobs:
   - bash: |
       set -e -x
       brew update --quiet
-      brew install --quiet temurin@17 cmake gradle ccache jq
-      JAVA_HOME="$(brew --prefix temurin@17)"
-      # temurin@17 installs the JDK under the Homebrew prefix; resolve the actual
-      # JDK home (Contents/Home on macOS) if present.
-      if [ -d "$JAVA_HOME/Contents/Home" ]; then
-        JAVA_HOME="$JAVA_HOME/Contents/Home"
-      fi
+      brew install --quiet cmake gradle ccache jq
+      # Temurin is distributed as a Homebrew cask, not a formula.
+      brew install --quiet --cask temurin@17
+      # Resolve JAVA_HOME for the freshly installed JDK 17.
+      JAVA_HOME="$(/usr/libexec/java_home -v 17)"
       echo "JAVA_HOME=$JAVA_HOME"
       echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
       echo "##vso[task.prependpath]$JAVA_HOME/bin"
