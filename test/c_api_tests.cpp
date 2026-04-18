@@ -1332,6 +1332,136 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+
+// Test RewindTo(0) with batch=1: full rewind should produce identical output
+TEST(CAPITests, RewindToZeroGptFp32CAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+  std::vector<int32_t> expected_output{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto sequence_length = generator->GetSequenceCount(0);
+  auto* sequence_data = generator->GetSequenceData(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence_data, sequence_length * sizeof(int32_t)));
+
+  // Full rewind and regenerate — output must be identical
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  sequence_length = generator->GetSequenceCount(0);
+  sequence_data = generator->GetSequenceData(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence_data, sequence_length * sizeof(int32_t)));
+}
+
+// Test multiple sequential RewindTo calls: rewind to different positions in succession
+TEST(CAPITests, MultipleRewindGptFp32CAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+  std::vector<int32_t> expected_output{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify initial generation
+  auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
+
+  // Rewind to 7, generate remaining
+  generator->RewindTo(7);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  sequence_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
+
+  // Rewind to 5, generate remaining
+  generator->RewindTo(5);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  sequence_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
+
+  // Rewind all the way to 0 and regenerate with same input
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  sequence_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
+}
+
+// Test RewindTo with new tokens: rewind to a midpoint and append different tokens
+TEST(CAPITests, RewindAndAppendNewTokensGptFp32CAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Save original sequence
+  auto orig_length = generator->GetSequenceCount(0);
+  std::vector<int32_t> original_sequence(orig_length);
+  std::memcpy(original_sequence.data(), generator->GetSequenceData(0), orig_length * sizeof(int32_t));
+
+  // Rewind to 4 and append different tokens
+  generator->RewindTo(4);
+  std::vector<int32_t> new_tokens{52, 204};
+  generator->AppendTokens(new_tokens.data(), new_tokens.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // First 4 tokens should match, but subsequent tokens may differ because we changed the input
+  auto new_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(new_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(original_sequence.data(), generator->GetSequenceData(0), 4 * sizeof(int32_t)));
+
+  // Rewind to 3 and append the original tokens to verify we get the original output back
+  generator->RewindTo(3);
+  std::vector<int32_t> orig_continuation{731, 731};
+  generator->AppendTokens(orig_continuation.data(), orig_continuation.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  new_length = generator->GetSequenceCount(0);
+  ASSERT_EQ(new_length, static_cast<size_t>(max_length));
+  EXPECT_TRUE(0 == std::memcmp(original_sequence.data(), generator->GetSequenceData(0), new_length * sizeof(int32_t)));
+}
 #endif
 
 #ifndef STREAMING_ASR_PATH
