@@ -55,21 +55,24 @@ jobs:
       addToPath: true
       architecture: 'arm64'
 
-  - task: JavaToolInstaller@0
-    displayName: 'Setup Java 17'
-    inputs:
-      versionSpec: '17'
-      jdkArchitectureOption: 'arm64'
-      jdkSourceOption: 'PreInstalled'
-
   - bash: |
       set -e -x
       brew update --quiet
-      brew install --quiet cmake gradle ccache jq
+      brew install --quiet temurin@17 cmake gradle ccache jq
+      JAVA_HOME="$(brew --prefix temurin@17)"
+      # temurin@17 installs the JDK under the Homebrew prefix; resolve the actual
+      # JDK home (Contents/Home on macOS) if present.
+      if [ -d "$JAVA_HOME/Contents/Home" ]; then
+        JAVA_HOME="$JAVA_HOME/Contents/Home"
+      fi
+      echo "JAVA_HOME=$JAVA_HOME"
+      echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+      echo "##vso[task.prependpath]$JAVA_HOME/bin"
+      "$JAVA_HOME/bin/java" -version
       cmake --version
       gradle --version | head -n 5
       ccache --version | head -n 1
-    displayName: 'Install build tools (cmake, gradle, ccache, jq)'
+    displayName: 'Install build tools (Java 17 Temurin, cmake, gradle, ccache, jq)'
 
   - task: UseDotNet@2
     displayName: 'Setup .NET 9.0'
