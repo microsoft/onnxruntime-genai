@@ -178,15 +178,20 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal
+          # Use nuget.org explicitly so restore does not consult the ORT-Nightly feed
+          # (ORT-Nightly is only needed for the earlier "Download OnnxRuntime Nightly" step
+          # and its upstream proxy requires auth for packages not yet cached in the feed).
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal \
+            --source https://api.nuget.org/v3/index.json
 
       - name: Build the C# Examples
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd examples/csharp/ModelChat
-          dotnet build -c Release
+          # Use nuget.org explicitly to avoid ORT-Nightly upstream auth requirement.
+          dotnet build -c Release --source https://api.nuget.org/v3/index.json
           cd ../ModelMM
-          dotnet build -c Release
+          dotnet build -c Release --source https://api.nuget.org/v3/index.json
 
       - name: Test the C# LLM Example with Tool Calling
         run: |
