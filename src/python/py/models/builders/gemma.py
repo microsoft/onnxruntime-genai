@@ -154,7 +154,7 @@ class Gemma3Model(Gemma2Model):
         super().make_attention_init()
 
     def make_rotary_embedding_multi_cache(self):
-        self.cos_cache_global_name, self.sin_cache_global_name = ("cos_cache_global", "sin_cache_global")
+        self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
         super().make_rotary_embedding_caches(
             cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name
         )
@@ -163,7 +163,7 @@ class Gemma3Model(Gemma2Model):
         self.rope_attrs["create_caches"] = True
         self.rope_attrs["theta"] = self.rope_local_theta
 
-        self.cos_cache_local_name, self.sin_cache_local_name = ("cos_cache_local", "sin_cache_local")
+        self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
         super().make_rotary_embedding_caches(
             cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
         )
@@ -185,9 +185,9 @@ class Gemma3Model(Gemma2Model):
 
     def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get(
-            "cos_cache_name", (self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
+            "cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name
         )
         sin_cache_name = kwargs.get(
-            "sin_cache_name", (self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
+            "sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name
         )
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)

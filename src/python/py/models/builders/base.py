@@ -2709,13 +2709,13 @@ class Model:
         if op_type == "Attention":
             self.make_packed_attention(
                 name,
-                **kwargs,
+                **kwargs
             )
         elif op_type == "MultiHeadAttention":
             self.make_multi_head_attention(
                 name,
-                add_qk=(f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] != "" else ""),
-                **kwargs,
+                add_qk=f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] != "" else "",
+                **kwargs
             )
         elif op_type == "GroupQueryAttention":
             self.make_group_query_attention(
@@ -3882,7 +3882,7 @@ class Model:
         if bias_exists:
             add_name = "/lm_head/Add"
             self.make_add_bias(
-                lm_head.bias, add_name, root_input=f"{lm_name}/output_0",logits=not any(exists_checks[1:]), seq_dim=seq_dim
+                lm_head.bias, add_name, root_input=f"{lm_name}/output_0", logits=not any(exists_checks[1:]), seq_dim=seq_dim
             )
             lm_name = add_name
 

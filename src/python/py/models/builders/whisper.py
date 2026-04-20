@@ -31,8 +31,8 @@ class WhisperEncoder(Model):
         self.max_source_positions = config.max_source_positions
 
         extra_options["include_hidden_states"] = True  # Include hidden states as output
-        extra_options["exclude_lm_head"] = True  # Exclude LM head since it's not used in the encoder
-        extra_options["filename"] = "encoder.onnx"  # Label encoder ONNX model
+        extra_options["exclude_lm_head"] = True        # Exclude LM head since it's not used in the encoder
+        extra_options["filename"] = "encoder.onnx"     # Label encoder ONNX model
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
