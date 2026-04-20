@@ -3,6 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import json
+import os
 from .llama import LlamaModel
 
 
@@ -47,6 +49,19 @@ class NemotronHModel(LlamaModel):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        """`nemotronh` is not supported as an architecture, let's replace with `olmo`."""
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        genai_config["model"]["type"] = "llama"
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
 
 
 class NemotronModel(LlamaModel):
