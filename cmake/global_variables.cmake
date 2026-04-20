@@ -81,6 +81,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/cuda/session_options.cpp"
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.h"
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.cpp"
+  "${GENERATORS_ROOT}/amdgpu/*.h"
+  "${GENERATORS_ROOT}/amdgpu/*.cpp"
   "${GENERATORS_ROOT}/vitisai/*.h"
   "${GENERATORS_ROOT}/vitisai/*.cpp"
   "${GENERATORS_ROOT}/dml/session_options.h"
@@ -102,7 +104,9 @@ if (IOS OR MAC_CATALYST)
 elseif (USE_WINML)
     message(STATUS "Using WinML, does NOT include ONNX Runtime library, is provied by Windows.")
 else()
-  if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
+  if(ORT_BIN_DIR AND EXISTS "${ORT_BIN_DIR}/${ONNXRUNTIME_LIB}")
+    # Custom ORT install: DLLs in bin/, import libs in lib/
+  elseif(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
     message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
   endif()
 endif()
