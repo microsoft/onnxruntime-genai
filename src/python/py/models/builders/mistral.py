@@ -76,7 +76,7 @@ class Ministral3TextModel(MistralModel):
         return model
 
 
-class Ministral3VisionEncoderModel:
+class Ministral3VisionEncoderModel(Model):
     """Direct ``onnx_ir`` graph builder for the Pixtral vision encoder + multimodal projector.
 
     Builds the ONNX graph manually (analogous to other model builders in this
