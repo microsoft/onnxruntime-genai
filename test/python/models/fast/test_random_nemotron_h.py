@@ -422,6 +422,7 @@ class TestNemotronH(ModelBuilderTestCase):
         max_new_tokens = 5
         prompt_ids = torch.randint(3, config.vocab_size, (batch_size, 4))
         prompt_len = prompt_ids.shape[1]
+        pt_tokens = None
 
         if not has_transformers("5.5"):
             # The code is broken in transformers 5.5 for this model.
@@ -442,7 +443,7 @@ class TestNemotronH(ModelBuilderTestCase):
             generator.generate_next_token()
             og_tokens.append(int(generator.get_next_tokens()[0]))
 
-        if not has_transformers("5.5"):
+        if pt_tokens is not None:
             self.assertEqual(pt_tokens, og_tokens)
 
 
