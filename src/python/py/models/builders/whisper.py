@@ -115,7 +115,7 @@ class WhisperEncoder(Model):
         self.make_initializer(self.weights.model.encoder.embed_positions.weight, position_embeds, to=self.io_dtype)
 
         add_name = f"{basename}/Add"
-        self.make_add add_name, inputs=[f"{transpose_name}/output_0", position_embeds], dtype=self.io_dtype, shape=["batch_size", self.max_source_positions, self.hidden_size])
+        self.make_add(add_name, inputs=[f"{transpose_name}/output_0", position_embeds], dtype=self.io_dtype, shape=["batch_size", self.max_source_positions, self.hidden_size])
 
         self.layernorm_attrs["root_input"] = f"{add_name}/output_0"
         self.layernorm_attrs["skip_input"] = f"{add_name}/output_0"

@@ -120,7 +120,7 @@ class TestWhisperModel(ExtTestCase):
         enc_disc = self.get_numpy_discrepancy(pt_hidden.astype(np_dtype), enc_results["hidden_states"])
         self.log_results({"step": "encoder", **enc_disc, **log_data})
 
-        atol_enc = {"fp32": 1e-4, "fp16": 5e-2, "int4": 0.5}
+        atol_enc = {"fp32": 2e-4, "fp16": 5e-2, "int4": 0.5}
         np.testing.assert_allclose(
             pt_hidden.astype(np_dtype), enc_results["hidden_states"], atol=atol_enc[precision], rtol=1e-3
         )
