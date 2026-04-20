@@ -201,9 +201,7 @@ def create_model(
 
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print(
-            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
-        )
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         from .builders.gemma import Gemma3Model
 
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -213,12 +211,8 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print(
-            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
-        )
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         from .builders.gemma import Gemma3Model
 
@@ -297,61 +291,38 @@ def create_model(
         from .builders.phi import PhiModel
 
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3ForCausalLM"
-        and config.max_position_embeddings == config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
         from .builders.phi import Phi3MiniModel
 
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3ForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         from .builders.phi import Phi3MiniLongRoPEModel
 
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "PhiMoEForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
-        print(
-            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
-        )
-        print(
-            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
-        )
+    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
         from .builders.phi import Phi3MoELongRoPEModel
 
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3SmallForCausalLM"
-        and config.max_position_embeddings == config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
         from .builders.phi import Phi3SmallModel
 
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3SmallForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         from .builders.phi import Phi3SmallLongRoPEModel
 
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         from .builders.phi import Phi3VModel
 
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         from .builders.phi import Phi4MMModel
 
@@ -365,9 +336,7 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         from .builders.qwen import Qwen25VLTextModel
 
@@ -385,9 +354,7 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print(
-            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
-        )
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         from .builders.qwen import Qwen3VLTextModel
 

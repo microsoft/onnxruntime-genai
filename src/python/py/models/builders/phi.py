@@ -63,9 +63,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         if "position_ids" in self.input_names:
             position_ids_result = self.make_position_ids_reformatting()
             self.position_ids_name = (
-                f"{position_ids_result}/output_0"
-                if position_ids_result != self.input_names["position_ids"]
-                else self.input_names["position_ids"]
+                f"{position_ids_result}/output_0" if position_ids_result != self.input_names["position_ids"] else self.input_names["position_ids"]
             )
         else:
             # When position_ids is not an input (use_rope_in_attn is True),

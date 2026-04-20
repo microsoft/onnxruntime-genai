@@ -53,9 +53,7 @@ class GPTOSSModel(Model):
         super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
     def make_rotary_embedding_caches_from_scratch(self):
-        inv_freq = 1.0 / (
-            self.rope_attrs["theta"] ** (torch.arange(0, self.head_size, 2, dtype=torch.float) / self.head_size)
-        )
+        inv_freq = 1.0 / (self.rope_attrs["theta"] ** (torch.arange(0, self.head_size, 2, dtype=torch.float) / self.head_size))
         inv_freq = self.make_inv_freq_rescaled(inv_freq)
 
         t = torch.arange(self.rope_attrs["cache_length"], dtype=torch.float32)
@@ -704,7 +702,7 @@ class GPTOSSModel(Model):
 
     def combine_quark_gate_up_biases_from_experts(self, experts):
         """Combine Quark gate_proj and up_proj biases from individual experts"""
-        assert self.has_quark_experts(experts)
+        assert(self.has_quark_experts(experts))
         combined_biases = []
 
         for expert_id in sorted(experts.keys()):
@@ -712,32 +710,20 @@ class GPTOSSModel(Model):
 
             if expert.gate_up_proj.qweight is not None:
                 # Fused gate_up projection
-                gate_up_proj = (
-                    expert.gate_up_proj.bias
-                    if hasattr(expert.gate_up_proj, "bias") and expert.gate_up_proj.bias is not None
-                    else torch.zeros(expert.gate_up_proj.qweight.shape[0])
-                )
+                gate_up_proj = expert.gate_up_proj.bias if hasattr(expert.gate_up_proj, 'bias') and expert.gate_up_proj.bias is not None else torch.zeros(expert.gate_up_proj.qweight.shape[0])
                 combined_biases.append(gate_up_proj)
             else:
                 # Get biases from individual projections
-                gate_bias = (
-                    expert.gate_proj.bias
-                    if hasattr(expert.gate_proj, "bias") and expert.gate_proj.bias is not None
-                    else torch.zeros(expert.gate_proj.qweight.shape[0])
-                )
-                up_bias = (
-                    expert.up_proj.bias
-                    if hasattr(expert.up_proj, "bias") and expert.up_proj.bias is not None
-                    else torch.zeros(expert.up_proj.qweight.shape[0])
-                )
+                gate_bias = expert.gate_proj.bias if hasattr(expert.gate_proj, 'bias') and expert.gate_proj.bias is not None else torch.zeros(expert.gate_proj.qweight.shape[0])
+                up_bias = expert.up_proj.bias if hasattr(expert.up_proj, 'bias') and expert.up_proj.bias is not None else torch.zeros(expert.up_proj.qweight.shape[0])
 
                 # Combine gate and up biases (interleaved pattern: even=gate, odd=up)
                 gate_out_dim = gate_bias.shape[0]
                 up_out_dim = up_bias.shape[0]
 
                 combined_bias = torch.zeros(gate_out_dim + up_out_dim, dtype=gate_bias.dtype, device="cpu")
-                combined_bias[::2] = gate_bias  # Even indices = gate
-                combined_bias[1::2] = up_bias  # Odd indices = up
+                combined_bias[::2] = gate_bias   # Even indices = gate
+                combined_bias[1::2] = up_bias    # Odd indices = up
 
                 combined_biases.append(combined_bias)
 
@@ -745,16 +731,12 @@ class GPTOSSModel(Model):
 
     def combine_quark_down_biases_from_experts(self, experts):
         """Combine Quark down_proj biases from individual experts"""
-        assert self.has_quark_experts(experts)
+        assert(self.has_quark_experts(experts))
         combined_biases = []
 
         for expert_id in sorted(experts.keys()):
             expert = experts[expert_id]
-            down_bias = (
-                expert.down_proj.bias
-                if hasattr(expert.down_proj, "bias") and expert.down_proj.bias is not None
-                else torch.zeros(expert.down_proj.qweight.shape[0])
-            )
+            down_bias = expert.down_proj.bias if hasattr(expert.down_proj, 'bias') and expert.down_proj.bias is not None else torch.zeros(expert.down_proj.qweight.shape[0])
             combined_biases.append(down_bias)
 
         return torch.stack(combined_biases, dim=0)
