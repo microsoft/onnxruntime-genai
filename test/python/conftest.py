@@ -12,13 +12,11 @@ def pytest_addoption(parser):
         "--test_models",
         help="Path to the current working directory",
         type=str,
-        required=False,
+        required=True,
     )
 
 
 def get_path_for_model(data_path, model_name, precision, device):
-    if data_path is None:
-        pytest.skip("--test_models option not provided")
     model_path = os.path.join(data_path, model_name, precision, device)
     if not os.path.exists(model_path):
         pytest.skip(f"Model {model_name} not found at {model_path}")
@@ -94,8 +92,6 @@ def path_for_model(request):
 def nemotron_speech_model_path(request):
     """Return the path to a nemotron_speech model directory, or skip if not available."""
     test_data = request.config.getoption("--test_models")
-    if test_data is None:
-        pytest.skip("--test_models option not provided")
     model_path = os.path.join(test_data, "nemotron-speech-streaming")
     if not os.path.exists(model_path):
         pytest.skip(f"Nemotron speech model not found at {model_path}")

@@ -4,7 +4,7 @@
 # license information.
 # --------------------------------------------------------------------------
 """
-This test file is ignore unless you set ``LONGTEST=1``.
+This test file is ignored unless you set ``LONGTEST=1``.
 It verifies a pretrained text model, discrepancies at prefill and decoding steps.
 It runs the token generation through transformers and ort-genai.
 """
