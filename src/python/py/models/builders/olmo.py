@@ -3,6 +3,9 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import json
+import os
+
 import torch
 
 from .base import Model
@@ -148,6 +151,19 @@ class OLMo2Model(Model):
         if layer_id == self.num_layers - 1:
             self.layernorm_attrs["last_layernorm"] = True
 
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        """`olmo2` is not supported as an architecture, let's replace with `olmo`."""
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        genai_config["model"]["type"] = "olmo"
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+
 
 class OLMo3Model(OLMo2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -162,3 +178,16 @@ class OLMo3Model(OLMo2Model):
             self.window_size = -1
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
+
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        """`olmo3` is not supported as an architecture, let's replace with `olmo`."""
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        genai_config["model"]["type"] = "olmo"
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)

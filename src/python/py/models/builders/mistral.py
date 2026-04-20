@@ -75,6 +75,19 @@ class Ministral3TextModel(MistralModel):
         _dequantize_fp8_weights(model)
         return model
 
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        """`minitral3` is not supported as an architecture, let's replace with `mistral`."""
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        genai_config["model"]["type"] = "mistral"
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+
 
 class Ministral3VisionEncoderModel:
     """Direct ``onnx_ir`` graph builder for the Pixtral vision encoder + multimodal projector.

@@ -77,6 +77,23 @@ def requires_yobx(version: str = "", msg: str = "") -> Callable:
     return lambda x: x
 
 
+def has_transformers(version: str) -> Callable:
+    try:
+        import transformers
+    except ImportError:
+        return False
+
+    if not hasattr(transformers, "__version__"):
+        return False
+
+    if not version:
+        return True
+
+    if PvVersion(transformers.__version__) < PvVersion(version):
+        return False
+    return True
+
+
 def requires_transformers(version: str = "", msg: str = "") -> Callable:
     try:
         import transformers
