@@ -47,7 +47,7 @@ jobs:
         run: ls . -l
 
       - name: Run fast tests
-        run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=models --cov-report=xml --cov-report=term-missing
+        run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=models --cov-report=xml --cov-report=term-missing --test_models=dump_models
 
       # Code to upload coverage report.
       # - name: Upload coverage reports to Codecov
