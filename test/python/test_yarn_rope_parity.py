@@ -66,6 +66,34 @@ MINISTRAL_3B_CONFIG = {
 # Exercises the computed-mscale fallback path and different factor/theta.
 # Modeled after DeepSeek-V2 style YaRN scaling.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GPT-OSS-20B YaRN configuration (from HuggingFace openai/gpt-oss-20b)
+# Unlike Ministral-3-3B, rope_theta is a top-level config attribute (150000)
+# and rope_scaling has no mscale/mscale_all_dim — exercises the computed
+# mscale fallback path with a top-level theta.
+# ---------------------------------------------------------------------------
+GPTOSS_20B_CONFIG = {
+    "hidden_size": 2880,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 8,
+    "num_hidden_layers": 24,
+    "head_dim": 64,
+    "max_position_embeddings": 131072,
+    "rope_theta": 150000.0,
+    "rope_scaling": {
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 32.0,
+        "original_max_position_embeddings": 4096,
+        "rope_type": "yarn",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Synthetic YaRN config with different parameters (no explicit mscale).
+# Exercises the computed-mscale fallback path and different factor/theta.
+# Modeled after DeepSeek-V2 style YaRN scaling.
+# ---------------------------------------------------------------------------
 YARN_NO_MSCALE_CONFIG = {
     "hidden_size": 4096,
     "num_attention_heads": 32,
@@ -88,7 +116,7 @@ YARN_NO_MSCALE_CONFIG = {
 def _make_hf_reference_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndarray, np.ndarray]:
     """Compute YaRN cos/sin caches using HuggingFace transformers reference."""
     rs = config_dict["rope_scaling"]
-    base = rs["rope_theta"]
+    base = rs.get("rope_theta", config_dict.get("rope_theta", 10000.0))
     dim = config_dict["head_dim"]
     factor = rs["factor"]
     original_max_position_embeddings = rs["original_max_position_embeddings"]
@@ -161,13 +189,17 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
         model.original_context_length = model.context_length
 
     # Build a mock config that looks like what AutoConfig.from_pretrained returns.
-    # Crucially, rope_scaling is a dict (not an object), and rope_theta is NOT
-    # a top-level attribute — it's only inside rope_scaling.
-    mock_config = types.SimpleNamespace(
+    # Crucially, rope_scaling is a dict (not an object). Some models (e.g.
+    # Ministral-3-3B) store rope_theta only inside rope_scaling, while others
+    # (e.g. GPT-OSS-20B) have it as a top-level attribute.
+    mock_kwargs = dict(
         head_dim=head_dim,
         max_position_embeddings=config_dict["max_position_embeddings"],
         rope_scaling=rs,
     )
+    if "rope_theta" in config_dict:
+        mock_kwargs["rope_theta"] = config_dict["rope_theta"]
+    mock_config = types.SimpleNamespace(**mock_kwargs)
 
     # Resolve rope_theta using the same fallback chain as Model.__init__
     rope_theta = (
@@ -201,7 +233,8 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
     model.make_rope_init(mock_config)
 
     # Verify make_rope_init set the expected attributes
-    assert model.rope_attrs["theta"] == rs["rope_theta"]
+    expected_theta = rs.get("rope_theta", config_dict.get("rope_theta", 10000.0))
+    assert model.rope_attrs["theta"] == expected_theta
     assert model.rope_attrs["mscale_policy"] == rs["rope_type"]
     if "mscale" in rs and rs["mscale"] > 0:
         assert model.rope_attrs["mscale"] == float(rs["mscale"])
@@ -515,4 +548,78 @@ class TestYarnRopeCacheParity:
         )
         assert not np.allclose(sin1, sin2, rtol=1e-3, atol=1e-3), (
             "Different YaRN configs should produce different sin caches"
+        )
+
+    def test_gptoss_20b_cos_sin_match(self):
+        """End-to-end parity: builder cos/sin caches match HF reference for GPT-OSS-20B."""
+        hf_cos, hf_sin = _make_hf_reference_cos_sin(GPTOSS_20B_CONFIG, CACHE_LENGTH)
+        builder_cos, builder_sin = _make_builder_cos_sin(GPTOSS_20B_CONFIG, CACHE_LENGTH)
+
+        np.testing.assert_allclose(
+            builder_cos, hf_cos, rtol=1e-5, atol=1e-5, err_msg="cos_cache mismatch for GPT-OSS-20B"
+        )
+        np.testing.assert_allclose(
+            builder_sin, hf_sin, rtol=1e-5, atol=1e-5, err_msg="sin_cache mismatch for GPT-OSS-20B"
+        )
+
+    def test_gptoss_20b_top_level_rope_theta(self):
+        """GPT-OSS-20B has top-level rope_theta=150000, not inside rope_scaling."""
+        config = GPTOSS_20B_CONFIG
+        rs = config["rope_scaling"]
+
+        assert "rope_theta" not in rs, "GPT-OSS-20B should NOT have rope_theta inside rope_scaling"
+        assert config["rope_theta"] == 150000.0, "GPT-OSS-20B should have top-level rope_theta=150000"
+
+        # Verify the builder resolves top-level rope_theta correctly via _make_builder_cos_sin
+        # (which reproduces the full __init__ theta-resolution chain).
+        hf_cos, _ = _make_hf_reference_cos_sin(config, 32)
+        builder_cos, _ = _make_builder_cos_sin(config, 32)
+        np.testing.assert_allclose(
+            builder_cos,
+            hf_cos,
+            rtol=1e-5,
+            atol=1e-5,
+            err_msg="builder must resolve top-level rope_theta=150000 for GPT-OSS-20B",
+        )
+
+        # Guard: verify output differs from default theta=10000
+        wrong_config = {**config, "rope_theta": 10000.0}
+        wrong_cos, _ = _make_hf_reference_cos_sin(wrong_config, 32)
+        assert not np.allclose(builder_cos, wrong_cos, rtol=1e-5, atol=1e-5), (
+            "builder cos_cache should differ from default theta=10000"
+        )
+
+    def test_gptoss_20b_computed_mscale(self):
+        """GPT-OSS-20B has no mscale in rope_scaling — must compute from factor=32."""
+        config = GPTOSS_20B_CONFIG
+        rs = config["rope_scaling"]
+
+        assert "mscale" not in rs, "GPT-OSS-20B should not have explicit mscale"
+        assert "mscale_all_dim" not in rs, "GPT-OSS-20B should not have explicit mscale_all_dim"
+
+        model = object.__new__(Model)
+        model.rope_attrs = {}
+        model.context_length = config["max_position_embeddings"]
+        model.original_context_length = rs["original_max_position_embeddings"]
+
+        mock_config = types.SimpleNamespace(**config)
+        model.make_rope_init(mock_config)
+
+        # mscale should be computed via make_mscale_yarn(32)
+        expected = 0.1 * math.log(32.0) + 1.0
+        assert abs(model.rope_attrs["mscale"] - expected) < 1e-10, (
+            f"Expected computed mscale={expected}, got {model.rope_attrs['mscale']}"
+        )
+
+    def test_gptoss_20b_full_cache_length(self):
+        """Parity check with larger cache length for GPT-OSS-20B."""
+        cache_length = 2048
+        hf_cos, hf_sin = _make_hf_reference_cos_sin(GPTOSS_20B_CONFIG, cache_length)
+        builder_cos, builder_sin = _make_builder_cos_sin(GPTOSS_20B_CONFIG, cache_length)
+
+        np.testing.assert_allclose(
+            builder_cos, hf_cos, rtol=1e-5, atol=1e-5, err_msg="cos_cache mismatch for GPT-OSS-20B @ 2048"
+        )
+        np.testing.assert_allclose(
+            builder_sin, hf_sin, rtol=1e-5, atol=1e-5, err_msg="sin_cache mismatch for GPT-OSS-20B @ 2048"
         )

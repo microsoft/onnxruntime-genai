@@ -4,10 +4,11 @@
 import argparse
 import json
 import os
+from dataclasses import asdict, dataclass
+from typing import Any
+
 import onnxruntime_genai as og
 
-from dataclasses import dataclass, asdict
-from typing import Any
 
 def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     """
@@ -20,6 +21,7 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
         None
     """
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
+
 
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
@@ -42,6 +44,7 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         # Modified from here: https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/tutorial?tabs=python#acquiring-the-model-and-preprocessing
         try:
             import winml
+
             print(winml.register_execution_providers(ort=False, ort_genai=True))
         except ImportError:
             print("WinML not available, using default execution providers")
@@ -53,10 +56,13 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
     else:
         print(f"Warning: EP registration not supported for {ep}")
-        print("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs.")
+        print(
+            "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs."
+        )
         return
 
     print(f"Registered {ep} successfully!")
+
 
 def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
     """
@@ -98,6 +104,7 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     config.overlay(json.dumps({"search": search_options}))
     return config
 
+
 def get_search_options(args: argparse.Namespace):
     """
     Get search options for a generator's params during decoding
@@ -128,7 +135,10 @@ def get_search_options(args: argparse.Namespace):
     search_options["batch_size"] = search_options.get("batch_size", 1)
     return search_options
 
-def apply_chat_template(model_path: str, tokenizer: og.Tokenizer, messages: str, add_generation_prompt: bool, tools: str = "") -> str:
+
+def apply_chat_template(
+    model_path: str, tokenizer: og.Tokenizer, messages: str, add_generation_prompt: bool, tools: str = ""
+) -> str:
     """
     Apply the chat template with various fallback options
 
@@ -150,6 +160,7 @@ def apply_chat_template(model_path: str, tokenizer: og.Tokenizer, messages: str,
         messages=messages, tools=tools, add_generation_prompt=add_generation_prompt, template_str=template_str
     )
     return prompt
+
 
 def get_user_prompt(prompt: str, non_interactive: bool) -> str:
     """
@@ -179,6 +190,7 @@ def get_user_prompt(prompt: str, non_interactive: bool) -> str:
 
     return text
 
+
 def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_type: str) -> list[str]:
     """
     Get paths to media for user
@@ -202,7 +214,9 @@ def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_ty
         # If interactive mode is on
         paths = [
             path.strip()
-            for path in input(f"{media_type.capitalize()} Path (comma separated; leave empty if no {media_type}): ").split(",")
+            for path in input(
+                f"{media_type.capitalize()} Path (comma separated; leave empty if no {media_type}): "
+            ).split(",")
         ]
 
     paths = [path for path in paths if path]
@@ -212,6 +226,7 @@ def get_user_media_paths(media_paths: list[str], non_interactive: bool, media_ty
         print(f"Using {media_type}: {path}")
 
     return paths
+
 
 def get_user_images(image_paths: list[str], non_interactive: bool) -> tuple[og.Images, int]:
     """
@@ -232,6 +247,7 @@ def get_user_images(image_paths: list[str], non_interactive: bool) -> tuple[og.I
     images = og.Images.open(*paths)
     return images, len(paths)
 
+
 def get_user_audios(audio_paths: list[str], non_interactive: bool) -> tuple[og.Audios, int]:
     """
     Get audios for user
@@ -250,6 +266,7 @@ def get_user_audios(audio_paths: list[str], non_interactive: bool) -> tuple[og.A
 
     audios = og.Audios.open(*paths)
     return audios, len(paths)
+
 
 def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: str) -> str | list[dict[str, str]]:
     """
@@ -278,49 +295,63 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         # Qwen-2.5 VL, Qwen-3 VL, Fara
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
+    elif model_type == "mistral3":
+        # Pixtral / Ministral-3 VLM: the C++ image processor expands each
+        # [IMG] into the full token sequence based on image resolution.
+        image_tags = "".join(["[IMG]" for _ in range(num_images)])
+        content = image_tags + prompt
     else:
         # Gemma-3 style: structured content
         image_tags = [{"type": "image"} for _ in range(num_images)]
         content = image_tags + [{"type": "text", "text": prompt}]
     return content
 
+
 @dataclass
 class ToolSchema:
     """
     A class for defining a tool in a JSON schema compatible way
     """
+
     description: str
     type: str
     properties: dict[str, Any]
     required: list[str]
     additionalProperties: bool
 
+
 @dataclass
 class JsonSchema:
     """
     A class for defining a JSON schema for guidance
     """
+
     x_guidance: dict[str, Any]
     type: str
     items: dict[str, list[ToolSchema]]
     minItems: int
+
 
 @dataclass
 class FunctionDefinition:
     """
     A class for defining a function in an OpenAI-compatible way
     """
+
     name: str
     description: str
     parameters: dict[str, Any]
+
 
 @dataclass
 class Tool:
     """
     A class for defining a tool in an OpenAI-compatible way
     """
+
     type: str
     function: FunctionDefinition
+
 
 def tools_to_schemas(tools: list[Tool]) -> list[ToolSchema]:
     """
@@ -355,6 +386,7 @@ def tools_to_schemas(tools: list[Tool]) -> list[ToolSchema]:
         tool_schemas.append(tool_schema)
     return tool_schemas
 
+
 def get_json_schema(tools: list[Tool], tool_output: bool) -> str:
     """
     Create a JSON schema from a list of tools
@@ -370,6 +402,7 @@ def get_json_schema(tools: list[Tool], tool_output: bool) -> str:
     json_schema = JsonSchema(x_guidance=x_guidance, type="array", items={"anyOf": schemas}, minItems=int(tool_output))
     d = {k.replace("x_guidance", "x-guidance"): v for k, v in asdict(json_schema).items()}
     return json.dumps(d)
+
 
 def get_lark_grammar(
     tools: list[Tool],
@@ -418,6 +451,7 @@ def get_lark_grammar(
 
     return "\n".join(rows)
 
+
 def to_tool(tool_defs: list[dict[str, Any]]) -> list[Tool]:
     """
     Convert a JSON-deserialized object of tools to a list of Tool objects
@@ -437,6 +471,7 @@ def to_tool(tool_defs: list[dict[str, Any]]) -> list[Tool]:
         tool = Tool(type="function", function=func)
         tools.append(tool)
     return tools
+
 
 def get_guidance(
     response_format: str = "",
@@ -469,7 +504,7 @@ def get_guidance(
     if tool_output:
         if os.path.exists(filepath):
             # If tools are provided as a file
-            with open(filepath, 'r') as f:
+            with open(filepath) as f:
                 tool_defs = json.load(f)
                 tools = to_tool(tool_defs)
         elif tools_str != "":
@@ -483,14 +518,18 @@ def get_guidance(
             if type(tools[0]) != Tool:
                 tools = to_tool(tools)
         else:
-            raise ValueError("Please provide the list of tools through a file, JSON-serialized string, or a list of tools")
+            raise ValueError(
+                "Please provide the list of tools through a file, JSON-serialized string, or a list of tools"
+            )
 
         assert len(tools) > 0, "Could not obtain a list of tools in memory"
 
     # Create guidance based on user-provided response format
     if response_format in {"text", "lark_grammar"}:
         if response_format == "text":
-            assert text_output and not tool_output, "A response format of 'text' requires text_output = True and tool_output = False"
+            assert text_output and not tool_output, (
+                "A response format of 'text' requires text_output = True and tool_output = False"
+            )
 
         guidance_type = "lark_grammar"
         guidance_data = get_lark_grammar(
@@ -501,7 +540,9 @@ def get_guidance(
             tool_call_end=tool_call_end,
         )
     elif response_format in {"json_schema", "json_object"}:
-        assert tool_output and not text_output, "A response format of 'json_schema' or 'json_object' requires text_output = False and tool_output = True"
+        assert tool_output and not text_output, (
+            "A response format of 'json_schema' or 'json_object' requires text_output = False and tool_output = True"
+        )
 
         guidance_type = "json_schema"
         guidance_data = get_json_schema(tools=tools, tool_output=tool_output)
@@ -509,6 +550,7 @@ def get_guidance(
         raise ValueError("Invalid response format provided")
 
     return guidance_type, guidance_data, json.dumps([asdict(tool) for tool in tools])
+
 
 def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
     """
@@ -520,16 +562,34 @@ def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
         None
     """
     generator_params = parser.add_argument_group("Generator Params")
-    generator_params.add_argument('-c', '--chunk_size', type=int, default=0, help="Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)")
-    generator_params.add_argument('-s', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
-    generator_params.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
-    generator_params.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
-    generator_params.add_argument('-b', '--num_beams', type=int, default=1, help='Number of beams to create')
-    generator_params.add_argument('-rs', '--num_return_sequences', type=int, default=1, help='Number of return sequences to produce')
-    generator_params.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
-    generator_params.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
-    generator_params.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
-    generator_params.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
+    generator_params.add_argument(
+        "-c",
+        "--chunk_size",
+        type=int,
+        default=0,
+        help="Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)",
+    )
+    generator_params.add_argument(
+        "-s",
+        "--do_sample",
+        action="store_true",
+        help="Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false",
+    )
+    generator_params.add_argument(
+        "-i", "--min_length", type=int, help="Min number of tokens to generate including the prompt"
+    )
+    generator_params.add_argument(
+        "-l", "--max_length", type=int, help="Max number of tokens to generate including the prompt"
+    )
+    generator_params.add_argument("-b", "--num_beams", type=int, default=1, help="Number of beams to create")
+    generator_params.add_argument(
+        "-rs", "--num_return_sequences", type=int, default=1, help="Number of return sequences to produce"
+    )
+    generator_params.add_argument("-r", "--repetition_penalty", type=float, help="Repetition penalty to sample with")
+    generator_params.add_argument("-t", "--temperature", type=float, help="Temperature to sample with")
+    generator_params.add_argument("-k", "--top_k", type=int, help="Top k tokens to sample from")
+    generator_params.add_argument("-p", "--top_p", type=float, help="Top p probability to sample with")
+
 
 def get_guidance_args(parser: argparse.ArgumentParser) -> None:
     """
@@ -541,9 +601,38 @@ def get_guidance_args(parser: argparse.ArgumentParser) -> None:
         None
     """
     guidance = parser.add_argument_group("Guidance Arguments")
-    guidance.add_argument('-rf', '--response_format', type=str, default="", choices=["", "text", "json_object", "json_schema", "lark_grammar"], help='Provide response format for the model')
-    guidance.add_argument('-tf', '--tools_file', type=str, default="", help='Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json')
-    guidance.add_argument('-text', '--text_output', action='store_true', default=False, help='Produce a text response in the output')
-    guidance.add_argument('-tool', '--tool_output', action='store_true', default=False, help='Produce a tool call in the output')
-    guidance.add_argument('-tcs', '--tool_call_start', type=str, default="", help='String representation of tool call start (ex: <|tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.')
-    guidance.add_argument('-tce', '--tool_call_end', type=str, default="", help='String representation of tool call end (ex: <|/tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.')
+    guidance.add_argument(
+        "-rf",
+        "--response_format",
+        type=str,
+        default="",
+        choices=["", "text", "json_object", "json_schema", "lark_grammar"],
+        help="Provide response format for the model",
+    )
+    guidance.add_argument(
+        "-tf",
+        "--tools_file",
+        type=str,
+        default="",
+        help="Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json",
+    )
+    guidance.add_argument(
+        "-text", "--text_output", action="store_true", default=False, help="Produce a text response in the output"
+    )
+    guidance.add_argument(
+        "-tool", "--tool_output", action="store_true", default=False, help="Produce a tool call in the output"
+    )
+    guidance.add_argument(
+        "-tcs",
+        "--tool_call_start",
+        type=str,
+        default="",
+        help="String representation of tool call start (ex: <|tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.",
+    )
+    guidance.add_argument(
+        "-tce",
+        "--tool_call_end",
+        type=str,
+        default="",
+        help="String representation of tool call end (ex: <|/tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.",
+    )
