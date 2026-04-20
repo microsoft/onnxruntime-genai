@@ -537,9 +537,6 @@ class Model:
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
-            # Note: ("cpu", ir.DataType.FLOAT16) is intentionally excluded because many
-            # FP16 GQA CPU kernels are not implemented, which would cause a performance
-            # regression by falling back to slower non-fused paths.
             ("cuda", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.BFLOAT16),
             ("dml", ir.DataType.FLOAT16),

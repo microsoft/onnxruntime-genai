@@ -21,6 +21,11 @@ class GPTOSSModel(Model):
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
 
+    def is_gqa_supported(self) -> bool:
+        if (self.ep, self.io_dtype) == ("cpu", ir.DataType.FLOAT16):
+            return True
+        return super().is_gqa_supported()
+
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> output_layernorm --> MoE
