@@ -40,6 +40,7 @@ struct AudioEncoderState : State {
 
   std::unique_ptr<AudioFeatures> audio_features_;  // { batch_size, num_mels, num_frames }
   std::unique_ptr<OrtValue> hidden_states_;        // { batch_size, num_frames / 2, hidden_size }
+  std::unique_ptr<OrtValue> mel_length_;           // { batch_size } — optional, for Cohere mel encoder
   int num_frames_{3000};                           // Whisper uses a default value of 3000
 };
 
