@@ -270,6 +270,7 @@ GeneratorParams::GeneratorParams(const Config& config)
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
+      use_static_input_shapes{NeedsStaticInputShapes(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_scoring_} {
   if (use_graph_capture) {
@@ -432,6 +433,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
+  state_->prompt_gen_ = state_->params_->use_static_input_shapes;
   ComputeLogits(input_ids_device);
 }
 
@@ -587,6 +589,8 @@ void Generator::GenerateNextToken() {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
+
+    state_->prompt_gen_ = false;
     ComputeLogits(next_tokens);
   }
   if (guidance_logits_processor_) {

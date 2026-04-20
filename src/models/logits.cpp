@@ -107,6 +107,9 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   shape_[1] = new_kv_length;
+  if (state_.prompt_gen_) {
+    shape_[1] = state_.params_->search.max_length;
+  }
   output_raw_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
   state_.outputs_[output_index_] = output_raw_->GetOrtTensor();
 }

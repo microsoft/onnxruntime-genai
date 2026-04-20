@@ -1088,11 +1088,20 @@ void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
 void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
-  Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
+  // Map AMDGPU to MIGraphX for ORT compatibility
+  const char* ort_name = registration_name;
+  if (std::string_view(registration_name) == "AMDGPUExecutionProvider") {
+    ort_name = "MIGraphXExecutionProvider";
+  }
+  Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), ort_name, fs::path(library_path).c_str());
 }
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
-  Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+  const char* ort_name = registration_name;
+  if (std::string_view(registration_name) == "AMDGPUExecutionProvider") {
+    ort_name = "MIGraphXExecutionProvider";
+  }
+  Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), ort_name);
 }
 
 OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out) {
