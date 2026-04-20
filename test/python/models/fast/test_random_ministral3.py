@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 from ext_test_case import (
-    ExtTestCase,
+    ModelBuilderTestCase,
     hide_stdout,
     requires_cuda,
     requires_transformers,
@@ -19,7 +19,7 @@ MINISTRAL3_MODEL_NAME = "mistralai/Ministral-3-3B-Instruct-2512"
 
 
 @requires_transformers("5")
-class TestMinistral3(ExtTestCase):
+class TestMinistral3(ModelBuilderTestCase):
     def common_fast_ministral3_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

@@ -226,7 +226,7 @@ def long_test(msg: Callable[[], str] | str | None = None) -> Callable:
     return lambda x: x
 
 
-class ExtTestCase(unittest.TestCase):
+class ModelBuilderTestCase(unittest.TestCase):
     _warns = []
     _do_clean = os.environ.get("DOCLEAN", "") in (1, "1", "True", "true")
 

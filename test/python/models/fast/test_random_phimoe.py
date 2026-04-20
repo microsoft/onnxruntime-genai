@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 _MODEL_NAME = "microsoft/Phi-3.5-MoE-instruct"
 
@@ -247,7 +247,7 @@ def _make_phimoe_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_opti
     return _PhiMoEBuilderWithSyntheticWeights(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
-class TestPhiMoE(ExtTestCase):
+class TestPhiMoE(ModelBuilderTestCase):
     def _build_phimoe_onnx(self, output_dir, cache_dir):
         """Build the PhiMoE ONNX model with synthetic random weights.
 

@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "google/gemma-2-2b"
 
 
-class TestRandomGemma2(ExtTestCase):
+class TestRandomGemma2(ModelBuilderTestCase):
     def common_fast_gemma2_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

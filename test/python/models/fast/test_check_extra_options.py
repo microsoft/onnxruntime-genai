@@ -5,10 +5,10 @@
 # --------------------------------------------------------------------------
 import unittest
 
-from ext_test_case import ExtTestCase, hide_stdout
+from ext_test_case import ModelBuilderTestCase, hide_stdout
 
 
-class TestCheckExtraOptions(ExtTestCase):
+class TestCheckExtraOptions(ModelBuilderTestCase):
     """Tests for the check_extra_options utility function."""
 
     # All keys that check_extra_options treats as booleans.
@@ -164,7 +164,7 @@ class TestCheckExtraOptions(ExtTestCase):
         self.assertEqual(kv, {})
 
 
-class TestParseExtraOptions(ExtTestCase):
+class TestParseExtraOptions(ModelBuilderTestCase):
     """Tests for the parse_extra_options helper."""
 
     @hide_stdout()

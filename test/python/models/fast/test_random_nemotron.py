@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "nvidia/Minitron-4B-Base"
 
 
-class TestNemotron(ExtTestCase):
+class TestNemotron(ModelBuilderTestCase):
     def common_fast_nemotron_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

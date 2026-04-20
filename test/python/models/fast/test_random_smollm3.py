@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 SMOLLM3_MODEL_NAME = "HuggingFaceTB/SmolLM3-3B"
 
 
-class TestSmolLM3(ExtTestCase):
+class TestSmolLM3(ModelBuilderTestCase):
     def common_fast_smollm3_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

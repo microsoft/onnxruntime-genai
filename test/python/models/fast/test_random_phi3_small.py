@@ -9,7 +9,7 @@ import textwrap
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 PHI3_SMALL_MODEL_NAME = "microsoft/Phi-3-small-8k-instruct"
 
@@ -345,7 +345,7 @@ def _load_phi3_small_class(modeling_path):
     return mod.Phi3SmallForCausalLM, mod.Phi3SmallConfig
 
 
-class TestPhi3Small(ExtTestCase):
+class TestPhi3Small(ModelBuilderTestCase):
     def _make_config(self, num_hidden_layers=1):
         """Return a minimal Phi3SmallConfig dict for fast offline tests.
 

@@ -8,12 +8,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_yobx, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_yobx, run_session_or_io_binding
 
 MISTRAL_NEMO_MODEL_NAME = "mistralai/Mistral-Nemo-Instruct-2407"
 
 
-class TestMistralNeMo(ExtTestCase):
+class TestMistralNeMo(ModelBuilderTestCase):
     def common_fast_mistral_nemo_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

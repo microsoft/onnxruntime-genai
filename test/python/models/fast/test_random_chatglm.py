@@ -8,7 +8,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 CHATGLM_MODEL_NAME = "THUDM/chatglm3-6b"
 
@@ -379,7 +379,7 @@ def _save_mini_chatglm(model_dir, num_layers=1):
     return model, config
 
 
-class TestChatGLM(ExtTestCase):
+class TestChatGLM(ModelBuilderTestCase):
     def common_fast_chatglm_random_weights(self, precision, provider):
         """Prefill + single-step decode: compare PyTorch logits vs ONNX logits."""
         import torch

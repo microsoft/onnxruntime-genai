@@ -7,13 +7,13 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 MODEL_NAME = "google/gemma-3-4b-it"
 
 
 @requires_transformers("5")
-class TestRandomGemma3Conditional(ExtTestCase):
+class TestRandomGemma3Conditional(ModelBuilderTestCase):
     """Fast offline tests for the Gemma3ForConditionalGeneration text decoder.
 
     The builder exports only the text component of the VLM (with

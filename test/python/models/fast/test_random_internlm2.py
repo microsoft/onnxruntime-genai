@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "InternLM2ForCausalLM"
 
 
-class TestInternLM2(ExtTestCase):
+class TestInternLM2(ModelBuilderTestCase):
     def common_fast_internlm2_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

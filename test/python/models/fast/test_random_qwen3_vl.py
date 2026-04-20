@@ -7,13 +7,13 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 QWEN3_VL_MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 
 
 @requires_transformers("5")
-class TestRandomQwen3VL(ExtTestCase):
+class TestRandomQwen3VL(ModelBuilderTestCase):
     def common_fast_qwen3_vl_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

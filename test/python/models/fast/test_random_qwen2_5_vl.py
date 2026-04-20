@@ -7,13 +7,13 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 QWEN2_5_VL_MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 
 @requires_transformers("5")  # text_config missing
-class TestRandomQwen25VL(ExtTestCase):
+class TestRandomQwen25VL(ModelBuilderTestCase):
     def common_fast_qwen25vl_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

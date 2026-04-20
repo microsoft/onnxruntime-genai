@@ -10,7 +10,7 @@ It runs the token generation through transformers and ort-genai.
 """
 import os
 import unittest
-from ext_test_case import ExtTestCase, long_test, requires_cuda, hide_stdout
+from ext_test_case import ModelBuilderTestCase, long_test, requires_cuda, hide_stdout
 
 QWEN3_MODEL_NAMES = [
     "Qwen/Qwen3-0.6B",
@@ -20,7 +20,7 @@ QWEN3_MODEL_NAMES = [
 ]
 
 
-class TestTrainedQwen3(ExtTestCase):
+class TestTrainedQwen3(ModelBuilderTestCase):
     def _common_part(self, model_id, precision, dtype, provider="cuda"):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from modelbuilder.builder import create_model

@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 import onnx_ir as ir
-from ext_test_case import ExtTestCase, hide_stdout, requires_transformers
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_transformers
 from models.builders.llama import LlamaModel
 
 # LlamaForCausalLM architecture matching arnir0/Tiny-LLM but with a single
@@ -115,7 +115,7 @@ class _AttentionOnlyLlamaModel(LlamaModel):
         self.save_model(out_dir)
 
 
-class TestLlamaAttentionDiscrepancies(ExtTestCase):
+class TestLlamaAttentionDiscrepancies(ModelBuilderTestCase):
     """Fast discrepancy tests for LlamaAttention using randomly initialised weights.
 
     Only the attention layer is tested (Q/K/V projections, fused rotary

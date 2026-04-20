@@ -13,7 +13,7 @@ import numpy as np
 import onnx
 import onnx.helper as oh
 import onnx.numpy_helper as onh
-from ext_test_case import ExtTestCase, hide_stdout, onnx_generate
+from ext_test_case import ModelBuilderTestCase, hide_stdout, onnx_generate
 
 TINT64 = onnx.TensorProto.INT64
 TFLOAT = onnx.TensorProto.FLOAT
@@ -41,7 +41,7 @@ def _make_tiny_lm_no_cache(fixed_token: int = 3) -> onnx.ModelProto:
     )
 
 
-class TestOnnxGenerate(ExtTestCase):
+class TestOnnxGenerate(ModelBuilderTestCase):
     # ------------------------------------------------------------------
     # No-KV-cache model tests
     # ------------------------------------------------------------------

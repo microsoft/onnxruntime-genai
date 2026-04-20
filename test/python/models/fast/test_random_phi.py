@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "microsoft/phi-2"
 
 
-class TestPhi(ExtTestCase):
+class TestPhi(ModelBuilderTestCase):
     def common_fast_phi_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

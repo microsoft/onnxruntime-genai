@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
 
 WHISPER_MODEL_NAME = "openai/whisper-tiny"
 
 
-class TestWhisperModel(ExtTestCase):
+class TestWhisperModel(ModelBuilderTestCase):
     def common_fast_whisper_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

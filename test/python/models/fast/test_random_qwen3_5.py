@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers
 
 QWEN3_5_MODEL_NAME = "Qwen/Qwen3.5-3B"
 
@@ -64,7 +64,7 @@ def _make_qwen3_5_config(layer_types, num_hidden_layers=None):
     return config
 
 
-class TestRandomQwen3_5(ExtTestCase):
+class TestRandomQwen3_5(ModelBuilderTestCase):
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #
     # ------------------------------------------------------------------ #

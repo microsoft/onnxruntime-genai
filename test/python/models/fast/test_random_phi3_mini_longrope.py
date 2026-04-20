@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"
 
 
-class TestRandomPhi3MiniLongRoPE(ExtTestCase):
+class TestRandomPhi3MiniLongRoPE(ModelBuilderTestCase):
     def common_fast_phi3_mini_longrope_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

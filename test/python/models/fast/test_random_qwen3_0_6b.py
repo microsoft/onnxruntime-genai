@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 QWEN3_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
-class TestRandomQwen3(ExtTestCase):
+class TestRandomQwen3(ModelBuilderTestCase):
     def common_fast_qwen3_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

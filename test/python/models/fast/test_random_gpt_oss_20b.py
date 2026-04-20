@@ -7,12 +7,12 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
 
-class TestGptOss20b(ExtTestCase):
+class TestGptOss20b(ModelBuilderTestCase):
     def common_fast_gpt_oss_20b_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

@@ -5,11 +5,11 @@
 # --------------------------------------------------------------------------
 import unittest
 
-from ext_test_case import ExtTestCase
+from ext_test_case import ModelBuilderTestCase
 from models.builders.base import fix_genai_config
 
 
-class TestFixGenaiConfig(ExtTestCase):
+class TestFixGenaiConfig(ModelBuilderTestCase):
     """Tests for the fix_genai_config utility function."""
 
     def _make_config_with_nulls(self):

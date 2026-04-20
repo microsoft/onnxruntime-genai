@@ -7,13 +7,13 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 ERNIE_MODEL_NAME = "baidu/ERNIE-4.5-0.3B-PT"
 
 
 @requires_transformers("5")
-class TestErnie4_5(ExtTestCase):
+class TestErnie4_5(ModelBuilderTestCase):
     def common_fast_ernie4_5_random_weights(self, precision, provider):
         import torch
         from models.builder import create_model

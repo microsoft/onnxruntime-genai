@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ExtTestCase, hide_stdout, requires_cuda
+from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
 from models.builders.phi import Phi4MMModel
 
 # Use a small Phi-3 configuration as the base for the synthetic Phi4MM model.
@@ -117,7 +117,7 @@ class _Phi4MMModelWithSyntheticWeights(Phi4MMModel):
         return self._synthetic_weights
 
 
-class TestPhi4MM(ExtTestCase):
+class TestPhi4MM(ModelBuilderTestCase):
     def common_fast_phi4mm_random_weights(self, precision, provider):
         """Build the ONNX model and run prefill + decode, comparing against PyTorch.
 
