@@ -1040,6 +1040,11 @@ class Qwen35TextModel(Model):
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
 
+    def is_gqa_supported(self) -> bool:
+        if (self.ep, self.io_dtype) == ("cpu", ir.DataType.FLOAT16):
+            return True
+        return super().is_gqa_supported()
+
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
         conv_state + recurrent_state for linear attention layers."""
