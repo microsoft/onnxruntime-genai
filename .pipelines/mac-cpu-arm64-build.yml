@@ -1,6 +1,3 @@
-# ADO equivalent of .github/workflows/mac-cpu-arm64-build.yml.
-# Builds the CPU/arm64 macOS configuration on the AcesShared pool (Sequoia image).
-
 trigger:
   branches:
     include:
@@ -209,7 +206,6 @@ jobs:
   - bash: |
       set -e -x
       source genai-macos-venv/bin/activate
-      export HF_TOKEN="12345"
       export ORTGENAI_LOG_ORT_LIB=1
       python3 -m pip install requests
       python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
