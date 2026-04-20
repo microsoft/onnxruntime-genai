@@ -154,8 +154,51 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
+  std::unique_ptr<OrtValue> new_input_ids;
+
+  if (prompt_gen_) {
+    for (int i = 0; i < inputs_.size(); i++) {
+      std::string input_name = input_names_[i];
+
+      if (input_name == "input_ids") {
+        int64_t batch_size = params_->search.batch_size;
+        int64_t padded_seq_len = static_cast<int64_t>(params_->search.max_length);
+        std::vector<int64_t> new_shape{batch_size, padded_seq_len};
+
+        OrtValue* value = inputs_[i];
+        auto info = value->GetTensorTypeAndShapeInfo();
+        ONNXTensorElementDataType elem_type = info->GetElementType();
+        std::vector<int64_t> dims = info->GetShape();
+        int64_t orig_seq_len = std::min(dims[1], padded_seq_len);
+
+        new_input_ids = OrtValue::CreateTensor(model_.allocator_cpu_, new_shape, elem_type);
+
+        if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+          auto* src = value->GetTensorMutableData<int64_t>();
+          auto* dst = new_input_ids->GetTensorMutableData<int64_t>();
+          std::fill(dst, dst + batch_size * padded_seq_len, int64_t{0});
+          for (int64_t b = 0; b < batch_size; ++b) {
+            std::copy(src + b * orig_seq_len, src + b * orig_seq_len + orig_seq_len,
+                      dst + b * padded_seq_len);
+          }
+        } else {
+          auto* src = value->GetTensorMutableData<int32_t>();
+          auto* dst = new_input_ids->GetTensorMutableData<int32_t>();
+          std::fill(dst, dst + batch_size * padded_seq_len, int32_t{0});
+          for (int64_t b = 0; b < batch_size; ++b) {
+            std::copy(src + b * orig_seq_len, src + b * orig_seq_len + orig_seq_len,
+                      dst + b * padded_seq_len);
+          }
+        }
+        inputs_[i] = new_input_ids.get();
+        break;
+      }
+    }
+  }
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
+
+  new_input_ids.reset();
 
   extra_outputs_.RegisterOutputs();
 

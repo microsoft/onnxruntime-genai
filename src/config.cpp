@@ -30,6 +30,8 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "VitisAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
+  } else if (lower_name == "amdgpu") {
+    return "AMDGPU";
   }
   return name;  // Return name unchanged
 }
@@ -1385,6 +1387,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
       } else if (provider_options->name == "DML") {
         return true;
+      } else if (provider_options->name == "AMDGPU") {
+        return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
           if (value.first == "enableGraphCapture" && value.second == "1") {
@@ -1403,6 +1407,22 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
     }
   }
 
+  return false;
+}
+
+bool NeedsStaticInputShapes(const Config::SessionOptions& session_options) {
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "AMDGPU") {
+        return true;
+      }
+    }
+  }
   return false;
 }
 
