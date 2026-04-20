@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import (
+from model_builder_test_case import (
     ModelBuilderTestCase,
     hide_stdout,
     requires_cuda,

@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 ERNIE_MODEL_NAME = "baidu/ERNIE-4.5-0.3B-PT"
 

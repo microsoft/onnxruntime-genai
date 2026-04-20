@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, requires_transformers, run_session_or_io_binding
 
 QWEN3_VL_MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 

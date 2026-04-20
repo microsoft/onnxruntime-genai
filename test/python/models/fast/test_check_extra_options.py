@@ -5,7 +5,7 @@
 # --------------------------------------------------------------------------
 import unittest
 
-from ext_test_case import ModelBuilderTestCase, hide_stdout
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout
 
 
 class TestCheckExtraOptions(ModelBuilderTestCase):

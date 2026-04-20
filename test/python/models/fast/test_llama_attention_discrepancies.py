@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 import onnx_ir as ir
-from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_transformers
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_transformers
 from models.builders.llama import LlamaModel
 
 # LlamaForCausalLM architecture matching arnir0/Tiny-LLM but with a single

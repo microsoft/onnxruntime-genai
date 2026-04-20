@@ -10,7 +10,7 @@ It runs the token generation through transformers and ort-genai.
 """
 import os
 import unittest
-from ext_test_case import ModelBuilderTestCase, long_test, requires_cuda, hide_stdout
+from model_builder_test_case import ModelBuilderTestCase, long_test, requires_cuda, hide_stdout
 
 QWEN3_MODEL_NAMES = [
     "Qwen/Qwen3-0.6B",

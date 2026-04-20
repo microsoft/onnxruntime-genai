@@ -7,7 +7,7 @@ import os
 import unittest
 
 import numpy as np
-from ext_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
 from models.builders.phi import Phi4MMModel
 
 # Use a small Phi-3 configuration as the base for the synthetic Phi4MM model.

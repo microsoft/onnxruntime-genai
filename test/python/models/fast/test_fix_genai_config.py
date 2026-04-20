@@ -5,7 +5,7 @@
 # --------------------------------------------------------------------------
 import unittest
 
-from ext_test_case import ModelBuilderTestCase
+from model_builder_test_case import ModelBuilderTestCase
 from models.builders.base import fix_genai_config
 
 

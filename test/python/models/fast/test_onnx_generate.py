@@ -13,7 +13,7 @@ import numpy as np
 import onnx
 import onnx.helper as oh
 import onnx.numpy_helper as onh
-from ext_test_case import ModelBuilderTestCase, hide_stdout, onnx_generate
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, onnx_generate
 
 TINT64 = onnx.TensorProto.INT64
 TFLOAT = onnx.TensorProto.FLOAT
