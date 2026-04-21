@@ -229,7 +229,7 @@ struct InterfaceImpl : DeviceInterface {
 
     int64_t shape_val = static_cast<int64_t>(upload_bytes);
     std::span<const int64_t> shape{&shape_val, 1};
-    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    static const auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, staging_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
