@@ -72,7 +72,7 @@ def create_model(output_dir: str):
 
     # 2.5 Compute seqlens_k and total_sequence_length from attention_mask
     # seqlens_k = ReduceSum(attention_mask, axis=1) - 1  [shape: batch_size]
-    # total_sequence_length = ReduceMax(seqlens_k) + 1  [shape: scalar]
+    # total_sequence_length = ReduceMax(ReduceSum(attention_mask, axis=1))  [shape: scalar]
     # First cast attention_mask from int64 to int32 for GQA compatibility
     nodes.append(helper.make_node("Cast", ["attention_mask"], ["mask_i32"], to=TensorProto.INT32))
     reduce_axis = numpy_helper.from_array(np.array([1], dtype=np.int64), "reduce_axis_1")
@@ -217,5 +217,5 @@ def create_model(output_dir: str):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--output", "-o", default=r"D:\jiajia\models\test\tiny-graph-capture")
+    p.add_argument("--output", "-o", default=os.path.join(".", "tiny-graph-capture"))
     create_model(p.parse_args().output)

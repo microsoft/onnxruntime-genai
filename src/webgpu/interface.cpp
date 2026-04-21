@@ -196,8 +196,14 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    (void)next_mask_data;
+    (void)new_kv_length;
+    (void)max_length;
     if (batch_beam_size != 1 || !update_only) {
       return false;  // Fall back to CPU for multi-beam or non-static mask
+    }
+    if (type != Ort::TypeToTensorType<int32_t> && type != Ort::TypeToTensorType<int64_t>) {
+      return false;  // Unsupported mask type; fall back to CPU handling.
     }
     // For batch_beam_size == 1 with static mask (update_only=true, no padding),
     // the mask is always all 1s for attended positions.
