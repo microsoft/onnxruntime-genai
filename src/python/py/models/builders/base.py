@@ -667,9 +667,14 @@ class Model:
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        self.update_genai_config(genai_config)
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def update_genai_config(self, genai_config):
+        """Override in subclasses to modify genai_config before it is written to disk."""
 
     def make_key_value_cache_names(self, layer_id):
         """

@@ -3,8 +3,6 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-import json
-import os
 
 import torch
 from transformers import Mistral3ForConditionalGeneration
@@ -28,23 +26,12 @@ class Mistral3TextModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # Cache image_token_id from the HF config to avoid a redundant network
-        # call in make_genai_config (the config is already loaded by builder.py).
+        # call in update_genai_config (the config is already loaded by builder.py).
         self.image_token_id = getattr(config, "image_token_id", None)
 
-    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
-
-        # Patch the generated genai_config.json with image_token_id so that
-        # the runtime can locate image tokens in the input sequence.
+    def update_genai_config(self, genai_config):
         if self.image_token_id is not None:
-            config_path = os.path.join(out_dir, "genai_config.json")
-            with open(config_path) as f:
-                genai_config = json.load(f)
-
             genai_config["model"]["image_token_id"] = self.image_token_id
-
-            with open(config_path, "w") as f:
-                json.dump(genai_config, f, indent=4)
 
     def load_weights(self, input_path):
         if self.quant_type is not None or input_path.endswith(".gguf"):
