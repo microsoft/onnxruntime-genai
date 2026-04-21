@@ -17,6 +17,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "nemotron_speech.h"
+#include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
@@ -824,8 +825,10 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (ModelType::IsRNNT(config->model.type))
+  if (config->model.type == "nemotron_speech")
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+  if (config->model.type == "moonshine_streaming")
+    return std::make_shared<MoonshineStreamingModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))

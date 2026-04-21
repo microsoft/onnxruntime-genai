@@ -43,6 +43,7 @@ struct State;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct StreamingASRState;
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -111,6 +112,8 @@ struct Generator : LeakChecked<Generator> {
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
+  StreamingASRState* GetStreamingASRState() const { return streaming_asr_state_; }
+
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<ExtraInput> extra_inputs_;
   void SetInputs(const NamedTensors& inputs);
@@ -132,7 +135,7 @@ struct Generator : LeakChecked<Generator> {
   Action last_action_{standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
-  bool is_nemotron_speech_model_{};
+  StreamingASRState* streaming_asr_state_{};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy,
                               kTopK,

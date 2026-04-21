@@ -5,6 +5,7 @@
 
 #include "generators.h"
 #include "models/streaming_processor.h"
+#include "models/streaming_asr_state.h"
 #include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
@@ -352,7 +353,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   // so skip the standard validations and just create the state.
   if (ModelType::IsRNNT(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
-    is_nemotron_speech_model_ = dynamic_cast<NemotronSpeechState*>(state_.get()) != nullptr;
+    streaming_asr_state_ = dynamic_cast<StreamingASRState*>(state_.get());
     return;
   }
 
@@ -552,18 +553,18 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 size_t Generator::TokenCount() const {
-  if (is_nemotron_speech_model_)
-    return static_cast<NemotronSpeechState*>(state_.get())->TokenCount();
+  if (streaming_asr_state_)
+    return streaming_asr_state_->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  if (is_nemotron_speech_model_) {
+  if (streaming_asr_state_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
+    return streaming_asr_state_->IsChunkDone();
   }
 
   if (computed_logits_) {
@@ -597,10 +598,10 @@ void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
   // RNNT models: yield one token per call from the decoder state machine
-  if (is_nemotron_speech_model_) {
+  if (streaming_asr_state_) {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
-    static_cast<NemotronSpeechState*>(state_.get())->StepToken();
+    streaming_asr_state_->StepToken();
     return;
   }
 

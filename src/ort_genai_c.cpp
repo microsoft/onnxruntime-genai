@@ -14,6 +14,7 @@
 #include "smartptrs.h"
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
+#include "models/streaming_asr_state.h"
 #include "models/nemotron_speech.h"
 #include "models/silero_vad.h"
 
@@ -481,9 +482,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
   OGA_TRY
-  // For RNNT models, search_ is not used; return tokens from last StepToken
-  if (auto* speech_state = dynamic_cast<Generators::NemotronSpeechState*>(generator->state_.get())) {
-    auto tokens = speech_state->GetStepTokens();
+  // For streaming ASR models (RNNT/Moonshine), search_ is not used; return tokens from last StepToken
+  if (auto* asr = generator->GetStreamingASRState()) {
+    auto tokens = asr->GetStepTokens();
     *out = tokens.data();
     *out_count = tokens.size();
     return nullptr;

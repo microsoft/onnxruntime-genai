@@ -37,8 +37,8 @@ struct ModelType {
   }
 
   inline static bool IsRNNT(const std::string& model_type) {
-    // RNNT models bypass the search/logits pipeline entirely.
-    static constexpr std::array<std::string_view, 1> rnnt_types = {"nemotron_speech"};
+    // RNNT and streaming ASR models bypass the search/logits pipeline entirely.
+    static constexpr std::array<std::string_view, 2> rnnt_types = {"nemotron_speech", "moonshine_streaming"};
     return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
   }
 
