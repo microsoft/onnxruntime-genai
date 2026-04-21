@@ -409,10 +409,21 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 
   // Dynamic mask: adjust shape so the next Update() creates the correct-sized tensor.
   // For batch_beam_size == 1 (the only case RewindTo supports), the CPU UpdateAttentionMask
-  // fills the entire next mask with 1s, so no data fixup is needed — just the shape.
+  // fills the entire next mask with 1s, so no data fixup is needed - just the shape.
   attention_mask_shape_[1] = static_cast<int64_t>(index);
 }
 
+// Returns true when the attention mask is a fixed-size [batch_beam_size, max_length] buffer
+// that must be updated in-place (write 1s/0s) rather than re-created per step.
+// Currently triggered by:
+//   - DML (always uses graph capture, see IsGraphCaptureEnabled in config.cpp)
+//   - WebGPU with enableGraphCapture=1 in provider options
+//   - NvTensorRtRtx with past-present shared buffers
+// Not yet using this path:
+//   - CUDA: graph capture is currently disabled in GenAI due to bugs
+//     (IsGraphCaptureEnabled throws for CUDA). Once re-enabled, RewindMask's
+//     static path will work for CUDA as well since it uses device-agnostic
+//     CpuSpan/CopyCpuToDevice.
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
          (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&

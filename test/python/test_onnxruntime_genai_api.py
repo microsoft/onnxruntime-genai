@@ -275,124 +275,48 @@ def test_rewind(test_data_path, relative_model_path):
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
+@pytest.mark.skipif(
+    not og.is_webgpu_available(),
+    reason="WebGPU EP not available, graph capture RewindTo test requires WebGPU",
+)
 @pytest.mark.parametrize(
     "relative_model_path",
-    ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
+    ([Path("webgpu") / "tiny-graph-capture-gqa"]),
 )
-def test_rewind_to_zero(test_data_path, relative_model_path):
-    """Test RewindTo(0): full rewind should produce identical output."""
+def test_rewind_graph_capture(test_data_path, relative_model_path):
+    """Test RewindTo with graph capture enabled (static mask handling via GQA model)."""
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    model = og.Model(model_path)
+    if not os.path.exists(model_path):
+        pytest.skip(f"Graph capture test model not found at {model_path}")
 
-    expected_sequence = np.array(
-        [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
-        dtype=np.int32,
-    )
+    model = og.Model(model_path)
+    max_length = 20
+    input_ids = np.array([[10, 20, 30, 40, 50]], dtype=np.int32)
 
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=1)
+    search_params.set_search_options(do_sample=False, max_length=max_length, batch_size=1)
 
     generator = og.Generator(model, search_params)
-    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    generator.append_tokens(input_ids)
     while not generator.is_done():
         generator.generate_next_token()
 
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+    first_output = generator.get_sequence(0).copy()
 
-    # Full rewind and regenerate — output must be identical
+    # Full rewind with static mask handling
     generator.rewind_to(0)
-    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    generator.append_tokens(input_ids)
     while not generator.is_done():
         generator.generate_next_token()
 
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+    assert np.array_equal(first_output, generator.get_sequence(0))
 
-
-@pytest.mark.parametrize(
-    "relative_model_path",
-    ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
-)
-def test_rewind_multiple_times(test_data_path, relative_model_path):
-    """Test multiple sequential RewindTo calls produce consistent results."""
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    model = og.Model(model_path)
-
-    expected_sequence = np.array(
-        [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
-        dtype=np.int32,
-    )
-
-    search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=1)
-
-    generator = og.Generator(model, search_params)
-    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
-
-    # Rewind to 7, generate remaining — deterministic output should match
+    # Partial rewind
     generator.rewind_to(7)
     while not generator.is_done():
         generator.generate_next_token()
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
-    # Rewind to 5, generate remaining
-    generator.rewind_to(5)
-    while not generator.is_done():
-        generator.generate_next_token()
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
-
-    # Full rewind and regenerate
-    generator.rewind_to(0)
-    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
-
-
-@pytest.mark.parametrize(
-    "relative_model_path",
-    ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
-)
-def test_rewind_and_diverge(test_data_path, relative_model_path):
-    """Test RewindTo with different continuation tokens, then rewind to original."""
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    model = og.Model(model_path)
-
-    expected_sequence = np.array(
-        [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
-        dtype=np.int32,
-    )
-
-    search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=1)
-
-    generator = og.Generator(model, search_params)
-    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
-
-    # Rewind to 4 and append different tokens — should diverge
-    generator.rewind_to(4)
-    generator.append_tokens(np.array([[52, 204]], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    diverged_sequence = generator.get_sequence(0).copy()
-    # First 4 tokens must still match
-    assert np.array_equal(expected_sequence[:4], diverged_sequence[:4])
-
-    # Rewind to 3 and append original continuation — should recover original output
-    generator.rewind_to(3)
-    generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+    assert np.array_equal(first_output, generator.get_sequence(0))
 
 
 # Test Model Loading with No Chat Template

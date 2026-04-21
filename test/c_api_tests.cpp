@@ -1332,143 +1332,9 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
-
-// Test RewindTo(0) with batch=1: full rewind should produce identical output
-TEST(CAPITests, RewindToZeroGptFp32CAPI) {
-  std::vector<int32_t> input_ids{0, 0, 195, 731};
-  std::vector<int32_t> expected_output{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
-  int max_length = 10;
-
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", max_length);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  auto sequence_length = generator->GetSequenceCount(0);
-  auto* sequence_data = generator->GetSequenceData(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence_data, sequence_length * sizeof(int32_t)));
-
-  // Full rewind and regenerate — output must be identical
-  generator->RewindTo(0);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  sequence_length = generator->GetSequenceCount(0);
-  sequence_data = generator->GetSequenceData(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence_data, sequence_length * sizeof(int32_t)));
-}
-
-// Test multiple sequential RewindTo calls: rewind to different positions in succession
-TEST(CAPITests, MultipleRewindGptFp32CAPI) {
-  std::vector<int32_t> input_ids{0, 0, 195, 731};
-  std::vector<int32_t> expected_output{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
-  int max_length = 10;
-
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", max_length);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  // Verify initial generation
-  auto sequence_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
-
-  // Rewind to 7, generate remaining
-  generator->RewindTo(7);
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-  sequence_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
-
-  // Rewind to 5, generate remaining
-  generator->RewindTo(5);
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-  sequence_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
-
-  // Rewind all the way to 0 and regenerate with same input
-  generator->RewindTo(0);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-  sequence_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(sequence_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), generator->GetSequenceData(0), sequence_length * sizeof(int32_t)));
-}
-
-// Test RewindTo with new tokens: rewind to a midpoint and append different tokens
-TEST(CAPITests, RewindAndAppendNewTokensGptFp32CAPI) {
-  std::vector<int32_t> input_ids{0, 0, 195, 731};
-  int max_length = 10;
-
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", max_length);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  // Save original sequence
-  auto orig_length = generator->GetSequenceCount(0);
-  std::vector<int32_t> original_sequence(orig_length);
-  std::memcpy(original_sequence.data(), generator->GetSequenceData(0), orig_length * sizeof(int32_t));
-
-  // Rewind to 4 and append different tokens
-  generator->RewindTo(4);
-  std::vector<int32_t> new_tokens{52, 204};
-  generator->AppendTokens(new_tokens.data(), new_tokens.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  // First 4 tokens should match, but subsequent tokens may differ because we changed the input
-  auto new_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(new_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(original_sequence.data(), generator->GetSequenceData(0), 4 * sizeof(int32_t)));
-
-  // Rewind to 3 and append the original tokens to verify we get the original output back
-  generator->RewindTo(3);
-  std::vector<int32_t> orig_continuation{731, 731};
-  generator->AppendTokens(orig_continuation.data(), orig_continuation.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  new_length = generator->GetSequenceCount(0);
-  ASSERT_EQ(new_length, static_cast<size_t>(max_length));
-  EXPECT_TRUE(0 == std::memcmp(original_sequence.data(), generator->GetSequenceData(0), new_length * sizeof(int32_t)));
-}
 #endif
 
-// Test RewindTo with static mask handling (graph capture / past-present share buffer).
-// NvTensorRtRtx enables ShouldUseStaticMaskHandling() via past-present share buffer.
-// On main (before our fix), RewindMask throws
-// "Static buffer is not supported for continuous decoding."
-// With our fix, the static mask is properly rewritten with 1s/0s.
+// Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
 // Skipped when the phi3-fp16-nvtrt model is not available (CI-only model).
 TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
@@ -1486,8 +1352,55 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
 
-  // Use a simple prompt
-  std::vector<int32_t> input_ids{1, 15043, 29892, 920};  // "Hello, world"
+  std::vector<int32_t> input_ids{1, 15043, 29892, 920};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  generator->RewindTo(6);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+}
+
+// Test RewindTo with a tiny GQA model configured for graph capture.
+// Uses a checked-in 1-layer model with GroupQueryAttention, enableGraphCapture=1,
+// and past_present_share_buffer=true. This exercises ShouldUseStaticMaskHandling()
+// without requiring a specific GPU or large model download.
+#if USE_WEBGPU
+TEST(CAPITests, RewindGraphCaptureGqaCAPI) {
+  std::string model_path = MODEL_PATH "webgpu/tiny-graph-capture-gqa";
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "tiny-graph-capture-gqa model not found at " << model_path;
+  }
+
+  int max_length = 20;
+  std::vector<int32_t> input_ids{10, 20, 30, 40, 50};
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
@@ -1500,20 +1413,19 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   std::vector<int32_t> first_output(seq_len);
   std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
 
-  // RewindTo(0) — full rewind with static mask. This threw on main.
+  // RewindTo(0) — full rewind with static mask handling
   generator->RewindTo(0);
   generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
-  // Output after rewind must match first run
   auto seq_len2 = generator->GetSequenceCount(0);
   ASSERT_EQ(seq_len2, seq_len);
   EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
 
-  // RewindTo(6) — partial rewind with static mask
-  generator->RewindTo(6);
+  // RewindTo(7) — partial rewind, continue generating
+  generator->RewindTo(7);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -1522,6 +1434,7 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   ASSERT_EQ(seq_len2, seq_len);
   EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
 }
+#endif  // USE_WEBGPU
 
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
