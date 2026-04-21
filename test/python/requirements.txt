@@ -1,11 +1,13 @@
 coloredlogs
 flatbuffers
-numpy<2
+numpy
 packaging
 protobuf==6.33.5
 sympy
 pytest
+pytest-cov
+pytest-subtests 
 onnx
 onnx_ir>=0.1.3
-transformers<5.0.0
+transformers
 huggingface_hub[cli,hf_xet]

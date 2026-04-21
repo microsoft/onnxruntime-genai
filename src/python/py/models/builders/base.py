@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import onnx_ir as ir
@@ -94,7 +94,9 @@ class Model:
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
             else config.rope_scaling["original_max_position_embeddings"]
-            if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict) and "original_max_position_embeddings" in config.rope_scaling
+            if hasattr(config, "rope_scaling")
+            and isinstance(config.rope_scaling, Mapping)
+            and "original_max_position_embeddings" in config.rope_scaling
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -270,6 +272,10 @@ class Model:
             if hasattr(config, "rope_theta")
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
+            else config.rope_scaling["rope_theta"]
+            if hasattr(config, "rope_scaling")
+            and isinstance(config.rope_scaling, Mapping)
+            and "rope_theta" in config.rope_scaling
             else 10000
         )
         self.rope_attrs = {
@@ -507,20 +513,11 @@ class Model:
             beta_fast = config.rope_scaling["beta_fast"] if "beta_fast" in config.rope_scaling else 0
 
             self.rope_attrs["mscale_policy"] = config.rope_scaling["rope_type"]
-            mscale_param = config.rope_scaling.get("mscale", 1.0)
-            mscale_all_dim = config.rope_scaling.get("mscale_all_dim", 0.0)
-            if mscale_all_dim:
-                # HuggingFace YaRN formula:
-                # final_mscale = yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)
-                # where yarn_get_mscale(s, m) = 0.1 * m * log(s) + 1 if s > 1 else 1
-                def _yarn_get_mscale(s, m):
-                    return (0.1 * m * float(np.log(s)) + 1.0) if s > 1.0 else 1.0
-
-                self.rope_attrs["mscale"] = _yarn_get_mscale(factor, mscale_param) / _yarn_get_mscale(
-                    factor, mscale_all_dim
-                )
-            else:
-                self.rope_attrs["mscale"] = self.make_mscale(factor)
+            self.rope_attrs["mscale"] = self.make_mscale(
+                config.rope_scaling["factor"],
+                config_mscale=config.rope_scaling.get("mscale", 0),
+                config_mscale_all_dim=config.rope_scaling.get("mscale_all_dim", 0),
+            )
             self.rope_attrs["rescale_inv_freq"] = {
                 "factor": factor,
                 "ntk_alpha": beta_slow,
@@ -1747,7 +1744,23 @@ class Model:
             return 1.0
         return 0.1 * np.log(mscale) + 1.0
 
-    def make_mscale(self, mscale):
+    def make_mscale(self, mscale, config_mscale=0, config_mscale_all_dim=0):
+        """Compute the magnitude scaling factor for rotary embeddings.
+
+        When both ``config_mscale`` and ``config_mscale_all_dim`` are provided
+        and > 0, uses the full HuggingFace formula:
+            get_mscale(s, ms) = 0.1 * ms * log(s) + 1.0  (if s > 1, else 1.0)
+            attention_factor = get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)
+        When only ``config_mscale`` > 0, it is used directly as the cos/sin
+        multiplier (e.g. Ministral-3-3B sets ``mscale=1.0`` to disable scaling).
+        Otherwise, compute from the scaling factor using the policy-specific formula.
+        """
+        if config_mscale > 0 and config_mscale_all_dim > 0:
+            def _get_mscale(scale, ms):
+                return (0.1 * ms * np.log(scale) + 1.0) if scale > 1 else 1.0
+            return float(_get_mscale(mscale, config_mscale) / _get_mscale(mscale, config_mscale_all_dim))
+        if config_mscale > 0:
+            return float(config_mscale)
         if self.rope_attrs["mscale_policy"] in {"su", "longrope"}:
             return self.make_mscale_su(mscale)
         elif self.rope_attrs["mscale_policy"] == "yarn":
