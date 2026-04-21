@@ -185,6 +185,7 @@ def long_test(msg: Callable[[], str] | str | None = None) -> Callable:
 class ModelBuilderTestCase(unittest.TestCase):
     _warns = []
     _do_clean = os.environ.get("DOCLEAN", "") in (1, "1", "True", "true")
+    _do_not_clean = os.environ.get("DONTCLEAN", "") in (1, "1", "True", "true")
 
     def shortDescription(self):
         # To remove annoying display on the screen every time verbosity is enabled.
@@ -200,14 +201,14 @@ class ModelBuilderTestCase(unittest.TestCase):
         cache_dir = os.path.expanduser(os.path.join("~", ".cache", "modelbuilder", prefix))
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(cache_dir, exist_ok=True)
-        if clean or self._do_clean:
+        if not self._do_not_clean and (clean or self._do_clean):
             self.addCleanup(self.clean_dir, os.path.join("dump_models", prefix, "output"))
         return output_dir, cache_dir
 
     def get_model_dir(self, prefix: str, clean: bool = False) -> tuple[str]:
         model_dir = os.path.join("dump_models", prefix, "checkpoint")
         os.makedirs(model_dir, exist_ok=True)
-        if clean or self._do_clean:
+        if not self._do_not_clean and (clean or self._do_clean):
             self.addCleanup(self.clean_dir, os.path.join("dump_models", prefix, "checkpoint"))
         return model_dir
 

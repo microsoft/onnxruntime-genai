@@ -2116,7 +2116,7 @@ class Model:
         self.rope_attrs["mscale"] = self.rope_attrs["multi_cache"]["long_mscale"]
 
         # Create caches for when sequence_length > self.original_context_length
-        cos_cache_large_name, sin_cache_large_name = ("cos_cache_large", "sin_cache_large")
+        cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
         self.rope_attrs["save_caches"] = False
         cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(
             cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name
