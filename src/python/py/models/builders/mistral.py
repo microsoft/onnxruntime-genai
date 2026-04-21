@@ -139,10 +139,7 @@ class Ministral3VisionEncoderModel(Model):
 
         # Re-initialise the graph with the vision-encoder name and reset
         # shared graph state so make_model() starts from a clean slate.
-        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="pixtral_vision_encoder")
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.values = {}
-        self.node_names = set()
+        self.graph.name = "pixtral_vision_encoder"
 
         # Store original (unpatched) config for callers that need top-level
         # Mistral3 attributes (e.g. spatial_merge_size, text_config, …).
@@ -170,7 +167,7 @@ class Ministral3VisionEncoderModel(Model):
         self.projector_hidden_act = config.projector_hidden_act
 
     # ------------------------------------------------------------------ #
-    #  Graph-construction helpers                                         #
+    #  Graph-construction helpers                                        #
     # ------------------------------------------------------------------ #
 
     def _rms_norm(self, name, root_input, weight_tensor, weight_name, shape):
