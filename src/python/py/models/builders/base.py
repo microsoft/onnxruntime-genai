@@ -675,6 +675,7 @@ class Model:
 
     def update_genai_config(self, genai_config):
         """Override in subclasses to modify genai_config before it is written to disk."""
+        pass
 
     def make_key_value_cache_names(self, layer_id):
         """
