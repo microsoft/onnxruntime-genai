@@ -289,7 +289,12 @@ def test_rewind_graph_capture(test_data_path, relative_model_path):
     if not os.path.exists(model_path):
         pytest.skip(f"Graph capture test model not found at {model_path}")
 
-    model = og.Model(model_path)
+    try:
+        model = og.Model(model_path)
+    except RuntimeError as e:
+        if "not supported in this build" in str(e):
+            pytest.skip(f"WebGPU EP not functional in this build: {e}")
+        raise
     max_length = 20
     input_ids = np.array([[10, 20, 30, 40, 50]], dtype=np.int32)
 
