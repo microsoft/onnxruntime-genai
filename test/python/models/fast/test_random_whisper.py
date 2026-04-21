@@ -165,6 +165,7 @@ class TestWhisperModel(ModelBuilderTestCase):
             self.assertEqual(dec_results[f"present_value_self_{i}"].shape, expected_kv_shape)
 
     @hide_stdout()
+    @unittest.skip("issue with Attention, onnxruntime is crashing")
     def test_fast_whisper_random_weights_fp32_cpu(self):
         self.common_fast_whisper_random_weights("fp32", "cpu")
 
