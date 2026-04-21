@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import os
-import re
 import shutil
 import unittest
 import warnings
@@ -14,49 +13,7 @@ import numpy as np
 import onnx
 import torch
 import transformers
-
-
-class PvVersion:
-    """Simple version of packaging.version.Version."""
-
-    def to_int(self, i: str) -> int:
-        if i[0] == "0" and len(i) != 1:
-            raise ValueError(f"{self!r} is not a valid version")
-        return int(i)
-
-    def __init__(self, version: str):
-        self.version = version
-        self.t_version = tuple(
-            self.to_int(i) for i in re.split(r"[.+]", version) if not i.startswith(("dev", "rc", "post", "cpu", "cu"))
-        )
-
-    def __repr__(self) -> str:
-        "usual"
-        return f"Version({self.version!r})"
-
-    def __eq__(self, other) -> bool:
-        """=="""
-        return self.version == other.version
-
-    def __ge__(self, other) -> bool:
-        """Lesser than."""
-        assert isinstance(other, PvVersion), f"Unexpected type {type(other)}"
-        return self.t_version >= other.t_version
-
-    def __gt__(self, other) -> bool:
-        """Lesser than."""
-        assert isinstance(other, PvVersion), f"Unexpected type {type(other)}"
-        return self.t_version > other.t_version
-
-    def __le__(self, other) -> bool:
-        """Lesser than."""
-        assert isinstance(other, PvVersion), f"Unexpected type {type(other)}"
-        return self.t_version <= other.t_version
-
-    def __lt__(self, other) -> bool:
-        """Lesser than."""
-        assert isinstance(other, PvVersion), f"Unexpected type {type(other)}"
-        return self.t_version < other.t_version
+from packaging.version import Version
 
 
 def requires_yobx(version: str = "", msg: str = "") -> Callable:
@@ -71,7 +28,7 @@ def requires_yobx(version: str = "", msg: str = "") -> Callable:
     if not version:
         return lambda x: x
 
-    if PvVersion(yobx.__version__) < PvVersion(version):
+    if Version(yobx.__version__) < Version(version):
         msg = f"onnx_ir version {yobx.__version__} < {version}: {msg}"
         return unittest.skip(msg)
     return lambda x: x
@@ -89,7 +46,7 @@ def has_transformers(version: str) -> Callable:
     if not version:
         return True
 
-    if PvVersion(transformers.__version__) < PvVersion(version):
+    if Version(transformers.__version__) < Version(version):
         return False
     return True
 
@@ -106,7 +63,7 @@ def requires_transformers(version: str = "", msg: str = "") -> Callable:
     if not version:
         return lambda x: x
 
-    if PvVersion(transformers.__version__) < PvVersion(version):
+    if Version(transformers.__version__) < Version(version):
         msg = msg or f"transformers version {transformers.__version__} < {version}"
         return unittest.skip(msg)
     return lambda x: x
@@ -131,7 +88,7 @@ def has_torch(version: str = "") -> bool:
         return False
     if not version:
         return True
-    return PvVersion(torch.__version__) >= PvVersion(version)
+    return Version(torch.__version__) >= Version(version)
 
 
 def requires_cuda(version: str = "", msg: str = "", memory: int = 0):
@@ -152,7 +109,7 @@ def requires_cuda(version: str = "", msg: str = "", memory: int = 0):
         return unittest.skip(msg or "cuda not installed")
 
     if version:
-        if PvVersion(torch.version.cuda) < PvVersion(version):
+        if Version(torch.version.cuda) < Version(version):
             msg = msg or f"CUDA older than {version}"
         return unittest.skip(msg or f"cuda not recent enough {torch.version.cuda} < {version}")
 
