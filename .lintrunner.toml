@@ -10,6 +10,7 @@ exclude_patterns = [
     'cmake/**',
     'build/**',
     'nuget/**',
+    'src/python/py/models/**',
 ]
 command = [
     'python',
@@ -41,6 +42,7 @@ exclude_patterns = [
     'cmake/**',
     'build/**',
     'nuget/**',
+    'src/python/py/models/**',
 ]
 command = [
     'python',
