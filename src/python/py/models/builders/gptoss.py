@@ -58,7 +58,7 @@ class GPTOSSModel(Model):
 
         t = torch.arange(self.rope_attrs["cache_length"], dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
-        cos_cache, sin_cache = (freqs.cos() * self.rope_attrs["mscale"], freqs.sin() * self.rope_attrs["mscale"])
+        cos_cache, sin_cache = freqs.cos() * self.rope_attrs["mscale"], freqs.sin() * self.rope_attrs["mscale"]
         return cos_cache, sin_cache
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -381,7 +381,6 @@ class GPTOSSModel(Model):
         act_shape = ["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1]
         self.make_slice(glu_slice_name, glu_slice_inputs, dtype=self.io_dtype, shape=act_shape)
         swiglu_limit = self.moe_attrs["swiglu_limit"]
-        act_shape = act_shape
         if swiglu_limit is not None:
             glu_clip_name = f"{basename}/act_fn/Clip_1"
             glu_clip_inputs = [f"{glu_slice_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{swiglu_limit}"]
