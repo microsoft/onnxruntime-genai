@@ -254,13 +254,9 @@ std::unique_ptr<NamedTensors> Mistral3ImageProcessor::Process(
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
 
   // Tensor 1: image_sizes[N, 2] from PixtralImageSizes (post-resize, pre-padding).
-  // Soft fallback: image_sizes may not be present if processor_config.json
-  // lacks the PixtralImageSizes step. Single-image works without it;
-  // multi-image requires it (enforced in PixtralVisionState::Run).
+  // Models must be exported with PixtralImageSizes in processor_config.json.
   OrtxTensor* image_sizes = nullptr;
-  if (OrtxTensorResultGetAt(result.get(), 1, &image_sizes) != kOrtxOK) {
-    image_sizes = nullptr;
-  }
+  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &image_sizes));
 
   auto [input_ids, num_img_tokens] =
       ProcessPixtralPrompt(tokenizer, prompt, pixel_values, image_sizes, patch_size_,
