@@ -388,7 +388,7 @@ class TestMinistral3(ModelBuilderTestCase):
             PreTrainedTokenizerFast,
         )
 
-        from modelbuilder.builder import create_model
+        from models.builder import create_model
 
         num_hidden_layers = 1
         # 56×56 image with patch_size=14 → 4×4=16 patches;
@@ -555,7 +555,7 @@ class TestMinistral3(ModelBuilderTestCase):
             PreTrainedTokenizerFast,
         )
 
-        from modelbuilder.builder import create_model
+        from models.builder import create_model
 
         # --- Tiny model configuration (same as the ONNX-only sibling test) ---
         num_hidden_layers = 1
@@ -687,7 +687,7 @@ class TestMinistral3(ModelBuilderTestCase):
         """_dequantize_fp8_weights leaves normal float32 weights unchanged."""
         import torch
 
-        from modelbuilder.builders.mistral import Ministral3TextModel
+        from models.builders.mistral import Ministral3TextModel
 
         linear = torch.nn.Linear(8, 4, bias=False)
         original_data = linear.weight.data.clone()
@@ -702,7 +702,7 @@ class TestMinistral3(ModelBuilderTestCase):
         if fp8_dtype is None:
             self.skipTest("float8_e4m3fn not available in this PyTorch build")
 
-        from modelbuilder.builders.mistral import Ministral3TextModel
+        from models.builders.mistral import Ministral3TextModel
 
         linear = torch.nn.Linear(8, 4, bias=False)
         # Simulate FP8 quantization: store weight as float8_e4m3fn.

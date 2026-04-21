@@ -3,10 +3,6 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""
-Tests for :func:`modelbuilder.helpers.rt_helper.onnx_generate`.
-"""
-
 import unittest
 
 import numpy as np

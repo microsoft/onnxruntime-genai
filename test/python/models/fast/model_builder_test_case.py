@@ -802,7 +802,7 @@ class ModelBuilderTestCase(unittest.TestCase):
 
         1. Set up output and cache directories.
         2. Save the PyTorch *model* and *tokenizer* to the checkpoint directory.
-        3. Export the model to ONNX via :func:`modelbuilder.builder.create_model`.
+        3. Export the model to ONNX via ``create_model``.
         4. Assert that ``model.onnx`` was produced.
         5. Load an OnnxRuntime :class:`InferenceSession`.
         6. Run :meth:`run_prefill_and_decode_check` to compare logits.
@@ -887,7 +887,7 @@ class ModelBuilderTestCase(unittest.TestCase):
             receive pre-computed embeddings together with ``position_ids``
             (Qwen2.5-VL style).
         """
-        from modelbuilder.builder import create_model
+        from models.builder import create_model
 
         model_dir = self.get_model_dir(basename)
         output_dir, cache_dir = self.get_dirs(basename)
@@ -960,7 +960,7 @@ class ModelBuilderTestCase(unittest.TestCase):
         ``common_*_greedy_generation`` test methods:
 
         1. Save the PyTorch *model* and *tokenizer* to the checkpoint directory.
-        2. Export the model to ONNX via :func:`modelbuilder.builder.create_model`.
+        2. Export the model to ONNX via ``create_model``.
         3. Assert that ``model.onnx`` was produced.
         4. Load an OnnxRuntime :class:`InferenceSession`.
         5. Run :meth:`run_greedy_generation_check` to compare token sequences.
@@ -1029,8 +1029,7 @@ class ModelBuilderTestCase(unittest.TestCase):
         The test is expected to be decorated with :func:`requires_genai` so that
         it is skipped automatically when ``onnxruntime-genai`` is not installed.
 
-        :param output_dir: directory that contains ``model.onnx`` and
-            ``genai_config.json`` (the output of :func:`modelbuilder.builder.create_model`).
+        :param output_dir: directory that contains ``model.onnx`` and ``genai_config.json``.
         :param prompt_ids: 2-D integer tensor of shape ``(1, prompt_len)``.
         :param max_new_tokens: maximum number of new tokens to generate.
         :return: list of all token ids (prompt + generated).
@@ -1077,7 +1076,7 @@ class ModelBuilderTestCase(unittest.TestCase):
            ``None`` after step 3).
 
         :param output_dir: directory produced by
-            :func:`modelbuilder.builder.create_model`, containing
+            ``create_model``, containing
             ``model.onnx`` and ``genai_config.json``.
         :param model: PyTorch model used for the reference generation.  Pass
             ``None`` when providing *pt_tokens* directly (e.g. when the model

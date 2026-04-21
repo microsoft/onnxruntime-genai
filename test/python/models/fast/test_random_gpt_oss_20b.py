@@ -154,7 +154,7 @@ class TestGptOss20b(ModelBuilderTestCase):
         from transformers import AutoModelForCausalLM, GptOssConfig, PreTrainedTokenizerFast
 
         from models.builder import create_model
-        from modelbuilder.builders.gptoss import GPTOSSModel
+        from models.builders.gptoss import GPTOSSModel
 
         num_hidden_layers = 2
 
