@@ -26,49 +26,6 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
-# Search-section defaults for onnxruntime-genai.  In transformers >= 5,
-# GenerationConfig attributes default to None instead of concrete values,
-# which can produce null entries in genai_config.json that
-# onnxruntime-genai does not accept.
-_GENAI_SEARCH_DEFAULTS = {
-    "diversity_penalty": 0.0,
-    "do_sample": False,
-    "early_stopping": True,
-    "length_penalty": 1.0,
-    "min_length": 0,
-    "no_repeat_ngram_size": 0,
-    "num_beams": 1,
-    "num_return_sequences": 1,
-    "repetition_penalty": 1.0,
-    "temperature": 1.0,
-    "top_k": 50,
-    "top_p": 1.0,
-}
-
-
-def fix_genai_config(genai_config):
-    """Fix a genai_config dict for compatibility with onnxruntime-genai.
-
-    In transformers >= 5, :class:`transformers.GenerationConfig` attributes
-    default to ``None`` instead of concrete values.  When
-    :meth:`Model.make_genai_config` reads those attributes to populate the
-    ``search`` section of ``genai_config.json``, the result can contain
-    ``null`` entries that onnxruntime-genai rejects.
-
-    This function replaces every ``null`` (``None``) value in the ``search``
-    section with the corresponding onnxruntime-genai default.  Values that are
-    already set are left unchanged, so the function is safe to call regardless
-    of the transformers version in use.
-
-    :param genai_config: genai_config dict (modified in-place and returned).
-    :return: the modified *genai_config* dict.
-    """
-    search = genai_config.get("search", {})
-    for key, default_val in _GENAI_SEARCH_DEFAULTS.items():
-        if search.get(key) is None:
-            search[key] = default_val
-    return genai_config
-
 
 def parse_hf_token(hf_token):
     """
@@ -267,17 +224,7 @@ class Model:
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
         rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
-        rope_theta = (
-            config.rope_theta
-            if hasattr(config, "rope_theta")
-            else config.rope_embedding_base
-            if hasattr(config, "rope_embedding_base")
-            else config.rope_scaling["rope_theta"]
-            if hasattr(config, "rope_scaling")
-            and isinstance(config.rope_scaling, Mapping)
-            and "rope_theta" in config.rope_scaling
-            else 10000
-        )
+        rope_theta = self._rope_theta_from_config(config)
         self.rope_attrs = {
             "create_caches": True,                           # Create cos/sin caches for rotary embeddings
             "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
@@ -294,6 +241,8 @@ class Model:
         }
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             self.make_rope_init(config)
+        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
+            self.rope_attrs["rescale_factors"] = 1.0 / config.compression_ratio
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         attn_softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") and config.attn_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
@@ -462,6 +411,28 @@ class Model:
         if self.exclude_lm_head:
             del self.output_names["logits"]
 
+    @staticmethod
+    def _rope_theta_from_config(config, default=10000):
+        """Return the RoPE base frequency from ``config``, trying all standard attribute locations.
+
+        The lookup order is:
+        1. ``config.rope_theta`` – the standard HuggingFace attribute.
+        2. ``config.rope_embedding_base`` – used by some older models.
+        3. ``config.rope_parameters["rope_theta"]`` – a flat dict used by models
+           such as Ernie 4.5 that store all RoPE hyper-parameters together under
+           ``rope_parameters`` rather than as individual top-level attributes.
+        4. ``default`` (10000) if none of the above is present.
+        """
+        if hasattr(config, "rope_theta"):
+            return config.rope_theta
+        if hasattr(config, "rope_embedding_base"):
+            return config.rope_embedding_base
+        if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
+            theta = config.rope_parameters.get("rope_theta")
+            if theta is not None:
+                return theta
+        return default
+
     def make_rope_init(self, config):
         # Some models (e.g. SmolLM3) store rope_theta inside rope_scaling
         # instead of as a top-level config attribute. Override the default theta
@@ -592,6 +563,43 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
+    def _make_search_section(self, config, context_length, extra_options, past_present_share_buffer):
+        """Build the ``search`` section of ``genai_config.json``.
+
+        Starts from :data:`GENAI_SEARCH_DEFAULTS` so that every field is always
+        initialized to a valid value.  Any attribute that exists on *config* and
+        is not ``None`` overrides the corresponding default, which is the correct
+        behaviour for both transformers < 5 (where attributes carry concrete
+        values) and transformers >= 5 (where they may be ``None``).
+        """
+        # Search-section defaults for onnxruntime-genai.  In transformers >= 5,
+        # GenerationConfig attributes default to None instead of concrete values,
+        # which can produce null entries in genai_config.json that
+        # onnxruntime-genai does not accept.
+        GENAI_SEARCH_DEFAULTS = {
+            "diversity_penalty": 0.0,
+            "do_sample": False,
+            "early_stopping": True,
+            "length_penalty": 1.0,
+            "min_length": 0,
+            "no_repeat_ngram_size": 0,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+            "repetition_penalty": 1.0,
+            "temperature": 1.0,
+            "top_k": 50,
+            "top_p": 1.0,
+        }
+
+        search = dict(GENAI_SEARCH_DEFAULTS)
+        for key in GENAI_SEARCH_DEFAULTS:
+            val = getattr(config, key, None)
+            if val is not None:
+                search[key] = val
+        search["max_length"] = context_length
+        search["past_present_share_buffer"] = False if "config_only" in extra_options else past_present_share_buffer
+        return search
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -674,22 +682,7 @@ class Model:
                 "type": self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
             },
-            "search": {
-                "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
-                "do_sample": config.do_sample if hasattr(config, "do_sample") else False,
-                "early_stopping": True,
-                "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
-                "max_length": self.context_length,
-                "min_length": 0,
-                "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
-                "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
-                "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
-                "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
-                "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k is not None else 50,
-                "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
-            },
+            "search": self._make_search_section(config, self.context_length, self.extra_options, self.past_present_share_buffer),
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
@@ -956,9 +949,16 @@ class Model:
         self.make_value(output, dtype, shape=shape)
 
     def make_reshape(self, name, inputs, dtype, shape):
+        if len(inputs) >= 2 and isinstance(inputs[1], (list, tuple)):
+            shape_name = f"{name}/shape"
+            ir_t = ir.tensor(np.array(inputs[1], dtype=np.int64), name=shape_name)
+            self.make_node("Constant", inputs=[], outputs=[shape_name], name=f"{shape_name}/Constant", value=ir_t)
+            self.make_value(shape_name, ir_t.dtype, ir_t.shape)
+            inputs = [inputs[0], shape_name]
         output = f"{name}/output_0"
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_shape(self, name, root_input, shape):
         output = f"{name}/output_0"
@@ -984,6 +984,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_tile(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1067,6 +1068,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Add", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1083,20 +1085,58 @@ class Model:
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_slice(self, name, inputs, dtype, shape):
+    def make_slice(self, name, inputs, dtype, shape, *, starts=None, ends=None, axes=None):
+        """Create a Slice ONNX node.
+
+        When *starts*, *ends*, and *axes* are provided as Python lists the
+        method creates inline ``Constant`` nodes for each of them automatically
+        and *inputs* should be the single root tensor name (str).  Otherwise
+        *inputs* must be a list of already-resolved tensor name strings
+        ``[data, starts, ends, ...]`` in the usual ONNX Slice convention.
+
+        Returns the output tensor name.
+        """
+        if starts is not None or ends is not None or axes is not None:
+            assert starts is not None and ends is not None, "Both 'starts' and 'ends' must be provided together"
+            root_input = inputs
+            starts_name = f"{name}/starts"
+            ends_name = f"{name}/ends"
+            for tensor_name, values in [(starts_name, starts), (ends_name, ends)]:
+                np_data = np.array(values, dtype=np.int64)
+                ir_t = ir.tensor(np_data, name=tensor_name)
+                self.make_node("Constant", inputs=[], outputs=[tensor_name], name=f"{tensor_name}/Constant", value=ir_t)
+                self.make_value(tensor_name, ir_t.dtype, ir_t.shape)
+            actual_inputs = [root_input, starts_name, ends_name]
+            if axes is not None:
+                axes_name = f"{name}/axes"
+                np_axes = np.array(axes, dtype=np.int64)
+                ir_t = ir.tensor(np_axes, name=axes_name)
+                self.make_node("Constant", inputs=[], outputs=[axes_name], name=f"{axes_name}/Constant", value=ir_t)
+                self.make_value(axes_name, ir_t.dtype, ir_t.shape)
+                actual_inputs.append(axes_name)
+            inputs = actual_inputs
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
+
+    def make_neg(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Neg", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1112,6 +1152,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Softmax", inputs=[root_input], outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
@@ -1739,10 +1780,13 @@ class Model:
             return 1.0
         return np.sqrt(1 + np.log(mscale) / np.log(self.original_context_length))
 
-    def make_mscale_yarn(self, mscale):
+    def make_mscale_yarn(self, mscale, alpha=1.0):
+        # Computes the YaRN magnitude scaling factor:
+        # yarn_get_mscale(s, alpha) = 0.1 * alpha * log(s) + 1 if s > 1 else 1
+        # alpha is the optional mscale multiplier from rope_scaling config (default 1.0).
         if mscale <= 1.0:
             return 1.0
-        return 0.1 * np.log(mscale) + 1.0
+        return 0.1 * alpha * np.log(mscale) + 1.0
 
     def make_mscale(self, mscale, config_mscale=0, config_mscale_all_dim=0):
         """Compute the magnitude scaling factor for rotary embeddings.
@@ -1761,6 +1805,13 @@ class Model:
             return float(_get_mscale(mscale, config_mscale) / _get_mscale(mscale, config_mscale_all_dim))
         if config_mscale > 0:
             return float(config_mscale)
+        if self.rope_attrs["mscale_policy"] in {"su", "longrope"}:
+            return self.make_mscale_su(mscale)
+        elif self.rope_attrs["mscale_policy"] == "yarn":
+            return self.make_mscale_yarn(mscale)
+        else:
+            return float(mscale)
+        
         if self.rope_attrs["mscale_policy"] in {"su", "longrope"}:
             return self.make_mscale_su(mscale)
         elif self.rope_attrs["mscale_policy"] == "yarn":
