@@ -502,6 +502,12 @@ class Model:
                 "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
 
+            # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
+            # instead of as a top-level config attribute. Override the default theta
+            # if rope_scaling provides one.
+            if "rope_theta" in config.rope_scaling:
+                self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
+
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
