@@ -319,8 +319,11 @@ class ModelBuilderTestCase(unittest.TestCase):
         if not full.startswith(prefix):
             raise AssertionError(f"prefix={prefix!r} does not start string {full!r}.")
 
-    def check_ort(self, onx: Union["onnx.ModelProto", str]) -> "onnxruntime.InferenceSession":  # noqa: F821  # noqa: F821
-        return self._check_with_ort(onx, cpu=True)
+    def check_ort(
+        self, onx: Union["onnx.ModelProto", str], provider: str = "cpu"
+    ) -> "onnxruntime.InferenceSession":  # noqa: F821  # noqa: F821
+        assert provider in {"cpu", "cuda"}, f"provider={provider!r} is not implemented"
+        return self._check_with_ort(onx, cpu=provider == "cpu")
 
     def _check_with_ort(
         self, proto: Union["onnx.ModelProto", str], cpu: bool = False
@@ -356,6 +359,260 @@ class ModelBuilderTestCase(unittest.TestCase):
         with open(os.path.join(stat_folder, "end2end_results.md"), "w") as f:
             f.write(md + "\n")
         df.to_excel(os.path.join(stat_folder, "end2end_results.xlsx"))
+
+    def run_prefill_and_decode_check(
+        self,
+        model,
+        sess,
+        num_hidden_layers,
+        num_key_value_heads,
+        head_size,
+        vocab_size,
+        precision,
+        provider,
+        log_data,
+        atol=None,
+        rtol=None,
+        seq_len=5,
+        batch_size=1,
+        embed_fn=None,
+    ):
+        """Run prefill and decode discrepancy checks comparing PyTorch vs ONNX.
+
+        This helper encapsulates the common prefill/decode test body shared
+        across model test files.
+
+        When *embed_fn* is provided it is called as ``embed_fn(token_ids)``
+        (where *token_ids* is a ``torch.Tensor``) to convert token ids to
+        embeddings.  The ONNX feed then uses ``"inputs_embeds"`` instead of
+        ``"input_ids"``, and the PyTorch forward calls use
+        ``model(inputs_embeds=...)``.  This supports models such as
+        ``Gemma3ForConditionalGeneration`` that are exported with
+        ``exclude_embeds=True``.
+        """
+        import torch
+
+        if atol is None:
+            atol = {"fp16": 1e-2, "bf16": 1e-2, "fp32": 1e-3, "int4": 0.5}
+        if rtol is None:
+            rtol = {"fp16": 10, "bf16": 1e-2, "fp32": 1e-3, "int4": 10000}
+
+        onnx_input_names = [i.name for i in sess.get_inputs()]
+        torch.manual_seed(0)
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len)).to(provider)
+
+        prefill_results = None
+        pt_prefill = None
+        with self.subTest(step="prefill"):
+            if embed_fn is not None:
+                with torch.no_grad():
+                    inputs_embeds = embed_fn(input_ids)
+                prefill_feed = {
+                    "inputs_embeds": inputs_embeds.cpu().numpy().astype(self.get_input_np_dtype(precision)),
+                    "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
+                    "position_ids": np.arange(seq_len, dtype=np.int64).reshape(batch_size, seq_len),
+                }
+            else:
+                prefill_feed = {
+                    "input_ids": input_ids.cpu().numpy().astype(np.int64),
+                    "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
+                    "position_ids": np.arange(seq_len, dtype=np.int64).reshape(batch_size, seq_len),
+                }
+            for i in range(num_hidden_layers):
+                prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
+                    (batch_size, num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+                )
+                prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
+                    (batch_size, num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+                )
+            prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
+
+            prefill_results, ort_logits_np = run_session_or_io_binding(
+                use_iobinding=precision == "bf16",
+                precision=precision,
+                provider=provider,
+                feed=prefill_feed,
+                sess=sess,
+                vocab_size=vocab_size,
+            )
+
+            with torch.no_grad():
+                if embed_fn is not None:
+                    pt_prefill = model(inputs_embeds=inputs_embeds)
+                else:
+                    pt_prefill = model(input_ids)
+
+            np_prefill = pt_prefill.logits.detach().cpu().numpy()
+            disc = self.get_numpy_discrepancy(np_prefill, ort_logits_np)
+            self.log_results({"step": "prefill", **disc, **log_data})
+            np.testing.assert_allclose(np_prefill, ort_logits_np, atol=atol[precision], rtol=1e-3)
+
+        with self.subTest(step="decode"):
+            if prefill_results is None or pt_prefill is None:
+                raise unittest.SkipTest("prefill failed")
+            next_token = int(np.argmax(prefill_results["logits"][0, -1, :]))
+            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long).to(provider)
+
+            if embed_fn is not None:
+                with torch.no_grad():
+                    next_embeds = embed_fn(next_token_tensor)
+                decode_feed = {
+                    "inputs_embeds": next_embeds.cpu().numpy().astype(self.get_input_np_dtype(precision)),
+                    "attention_mask": np.ones((batch_size, seq_len + 1), dtype=np.int64),
+                    "position_ids": np.array([[seq_len]], dtype=np.int64),
+                }
+            else:
+                decode_feed = {
+                    "input_ids": np.array([[next_token]], dtype=np.int64),
+                    "attention_mask": np.ones((batch_size, seq_len + 1), dtype=np.int64),
+                    "position_ids": np.array([[seq_len]], dtype=np.int64),
+                }
+            for i in range(num_hidden_layers):
+                decode_feed[f"past_key_values.{i}.key"] = prefill_results[f"present.{i}.key"]
+                decode_feed[f"past_key_values.{i}.value"] = prefill_results[f"present.{i}.value"]
+            decode_feed = {k: v for k, v in decode_feed.items() if k in onnx_input_names}
+
+            prefill_results, onnx_decode_logits = run_session_or_io_binding(
+                use_iobinding=precision == "bf16",
+                precision=precision,
+                provider=provider,
+                feed=decode_feed,
+                sess=sess,
+                vocab_size=vocab_size,
+                results=prefill_results,
+            )
+
+            with torch.no_grad():
+                pt_past_kv = pt_prefill.past_key_values
+                if embed_fn is not None:
+                    pt_decode = model(inputs_embeds=next_embeds, past_key_values=pt_past_kv)
+                else:
+                    pt_decode = model(next_token_tensor, past_key_values=pt_past_kv)
+                pt_decode_logits = pt_decode.logits.detach().cpu().numpy()
+
+            disc = self.get_numpy_discrepancy(pt_decode_logits, onnx_decode_logits)
+            self.log_results({"step": "decode", **disc, **log_data})
+            np.testing.assert_allclose(pt_decode_logits, onnx_decode_logits, atol=atol[precision], rtol=rtol[precision])
+
+    def run_greedy_generation_check(
+        self,
+        model,
+        sess,
+        num_hidden_layers,
+        num_key_value_heads,
+        head_size,
+        vocab_size,
+        eos_token_id,
+        precision,
+        provider,
+        log_data,
+        max_new_tokens=10,
+        prompt_len=5,
+        pt_tokens=None,
+        half_prec_slice=None,
+        batch_size=1,
+        embed_fn=None,
+    ):
+        """Run an end-to-end greedy generation check comparing PyTorch vs ONNX.
+
+        This helper encapsulates the common greedy generation test body shared
+        across model test files.  When ``pt_tokens`` is ``None`` (the default),
+        ``model.generate()`` is used to obtain the reference token sequence.
+        Callers that need a custom PyTorch generation loop (e.g. models that do
+        not support ``generate()``) can run that loop themselves and pass the
+        resulting list as ``pt_tokens``.
+
+        When *embed_fn* is provided it is called as ``embed_fn(token_ids)``
+        (where *token_ids* is a ``torch.Tensor``) to convert token ids to
+        embeddings.  The ONNX feed then uses ``"inputs_embeds"`` instead of
+        ``"input_ids"`` at every step.  This supports models such as
+        ``Gemma3ForConditionalGeneration`` that are exported with
+        ``exclude_embeds=True``.
+        """
+        import torch
+
+        if half_prec_slice is None:
+            half_prec_slice = slice(None, -5)
+
+        input_names = {inp.name for inp in sess.get_inputs()}
+
+        torch.manual_seed(0)
+        prompt_ids = torch.randint(3, vocab_size, (batch_size, prompt_len)).to(provider)
+
+        if pt_tokens is None:
+            with torch.no_grad():
+                pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=eos_token_id)
+            pt_tokens = pt_output[0].tolist()
+
+        if embed_fn is not None:
+            with torch.no_grad():
+                current_tensor = embed_fn(prompt_ids)
+            current_feed_np = current_tensor.cpu().numpy().astype(self.get_input_np_dtype(precision))
+            current_feed_key = "inputs_embeds"
+        else:
+            current_feed_np = prompt_ids.detach().cpu().numpy().astype(np.int64)
+            current_feed_key = "input_ids"
+
+        past_kv = {}
+        for i in range(num_hidden_layers):
+            past_kv[f"past_key_values.{i}.key"] = np.zeros(
+                (batch_size, num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+            )
+            past_kv[f"past_key_values.{i}.value"] = np.zeros(
+                (batch_size, num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
+            )
+
+        onnx_tokens = prompt_ids.detach().cpu().numpy()[0].tolist()
+        results = None
+        for _ in range(max_new_tokens):
+            past_len = past_kv["past_key_values.0.key"].shape[2]
+            cur_len = current_feed_np.shape[1]
+
+            feed = {
+                current_feed_key: current_feed_np,
+                "attention_mask": np.ones((batch_size, past_len + cur_len), dtype=np.int64),
+                "position_ids": np.arange(past_len, past_len + cur_len, dtype=np.int64).reshape(batch_size, cur_len),
+            }
+            for i in range(num_hidden_layers):
+                feed[f"past_key_values.{i}.key"] = past_kv[f"past_key_values.{i}.key"]
+                feed[f"past_key_values.{i}.value"] = past_kv[f"past_key_values.{i}.value"]
+            feed = {k: v for k, v in feed.items() if k in input_names}
+
+            results, _ = run_session_or_io_binding(
+                use_iobinding=precision == "bf16",
+                precision=precision,
+                provider=provider,
+                feed=feed,
+                sess=sess,
+                vocab_size=vocab_size,
+                results=results,
+            )
+
+            next_token = int(np.argmax(results["logits"][0, -1, :]))
+            onnx_tokens.append(next_token)
+
+            for i in range(num_hidden_layers):
+                past_kv[f"past_key_values.{i}.key"] = results[f"present.{i}.key"]
+                past_kv[f"past_key_values.{i}.value"] = results[f"present.{i}.value"]
+
+            if embed_fn is not None:
+                next_ids = torch.tensor([[next_token]], dtype=torch.long).to(provider)
+                with torch.no_grad():
+                    current_tensor = embed_fn(next_ids)
+                current_feed_np = current_tensor.cpu().numpy().astype(self.get_input_np_dtype(precision))
+            else:
+                current_feed_np = np.array([[next_token]], dtype=np.int64)
+
+            if next_token == eos_token_id:
+                break
+
+        diff = self.first_token_diff(pt_tokens, onnx_tokens)
+        diff.update(log_data)
+        self.log_results(diff)
+        if precision in ("fp16", "bf16"):
+            pt_tokens = pt_tokens[half_prec_slice]
+            onnx_tokens = onnx_tokens[half_prec_slice]
+        self.assertEqual(pt_tokens, onnx_tokens)
 
     def make_dummy_text_inputs(
         self,
@@ -413,6 +670,285 @@ class ModelBuilderTestCase(unittest.TestCase):
 
     def fill_with_empty_cache(self, onnx_feed, session, provider, batch_size=1):
         return fill_with_empty_cache(onnx_feed, session, provider=provider, batch_size=batch_size)
+
+    def make_word_level_tokenizer(
+        self, bos_token: str = "<s>", bos_token_id: int = 1, eos_token: str = "</s>", eos_token_id: int = 2
+    ) -> "PreTrainedTokenizerFast":  # noqa: F821
+        """Create a minimal ``PreTrainedTokenizerFast`` backed by a ``WordLevel`` model.
+
+        The vocabulary contains exactly three tokens: ``<unk>`` at id 0, plus the
+        given *bos* and *eos* tokens at their respective ids.  This covers both the
+        standard convention (bos_token_id=1, eos_token_id=2) and the Gemma-style
+        convention (bos_token_id=2, eos_token_id=1).
+        """
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import PreTrainedTokenizerFast
+
+        vocab = {"<unk>": 0, bos_token: bos_token_id, eos_token: eos_token_id}
+        return PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
+            bos_token=bos_token,
+            eos_token=eos_token,
+            unk_token="<unk>",
+        )
+
+    def run_random_weights_test(
+        self,
+        model,
+        tokenizer,
+        model_name: str,
+        basename: str,
+        precision: str,
+        provider: str,
+        num_hidden_layers: int,
+        num_key_value_heads: int,
+        head_size: int,
+        vocab_size: int,
+        create_model_kwargs: dict | None = None,
+        atol: dict | None = None,
+        rtol: dict | None = None,
+        input_type: str = "text",
+        kind: str = "random",
+        embed_fn=None,
+    ):
+        """Build and export a random-weight model to ONNX and compare PyTorch vs ONNX.
+
+        This helper encapsulates the boilerplate shared by most
+        ``common_fast_*_random_weights`` test methods:
+
+        1. Set up output and cache directories.
+        2. Save the PyTorch *model* and *tokenizer* to the checkpoint directory.
+        3. Export the model to ONNX via :func:`modelbuilder.builder.create_model`.
+        4. Assert that ``model.onnx`` was produced.
+        5. Load an OnnxRuntime :class:`InferenceSession`.
+        6. Run :meth:`run_prefill_and_decode_check` to compare logits.
+        """
+        from models.builder import create_model
+
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        model.save_pretrained(model_dir)
+        tokenizer.save_pretrained(model_dir)
+
+        create_kwargs: Dict = dict(
+            model_name=model_name,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision=precision,
+            execution_provider=provider,
+            cache_dir=cache_dir,
+        )
+        if create_model_kwargs:
+            create_kwargs.update(create_model_kwargs)
+        create_model(**create_kwargs)
+
+        log_data = dict(
+            precision=precision,
+            model_id=model_name,
+            experiment="forward",
+            provider=provider,
+            test=basename,
+            input_type=input_type,
+            kind=kind,
+        )
+
+        onnx_path = os.path.join(output_dir, "model.onnx")
+        self.assertExists(onnx_path)
+        sess = self.check_ort(onnx_path, provider=provider)
+
+        self.run_prefill_and_decode_check(
+            model=model,
+            sess=sess,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=num_key_value_heads,
+            head_size=head_size,
+            vocab_size=vocab_size,
+            precision=precision,
+            provider=provider,
+            log_data=log_data,
+            atol=atol,
+            rtol=rtol,
+            embed_fn=embed_fn,
+        )
+
+    def run_greedy_generation_test(
+        self,
+        model,
+        tokenizer,
+        model_name: str,
+        basename: str,
+        precision: str,
+        provider: str,
+        num_hidden_layers: int,
+        num_key_value_heads: int,
+        head_size: int,
+        vocab_size: int,
+        eos_token_id: int,
+        create_model_kwargs: dict | None = None,
+        half_prec_slice=None,
+        pt_tokens=None,
+        embed_fn=None,
+    ):
+        """Build and export a model to ONNX, then run end-to-end greedy generation.
+
+        This helper encapsulates the boilerplate shared by most
+        ``common_*_greedy_generation`` test methods:
+
+        1. Save the PyTorch *model* and *tokenizer* to the checkpoint directory.
+        2. Export the model to ONNX via :func:`modelbuilder.builder.create_model`.
+        3. Assert that ``model.onnx`` was produced.
+        4. Load an OnnxRuntime :class:`InferenceSession`.
+        5. Run :meth:`run_greedy_generation_check` to compare token sequences.
+        """
+        from models.builder import create_model
+
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        model.save_pretrained(model_dir)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(model_dir)
+
+        create_kwargs: Dict = dict(
+            model_name=model_name,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision=precision,
+            execution_provider=provider,
+            cache_dir=cache_dir,
+        )
+        if create_model_kwargs:
+            create_kwargs.update(create_model_kwargs)
+        create_model(**create_kwargs)
+
+        onnx_path = os.path.join(output_dir, "model.onnx")
+        self.assertExists(onnx_path)
+        sess = self.check_ort(onnx_path, provider=provider)
+
+        log_data = dict(
+            precision=precision,
+            model_id=model_name,
+            experiment="generate",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="fast",
+        )
+        self.run_greedy_generation_check(
+            model=model,
+            sess=sess,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=num_key_value_heads,
+            head_size=head_size,
+            vocab_size=vocab_size,
+            eos_token_id=eos_token_id,
+            precision=precision,
+            provider=provider,
+            log_data=log_data,
+            half_prec_slice=half_prec_slice,
+            pt_tokens=pt_tokens,
+            embed_fn=embed_fn,
+        )
+
+    def run_genai_generation(self, output_dir: str, prompt_ids, max_new_tokens: int = 5) -> list[int]:
+        """Run greedy generation with ``onnxruntime-genai`` and return all tokens.
+
+        This helper encapsulates the boilerplate shared by every
+        ``test_*_genai_generate`` test method:
+
+        1. Load the ONNX model from *output_dir* via ``og.Model``.
+        2. Create ``GeneratorParams`` with greedy (argmax) search options.
+        3. Feed *prompt_ids* and iterate until generation is complete.
+        4. Return the full token sequence (prompt tokens + generated tokens).
+
+        The test is expected to be decorated with :func:`requires_genai` so that
+        it is skipped automatically when ``onnxruntime-genai`` is not installed.
+
+        :param output_dir: directory that contains ``model.onnx`` and
+            ``genai_config.json`` (the output of :func:`modelbuilder.builder.create_model`).
+        :param prompt_ids: 2-D integer tensor of shape ``(1, prompt_len)``.
+        :param max_new_tokens: maximum number of new tokens to generate.
+        :return: list of all token ids (prompt + generated).
+        """
+        import numpy as np
+        import onnxruntime_genai as og
+
+        prompt_len = prompt_ids.shape[1]
+        og_model = og.Model(output_dir)
+        params = og.GeneratorParams(og_model)
+        params.set_search_options(do_sample=False, max_length=prompt_len + max_new_tokens, temperature=1.0, top_k=1)
+        generator = og.Generator(og_model, params)
+        generator.append_tokens(prompt_ids.numpy().astype(np.int64))
+        og_tokens = prompt_ids[0].tolist()
+        while not generator.is_done():
+            generator.generate_next_token()
+            og_tokens.append(int(generator.get_next_tokens()[0]))
+        return og_tokens
+
+    def run_genai_generation_test(
+        self,
+        output_dir: str,
+        model,
+        vocab_size: int,
+        eos_token_id: int,
+        max_new_tokens: int = 5,
+        pt_tokens: list[int] | None = None,
+        prompt_ids=None,
+    ) -> None:
+        """Assert ONNX artefacts exist, then compare PyTorch vs genai generation.
+
+        This helper encapsulates the boilerplate shared by every
+        ``test_*_cpu_genai_generate`` test method:
+
+        1. Assert that ``model.onnx`` and ``genai_config.json`` exist in
+           *output_dir*.
+        2. Build a deterministic prompt tensor (or use the provided
+           *prompt_ids*).
+        3. Run ``model.generate`` with greedy decoding to get the reference
+           token sequence (unless *pt_tokens* is already provided or *model*
+           is ``None``).
+        4. Run :meth:`run_genai_generation` to obtain the genai token sequence.
+        5. Assert that both sequences are equal (skipped when *pt_tokens* is
+           ``None`` after step 3).
+
+        :param output_dir: directory produced by
+            :func:`modelbuilder.builder.create_model`, containing
+            ``model.onnx`` and ``genai_config.json``.
+        :param model: PyTorch model used for the reference generation.  Pass
+            ``None`` when providing *pt_tokens* directly (e.g. when the model
+            does not support ``generate``).
+        :param vocab_size: vocabulary size used to sample random prompt tokens.
+            Ignored when *prompt_ids* is provided.
+        :param eos_token_id: end-of-sequence token id, forwarded as
+            ``pad_token_id`` to ``model.generate``.
+        :param max_new_tokens: maximum number of new tokens to generate.
+        :param pt_tokens: pre-computed PyTorch token sequence.  When given,
+            the ``model.generate`` call is skipped.  Pass ``None`` together
+            with a non-``None`` *model* to let the helper run
+            ``model.generate``.
+        :param prompt_ids: 2-D integer tensor of shape ``(1, prompt_len)``.
+            When omitted a 4-token prompt is created with ``torch.manual_seed(0)``.
+        """
+        import torch
+
+        self.assertExists(os.path.join(output_dir, "model.onnx"))
+        self.assertExists(os.path.join(output_dir, "genai_config.json"))
+
+        if prompt_ids is None:
+            torch.manual_seed(0)
+            prompt_ids = torch.randint(3, vocab_size, (1, 4))
+
+        if pt_tokens is None and model is not None:
+            with torch.no_grad():
+                pt_output = model.generate(prompt_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=eos_token_id)
+            pt_tokens = pt_output[0].tolist()
+
+        og_tokens = self.run_genai_generation(output_dir, prompt_ids, max_new_tokens)
+
+        if pt_tokens is not None:
+            self.assertEqual(pt_tokens, og_tokens)
 
 
 def get_input_np_dtype(precision):
@@ -583,7 +1119,7 @@ def get_pytorch_discrepancy(tensor_a, tensor_b):
     # 5. Average Absolute Discrepancy (Mean Absolute Error)
     avg_disc = torch.mean(diff).item()
 
-    n = torch.prod(a.shape)
+    n = a.numel()
     return {
         "max_abs_err": float(max_disc),
         "%_gt_0.1": mismatches_01 / n,

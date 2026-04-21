@@ -409,6 +409,63 @@ class TestRandomPhi3V(ModelBuilderTestCase):
     def test_phi3v_bf16_cuda_greedy_generation(self):
         self.common_phi3v_greedy_generation("bf16", "cuda")
 
+    @unittest.skip("RuntimeError: Load model from dump_models/test_gemma3_fp32_cpu_genai_generate/output/ failed:Protobuf parsing failed.")
+    @hide_stdout()
+    def test_phi3v_fp32_cpu_genai_generate(self):
+        import torch
+        from transformers import Phi3Config, Phi3ForCausalLM
+
+        from models.builder import create_model
+
+        prefix = "test_phi3v_fp32_cpu_genai_generate"
+        num_hidden_layers = 1
+        head_size = 64
+        config = Phi3Config(
+            architectures=["Phi3VForCausalLM"],
+            bos_token_id=1,
+            eos_token_id=2,
+            hidden_act="silu",
+            hidden_size=512,
+            intermediate_size=1376,
+            max_position_embeddings=8192,
+            original_max_position_embeddings=4096,
+            num_attention_heads=8,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=4,
+            rms_norm_eps=1e-05,
+            rope_scaling={"type": "longrope", "short_factor": [1.0] * (head_size // 2), "long_factor": [1.0] * (head_size // 2)},
+            vocab_size=32064,
+        )
+
+        model_dir = self.get_model_dir(prefix, clean=False)
+        torch.manual_seed(42)
+        model = Phi3ForCausalLM(config)
+        model.eval()
+        model.save_pretrained(model_dir)
+        config_path = os.path.join(model_dir, "config.json")
+        with open(config_path) as f:
+            saved_cfg = json.load(f)
+        saved_cfg["architectures"] = ["Phi3VForCausalLM"]
+        with open(config_path, "w") as f:
+            json.dump(saved_cfg, f, indent=2)
+
+        tokenizer = self.make_word_level_tokenizer()
+        tokenizer.save_pretrained(model_dir)
+
+        output_dir, cache_dir = self.get_dirs(prefix, clean=False)
+
+        create_model(
+            model_name=PHI3V_MODEL_NAME,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision="fp32",
+            execution_provider="cpu",
+            cache_dir=cache_dir,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+        self.run_genai_generation_test(output_dir, model, config.vocab_size, config.eos_token_id)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -51,7 +51,7 @@ class NemotronHModel(LlamaModel):
             self.layernorm_attrs["last_layernorm"] = True
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        """`nemotronh` is not supported as an architecture, let's replace with `olmo`."""
+        """`nemotronh` is not supported as an architecture, let's replace with `llama`."""
         super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
 
         config_path = os.path.join(out_dir, "genai_config.json")

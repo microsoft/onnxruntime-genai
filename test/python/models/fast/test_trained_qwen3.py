@@ -23,7 +23,7 @@ QWEN3_MODEL_NAMES = [
 class TestTrainedQwen3(ModelBuilderTestCase):
     def _common_part(self, model_id, precision, dtype, provider="cuda"):
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from modelbuilder.builder import create_model
+        from models.builder import create_model
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         text = "What is machine learning?"

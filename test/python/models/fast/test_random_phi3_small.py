@@ -478,85 +478,20 @@ class TestPhi3Small(ModelBuilderTestCase):
         self.assertExists(onnx_path)
         sess = self._check_with_ort(onnx_path, cpu=provider == "cpu")
 
-        batch_size = 1
-        seq_len = 5
-        head_size = config_obj.hidden_size // config_obj.num_attention_heads
-
-        torch.manual_seed(1)
-        input_ids = torch.randint(0, config_obj.vocab_size, (batch_size, seq_len)).to(provider)
-        onnx_input_names = [i.name for i in sess.get_inputs()]
-
-        prefill_results = None
-        with self.subTest(step="prefill"):
-            prefill_feed = {
-                "input_ids": input_ids.cpu().numpy().astype(np.int64),
-                "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
-                "position_ids": np.arange(seq_len, dtype=np.int64).reshape(batch_size, seq_len),
-            }
-            for i in range(num_hidden_layers):
-                prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
-                    (batch_size, config_obj.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
-                )
-                prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
-                    (batch_size, config_obj.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
-                )
-            prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
-
-            prefill_results, ort_logits_np = run_session_or_io_binding(
-                use_iobinding=precision == "bf16",
-                precision=precision,
-                provider=provider,
-                feed=prefill_feed,
-                sess=sess,
-                vocab_size=config_obj.vocab_size,
-            )
-
-            with torch.no_grad():
-                pt_prefill = model(input_ids)
-
-            np_prefill = pt_prefill.logits.detach().cpu().numpy()
-            disc = self.get_numpy_discrepancy(np_prefill, ort_logits_np)
-            self.log_results({"step": "prefill", **disc, **log_data})
-            # gegelu and mup scaling introduce moderate numerical differences
-            atol = {"fp16": 5e-2, "bf16": 5e-2, "fp32": 1e-2, "int4": 0.5}
-            np.testing.assert_allclose(np_prefill, ort_logits_np, atol=atol[precision], rtol=1e-3)
-
-        with self.subTest(step="decode"):
-            if prefill_results is None:
-                raise unittest.SkipTest("prefill failed")
-            next_token = int(np.argmax(prefill_results["logits"][0, -1, :]))
-
-            decode_feed = {
-                "input_ids": np.array([[next_token]], dtype=np.int64),
-                "attention_mask": np.ones((batch_size, seq_len + 1), dtype=np.int64),
-                "position_ids": np.array([[seq_len]], dtype=np.int64),
-            }
-            for i in range(num_hidden_layers):
-                decode_feed[f"past_key_values.{i}.key"] = prefill_results[f"present.{i}.key"]
-                decode_feed[f"past_key_values.{i}.value"] = prefill_results[f"present.{i}.value"]
-            decode_feed = {k: v for k, v in decode_feed.items() if k in onnx_input_names}
-
-            prefill_results, onnx_decode_logits = run_session_or_io_binding(
-                use_iobinding=precision == "bf16",
-                precision=precision,
-                provider=provider,
-                feed=decode_feed,
-                sess=sess,
-                vocab_size=config_obj.vocab_size,
-                results=prefill_results,
-            )
-
-            with torch.no_grad():
-                pt_past_kv = pt_prefill.past_key_values
-                next_token_tensor = torch.tensor([[next_token]], dtype=torch.long).to(provider)
-                pt_decode = model(next_token_tensor, past_key_values=pt_past_kv)
-                pt_decode_logits = pt_decode.logits.detach().cpu().numpy()
-
-            disc = self.get_numpy_discrepancy(pt_decode_logits, onnx_decode_logits)
-            self.log_results({"step": "decode", **disc, **log_data})
-            atol = {"fp16": 5e-2, "bf16": 5e-2, "fp32": 1e-2, "int4": 0.5}
-            rtol = {"fp16": 10, "bf16": 10, "fp32": 1e-2, "int4": 10000}
-            np.testing.assert_allclose(pt_decode_logits, onnx_decode_logits, atol=atol[precision], rtol=rtol[precision])
+        # gegelu and mup scaling introduce moderate numerical differences
+        self.run_prefill_and_decode_check(
+            model=model,
+            sess=sess,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=config_obj.num_key_value_heads,
+            head_size=config_obj.hidden_size // config_obj.num_attention_heads,
+            vocab_size=config_obj.vocab_size,
+            precision=precision,
+            provider=provider,
+            log_data=log_data,
+            atol={"fp16": 5e-2, "bf16": 5e-2, "fp32": 1e-2, "int4": 0.5},
+            rtol={"fp16": 10, "bf16": 10, "fp32": 1e-2, "int4": 10000},
+        )
 
     def common_phi3_small_greedy_generation(self, precision, provider):
         import torch
@@ -585,10 +520,7 @@ class TestPhi3Small(ModelBuilderTestCase):
         self.assertExists(onnx_path)
         sess = self._check_with_ort(onnx_path, cpu=provider == "cpu")
 
-        input_names = {inp.name for inp in sess.get_inputs()}
-
         batch_size = 1
-        head_size = config_obj.hidden_size // config_obj.num_attention_heads
         max_new_tokens = 10
 
         torch.manual_seed(0)
@@ -609,72 +541,28 @@ class TestPhi3Small(ModelBuilderTestCase):
                 if next_tok == config_obj.eos_token_id:
                     break
 
-        current_ids = prompt_ids.detach().cpu().numpy().astype(np.int64)
-
-        past_kv = {}
-        for i in range(num_hidden_layers):
-            past_kv[f"past_key_values.{i}.key"] = np.zeros(
-                (batch_size, config_obj.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
-            )
-            past_kv[f"past_key_values.{i}.value"] = np.zeros(
-                (batch_size, config_obj.num_key_value_heads, 0, head_size), dtype=self.get_input_np_dtype(precision)
-            )
-
-        onnx_tokens = current_ids[0].tolist()
-        results = None
-        for _ in range(max_new_tokens):
-            past_len = past_kv["past_key_values.0.key"].shape[2]
-            cur_len = current_ids.shape[1]
-
-            feed = {
-                "input_ids": current_ids,
-                "attention_mask": np.ones((batch_size, past_len + cur_len), dtype=np.int64),
-                "position_ids": np.arange(past_len, past_len + cur_len, dtype=np.int64).reshape(batch_size, cur_len),
-            }
-            for i in range(num_hidden_layers):
-                feed[f"past_key_values.{i}.key"] = past_kv[f"past_key_values.{i}.key"]
-                feed[f"past_key_values.{i}.value"] = past_kv[f"past_key_values.{i}.value"]
-            feed = {k: v for k, v in feed.items() if k in input_names}
-
-            results, _ = run_session_or_io_binding(
-                use_iobinding=precision == "bf16",
-                precision=precision,
-                provider=provider,
-                feed=feed,
-                sess=sess,
-                vocab_size=config_obj.vocab_size,
-                results=results,
-            )
-
-            next_token = int(np.argmax(results["logits"][0, -1, :]))
-            onnx_tokens.append(next_token)
-
-            for i in range(num_hidden_layers):
-                past_kv[f"past_key_values.{i}.key"] = results[f"present.{i}.key"]
-                past_kv[f"past_key_values.{i}.value"] = results[f"present.{i}.value"]
-
-            current_ids = np.array([[next_token]], dtype=np.int64)
-
-            if next_token == config_obj.eos_token_id:
-                break
-
-        diff = self.first_token_diff(pt_tokens, onnx_tokens)
-        diff.update(
-            dict(
-                precision=precision,
-                model_id=PHI3_SMALL_MODEL_NAME,
-                experiment="generate",
-                provider=provider,
-                test=basename,
-                input_type="text",
-                kind="fast",
-            )
+        log_data = dict(
+            precision=precision,
+            model_id=PHI3_SMALL_MODEL_NAME,
+            experiment="generate",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="fast",
         )
-        self.log_results(diff)
-        if precision in ("fp16", "bf16"):
-            pt_tokens = pt_tokens[:-5]
-            onnx_tokens = onnx_tokens[:-5]
-        self.assertEqual(pt_tokens, onnx_tokens)
+        self.run_greedy_generation_check(
+            model=model,
+            sess=sess,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=config_obj.num_key_value_heads,
+            head_size=config_obj.hidden_size // config_obj.num_attention_heads,
+            vocab_size=config_obj.vocab_size,
+            eos_token_id=config_obj.eos_token_id,
+            precision=precision,
+            provider=provider,
+            log_data=log_data,
+            pt_tokens=pt_tokens,
+        )
 
     @hide_stdout()
     def test_fast_discrepancy_phi3_small_fp32_cpu(self):
@@ -908,6 +796,50 @@ class TestPhi3Small(ModelBuilderTestCase):
     @requires_cuda()
     def test_fast_discrepancy_phi3_small_longrope_bf16_cuda(self):
         self.common_fast_phi3_small_longrope_random_weights("bf16", "cuda")
+
+    @hide_stdout()
+    def test_phi3_small_fp32_cpu_genai_generate(self):
+        import torch
+
+        from models.builder import create_model
+
+        prefix = "test_phi3_small_fp32_cpu_genai_generate"
+        num_hidden_layers = 1
+
+        torch.manual_seed(42)
+        model_dir, output_dir, cache_dir, model, config_obj = self._prepare_model_dir(prefix, num_hidden_layers=num_hidden_layers)
+
+        create_model(
+            model_name=PHI3_SMALL_MODEL_NAME,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision="fp32",
+            execution_provider="cpu",
+            cache_dir=cache_dir,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+        torch.manual_seed(0)
+        prompt_ids = torch.randint(3, config_obj.vocab_size, (1, 4))
+
+        # Greedy generation with the PyTorch model (manual loop, since
+        # PreTrainedModel.generate is not available for this custom model).
+        pt_past_kvs = None
+        pt_tokens = prompt_ids[0].tolist()
+        current_pt_ids = prompt_ids
+        with torch.no_grad():
+            for _ in range(5):
+                pt_out = model(current_pt_ids, past_key_values=pt_past_kvs)
+                next_tok = int(pt_out.logits[0, -1, :].argmax())
+                pt_tokens.append(next_tok)
+                pt_past_kvs = pt_out.past_key_values
+                current_pt_ids = torch.tensor([[next_tok]], dtype=torch.long)
+                if next_tok == config_obj.eos_token_id:
+                    break
+
+        self.run_genai_generation_test(
+            output_dir, None, config_obj.vocab_size, config_obj.eos_token_id, pt_tokens=pt_tokens, prompt_ids=prompt_ids
+        )
 
 
 if __name__ == "__main__":
