@@ -1811,13 +1811,6 @@ class Model:
             return self.make_mscale_yarn(mscale)
         else:
             return float(mscale)
-        
-        if self.rope_attrs["mscale_policy"] in {"su", "longrope"}:
-            return self.make_mscale_su(mscale)
-        elif self.rope_attrs["mscale_policy"] == "yarn":
-            return self.make_mscale_yarn(mscale)
-        else:
-            return float(mscale)
 
     def make_inv_freq_rescaled(self, inv_freq):
         if "low_freq_factor" in self.rope_attrs["rescale_inv_freq"]:
