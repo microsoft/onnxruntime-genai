@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 import os
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
