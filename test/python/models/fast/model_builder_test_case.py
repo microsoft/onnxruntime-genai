@@ -262,7 +262,7 @@ class ModelBuilderTestCase(unittest.TestCase):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(cache_dir, exist_ok=True)
         if clean or self._do_clean:
-            self.addCleanup(self.clean_dir, os.path.join("dump_models", prefix, "output_dir"))
+            self.addCleanup(self.clean_dir, os.path.join("dump_models", prefix, "output"))
         return output_dir, cache_dir
 
     def get_model_dir(self, prefix: str, clean: bool = False) -> tuple[str]:
