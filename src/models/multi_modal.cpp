@@ -414,6 +414,11 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
         "PixtralVisionState: image_heights_ has " + std::to_string(image_heights_.size()) +
         " entries but num_images_ is " + std::to_string(num_images_));
 
+  if (static_cast<int64_t>(image_widths_.size()) < num_images_)
+    throw std::runtime_error(
+        "PixtralVisionState: image_widths_ has " + std::to_string(image_widths_.size()) +
+        " entries but num_images_ is " + std::to_string(num_images_));
+
   // Multi-image: pixel_values is [N, C, H_max, W_max] with zero-padding.
   // image_heights_/image_widths_ hold the actual per-image dimensions.
   // Run vision.onnx once per image with [1, C, H_i, W_i].
@@ -481,6 +486,17 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   for (int64_t img = 0; img < num_images_; ++img) {
     int64_t h_i = image_heights_[img];
     int64_t w_i = image_widths_[img];
+
+    if (h_i <= 0 || h_i > h_max)
+      throw std::runtime_error(
+          "PixtralVisionState: image " + std::to_string(img) + " has h_i=" +
+          std::to_string(h_i) + " which is out of valid range (0, " +
+          std::to_string(h_max) + "]");
+    if (w_i <= 0 || w_i > w_max)
+      throw std::runtime_error(
+          "PixtralVisionState: image " + std::to_string(img) + " has w_i=" +
+          std::to_string(w_i) + " which is out of valid range (0, " +
+          std::to_string(w_max) + "]");
 
     // Create a contiguous [1, C, H_i, W_i] tensor by copying valid rows
     // from the zero-padded [N, C, H_max, W_max] buffer.

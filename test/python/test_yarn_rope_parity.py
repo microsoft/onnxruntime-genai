@@ -62,11 +62,6 @@ MINISTRAL_3B_CONFIG = {
 }
 
 # ---------------------------------------------------------------------------
-# Synthetic YaRN config with different parameters (no explicit mscale).
-# Exercises the computed-mscale fallback path and different factor/theta.
-# Modeled after DeepSeek-V2 style YaRN scaling.
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # GPT-OSS-20B YaRN configuration (from HuggingFace openai/gpt-oss-20b)
 # Unlike Ministral-3-3B, rope_theta is a top-level config attribute (150000)
 # and rope_scaling has no mscale/mscale_all_dim — exercises the computed

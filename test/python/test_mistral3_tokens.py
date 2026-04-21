@@ -15,7 +15,8 @@ dimensions, matching the HuggingFace Pixtral token convention:
         [IMG_BREAK]  (between rows)
     [IMG_END]  (after the last row)
 
-Token IDs: [IMG]=10, [IMG_BREAK]=12, [IMG_END]=13
+Token IDs used in unit tests are synthetic placeholders (not real
+tokenizer IDs); the integration test resolves IDs from the model.
 
 Run with:
     python -m pytest test/python/test_mistral3_tokens.py -v
@@ -23,9 +24,12 @@ Run with:
 
 import pytest
 
-# Pixtral special token IDs from the Ministral-3-3B tokenizer.
-# The integration test (test_genai_processor_token_counts) validates that
-# the C++ processor produces correct token sequences using these IDs.
+# Fake special-token IDs used only for unit-testing the counting/sequence
+# logic.  These do NOT correspond to real Mistral-3/Pixtral tokenizer IDs
+# (which are much larger, e.g. 10 → a vocabulary-specific index).  The
+# integration test (test_genai_processor_token_counts) reads the actual IDs
+# from the model config at runtime, so the specific values here are
+# irrelevant as long as they are distinct and non-zero.
 IMG_TOKEN_ID = 10
 IMG_BREAK_TOKEN_ID = 12
 IMG_END_TOKEN_ID = 13
@@ -226,6 +230,8 @@ class TestTokenExpansionIntegration:
             f"[IMG] count {num_img} not divisible by grid rows {total_rows}"
         )
 
+        # Explicitly delete generator to ensure deterministic C++ destructor
+        # invocation before model teardown — important for GPU memory cleanup.
         del generator
 
 
