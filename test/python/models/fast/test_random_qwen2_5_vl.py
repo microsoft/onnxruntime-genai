@@ -15,16 +15,7 @@ QWEN2_5_VL_MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 @requires_transformers("5")  # text_config missing
 class TestRandomQwen25VL(ModelBuilderTestCase):
     def common_fast_qwen25vl_random_weights(self, precision, provider):
-        import torch
-        from models.builder import create_model
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from transformers import (
-            PreTrainedTokenizerFast,
-            Qwen2_5_VLConfig,
-            Qwen2_5_VLForConditionalGeneration,
-            Qwen2_5_VLTextConfig,
-        )
+        from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLTextConfig
 
         num_hidden_layers = 1
 
@@ -62,158 +53,25 @@ class TestRandomQwen25VL(ModelBuilderTestCase):
         config = Qwen2_5_VLConfig(text_config=text_config, vision_config=vision_config)
         config.architectures = ["Qwen2_5_VLForConditionalGeneration"]
 
-        basename = f"test_discrepancies_qwen25vl_{precision}_{provider}"
-        model_dir = self.get_model_dir(basename)
-        output_dir, cache_dir = self.get_dirs(basename)
-
         model = Qwen2_5_VLForConditionalGeneration(config)
         model.eval().to(provider)
-        model.save_pretrained(model_dir)
+        tokenizer = self.make_word_level_tokenizer()
 
-        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
-        tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
-            bos_token="<s>",
-            eos_token="</s>",
-            unk_token="<unk>",
-        )
-        tokenizer.save_pretrained(model_dir)
-
-        create_model(
-            model_name=QWEN2_5_VL_MODEL_NAME,
-            input_path=model_dir,
-            output_dir=output_dir,
-            precision=precision,
-            execution_provider=provider,
-            cache_dir=cache_dir,
-            num_hidden_layers=num_hidden_layers,
-        )
-
-        log_data = dict(
-            precision=precision,
-            model_id=QWEN2_5_VL_MODEL_NAME,
-            experiment="forward",
-            provider=provider,
-            test=basename,
-            input_type="text",
-            kind="random",
-        )
-
-        onnx_path = os.path.join(output_dir, "model.onnx")
-        self.assertExists(onnx_path)
-        sess = self.check_ort(onnx_path)
-
-        batch_size = 1
-        seq_len = 5
         head_size = text_config.hidden_size // text_config.num_attention_heads
-
-        torch.manual_seed(0)
-        input_ids = torch.randint(0, text_config.vocab_size, (batch_size, seq_len)).to(provider)
-        onnx_input_names = [i.name for i in sess.get_inputs()]
-
-        # Compute inputs_embeds using the model's embed_tokens since the ONNX
-        # model was built with exclude_embeds=True and therefore expects
-        # inputs_embeds instead of input_ids.
-        with torch.no_grad():
-            inputs_embeds = model.get_input_embeddings()(input_ids)
-        inputs_embeds_np = inputs_embeds.cpu().numpy().astype(self.get_input_np_dtype(precision))
-
-        # Qwen2.5-VL uses 3D position_ids: [3, batch_size, seq_len]
-        # The three dims correspond to temporal, height, and width.
-        # For text-only inference all three dims use the same arange.
-        position_ids_3d = (
-            np.arange(seq_len, dtype=np.int64).reshape(1, 1, seq_len).repeat(3, axis=0).repeat(batch_size, axis=1)
+        self.run_vl_random_weights_test(
+            model=model,
+            tokenizer=tokenizer,
+            model_name=QWEN2_5_VL_MODEL_NAME,
+            basename=f"test_discrepancies_qwen25vl_{precision}_{provider}",
+            precision=precision,
+            provider=provider,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=text_config.num_key_value_heads,
+            head_size=head_size,
+            vocab_size=text_config.vocab_size,
+            create_model_kwargs={"num_hidden_layers": num_hidden_layers},
+            pt_mode="inputs_embeds",
         )
-
-        with self.subTest(step="prefill"):
-            prefill_feed = {
-                "inputs_embeds": inputs_embeds_np,
-                "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
-                "position_ids": position_ids_3d,
-            }
-            for i in range(num_hidden_layers):
-                prefill_feed[f"past_key_values.{i}.key"] = np.zeros(
-                    (batch_size, text_config.num_key_value_heads, 0, head_size),
-                    dtype=self.get_input_np_dtype(precision),
-                )
-                prefill_feed[f"past_key_values.{i}.value"] = np.zeros(
-                    (batch_size, text_config.num_key_value_heads, 0, head_size),
-                    dtype=self.get_input_np_dtype(precision),
-                )
-            prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
-
-            prefill_results, ort_logits_np = run_session_or_io_binding(
-                use_iobinding=precision == "bf16",
-                precision=precision,
-                provider=provider,
-                feed=prefill_feed,
-                sess=sess,
-                vocab_size=text_config.vocab_size,
-            )
-
-            # Build 3D position_ids tensor for PyTorch
-            pt_position_ids = torch.from_numpy(position_ids_3d).to(provider)
-            with torch.no_grad():
-                pt_prefill = model(
-                    inputs_embeds=inputs_embeds.to(provider),
-                    position_ids=pt_position_ids,
-                    attention_mask=torch.ones((batch_size, seq_len), dtype=torch.long).to(provider),
-                )
-
-            np_prefill = pt_prefill.logits.detach().cpu().numpy()
-            disc = self.get_numpy_discrepancy(np_prefill, ort_logits_np)
-            self.log_results({"step": "prefill", **disc, **log_data})
-            atol = {"fp16": 1e-2, "bf16": 1e-2, "fp32": 1e-3, "int4": 0.5}
-            np.testing.assert_allclose(np_prefill, ort_logits_np, atol=atol[precision], rtol=1e-3)
-
-        with self.subTest(step="decode"):
-            next_token = int(np.argmax(prefill_results["logits"][0, -1, :]))
-
-            # Compute embedding for the next token
-            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long).to(provider)
-            with torch.no_grad():
-                next_embeds = model.get_input_embeddings()(next_token_tensor)
-            next_embeds_np = next_embeds.cpu().numpy().astype(self.get_input_np_dtype(precision))
-
-            # 3D position_ids for decode step: position = seq_len
-            decode_position_ids_3d = np.full((3, batch_size, 1), seq_len, dtype=np.int64)
-
-            decode_feed = {
-                "inputs_embeds": next_embeds_np,
-                "attention_mask": np.ones((batch_size, seq_len + 1), dtype=np.int64),
-                "position_ids": decode_position_ids_3d,
-            }
-            for i in range(num_hidden_layers):
-                decode_feed[f"past_key_values.{i}.key"] = prefill_results[f"present.{i}.key"]
-                decode_feed[f"past_key_values.{i}.value"] = prefill_results[f"present.{i}.value"]
-            decode_feed = {k: v for k, v in decode_feed.items() if k in onnx_input_names}
-
-            prefill_results, onnx_decode_logits = run_session_or_io_binding(
-                use_iobinding=precision == "bf16",
-                precision=precision,
-                provider=provider,
-                feed=decode_feed,
-                sess=sess,
-                vocab_size=text_config.vocab_size,
-                results=prefill_results,
-            )
-
-            pt_decode_pos_ids = torch.from_numpy(decode_position_ids_3d).to(provider)
-            with torch.no_grad():
-                pt_past_kv = pt_prefill.past_key_values
-                pt_decode = model(
-                    inputs_embeds=next_embeds.to(provider),
-                    position_ids=pt_decode_pos_ids,
-                    attention_mask=torch.ones((batch_size, seq_len + 1), dtype=torch.long).to(provider),
-                    past_key_values=pt_past_kv,
-                )
-                pt_decode_logits = pt_decode.logits.detach().cpu().numpy()
-
-            disc = self.get_numpy_discrepancy(pt_decode_logits, onnx_decode_logits)
-            self.log_results({"step": "decode", **disc, **log_data})
-            atol = {"fp16": 1e-2, "bf16": 1e-2, "fp32": 1e-3, "int4": 0.5}
-            rtol = {"fp16": 10, "bf16": 1e-2, "fp32": 1e-3, "int4": 10000}
-            np.testing.assert_allclose(pt_decode_logits, onnx_decode_logits, atol=atol[precision], rtol=rtol[precision])
 
     @hide_stdout()
     def test_fast_discrepancy_qwen25vl_fp32_cpu(self):

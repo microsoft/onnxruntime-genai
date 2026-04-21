@@ -494,6 +494,150 @@ class ModelBuilderTestCase(unittest.TestCase):
             self.log_results({"step": "decode", **disc, **log_data})
             np.testing.assert_allclose(pt_decode_logits, onnx_decode_logits, atol=atol[precision], rtol=rtol[precision])
 
+    def run_mrope_vl_prefill_and_decode_check(
+        self,
+        model,
+        sess,
+        num_hidden_layers,
+        num_key_value_heads,
+        head_size,
+        vocab_size,
+        precision,
+        provider,
+        log_data,
+        pt_mode="input_ids",
+        atol=None,
+        rtol=None,
+        seq_len=5,
+        batch_size=1,
+    ):
+        """Run prefill and decode discrepancy checks for VL models.
+
+        This helper handles vision-language models that use ``inputs_embeds``
+        (pre-computed token embeddings) and 3-D ``position_ids`` for multi-rope
+        (mRoPE) positional encoding.
+
+        Two PT forward-pass modes are supported via *pt_mode*:
+
+        * ``"input_ids"`` – PyTorch is called with ``input_ids`` only (default,
+          used by Qwen3-VL).
+        * ``"inputs_embeds"`` – PyTorch is called with ``inputs_embeds``,
+          ``position_ids``, and ``attention_mask`` (used by Qwen2.5-VL).
+
+        The ONNX model always receives ``inputs_embeds`` and a 3-D
+        ``position_ids`` tensor of shape ``[3, batch_size, seq_len]``.
+        """
+        import torch
+
+        if atol is None:
+            atol = {"fp16": 1e-2, "bf16": 1e-2, "fp32": 1e-3, "int4": 0.5}
+        if rtol is None:
+            rtol = {"fp16": 10, "bf16": 1e-2, "fp32": 1e-3, "int4": 10000}
+
+        onnx_input_names = [i.name for i in sess.get_inputs()]
+        np_dtype = self.get_input_np_dtype(precision)
+
+        torch.manual_seed(0)
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len)).to(provider)
+
+        with torch.no_grad():
+            inputs_embeds = model.get_input_embeddings()(input_ids)
+
+        # 3D position_ids for mRoPE: [3, batch_size, seq_len]
+        position_ids_3d = np.tile(np.arange(seq_len, dtype=np.int64), (3, batch_size, 1))
+
+        prefill_results = None
+        pt_prefill = None
+
+        with self.subTest(step="prefill"):
+            prefill_feed = {
+                "inputs_embeds": inputs_embeds.cpu().numpy().astype(np_dtype),
+                "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
+                "position_ids": position_ids_3d,
+            }
+            for i in range(num_hidden_layers):
+                prefill_feed[f"past_key_values.{i}.key"] = np.zeros((batch_size, num_key_value_heads, 0, head_size), dtype=np_dtype)
+                prefill_feed[f"past_key_values.{i}.value"] = np.zeros((batch_size, num_key_value_heads, 0, head_size), dtype=np_dtype)
+            prefill_feed = {k: v for k, v in prefill_feed.items() if k in onnx_input_names}
+
+            prefill_results, ort_logits_np = run_session_or_io_binding(
+                use_iobinding=precision == "bf16",
+                precision=precision,
+                provider=provider,
+                feed=prefill_feed,
+                sess=sess,
+                vocab_size=vocab_size,
+            )
+
+            if pt_mode == "inputs_embeds":
+                pt_position_ids = torch.from_numpy(position_ids_3d).to(provider)
+                with torch.no_grad():
+                    pt_prefill = model(
+                        inputs_embeds=inputs_embeds.to(provider),
+                        position_ids=pt_position_ids,
+                        attention_mask=torch.ones((batch_size, seq_len), dtype=torch.long).to(provider),
+                    )
+            else:
+                with torch.no_grad():
+                    pt_prefill = model(input_ids=input_ids)
+
+            np_prefill = pt_prefill.logits.detach().cpu().numpy()
+            disc = self.get_numpy_discrepancy(np_prefill, ort_logits_np)
+            self.log_results({"step": "prefill", **disc, **log_data})
+            np.testing.assert_allclose(np_prefill, ort_logits_np, atol=atol[precision], rtol=1e-3)
+
+        with self.subTest(step="decode"):
+            if prefill_results is None or pt_prefill is None:
+                raise unittest.SkipTest("prefill failed")
+            next_token = int(np.argmax(prefill_results["logits"][0, -1, :]))
+
+            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long).to(provider)
+            with torch.no_grad():
+                decode_embeds = model.get_input_embeddings()(next_token_tensor)
+
+            # 3D position_ids for decode step: [3, batch_size, 1] with value = seq_len
+            decode_position_ids_3d = np.full((3, batch_size, 1), seq_len, dtype=np.int64)
+
+            decode_feed = {
+                "inputs_embeds": decode_embeds.cpu().numpy().astype(np_dtype),
+                "attention_mask": np.ones((batch_size, seq_len + 1), dtype=np.int64),
+                "position_ids": decode_position_ids_3d,
+            }
+            for i in range(num_hidden_layers):
+                decode_feed[f"past_key_values.{i}.key"] = prefill_results[f"present.{i}.key"]
+                decode_feed[f"past_key_values.{i}.value"] = prefill_results[f"present.{i}.value"]
+            decode_feed = {k: v for k, v in decode_feed.items() if k in onnx_input_names}
+
+            prefill_results, onnx_decode_logits = run_session_or_io_binding(
+                use_iobinding=precision == "bf16",
+                precision=precision,
+                provider=provider,
+                feed=decode_feed,
+                sess=sess,
+                vocab_size=vocab_size,
+                results=prefill_results,
+            )
+
+            if pt_mode == "inputs_embeds":
+                pt_decode_pos_ids = torch.from_numpy(decode_position_ids_3d).to(provider)
+                with torch.no_grad():
+                    pt_past_kv = pt_prefill.past_key_values
+                    pt_decode = model(
+                        inputs_embeds=decode_embeds.to(provider),
+                        position_ids=pt_decode_pos_ids,
+                        attention_mask=torch.ones((batch_size, seq_len + 1), dtype=torch.long).to(provider),
+                        past_key_values=pt_past_kv,
+                    )
+            else:
+                with torch.no_grad():
+                    pt_past_kv = pt_prefill.past_key_values
+                    pt_decode = model(input_ids=next_token_tensor, past_key_values=pt_past_kv)
+
+            pt_decode_logits = pt_decode.logits.detach().cpu().numpy()
+            disc = self.get_numpy_discrepancy(pt_decode_logits, onnx_decode_logits)
+            self.log_results({"step": "decode", **disc, **log_data})
+            np.testing.assert_allclose(pt_decode_logits, onnx_decode_logits, atol=atol[precision], rtol=rtol[precision])
+
     def run_greedy_generation_check(
         self,
         model,
@@ -771,6 +915,86 @@ class ModelBuilderTestCase(unittest.TestCase):
             atol=atol,
             rtol=rtol,
             embed_fn=embed_fn,
+        )
+
+    def run_vl_random_weights_test(
+        self,
+        model,
+        tokenizer,
+        model_name: str,
+        basename: str,
+        precision: str,
+        provider: str,
+        num_hidden_layers: int,
+        num_key_value_heads: int,
+        head_size: int,
+        vocab_size: int,
+        create_model_kwargs: Optional[Dict] = None,
+        atol: Optional[Dict] = None,
+        rtol: Optional[Dict] = None,
+        pt_mode: str = "input_ids",
+    ):
+        """Build and export a random-weight VL model to ONNX and compare PyTorch vs ONNX.
+
+        This helper is the vision-language counterpart of
+        :meth:`run_random_weights_test`.  It follows the same structure but
+        delegates the prefill/decode discrepancy check to
+        :meth:`run_mrope_vl_prefill_and_decode_check`, which uses
+        ``inputs_embeds`` and 3-D ``position_ids`` for mRoPE models.
+
+        :param pt_mode: forwarded to :meth:`run_mrope_vl_prefill_and_decode_check`.
+            Use ``"input_ids"`` (default) when the PyTorch model can accept raw
+            token ids (Qwen3-VL style), or ``"inputs_embeds"`` when it must
+            receive pre-computed embeddings together with ``position_ids``
+            (Qwen2.5-VL style).
+        """
+        from modelbuilder.builder import create_model
+
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        model.save_pretrained(model_dir)
+        tokenizer.save_pretrained(model_dir)
+
+        create_kwargs: Dict = dict(
+            model_name=model_name,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision=precision,
+            execution_provider=provider,
+            cache_dir=cache_dir,
+        )
+        if create_model_kwargs:
+            create_kwargs.update(create_model_kwargs)
+        create_model(**create_kwargs)
+
+        log_data = dict(
+            precision=precision,
+            model_id=model_name,
+            experiment="forward",
+            provider=provider,
+            test=basename,
+            input_type="text",
+            kind="random",
+        )
+
+        onnx_path = os.path.join(output_dir, "model.onnx")
+        self.assertExists(onnx_path)
+        sess = self.check_ort(onnx_path, provider=provider)
+
+        self.run_mrope_vl_prefill_and_decode_check(
+            model=model,
+            sess=sess,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=num_key_value_heads,
+            head_size=head_size,
+            vocab_size=vocab_size,
+            precision=precision,
+            provider=provider,
+            log_data=log_data,
+            pt_mode=pt_mode,
+            atol=atol,
+            rtol=rtol,
         )
 
     def run_greedy_generation_test(

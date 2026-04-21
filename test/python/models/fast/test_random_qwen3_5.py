@@ -76,9 +76,7 @@ class TestRandomQwen3_5(ModelBuilderTestCase):
         """
         import torch
         from models.builder import create_model
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
+        from transformers import AutoModelForImageTextToText
 
         basename = f"test_qwen3_5_{precision}_{provider}_{'_'.join(config.text_config.layer_types)}"
         model_dir_full = self.get_model_dir(basename)
@@ -89,13 +87,7 @@ class TestRandomQwen3_5(ModelBuilderTestCase):
         model.eval()
         model.save_pretrained(model_dir_full)
 
-        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
-        tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")),
-            bos_token="<s>",
-            eos_token="</s>",
-            unk_token="<unk>",
-        )
+        tokenizer = self.make_word_level_tokenizer()
         tokenizer.save_pretrained(model_dir_full)
 
         create_model(
