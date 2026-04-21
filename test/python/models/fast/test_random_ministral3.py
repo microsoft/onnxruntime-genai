@@ -306,8 +306,8 @@ class TestMinistral3(ModelBuilderTestCase):
         self.assertExists(genai_config_path)
         with open(genai_config_path) as f:
             genai_config = json.load(f)
-        self.assertIn("vision_encoder", genai_config["model"])
-        ve_cfg = genai_config["model"]["vision_encoder"]
+        self.assertIn("vision", genai_config["model"])
+        ve_cfg = genai_config["model"]["vision"]
         self.assertEqual(ve_cfg["filename"], "vision_encoder.onnx")
         self.assertEqual(ve_cfg["image_size"], image_size)
         self.assertEqual(ve_cfg["patch_size"], patch_size)

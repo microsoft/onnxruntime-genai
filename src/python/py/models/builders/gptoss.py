@@ -231,13 +231,15 @@ class GPTOSSModel(Model):
                 shape=["batch_size", "sequence_length", self.moe_attrs["top_k"]],
             )
 
-        # Save initializers to use with Gather nodes
+        # Save initializers to use with Gather nodes.
+        # Weights are stored transposed (is_transposed=True) in the PyTorch model as
+        # [in, out], but ONNX MatMul needs [out, in], so transpose before saving.
         gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.weight"
-        self.make_initializer(mlp.experts.gate_up_proj, gate_up_proj_weight, to=self.io_dtype)
+        self.make_initializer(mlp.experts.gate_up_proj.transpose(-1, -2), gate_up_proj_weight, to=self.io_dtype)
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
         self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.weight"
-        self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
+        self.make_initializer(mlp.experts.down_proj.transpose(-1, -2), down_proj_weight, to=self.io_dtype)
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
         self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
 
@@ -376,27 +378,14 @@ class GPTOSSModel(Model):
             "/model/constants/INT64/[3]",
             "/model/constants/INT64/[2]",
         ]
-        self.make_slice(
-            glu_slice_name,
-            glu_slice_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
-        swiglu_limit = self.moe_attrs["swiglu_limit"]
         act_shape = ["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1]
+        self.make_slice(glu_slice_name, glu_slice_inputs, dtype=self.io_dtype, shape=act_shape)
+        swiglu_limit = self.moe_attrs["swiglu_limit"]
+        act_shape = act_shape
         if swiglu_limit is not None:
             glu_clip_name = f"{basename}/act_fn/Clip_1"
-            glu_clip_inputs = [
-                f"{glu_slice_name}/output_0",
-                "",
-                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.moe_attrs['swiglu_limit']}",
-            ]
-            self.make_clip(
-                glu_clip_name,
-                glu_clip_inputs,
-                dtype=self.io_dtype,
-                shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-            )
+            glu_clip_inputs = [f"{glu_slice_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{swiglu_limit}"]
+            self.make_clip(glu_clip_name, glu_clip_inputs, dtype=self.io_dtype, shape=act_shape)
             glu_act_output = f"{glu_clip_name}/output_0"
         else:
             glu_act_output = f"{glu_slice_name}/output_0"
@@ -409,71 +398,38 @@ class GPTOSSModel(Model):
             "/model/constants/INT64/[3]",
             "/model/constants/INT64/[2]",
         ]
-        self.make_slice(
-            linear_slice_name,
-            linear_slice_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_slice(linear_slice_name, linear_slice_inputs, dtype=self.io_dtype, shape=act_shape)
         if swiglu_limit is not None:
             linear_clip_name = f"{basename}/act_fn/Clip_2"
             linear_clip_inputs = [
                 f"{linear_slice_name}/output_0",
-                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{-self.moe_attrs['swiglu_limit']}",
-                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.moe_attrs['swiglu_limit']}",
+                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{-swiglu_limit}",
+                f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{swiglu_limit}",
             ]
-            self.make_clip(
-                linear_clip_name,
-                linear_clip_inputs,
-                dtype=self.io_dtype,
-                shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-            )
+            self.make_clip(linear_clip_name, linear_clip_inputs, dtype=self.io_dtype, shape=act_shape)
             linear_act_output = f"{linear_clip_name}/output_0"
         else:
             linear_act_output = f"{linear_slice_name}/output_0"
 
         # Make Mul node after activation
         act_fn_mul_1_name = f"{basename}/act_fn/Mul_1"
-        act_fn_mul_1_inputs = [
-            glu_act_output,
-            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1.703125",
-        ]
-        self.make_mul(
-            act_fn_mul_1_name,
-            act_fn_mul_1_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        act_fn_mul_1_inputs = [glu_act_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1.703125"]
+        self.make_mul(act_fn_mul_1_name, act_fn_mul_1_inputs, dtype=self.io_dtype, shape=act_shape)
         sigmoid_name = f"{basename}/act_fn/Sigmoid"
-        self.make_sigmoid(
-            sigmoid_name,
-            f"{act_fn_mul_1_name}/output_0",
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_sigmoid(sigmoid_name, f"{act_fn_mul_1_name}/output_0", dtype=self.io_dtype, shape=act_shape)
         act_fn_mul_2_name = f"{basename}/act_fn/Mul_2"
         act_fn_mul_2_inputs = [glu_act_output, f"{sigmoid_name}/output_0"]
-        self.make_mul(
-            act_fn_mul_2_name,
-            act_fn_mul_2_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_mul(act_fn_mul_2_name, act_fn_mul_2_inputs, dtype=self.io_dtype, shape=act_shape)
         act_fn_add_name = f"{basename}/act_fn/Add"
         self.make_add(
             act_fn_add_name,
             [linear_act_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1"],
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
+            shape=act_shape,
         )
         act_fn_mul_3_name = f"{basename}/act_fn/Mul_3"
         act_fn_mul_3_inputs = [f"{act_fn_mul_2_name}/output_0", f"{act_fn_add_name}/output_0"]
-        self.make_mul(
-            act_fn_mul_3_name,
-            act_fn_mul_3_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_mul(act_fn_mul_3_name, act_fn_mul_3_inputs, dtype=self.io_dtype, shape=act_shape)
 
         # Make Down proj nodes (MatMul --> Add --> Cast)
         down_proj_weight_name = f"{basename}/down_proj/MatMul"
@@ -484,26 +440,14 @@ class GPTOSSModel(Model):
             outputs=[down_proj_weight_output],
             name=down_proj_weight_name,
         )
-        self.make_value(
-            down_proj_weight_output,
-            self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_value(down_proj_weight_output, self.io_dtype, shape=act_shape)
         down_proj_bias_name = f"{basename}/down_proj/Add"
         self.make_add(
-            down_proj_bias_name,
-            [down_proj_weight_output, f"{mlp2_bias_unsqueeze_name}/output_0"],
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
+            down_proj_bias_name, [down_proj_weight_output, f"{mlp2_bias_unsqueeze_name}/output_0"], dtype=self.io_dtype, shape=act_shape
         )
         if use_cast:
             down_proj_cast_name = f"{basename}/down_proj/Cast"
-            self.make_cast(
-                down_proj_cast_name,
-                f"{down_proj_bias_name}/output_0",
-                ir.DataType.FLOAT,
-                shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-            )
+            self.make_cast(down_proj_cast_name, f"{down_proj_bias_name}/output_0", ir.DataType.FLOAT, shape=act_shape)
 
         # Make weighted sum nodes
         #
@@ -517,19 +461,11 @@ class GPTOSSModel(Model):
             f"{down_proj_cast_name if use_cast else down_proj_bias_name}/output_0",
             f"{expert_weights_cast_name if use_cast else expert_weights_unsqueeze_2_name}/output_0",
         ]
-        self.make_mul(
-            weighted_sum_mul_name,
-            weighted_sum_mul_inputs,
-            dtype=ir.DataType.FLOAT,
-            shape=["batch_size", "sequence_length", self.moe_attrs["top_k"], self.intermediate_size, 1],
-        )
+        self.make_mul(weighted_sum_mul_name, weighted_sum_mul_inputs, dtype=ir.DataType.FLOAT, shape=act_shape)
         reduce_sum_name = f"{basename}/weighted_sum/ReduceSum"
         reduce_sum_inputs = [f"{weighted_sum_mul_name}/output_0", "/model/constants/INT64/[2]"]
         self.make_reduce_sum(
-            reduce_sum_name,
-            reduce_sum_inputs,
-            dtype=ir.DataType.FLOAT,
-            shape=["batch_size", "sequence_length", self.intermediate_size, 1],
+            reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size, 1]
         )
         weighted_sum_squeeze_name = f"{basename}/weighted_sum/Squeeze"
         weighted_sum_squeeze_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[-1]"]
