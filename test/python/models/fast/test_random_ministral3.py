@@ -60,10 +60,7 @@ class TestMinistral3(ModelBuilderTestCase):
 
     def common_ministral3_greedy_generation(self, precision, provider):
         import torch
-        from models.builder import create_model
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from transformers import AutoModelForCausalLM, Ministral3Config, PreTrainedTokenizerFast
+        from transformers import AutoModelForCausalLM, Ministral3Config
 
         num_hidden_layers = 1
         config = Ministral3Config(
@@ -510,6 +507,13 @@ class TestMinistral3(ModelBuilderTestCase):
 
     @hide_stdout()
     def test_ministral3_two_images_and_text_fp32_cpu_genai(self):
+        self.common_ministral3_two_images_and_text_cpu_genai("fp32")
+
+    @hide_stdout()
+    def test_ministral3_two_images_and_text_int4_cpu_genai(self):
+        self.common_ministral3_two_images_and_text_cpu_genai("int4")
+
+    def common_ministral3_two_images_and_text_cpu_genai(self, precision):
         """
         Draw a dummy cross image, run ``model.generate()`` from HuggingFace
         ``Mistral3ForConditionalGeneration`` and ``onnxruntime-genai``, then
@@ -590,7 +594,7 @@ class TestMinistral3(ModelBuilderTestCase):
         config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
         config.architectures = ["Mistral3ForConditionalGeneration"]
 
-        basename = "test_ministral3_two_images_and_text_fp32_cpu_genai"
+        basename = f"test_ministral3_two_images_and_text_{precision}_cpu_genai"
         model_dir = self.get_model_dir(basename)
         output_dir, cache_dir = self.get_dirs(basename)
 
@@ -609,7 +613,7 @@ class TestMinistral3(ModelBuilderTestCase):
             model_name=MINISTRAL3_MODEL_NAME,
             input_path=model_dir,
             output_dir=output_dir,
-            precision="fp32",
+            precision=precision,
             execution_provider="cpu",
             cache_dir=cache_dir,
             num_hidden_layers=num_hidden_layers,
@@ -671,7 +675,7 @@ class TestMinistral3(ModelBuilderTestCase):
             og_generated.append(int(generator.get_next_tokens()[0]))
 
         log_data = dict(
-            precision="fp32",
+            precision=precision,
             model_id=MINISTRAL3_MODEL_NAME,
             experiment="genai_vision_generate",
             provider="cpu",
@@ -682,6 +686,118 @@ class TestMinistral3(ModelBuilderTestCase):
         diff = self.first_token_diff(pt_generated, og_generated)
         self.log_results({**log_data, **diff})
         self.assertEqual(pt_generated, og_generated)
+
+    @hide_stdout()
+    def test_ministral3_vision_encoder_int4_cpu_random_weights(self):
+        """
+        Build a randomly-initialised Mistral3ForConditionalGeneration model,
+        export it with int4 precision, and verify that the vision encoder ONNX
+        model is correctly quantised.
+
+        Specifically the test checks:
+
+        1. ``vision_encoder.onnx`` is written to the output directory.
+        2. The vision encoder ONNX graph contains at least one ``MatMulNBits``
+           node, confirming that int4 weight quantisation was applied to the
+           linear layers inside the Pixtral vision tower and projector.
+        3. An ORT forward pass on the quantised model produces
+           ``image_features`` with the expected shape
+           ``[num_merged_patches, text_hidden_size]``.
+        """
+        import onnx
+        import torch
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import (
+            Ministral3Config,
+            Mistral3Config,
+            Mistral3ForConditionalGeneration,
+            PixtralVisionConfig,
+            PreTrainedTokenizerFast,
+        )
+
+        from models.builder import create_model
+
+        num_hidden_layers = 1
+        # Same tiny geometry as the fp32 sibling test:
+        # 56×56 / patch_size=14 → 4×4=16 patches;
+        # spatial_merge_size=2 → 4 merged patches.
+        image_size = 56
+        patch_size = 14
+        spatial_merge_size = 2
+
+        vision_config = PixtralVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            head_dim=16,
+            image_size=image_size,
+            patch_size=patch_size,
+        )
+        text_config = Ministral3Config(
+            bos_token_id=1,
+            eos_token_id=2,
+            hidden_act="silu",
+            hidden_size=512,
+            intermediate_size=1376,
+            max_position_embeddings=1024,
+            num_attention_heads=8,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=4,
+            head_dim=64,
+            rms_norm_eps=1e-05,
+            sliding_window=None,
+            vocab_size=32000,
+        )
+        config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
+        config.architectures = ["Mistral3ForConditionalGeneration"]
+
+        basename = "test_ministral3_vision_encoder_int4_cpu_random_weights"
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        torch.manual_seed(42)
+        model = Mistral3ForConditionalGeneration(config)
+        model.eval()
+        model.save_pretrained(model_dir)
+
+        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+        )
+        tokenizer.save_pretrained(model_dir)
+
+        create_model(
+            model_name=MINISTRAL3_MODEL_NAME,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision="int4",
+            execution_provider="cpu",
+            cache_dir=cache_dir,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+        # --- Verify vision encoder ONNX exists ---
+        vision_onnx_path = os.path.join(output_dir, "vision_encoder.onnx")
+        self.assertExists(vision_onnx_path)
+
+        # --- Verify MatMulNBits nodes are present (int4 quantisation applied) ---
+        # Load graph structure only (skip external weight data) to check op types.
+        vision_proto = onnx.load(vision_onnx_path, load_external_data=False)
+        op_types = {node.op_type for node in vision_proto.graph.node}
+        self.assertIn("MatMulNBits", op_types, "Vision encoder ONNX should contain MatMulNBits nodes after int4 quantisation")
+
+        # --- Run forward pass and verify output shape ---
+        num_patches_per_side = image_size // patch_size
+        expected_merged_patches = (num_patches_per_side**2) // (spatial_merge_size**2)
+
+        vision_sess = self.check_ort(vision_onnx_path)
+        pixel_values = np.zeros((1, vision_config.num_channels, image_size, image_size), dtype=np.float32)
+        vision_outputs = vision_sess.run(None, {"pixel_values": pixel_values})
+        self.assertIsNotNone(vision_outputs[0])
+        self.assertEqual(vision_outputs[0].shape[0], expected_merged_patches)
+        self.assertEqual(vision_outputs[0].shape[1], text_config.hidden_size)
 
     def test_dequantize_fp8_weights_no_op_when_no_fp8(self):
         """_dequantize_fp8_weights leaves normal float32 weights unchanged."""
