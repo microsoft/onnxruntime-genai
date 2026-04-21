@@ -174,6 +174,7 @@ class TestWhisperModel(ModelBuilderTestCase):
         self.common_fast_whisper_random_weights("fp16", "cpu")
 
     @hide_stdout()
+    @unittest.skip("issue with Attention, onnxruntime is crashing")
     def test_fast_whisper_random_weights_int4_cpu(self):
         self.common_fast_whisper_random_weights("int4", "cpu")
 
