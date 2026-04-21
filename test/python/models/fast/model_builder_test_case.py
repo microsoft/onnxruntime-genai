@@ -7,31 +7,13 @@ import shutil
 import unittest
 import warnings
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import onnx
 import torch
 import transformers
 from packaging.version import Version
-
-
-def requires_yobx(version: str = "", msg: str = "") -> Callable:
-    try:
-        import yobx
-    except ImportError:
-        return unittest.skip(msg or "yobx not installed")
-
-    if not hasattr(yobx, "__version__"):
-        return unittest.skip(msg or "yobx not properly installed")
-
-    if not version:
-        return lambda x: x
-
-    if Version(yobx.__version__) < Version(version):
-        msg = f"onnx_ir version {yobx.__version__} < {version}: {msg}"
-        return unittest.skip(msg)
-    return lambda x: x
 
 
 def has_transformers(version: str) -> Callable:

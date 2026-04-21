@@ -10,10 +10,8 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
-from tqdm import tqdm
 
-from .base import Model, parse_hf_token
+from .base import Model
 
 
 class MistralModel(Model):
