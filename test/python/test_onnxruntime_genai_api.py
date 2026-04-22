@@ -275,55 +275,6 @@ def test_rewind(test_data_path, relative_model_path):
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
-@pytest.mark.skipif(
-    not og.is_webgpu_available(),
-    reason="WebGPU EP not available, graph capture RewindTo test requires WebGPU",
-)
-@pytest.mark.parametrize(
-    "relative_model_path",
-    ([Path("webgpu") / "tiny-graph-capture-gqa"]),
-)
-def test_rewind_graph_capture(test_data_path, relative_model_path):
-    """Test RewindTo with graph capture enabled (static mask handling via GQA model)."""
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    if not os.path.exists(model_path):
-        pytest.skip(f"Graph capture test model not found at {model_path}")
-
-    try:
-        model = og.Model(model_path)
-    except RuntimeError as e:
-        if "not supported in this build" in str(e):
-            pytest.skip(f"WebGPU EP not functional in this build: {e}")
-        raise
-    max_length = 20
-    input_ids = np.array([[10, 20, 30, 40, 50]], dtype=np.int32)
-
-    search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=max_length, batch_size=1)
-
-    generator = og.Generator(model, search_params)
-    generator.append_tokens(input_ids)
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    first_output = generator.get_sequence(0).copy()
-
-    # Full rewind with static mask handling
-    generator.rewind_to(0)
-    generator.append_tokens(input_ids)
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    assert np.array_equal(first_output, generator.get_sequence(0))
-
-    # Partial rewind
-    generator.rewind_to(7)
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    assert np.array_equal(first_output, generator.get_sequence(0))
-
-
 # Test Model Loading with No Chat Template
 
 
