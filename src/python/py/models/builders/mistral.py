@@ -708,23 +708,7 @@ class Ministral3ConditionalGenerationModel(Model):
         text_obj_config = copy.deepcopy(config)
         text_config = config.text_config
         for key in text_config:
-            if not hasattr(text_obj_config, key) or key in (
-                "hidden_size",
-                "intermediate_size",
-                "num_hidden_layers",
-                "num_attention_heads",
-                "num_key_value_heads",
-                "head_dim",
-                "rms_norm_eps",
-                "sliding_window",
-                "vocab_size",
-                "max_position_embeddings",
-                "hidden_act",
-                "rope_theta",
-                "rope_scaling",
-                "bos_token_id",
-                "eos_token_id",
-            ):
+            if not hasattr(text_obj_config, key):
                 setattr(text_obj_config, key, getattr(text_config, key))
 
         embed_extra_options = dict(extra_options)

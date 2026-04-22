@@ -959,6 +959,144 @@ class TestMinistral3(ModelBuilderTestCase):
         expected = fp8_weight.float() * scale_inv.float()
         self.assertTrue(torch.allclose(linear.weight.data, expected))
 
+    @hide_stdout()
+    def test_ministral3_projector_linear1_bias_adds_bias_node(self):
+        """Exercises the bias-addition branch in _build_projector (line 528 of
+        mistral.py) by injecting a non-zero bias into the projector's linear_1.
+
+        The standard HuggingFace ``Mistral3MultiModalProjector.linear_1`` is
+        always created with ``bias=False``, so the branch
+
+            if lin1_bias is not None and torch.count_nonzero(lin1_bias) > 0:
+
+        is never reached during normal save/load cycles.  This test replaces
+        ``linear_1`` with an ``nn.Linear`` that carries a non-zero bias, then
+        patches ``Ministral3VisionEncoderModel._load_hf_model`` so the builder
+        receives the in-memory model directly (avoiding the round-trip through
+        ``save_pretrained`` / ``from_pretrained`` which would silently drop the
+        bias).  The resulting ``vision_encoder.onnx`` must contain a
+        ``/vision/projector/linear_1/MatMul/BiasAdd`` node, confirming that
+        line 528 was executed.
+        """
+        import onnx
+        import torch
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from unittest.mock import patch
+        from transformers import (
+            Ministral3Config,
+            Mistral3Config,
+            Mistral3ForConditionalGeneration,
+            PixtralVisionConfig,
+            PreTrainedTokenizerFast,
+        )
+
+        from models.builder import create_model
+        from models.builders.mistral import Ministral3VisionEncoderModel
+
+        num_hidden_layers = 1
+        image_size = 56
+        patch_size = 14
+        spatial_merge_size = 2
+
+        vision_config = PixtralVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            head_dim=16,
+            image_size=image_size,
+            patch_size=patch_size,
+        )
+        text_config = Ministral3Config(
+            bos_token_id=1,
+            eos_token_id=2,
+            hidden_act="silu",
+            hidden_size=512,
+            intermediate_size=1376,
+            max_position_embeddings=1024,
+            num_attention_heads=8,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=4,
+            head_dim=64,
+            rms_norm_eps=1e-05,
+            sliding_window=None,
+            vocab_size=32000,
+        )
+        config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
+        config.architectures = ["Mistral3ForConditionalGeneration"]
+
+        basename = "test_ministral3_projector_linear1_bias_adds_bias_node"
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        torch.manual_seed(42)
+        model = Mistral3ForConditionalGeneration(config)
+        model.eval()
+
+        # Inject a non-zero bias into linear_1 so that the bias-addition
+        # branch (mistral.py line 528) is reached during ONNX construction.
+        proj = model.model.multi_modal_projector
+        in_features = proj.linear_1.weight.shape[1]
+        out_features = proj.linear_1.weight.shape[0]
+        new_linear_1 = torch.nn.Linear(in_features, out_features, bias=True)
+        with torch.no_grad():
+            new_linear_1.weight.copy_(proj.linear_1.weight)
+            new_linear_1.bias.fill_(0.1)
+        proj.linear_1 = new_linear_1
+
+        # Save model and tokenizer so that the embedding and text sub-models
+        # can load normally from the directory.  The bias weights are written
+        # to the safetensors file but silently ignored on reload because the
+        # default architecture uses bias=False; only the vision encoder (whose
+        # _load_hf_model is patched below) sees the modified projector.
+        model.save_pretrained(model_dir)
+        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+        )
+        tokenizer.save_pretrained(model_dir)
+
+        # Patch _load_hf_model on Ministral3VisionEncoderModel so the builder
+        # receives our in-memory model (with non-zero bias) directly.
+        def _load_hf_model_with_bias(self_inner, input_path):
+            return model
+
+        with patch.object(Ministral3VisionEncoderModel, "_load_hf_model", _load_hf_model_with_bias):
+            create_model(
+                model_name=MINISTRAL3_MODEL_NAME,
+                input_path=model_dir,
+                output_dir=output_dir,
+                precision="fp32",
+                execution_provider="cpu",
+                cache_dir=cache_dir,
+                num_hidden_layers=num_hidden_layers,
+            )
+
+        # The vision encoder ONNX must exist.
+        vision_onnx_path = os.path.join(output_dir, "vision_encoder.onnx")
+        self.assertExists(vision_onnx_path)
+
+        # A BiasAdd node for linear_1 must be present, confirming that line 528
+        # in _build_projector was executed (non-zero bias branch).
+        vision_proto = onnx.load(vision_onnx_path, load_external_data=False)
+        node_names = {node.name for node in vision_proto.graph.node}
+        self.assertIn(
+            "/vision/projector/linear_1/MatMul/BiasAdd",
+            node_names,
+            "BiasAdd node for linear_1 should be present when projector.linear_1 has a non-zero bias",
+        )
+
+        # Verify the forward pass still produces the correct output shape.
+        vision_sess = self.check_ort(vision_onnx_path)
+        pixel_values = np.zeros((1, vision_config.num_channels, image_size, image_size), dtype=np.float32)
+        vision_outputs = vision_sess.run(None, {"pixel_values": pixel_values})
+        self.assertIsNotNone(vision_outputs[0])
+        num_patches_per_side = image_size // patch_size
+        expected_merged_patches = (num_patches_per_side**2) // (spatial_merge_size**2)
+        self.assertEqual(vision_outputs[0].shape[0], expected_merged_patches)
+        self.assertEqual(vision_outputs[0].shape[1], text_config.hidden_size)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
