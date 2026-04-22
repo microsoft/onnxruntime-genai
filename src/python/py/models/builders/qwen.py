@@ -7,7 +7,6 @@
 # Portions of this file consist of AI generated content.
 
 import os
-
 import numpy as np
 import onnx_ir as ir
 import torch
