@@ -61,7 +61,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   const int64_t* image_grid_thw_data = nullptr;
 
   if (pixel_values) {
-    // Grid-based mode: compute token count from image_grid_thw
+    // Get image_grid_thw data from either processor output or computed value
     if (image_grid_thw) {
       const int64_t* image_grid_thw_shape{};
       size_t image_grid_thw_num_dims;
@@ -73,6 +73,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
       num_images = computed_grid_num_images;
     }
 
+    // Calculate total image tokens based on grid dimensions
+    // For each image: (temporal * height * width) / (merge_size^2)
     for (int64_t i = 0; i < num_images; ++i) {
       int64_t t = image_grid_thw_data[i * 3 + 0];
       int64_t h = image_grid_thw_data[i * 3 + 1];
@@ -82,8 +84,10 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     }
   }
 
+  // Generate input_ids with vision tokens
   std::string text = prompt;
 
+  // If prompt is empty, add vision markers for each image
   if (text.empty()) {
     for (int64_t i = 0; i < num_images; ++i) {
       text += std::string(vision_start_token) + " " + std::string(vision_end_token);
@@ -93,6 +97,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     }
   }
 
+  // Count the number of vision_start tokens and make sure it matches the number of images
+  // Need to escape special regex characters in the token
   const std::regex vision_start_regex{R"(<\|vision_start\|>)"};
   const auto vision_start_begin = std::sregex_iterator(text.begin(), text.end(), vision_start_regex);
   const auto vision_start_end = std::sregex_iterator();
@@ -103,8 +109,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
                              " vision_start tokens but received " + std::to_string(num_images) + " images.");
   }
 
-  // Replace vision markers with the correct number of image_pad tokens per image.
-  // The count is derived from (T*H*W) / spatial_merge_size^2.
+  // For Qwen2-VL, we need to replace vision markers with image_pad tokens
+  // The number of image_pad tokens for each image depends on the image dimensions
   if (num_images > 0 && image_grid_thw_data) {
     std::string modified_text;
     size_t last_pos = 0;
@@ -113,13 +119,16 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     std::smatch match;
     std::string temp_text = text;
     while (std::regex_search(temp_text, match, vision_start_regex)) {
+      // Add text before the vision_start token
       modified_text += text.substr(last_pos, match.position() - (last_pos - (text.size() - temp_text.size())));
 
+      // Calculate number of image_pad tokens for this image
       int64_t t = image_grid_thw_data[image_idx * 3 + 0];
       int64_t h = image_grid_thw_data[image_idx * 3 + 1];
       int64_t w = image_grid_thw_data[image_idx * 3 + 2];
       int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
 
+      // Add vision_start, image_pad tokens, and vision_end
       modified_text += vision_start_token;
       for (int64_t i = 0; i < num_pads; ++i) {
         modified_text += image_pad_token;
@@ -128,6 +137,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
       last_pos = match.position() + match.length() + (text.size() - temp_text.size());
 
+      // Find and skip vision_end token
       size_t vision_end_pos = text.find(vision_end_token, last_pos);
       if (vision_end_pos != std::string::npos) {
         last_pos = vision_end_pos + strlen(vision_end_token);
@@ -156,7 +166,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 }  // namespace
 
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
-    : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},
+    : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
       patch_size_{config.model.vision.patch_size} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
