@@ -82,8 +82,7 @@ endif()
 
 FetchContent_Declare(
   onnxruntime_extensions
-  GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
-  GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
+  SOURCE_DIR /home/nebanfic/onnxruntime-extensions
 )
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)

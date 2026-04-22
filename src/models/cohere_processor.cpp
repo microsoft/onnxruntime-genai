@@ -12,37 +12,6 @@
 
 namespace Generators {
 
-// Mirror of ort-extensions internal RawAudiosObject layout to access raw audio bytes.
-struct RawAudiosAccess : ort_extensions::OrtxObjectImpl {
-  std::unique_ptr<ort_extensions::AudioRawData[]> audios_;
-  size_t num_audios_{};
-};
-
-// Decode 16-bit PCM WAV file bytes to float32 samples.
-static std::vector<float> DecodeWav16(const std::byte* data, size_t size) {
-  if (size < 44) return {};
-  auto u8 = reinterpret_cast<const uint8_t*>(data);
-  if (std::memcmp(u8, "RIFF", 4) != 0 || std::memcmp(u8 + 8, "WAVE", 4) != 0)
-    return {};
-  size_t pos = 12;
-  while (pos + 8 <= size) {
-    uint32_t chunk_size = u8[pos + 4] | (u8[pos + 5] << 8) | (u8[pos + 6] << 16) | (u8[pos + 7] << 24);
-    if (std::memcmp(u8 + pos, "data", 4) == 0) {
-      size_t data_start = pos + 8;
-      size_t data_bytes = std::min(static_cast<size_t>(chunk_size), size - data_start);
-      size_t num_samples = data_bytes / 2;
-      std::vector<float> samples(num_samples);
-      auto pcm16 = reinterpret_cast<const int16_t*>(u8 + data_start);
-      for (size_t i = 0; i < num_samples; ++i)
-        samples[i] = static_cast<float>(pcm16[i]) / 32768.0f;
-      return samples;
-    }
-    pos += 8 + chunk_size;
-    if (chunk_size & 1) pos++;
-  }
-  return {};
-}
-
 // Apply per-feature normalization (Cohere-style): for each mel bin,
 // compute mean and std across time, then normalize.
 // mel is [num_mels, num_frames] row-major.
@@ -78,14 +47,19 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   if (!audios || !audios->audios_)
     throw std::runtime_error("No audios provided to process.");
 
-  // Decode WAV to float PCM
-  auto* raw = static_cast<RawAudiosAccess*>(audios->audios_.get());
-  if (raw->num_audios_ == 0)
-    throw std::runtime_error("No audio files loaded.");
-  auto& wav_bytes = raw->audios_[0];
-  auto samples = DecodeWav16(wav_bytes.data(), wav_bytes.size());
-  if (samples.empty())
-    throw std::runtime_error("Failed to decode WAV. Ensure 16-bit PCM WAV.");
+  // Decode audio using ort-extensions (handles WAV/MP3/FLAC, resampling, stereo→mono)
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> decode_result;
+  CheckResult(OrtxDecodeAudio(audios->audios_.get(), 0, /*target_sample_rate=*/16000, decode_result.ToBeAssigned()));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
+  CheckResult(OrtxTensorResultGetAt(decode_result.get(), 0, pcm_tensor.ToBeAssigned()));
+
+  // Get PCM data pointer and length
+  const float* pcm_data = nullptr;
+  const int64_t* pcm_shape = nullptr;
+  size_t pcm_num_dims = 0;
+  CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm_data), &pcm_shape, &pcm_num_dims));
+  size_t num_samples = static_cast<size_t>(pcm_shape[1]);  // shape is [1, num_samples]
 
   // Compute Cohere-compatible log-mel spectrogram via NeMo mel code
   nemo_mel::NemoMelConfig mel_cfg{};
@@ -99,7 +73,7 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
 
   int num_frames = 0;
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(
-      samples.data(), samples.size(), mel_cfg, num_frames);
+      pcm_data, num_samples, mel_cfg, num_frames);
 
   // Apply per-feature normalization (Cohere-specific)
   PerFeatureNormalize(mel_data.data(), mel_cfg.num_mels, num_frames);
