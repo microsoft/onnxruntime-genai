@@ -1019,7 +1019,16 @@ class Qwen35TextModel(Model):
         #
         # Linear attention recurrence accumulates errors across the full sequence,
         # unlike softmax attention which normalizes per-step.
-        if extra_options.get("linear_attention_int8", "false").lower() == "true":
+        linear_attention_int8 = extra_options.get("linear_attention_int8", False)
+        if isinstance(linear_attention_int8, bool):
+            enable_linear_attention_int8 = linear_attention_int8
+        elif isinstance(linear_attention_int8, str):
+            linear_attention_int8 = linear_attention_int8.lower()
+            enable_linear_attention_int8 = linear_attention_int8 in {"true", "1"}
+        else:
+            enable_linear_attention_int8 = False
+
+        if enable_linear_attention_int8:
             int8_nodes = {}
             for i, lt in enumerate(self.layer_types):
                 if lt == "linear_attention":
