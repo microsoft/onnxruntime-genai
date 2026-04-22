@@ -1013,29 +1013,28 @@ class Qwen35TextModel(Model):
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
 
-        # Mixed-precision quantization for linear attention layers.
-        # Baseline: whole model INT4. Override linear attention layer nodes
-        # to INT8 for better accuracy with modest size increase.
+        # Optional mixed-precision quantization for linear attention layers.
+        # When enabled via extra_options linear_attention_int8=true, promotes
+        # linear attention layer nodes from INT4 to INT8 for better accuracy.
         #
         # Linear attention recurrence accumulates errors across the full sequence,
         # unlike softmax attention which normalizes per-step.
-        int8_nodes = {}
-        for i, lt in enumerate(self.layer_types):
-            if lt == "linear_attention":
-                # All linear attention projections: INT8
-                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                # MLP projections in linear attention layers: INT8
-                for proj in ("gate_proj", "up_proj", "down_proj"):
-                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
+        if extra_options.get("linear_attention_int8", "false").lower() == "true":
+            int8_nodes = {}
+            for i, lt in enumerate(self.layer_types):
+                if lt == "linear_attention":
+                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                        int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                        int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
-        if int8_nodes:
-            algo_config = self.quant_attrs["int4"].get("algo_config")
-            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-                algo_config.customized_weight_config.update(int8_nodes)
-            else:
-                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
-                self.quant_attrs["int4"]["algo_config"] = algo_config
+            if int8_nodes:
+                algo_config = self.quant_attrs["int4"].get("algo_config")
+                if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
+                    algo_config.customized_weight_config.update(int8_nodes)
+                else:
+                    algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
+                    self.quant_attrs["int4"]["algo_config"] = algo_config
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
