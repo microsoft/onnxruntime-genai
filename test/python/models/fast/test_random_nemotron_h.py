@@ -571,7 +571,6 @@ class TestNemotronH(ModelBuilderTestCase):
         self.common_fast_nemotron_h_moe_random_weights("bf16", "cuda")
 
     @hide_stdout()
-    @requires_genai()
     def test_nemotron_h_moe_fp32_cpu_genai_generate(self):
         import torch
         from transformers import AutoModelForCausalLM
@@ -737,7 +736,6 @@ class TestNemotronH(ModelBuilderTestCase):
         self.common_nemotron_h_mamba_build("fp32", "cpu", layers_block_type=["attention", "mamba"])
 
     @hide_stdout()
-    @requires_genai()
     def test_nemotron_h_mamba_fp32_cpu_genai_generate(self):
         """Verify genai generation completes for a mamba-only NemotronH model (fp32/CPU)."""
         config = self._make_nemotronh_mamba_config(["mamba"])
@@ -754,7 +752,6 @@ class TestNemotronH(ModelBuilderTestCase):
         self.run_genai_generation_test(output_dir, None, config.vocab_size, config.eos_token_id, prompt_ids=prompt_ids)
 
     @hide_stdout()
-    @requires_genai()
     def test_nemotron_h_mamba_hybrid_fp32_cpu_genai_generate(self):
         """Verify genai generation completes for a hybrid attention+mamba NemotronH model (fp32/CPU)."""
         config = self._make_nemotronh_mamba_config(["attention", "mamba"])
@@ -845,7 +842,6 @@ class TestNemotronH(ModelBuilderTestCase):
         self.assertIn("CausalConvWithState", op_types)
 
     @hide_stdout()
-    @requires_genai()
     def test_nemotron_h_full_hybrid_fp32_cpu_genai_generate(self):
         """Verify genai generation completes for a full hybrid attention+mamba+moe NemotronH model (fp32/CPU)."""
         import torch

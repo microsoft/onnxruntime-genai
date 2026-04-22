@@ -1017,7 +1017,7 @@ class ModelBuilderTestCase(unittest.TestCase):
         )
 
     def run_genai_generation(self, output_dir: str, prompt_ids, max_new_tokens: int = 5) -> list[int]:
-        """Run greedy generation with ``onnxruntime-genai`` and return all tokens.
+        """Run greedy generation and return all tokens.
 
         This helper encapsulates the boilerplate shared by every
         ``test_*_genai_generate`` test method:
@@ -1026,9 +1026,6 @@ class ModelBuilderTestCase(unittest.TestCase):
         2. Create ``GeneratorParams`` with greedy (argmax) search options.
         3. Feed *prompt_ids* and iterate until generation is complete.
         4. Return the full token sequence (prompt tokens + generated tokens).
-
-        The test is expected to be decorated with :func:`requires_genai` so that
-        it is skipped automatically when ``onnxruntime-genai`` is not installed.
 
         :param output_dir: directory that contains ``model.onnx`` and ``genai_config.json``.
         :param prompt_ids: 2-D integer tensor of shape ``(1, prompt_len)``.
