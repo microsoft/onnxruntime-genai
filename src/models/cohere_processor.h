@@ -3,7 +3,6 @@
 #pragma once
 
 #include "processor.h"
-#include "nemo_mel_spectrogram.h"
 
 namespace Generators {
 
@@ -18,7 +17,7 @@ struct CohereProcessor : Processor {
 
  private:
   ONNXTensorElementDataType audio_features_type_;
-  nemo_mel::NemoMelConfig mel_cfg_;
+  ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;
 };
 
 }  // namespace Generators
