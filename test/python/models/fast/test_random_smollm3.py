@@ -3,11 +3,9 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-import os
 import unittest
 
-import numpy as np
-from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda, run_session_or_io_binding
+from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
 
 SMOLLM3_MODEL_NAME = "HuggingFaceTB/SmolLM3-3B"
 

@@ -12,7 +12,6 @@ from model_builder_test_case import (
     hide_stdout,
     requires_cuda,
     requires_transformers,
-    run_session_or_io_binding,
 )
 
 MINISTRAL3_MODEL_NAME = "mistralai/Ministral-3-3B-Instruct-2512"

@@ -7,7 +7,7 @@ import shutil
 import unittest
 import warnings
 from collections.abc import Callable
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import onnx

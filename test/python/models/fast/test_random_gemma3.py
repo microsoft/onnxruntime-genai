@@ -3,10 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-import os
 import unittest
 
-import numpy as np
 from model_builder_test_case import ModelBuilderTestCase, has_transformers, hide_stdout, requires_cuda, requires_transformers
 
 MODEL_NAME = "google/gemma-3-4b-it"
