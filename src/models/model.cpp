@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 //
 // Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// -------------------------------------------------------------------------
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
+// --------------------------------------------------------------------------
 #include <algorithm>
 #include <climits>
 #include <random>
