@@ -38,9 +38,6 @@ examples/csharp/ModelChat/models
 !test/test_models/qwen3-vl-vision-preprocessing/*.onnx
 !test/test_models/qwen35-hybrid-preprocessing/
 !test/test_models/qwen35-hybrid-preprocessing/*.onnx
-!test/test_models/webgpu/
-!test/test_models/webgpu/tiny-graph-capture-gqa/
-!test/test_models/webgpu/tiny-graph-capture-gqa/*.onnx
 
 .ipynb_checkpoints/
 /src/java/.gradle

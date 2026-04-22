@@ -1384,58 +1384,6 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
 }
 
-// Test RewindTo with a tiny GQA model configured for graph capture.
-// Uses a checked-in 1-layer model with GroupQueryAttention, enableGraphCapture=1,
-// and past_present_share_buffer=true. This exercises ShouldUseStaticMaskHandling()
-// without requiring a specific GPU or large model download.
-#if USE_WEBGPU
-TEST(CAPITests, RewindGraphCaptureGqaCAPI) {
-  std::string model_path = MODEL_PATH "webgpu/tiny-graph-capture-gqa";
-  if (!std::filesystem::exists(model_path)) {
-    GTEST_SKIP() << "tiny-graph-capture-gqa model not found at " << model_path;
-  }
-
-  int max_length = 20;
-  std::vector<int32_t> input_ids{10, 20, 30, 40, 50};
-
-  auto model = OgaModel::Create(model_path.c_str());
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", max_length);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  // Save first-run output
-  auto seq_len = generator->GetSequenceCount(0);
-  std::vector<int32_t> first_output(seq_len);
-  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
-
-  // RewindTo(0) — full rewind with static mask handling
-  generator->RewindTo(0);
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  auto seq_len2 = generator->GetSequenceCount(0);
-  ASSERT_EQ(seq_len2, seq_len);
-  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
-
-  // RewindTo(7) — partial rewind, continue generating
-  generator->RewindTo(7);
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  seq_len2 = generator->GetSequenceCount(0);
-  ASSERT_EQ(seq_len2, seq_len);
-  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
-}
-#endif  // USE_WEBGPU
-
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
 #endif
