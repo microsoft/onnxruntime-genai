@@ -7,39 +7,23 @@
 #include "nemo_mel_spectrogram.h"
 
 #include <cstring>
-#include <cmath>
 #include <numeric>
 
 namespace Generators {
-
-// Apply per-feature normalization (Cohere-style): for each mel bin,
-// compute mean and std across time, then normalize.
-// mel is [num_mels, num_frames] row-major.
-static void PerFeatureNormalize(float* mel, int num_mels, int num_frames) {
-  constexpr float eps = 1e-5f;
-  for (int m = 0; m < num_mels; ++m) {
-    float* row = mel + m * num_frames;
-    // Mean
-    float sum = 0.0f;
-    for (int t = 0; t < num_frames; ++t) sum += row[t];
-    float mean = sum / num_frames;
-    // Std
-    float var_sum = 0.0f;
-    for (int t = 0; t < num_frames; ++t) {
-      float d = row[t] - mean;
-      var_sum += d * d;
-    }
-    float std_val = std::sqrt(var_sum / (num_frames - 1)) + eps;
-    // Normalize
-    for (int t = 0; t < num_frames; ++t)
-      row[t] = (row[t] - mean) / std_val;
-  }
-}
 
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
+
+  // Read mel spectrogram config from genai_config.json
+  mel_cfg_.num_mels = config.model.num_mels;
+  mel_cfg_.fft_size = config.model.fft_size;
+  mel_cfg_.hop_length = config.model.hop_length;
+  mel_cfg_.win_length = config.model.win_length;
+  mel_cfg_.sample_rate = config.model.sample_rate;
+  mel_cfg_.preemph = config.model.preemph;
+  mel_cfg_.log_eps = config.model.log_eps;
 }
 
 std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
@@ -61,28 +45,19 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm_data), &pcm_shape, &pcm_num_dims));
   size_t num_samples = static_cast<size_t>(pcm_shape[1]);  // shape is [1, num_samples]
 
-  // Compute Cohere-compatible log-mel spectrogram via NeMo mel code
-  nemo_mel::NemoMelConfig mel_cfg{};
-  mel_cfg.num_mels = 128;
-  mel_cfg.fft_size = 512;
-  mel_cfg.hop_length = 160;
-  mel_cfg.win_length = 400;
-  mel_cfg.sample_rate = 16000;
-  mel_cfg.preemph = 0.97f;
-  mel_cfg.log_eps = 5.960464477539063e-08f;  // Cohere's log_zero_guard_value
-
+  // Compute log-mel spectrogram via NeMo mel code (params from genai_config.json)
   int num_frames = 0;
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(
-      pcm_data, num_samples, mel_cfg, num_frames);
+      pcm_data, num_samples, mel_cfg_, num_frames);
 
-  // Apply per-feature normalization (Cohere-specific)
-  PerFeatureNormalize(mel_data.data(), mel_cfg.num_mels, num_frames);
+  // Apply per-feature normalization (via ort-extensions)
+  CheckResult(OrtxPerFeatureNormalize(mel_data.data(), mel_cfg_.num_mels, num_frames, 1e-5f));
 
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
   // Create mel tensor [1, num_mels, num_frames]
-  auto mel_shape = std::array<int64_t, 3>{1, mel_cfg.num_mels, num_frames};
+  auto mel_shape = std::array<int64_t, 3>{1, mel_cfg_.num_mels, num_frames};
   auto mel_tensor = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(mel_shape.data(), 3));
   std::memcpy(mel_tensor->GetTensorMutableData<float>(), mel_data.data(),
               mel_data.size() * sizeof(float));
