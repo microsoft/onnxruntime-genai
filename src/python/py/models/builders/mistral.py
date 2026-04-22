@@ -295,12 +295,13 @@ class Ministral3VisionEncoderModel(Model):
 
         qkv_t_shape = [1, nh, n_p, hd]
         q_t = self.make_transpose(f"{b}/q_t", q_4d, self.io_dtype, qkv_t_shape, perm=[0, 2, 1, 3])
-        k_t = self.make_transpose(f"{b}/k_t", k_4d, self.io_dtype, qkv_t_shape, perm=[0, 2, 1, 3])
+        # k_t = self.make_transpose(f"{b}/k_t", k_4d, self.io_dtype, qkv_t_shape, perm=[0, 2, 1, 3])
         v_t = self.make_transpose(f"{b}/v_t", v_4d, self.io_dtype, qkv_t_shape, perm=[0, 2, 1, 3])
 
         # Scaled dot-product attention (encoder, no causal mask)
         # K^T: [1, nh, hd, n_p]
-        k_T = self.make_transpose(f"{b}/k_T", k_t, self.io_dtype, [1, nh, hd, n_p], perm=[0, 1, 3, 2])
+        # k_T = self.make_transpose(f"{b}/k_T", k_t, self.io_dtype, [1, nh, hd, n_p], perm=[0, 1, 3, 2])
+        k_T = self.make_transpose(f"{b}/k_T", k_4d, self.io_dtype, [1, nh, hd, n_p], perm=[0, 2, 3, 1])
         attn_w = f"{b}/attn_w/MatMul/output_0"
         self.make_node("MatMul", inputs=[q_t, k_T], outputs=[attn_w], name=f"{b}/attn_w/MatMul")
         self.make_value(attn_w, self.io_dtype, shape=[1, nh, n_p, n_p])
@@ -432,21 +433,24 @@ class Ministral3VisionEncoderModel(Model):
         )
         conv_out = "/vision/patch_conv/Conv/output_0"
 
-        # Reshape to [1, hidden_size, n_patches] then Transpose to [1, n_patches, hidden_size]
-        reshape1 = self.make_reshape(
-            "/vision/patch_embed/Reshape1",
-            [conv_out, [1, self.vis_hidden_size, self.n_patches]],
-            self.io_dtype,
-            [1, self.vis_hidden_size, self.n_patches],
-        )
+        # Transpose NCHW→NHWC: [1, hidden_size, n_h, n_w] → [1, n_h, n_w, hidden_size]
+        # then Reshape to merge spatial dims: → [1, n_patches, hidden_size].
+        # Transpose-before-Reshape avoids a rank-changing Reshape before a Transpose,
+        # which can confuse graph optimisers.
         transposed = self.make_transpose(
-            "/vision/patch_embed/Transpose", reshape1, self.io_dtype, [1, self.n_patches, self.vis_hidden_size], perm=[0, 2, 1]
+            "/vision/patch_embed/Transpose", conv_out, self.io_dtype, [1, n_h, n_w, self.vis_hidden_size], perm=[0, 2, 3, 1]
+        )
+        patch_embed = self.make_reshape(
+            "/vision/patch_embed/Reshape",
+            [transposed, [1, self.n_patches, self.vis_hidden_size]],
+            self.io_dtype,
+            [1, self.n_patches, self.vis_hidden_size],
         )
 
         # ln_pre (SimplifiedLayerNormalization)
         ln_pre_out = self._rms_norm(
             "/vision/ln_pre/SimplifiedLayerNorm",
-            transposed,
+            patch_embed,
             vt.ln_pre.weight,
             "vision.ln_pre.weight",
             shape=[1, self.n_patches, self.vis_hidden_size],
@@ -503,16 +507,14 @@ class Ministral3VisionEncoderModel(Model):
         #   -> unfold(kernel=s, stride=s)  -> [1, d*s*s, n_h//s * n_w//s]
         #   -> view(d*s*s, n_merged).t()   -> [n_merged, d*s*s]
         #
-        # Equivalent reshape+transpose+reshape (no overlap, stride==kernel):
+        # Equivalent single-reshape + transpose + reshape (no overlap, stride==kernel):
         #   [n_patches, d]
-        #   -> [n_h, n_w, d]                                Reshape
-        #   -> [n_h//s, s, n_w//s, s, d]                   Reshape
+        #   -> [n_h//s, s, n_w//s, s, d]                   Reshape   (direct, skips intermediate [n_h, n_w, d])
         #   -> [n_h//s, n_w//s, d, s, s]  perm=[0,2,4,1,3] Transpose
         #   -> [n_merged, d*s*s]                            Reshape
-        r1 = self.make_reshape("/vision/projector/merge/Reshape1", [squeeze_out, [n_h, n_w, d]], self.io_dtype, [n_h, n_w, d])
-        r2 = self.make_reshape("/vision/projector/merge/Reshape2", [r1, [mh, s, mw, s, d]], self.io_dtype, [mh, s, mw, s, d])
-        tp = self.make_transpose("/vision/projector/merge/Transpose", r2, self.io_dtype, [mh, mw, d, s, s], perm=[0, 2, 4, 1, 3])
-        merged = self.make_reshape("/vision/projector/merge/Reshape3", [tp, [nm, d * s * s]], self.io_dtype, [nm, d * s * s])
+        r = self.make_reshape("/vision/projector/merge/Reshape1", [squeeze_out, [mh, s, mw, s, d]], self.io_dtype, [mh, s, mw, s, d])
+        tp = self.make_transpose("/vision/projector/merge/Transpose", r, self.io_dtype, [mh, mw, d, s, s], perm=[0, 2, 4, 1, 3])
+        merged = self.make_reshape("/vision/projector/merge/Reshape2", [tp, [nm, d * s * s]], self.io_dtype, [nm, d * s * s])
 
         # Merging linear (no bias): [nm, d*s*s] -> [nm, d]
         merged_out = f"{self.make_matmul(proj.patch_merger.merging_layer, '/vision/projector/merging_layer/MatMul', merged)}/output_0"
@@ -594,26 +596,115 @@ class Ministral3VisionEncoderModel(Model):
         self.graph.sort()
 
 
+class Ministral3EmbeddingModel(Model):
+    """ONNX embedding model for the ``phi3v``-style multimodal pipeline.
+
+    Inherits from :class:`Model` to fit the standard builder interface.
+
+    ``input_ids`` must include ``image_token_id`` placeholder tokens at the
+    positions where image features should be inserted.  The model:
+
+    1. Embeds **all** tokens with the standard token-embedding table.
+    2. Identifies positions where ``input_ids == image_token_id`` using
+       ``Equal`` + ``NonZero``.
+    3. Scatters the vision-encoder output ``image_features`` into those
+       positions via ``ScatterND``.
+
+    This keeps ``T_total = len(input_ids)`` unchanged, so ORT-GenAI's
+    sequence-length tracking (KV cache, position IDs, attention mask) remains
+    consistent.  During token generation ``input_ids`` contains a single new
+    token (never an image placeholder), so ``NonZero`` returns an empty index
+    tensor and ``ScatterND`` is a no-op.
+
+    Graph (2-D ``input_ids [1, T]`` from ORT-GenAI's ``EmbeddingState``)::
+
+        text_embeds   = Gather(embed_tokens_weight, input_ids)  # [1, T, H]
+        text_2d       = Squeeze(text_embeds, [0])               # [T, H]
+        flat_ids      = Squeeze(input_ids, [0])                 # [T]
+        is_img        = Equal(flat_ids, image_token_id_const)   # [T] bool
+        img_pos       = NonZero(is_img)                         # [1, N]
+        img_pos_idx   = Transpose(img_pos, [1, 0])              # [N, 1]
+        scattered_2d  = ScatterND(text_2d, img_pos_idx,
+                                  image_features)               # [T, H]
+        inputs_embeds = Unsqueeze(scattered_2d, [0])            # [1, T, H]
+    """
+
+    FILENAME = "embedding.onnx"
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.filename = self.FILENAME
+        self.image_token_id = extra_options["image_token_id"]
+
+    # ------------------------------------------------------------------
+
+    def _load_hf_model(self, input_path):
+        from transformers import Mistral3ForConditionalGeneration
+
+        src = input_path if os.path.isdir(input_path) else self.model_name_or_path
+        extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": self.cache_dir}
+        return Mistral3ForConditionalGeneration.from_pretrained(src, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
+
+    def make_model(self, input_path):
+        """Load HF weights and build the embedding ONNX graph."""
+        hf_model = self._load_hf_model(input_path)
+        hf_model.eval()
+        embed_weight = hf_model.model.language_model.embed_tokens.weight.detach().float().numpy()
+
+        # Initialisers
+        self.make_initializer(embed_weight, name="embed_tokens_weight")
+        self.make_initializer(np.array(self.image_token_id, dtype=np.int64), name="image_token_id_const")
+        self.make_initializer(np.array([0], dtype=np.int64), name="squeeze_batch_axes")
+
+        # Graph inputs (dynamic shapes).
+        # ORT-GenAI passes input_ids as 2D [batch, seq_len].
+        self.graph.inputs.append(self.make_value("input_ids", ir.DataType.INT64, shape=[None, None]))
+        self.graph.inputs.append(self.make_value("image_features", ir.DataType.FLOAT, shape=[None, self.hidden_size]))
+
+        # Nodes:
+        # 1. Embed all tokens: input_ids [1, T] -> text_embeds [1, T, H]
+        self.make_node("Gather", inputs=["embed_tokens_weight", "input_ids"], outputs=["text_embeds"], name="/embed/Gather", axis=0)
+        # 2. Squeeze batch dim for easier indexing: [1, T, H] → [T, H]
+        self.make_node("Squeeze", inputs=["text_embeds", "squeeze_batch_axes"], outputs=["text_2d"], name="/embed/Squeeze_3d")
+        # 3. Flatten input_ids: [1, T] → [T]
+        self.make_node("Squeeze", inputs=["input_ids", "squeeze_batch_axes"], outputs=["flat_ids"], name="/embed/Squeeze_ids")
+        # 4. Boolean mask where tokens are image placeholders: [T] bool
+        self.make_node("Equal", inputs=["flat_ids", "image_token_id_const"], outputs=["is_image"], name="/embed/Equal")
+        # 5. Positions of image placeholders: [1, N] int64
+        self.make_node("NonZero", inputs=["is_image"], outputs=["img_pos"], name="/embed/NonZero")
+        # 6. Transpose to [N, 1] for ScatterND
+        self.make_node("Transpose", inputs=["img_pos"], outputs=["img_pos_idx"], name="/embed/Transpose", perm=[1, 0])
+        # 7. Scatter image_features into text embeddings at placeholder positions
+        self.make_node("ScatterND", inputs=["text_2d", "img_pos_idx", "image_features"], outputs=["scattered_2d"], name="/embed/ScatterND")
+        # 8. Re-add batch dimension: [T, H] → [1, T, H]
+        self.make_node("Unsqueeze", inputs=["scattered_2d", "squeeze_batch_axes"], outputs=["inputs_embeds"], name="/embed/Unsqueeze")
+
+        # Graph output
+        self.graph.outputs.append(self.make_value("inputs_embeds", ir.DataType.FLOAT, shape=[1, None, self.hidden_size]))
+
+        self.graph.sort()
+
+
 class Ministral3ConditionalGenerationModel(Model):
-    """Orchestrates exporting both the vision encoder and the text decoder for
-    ``Mistral3ForConditionalGeneration`` (Ministral-3-3B-Instruct-2512).
+    """Orchestrates exporting the vision encoder, embedding model, and text
+    decoder for ``Mistral3ForConditionalGeneration`` (Ministral-3-3B-Instruct).
 
     The exported artifacts are:
 
-    * ``vision_encoder.onnx`` - Pixtral vision tower + multimodal projector
-      (one fixed-resolution image in, projected embeddings out).
-    * ``model.onnx`` - Mistral text decoder with ``exclude_embeds=True``
-      (takes ``inputs_embeds`` from the vision encoder, outputs logits + KV cache).
-    * ``genai_config.json`` - extended with a ``vision_encoder`` section.
+    * ``vision_encoder.onnx`` - Pixtral vision tower + multimodal projector.
+    * ``embedding.onnx`` - token-embedding table + image-feature prepend.
+    * ``model.onnx`` - Mistral text decoder (``inputs_embeds`` → logits).
+    * ``genai_config.json`` - ``phi3v``-type VLM config understood by
+      ``onnxruntime-genai ≥ 0.12``.
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # --- Vision encoder ---
         self.vision_encoder = Ministral3VisionEncoderModel(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # --- Text decoder ---
-        # Flatten text_config attributes onto the top-level config so that the
-        # existing Ministral3TextModel constructor finds them (hidden_size, etc.).
+        # --- Embedding model ---
+        # Flatten text_config attributes onto the top-level config so that
+        # Model.__init__ (inside Ministral3EmbeddingModel) finds hidden_size etc.
         text_obj_config = copy.deepcopy(config)
         text_config = config.text_config
         for key in text_config:
@@ -636,6 +727,13 @@ class Ministral3ConditionalGenerationModel(Model):
             ):
                 setattr(text_obj_config, key, getattr(text_config, key))
 
+        embed_extra_options = dict(extra_options)
+        embed_extra_options["image_token_id"] = config.image_token_id
+
+        # The embedding table is always stored as float32.
+        self.embedding_model = Ministral3EmbeddingModel(text_obj_config, io_dtype, ir.DataType.FLOAT, ep, cache_dir, embed_extra_options)
+
+        # --- Text decoder (same flattened config, exclude_embeds=True) ---
         text_extra_options = dict(extra_options)
         text_extra_options["exclude_embeds"] = True
 
@@ -648,42 +746,42 @@ class Ministral3ConditionalGenerationModel(Model):
     def make_model(self, input_path):
         print("Building vision encoder (Pixtral + multimodal projector) for Mistral3ForConditionalGeneration...")
         self.vision_encoder.make_model(input_path)
+        print("Building embedding model for Mistral3ForConditionalGeneration...")
+        self.embedding_model.make_model(input_path)
         print("Building text decoder for Mistral3ForConditionalGeneration...")
         self.text_model.make_model(input_path)
 
     def save_model(self, out_dir):
         self.vision_encoder.save_model(out_dir)
+        self.embedding_model.save_model(out_dir)
         self.text_model.save_model(out_dir)
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Let the text model write genai_config.json first, then extend it
-        # with a vision_encoder section.
+        # with vision + embedding sections for the phi3v VLM pipeline.
         self.text_model.make_genai_config(model_name_or_path, extra_kwargs, out_dir)
 
         config_path = os.path.join(out_dir, "genai_config.json")
         with open(config_path) as f:
             genai_config = json.load(f)
 
-        vision_cfg = self.vision_encoder.vision_config
-        text_hidden_size = self.text_model.hidden_size
-        image_size = vision_cfg.image_size
-        patch_size = vision_cfg.patch_size
         spatial_merge_size = self.vision_encoder.config.spatial_merge_size
-        num_patches_per_side = image_size // patch_size
-        num_merged_patches = (num_patches_per_side**2) // (spatial_merge_size**2)
+
+        # onnxruntime-genai uses "phi3v" as the model type for the
+        # Vision + Embedding + Decoder multimodal pipeline.
+        genai_config["model"]["type"] = "phi3v"
 
         genai_config["model"]["vision"] = {
             "filename": self.vision_encoder.filename,
-            "hidden_size": vision_cfg.hidden_size,
-            "image_size": image_size,
-            "num_channels": vision_cfg.num_channels,
-            "num_hidden_layers": vision_cfg.num_hidden_layers,
-            "num_merged_patches": num_merged_patches,
-            "patch_size": patch_size,
             "spatial_merge_size": spatial_merge_size,
-            "text_hidden_size": text_hidden_size,
             "inputs": {"pixel_values": "pixel_values"},
             "outputs": {"image_features": "image_features"},
+        }
+
+        genai_config["model"]["embedding"] = {
+            "filename": self.embedding_model.filename,
+            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
         }
 
         with open(config_path, "w") as f:

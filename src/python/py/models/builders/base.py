@@ -501,7 +501,11 @@ class Model:
             self.rope_attrs["mrope"] = {
                 "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
-
+            # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
+            # instead of as a top-level config attribute. Override the default theta
+            # if rope_scaling provides one.
+            if "rope_theta" in config.rope_scaling:
+                self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
             # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
             # instead of as a top-level config attribute. Override the default theta
             # if rope_scaling provides one.
@@ -511,6 +515,7 @@ class Model:
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
+            ("cpu", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.BFLOAT16),
             ("dml", ir.DataType.FLOAT16),
@@ -1805,8 +1810,10 @@ class Model:
         Otherwise, compute from the scaling factor using the policy-specific formula.
         """
         if config_mscale > 0 and config_mscale_all_dim > 0:
+
             def _get_mscale(scale, ms):
                 return (0.1 * ms * np.log(scale) + 1.0) if scale > 1 else 1.0
+
             return float(_get_mscale(mscale, config_mscale) / _get_mscale(mscale, config_mscale_all_dim))
         if config_mscale > 0:
             return float(config_mscale)

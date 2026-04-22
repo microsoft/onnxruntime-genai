@@ -296,19 +296,21 @@ class TestMinistral3(ModelBuilderTestCase):
         text_onnx_path = os.path.join(output_dir, "model.onnx")
         self.assertExists(text_onnx_path)
 
-        # --- Verify genai_config.json has vision_encoder section ---
+        # --- Verify genai_config.json has vision + embedding sections ---
         import json
 
         genai_config_path = os.path.join(output_dir, "genai_config.json")
         self.assertExists(genai_config_path)
         with open(genai_config_path) as f:
             genai_config = json.load(f)
+        self.assertEqual(genai_config["model"]["type"], "phi3v")
         self.assertIn("vision", genai_config["model"])
         ve_cfg = genai_config["model"]["vision"]
         self.assertEqual(ve_cfg["filename"], "vision_encoder.onnx")
-        self.assertEqual(ve_cfg["image_size"], image_size)
-        self.assertEqual(ve_cfg["patch_size"], patch_size)
         self.assertEqual(ve_cfg["spatial_merge_size"], spatial_merge_size)
+        self.assertIn("embedding", genai_config["model"])
+        em_cfg = genai_config["model"]["embedding"]
+        self.assertEqual(em_cfg["filename"], "embedding.onnx")
 
         # --- Run vision encoder forward pass ---
         num_patches_per_side = image_size // patch_size
@@ -655,20 +657,22 @@ class TestMinistral3(ModelBuilderTestCase):
         # pt_tokens = [img_tok*N, text_ids..., gen1, gen2, ...]
         pt_generated = pt_tokens[hf_prompt.shape[1] :]
 
-        # --- genai: same pixel_values + text_ids → multiple generation steps ---
-        # genai vision flow: set_inputs(pixel_values) lets the runtime call the
-        # vision encoder; append_tokens provides only the text token IDs.
-        # Internally the runtime prepends the image features to the text
-        # embeddings, matching the HF merged sequence.
+        # --- genai: same pixel_values + full prompt → multiple generation steps ---
+        # phi3v-style flow: the full prompt (image placeholder tokens + text tokens)
+        # is passed via append_tokens; set_inputs provides pixel_values and
+        # num_image_tokens so the runtime calls the vision encoder.
+        # The embedding model replaces the image placeholder positions with actual
+        # image features from the vision encoder, matching the HF merged sequence.
         og_model = og.Model(output_dir)
-        text_prompt_ids = np.array(text_ids, dtype=np.int64)
+        full_prompt_ids = np.array([image_token_id] * n_merged_patches + text_ids, dtype=np.int64)
         params = og.GeneratorParams(og_model)
         params.set_search_options(do_sample=False, max_length=n_merged_patches + len(text_ids) + max_new_tokens, temperature=1.0, top_k=1)
         generator = og.Generator(og_model, params)
         named_tensors = og.NamedTensors()
         named_tensors["pixel_values"] = cross_image
+        named_tensors["num_image_tokens"] = np.array([n_merged_patches], dtype=np.int64)
         generator.set_inputs(named_tensors)
-        generator.append_tokens(text_prompt_ids)
+        generator.append_tokens(full_prompt_ids)
         og_generated = []
         while not generator.is_done():
             generator.generate_next_token()
@@ -685,7 +689,14 @@ class TestMinistral3(ModelBuilderTestCase):
         )
         diff = self.first_token_diff(pt_generated, og_generated)
         self.log_results({**log_data, **diff})
-        self.assertEqual(pt_generated, og_generated)
+        # For fp32, ORT and HuggingFace produce identical tokens.
+        # For lossy precisions (int4, …) the embedding table and linear layers
+        # are quantised, so token mismatches are expected; just verify that the
+        # correct number of tokens was generated without error.
+        if precision == "fp32":
+            self.assertEqual(pt_generated, og_generated)
+        else:
+            self.assertEqual(len(og_generated), max_new_tokens)
 
     @hide_stdout()
     def test_ministral3_vision_encoder_int4_cpu_random_weights(self):
@@ -798,6 +809,120 @@ class TestMinistral3(ModelBuilderTestCase):
         self.assertIsNotNone(vision_outputs[0])
         self.assertEqual(vision_outputs[0].shape[0], expected_merged_patches)
         self.assertEqual(vision_outputs[0].shape[1], text_config.hidden_size)
+
+    @hide_stdout()
+    def test_ministral3_vision_encoder_output_matches_pytorch(self):
+        """Vision encoder ONNX output should match the PyTorch reference numerically.
+
+        Creates a tiny randomly-initialised ``Mistral3ForConditionalGeneration``
+        with a fixed seed, exports only the vision encoder, then runs both the
+        PyTorch vision tower + projector and the ONNX model on the same pixel
+        values.  Asserts that the outputs agree to within fp32 tolerance
+        (``atol=1e-4``).
+
+        This test specifically guards the ``_build_patch_embedding`` and
+        ``_build_projector`` implementations against regressions in the
+        reshape / transpose ordering.
+        """
+        import torch
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import (
+            Ministral3Config,
+            Mistral3Config,
+            Mistral3ForConditionalGeneration,
+            PixtralVisionConfig,
+            PreTrainedTokenizerFast,
+        )
+
+        from models.builder import create_model
+
+        num_hidden_layers = 1
+        image_size = 56
+        patch_size = 14
+        spatial_merge_size = 2
+
+        vision_config = PixtralVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            head_dim=16,
+            image_size=image_size,
+            patch_size=patch_size,
+        )
+        text_config = Ministral3Config(
+            bos_token_id=1,
+            eos_token_id=2,
+            hidden_act="silu",
+            hidden_size=512,
+            intermediate_size=1376,
+            max_position_embeddings=1024,
+            num_attention_heads=8,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=4,
+            head_dim=64,
+            rms_norm_eps=1e-05,
+            sliding_window=None,
+            vocab_size=32000,
+        )
+        config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
+        config.architectures = ["Mistral3ForConditionalGeneration"]
+
+        basename = "test_ministral3_vision_encoder_output_matches_pytorch"
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        torch.manual_seed(0)
+        model = Mistral3ForConditionalGeneration(config)
+        model.eval()
+        model.save_pretrained(model_dir)
+
+        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>")), bos_token="<s>", eos_token="</s>", unk_token="<unk>"
+        )
+        tokenizer.save_pretrained(model_dir)
+
+        create_model(
+            model_name=MINISTRAL3_MODEL_NAME,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision="fp32",
+            execution_provider="cpu",
+            cache_dir=cache_dir,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+        vision_onnx_path = os.path.join(output_dir, "vision_encoder.onnx")
+        self.assertExists(vision_onnx_path)
+
+        # --- Reference: PyTorch vision tower + projector ---
+        # Use model.model.get_image_features(), which is the same call path used
+        # by Mistral3ForConditionalGeneration.forward().  It squeezes the batch
+        # dimension before the projector, matching the ONNX encoder's behaviour.
+        torch.manual_seed(1)
+        pixel_values = torch.randn(1, vision_config.num_channels, image_size, image_size)
+        image_sizes = torch.tensor([[image_size, image_size]])
+
+        with torch.no_grad():
+            hf_out = model.model.get_image_features(pixel_values, image_sizes, vision_feature_layer=config.vision_feature_layer)
+        # get_image_features returns a BaseModelOutputWithPooling whose
+        # pooler_output is a tuple of per-image feature tensors.
+        pt_image_features = hf_out.pooler_output[0]  # [n_merged, text_hidden]
+        pt_np = pt_image_features.numpy().astype(np.float32)
+
+        # --- ONNX vision encoder ---
+        vision_sess = self.check_ort(vision_onnx_path)
+        ort_out = vision_sess.run(None, {"pixel_values": pixel_values.numpy().astype(np.float32)})[0]
+
+        # Shapes should match
+        self.assertEqual(ort_out.shape, pt_np.shape)
+
+        # Numerical values should match to within fp32 tolerance
+        np.testing.assert_allclose(
+            ort_out, pt_np, atol=1e-4, rtol=1e-3, err_msg="Vision encoder ONNX output does not match PyTorch reference"
+        )
 
     def test_dequantize_fp8_weights_no_op_when_no_fp8(self):
         """_dequantize_fp8_weights leaves normal float32 weights unchanged."""
