@@ -3,7 +3,6 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-import os
 import unittest
 
 from model_builder_test_case import ModelBuilderTestCase, hide_stdout, requires_cuda
