@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 
 namespace Generators {
