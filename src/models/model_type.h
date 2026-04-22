@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 // Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved.
 // --------------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
+// --------------------------------------------------------------------------
 
 #pragma once
 
