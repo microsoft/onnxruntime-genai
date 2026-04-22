@@ -26,6 +26,8 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
 
+from .local_functions import LocalFunctionsMixin
+
 
 def parse_hf_token(hf_token):
     """
@@ -44,7 +46,7 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
-class Model:
+class Model(LocalFunctionsMixin):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
@@ -885,6 +887,12 @@ class Model:
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
+        # When a com.microsoft contrib op with a local-function fallback is added, register it.
+        if domain == "com.microsoft" and op_type == "CausalConvWithState":
+            # inputs[3] is past_conv_state with shape [B, C, K-1]; K = shape[-1] + 1.
+            past_val = self.values.get(inputs[3]) if len(inputs) >= 4 else None
+            if past_val is not None and past_val.shape is not None and len(past_val.shape) >= 1:
+                self._register_causal_conv_local_function(int(past_val.shape[-1]) + 1)
 
     def make_value(
         self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None

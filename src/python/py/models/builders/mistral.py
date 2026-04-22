@@ -654,7 +654,13 @@ class Ministral3EmbeddingModel(Model):
         # Initialisers
         self.make_initializer(embed_weight, name="embed_tokens_weight")
         self.make_initializer(np.array(self.image_token_id, dtype=np.int64), name="image_token_id_const")
-        self.make_initializer(np.array([0], dtype=np.int64), name="squeeze_batch_axes")
+        # Use a Constant node (always inline) rather than an initializer so that
+        # shape inference can read the axes value even when external data is used.
+        _squeeze_axes = ir.Tensor(np.array([0], dtype=np.int64), name="squeeze_batch_axes")
+        self.make_node(
+            "Constant", inputs=[], outputs=["squeeze_batch_axes"], name="/embed/squeeze_batch_axes/Constant", value=_squeeze_axes
+        )
+        self.make_value("squeeze_batch_axes", ir.DataType.INT64, shape=[1])
 
         # Graph inputs (dynamic shapes).
         # ORT-GenAI passes input_ids as 2D [batch, seq_len].
