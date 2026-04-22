@@ -25,6 +25,8 @@ def run(args):
     config.clear_providers()  # CPU only
     model = og.Model(config)
     processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
+    stream = tokenizer.create_stream()
 
     audio_paths = [p.strip() for p in args.audio.split(",")]
     for p in audio_paths:
@@ -53,25 +55,22 @@ def run(args):
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
 
+    # Stream tokens as they are generated
+    print("\nTranscription: ", end="", flush=True)
     while not generator.is_done():
         generator.generate_next_token()
+        token = generator.get_sequence(0)[-1]
+        text = stream.decode(token)
+        print(text, end="", flush=True)
+    print()
 
     elapsed = time.time() - t0
 
     total_audio_dur = 0.0
     for i in range(batch_size):
-        tokens = generator.get_sequence(i)
-        transcription = processor.decode(tokens)
-
-        # Get audio duration from WAV header
         with wave.open(audio_paths[i], 'rb') as wf:
             audio_dur = wf.getnframes() / wf.getframerate()
         total_audio_dur += audio_dur
-        rtfx = audio_dur / max(elapsed, 1e-9)
-
-        print(f"\n[{audio_paths[i]}]")
-        print(f"  Duration: {audio_dur:.2f}s")
-        print(f"  Transcription: {transcription}")
 
     print(f"\nElapsed: {elapsed:.2f}s | Audio: {total_audio_dur:.2f}s | RTFx: {total_audio_dur / max(elapsed, 1e-9):.2f}")
 
