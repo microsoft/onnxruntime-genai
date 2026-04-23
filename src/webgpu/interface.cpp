@@ -195,10 +195,7 @@ struct InterfaceImpl : DeviceInterface {
 
   void Synchronize() override {}  // Nothing to do?
 
-  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
-    (void)next_mask_data;
-    (void)new_kv_length;
-    (void)max_length;
+  bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (batch_beam_size != 1 || !update_only) {
       return false;  // Fall back to CPU for multi-beam or non-static mask
     }
