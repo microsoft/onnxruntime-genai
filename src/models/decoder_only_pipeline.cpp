@@ -347,7 +347,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
     // Notify derived classes that this pipeline stage has completed.
     // This allows e.g. Qwen VL to inject vision embeddings after the embeddings stage.
-    OnStageComplete(pipeline_state->id_, next_tokens);
+    OnStageComplete(pipeline_state->id_);
   }
 }
 
