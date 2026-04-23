@@ -756,7 +756,7 @@ class TestMinistral3(ModelBuilderTestCase):
             PreTrainedTokenizerFast,
         )
 
-        from modelbuilder.builder import create_model
+        from models.builder import create_model
 
         # --- Tiny model configuration (same geometry as sibling tests) ---
         num_hidden_layers = 1
