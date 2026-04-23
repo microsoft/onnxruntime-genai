@@ -5,7 +5,7 @@
 # --------------------------------------------------------------------------
 """ONNX local-function fallbacks for ``com.microsoft`` contrib ops.
 
-When ``onnxruntime < 1.25`` is installed the native kernel for some contrib
+When ``onnxruntime < 1.26`` is installed the native kernel for some contrib
 ops may not be registered.  :class:`LocalFunctionsMixin` provides class
 methods that build ONNX local-function bodies using only standard opset-21
 primitives, and registers them into the ONNX model whenever the installed ORT
@@ -68,7 +68,7 @@ class LocalFunctionsMixin:
         """Build an ONNX local function that implements ``com.microsoft:CausalConvWithState``.
 
         The function body uses only standard ONNX opset-21 primitives so that
-        runtimes without the native ``CausalConvWithState`` kernel (e.g. ORT < 1.25)
+        runtimes without the native ``CausalConvWithState`` kernel (e.g. ORT < 1.26)
         can fall back to this definition automatically.
 
         The convolution kernel width *K* is unrolled at function-build time.
@@ -219,7 +219,7 @@ class LocalFunctionsMixin:
         return ir.Function("com.microsoft", "CausalConvWithState", "", graph=body, attributes={})
 
     def _register_causal_conv_local_function(self, K: int) -> None:
-        """Register the ``CausalConvWithState`` local function if ORT < 1.25.
+        """Register the ``CausalConvWithState`` local function if ORT < 1.26.
 
         The function is added to ``self.model.functions`` at most once per
         model (guarded by the function key lookup).
@@ -227,7 +227,7 @@ class LocalFunctionsMixin:
         Args:
             K: Convolution kernel width.  Derived from ``present_conv_shape[-1] + 1``.
         """
-        if self._ort_version() < (1, 25):
+        if self._ort_version() < (1, 26):
             func_key = ("com.microsoft", "CausalConvWithState", "")
             if func_key not in self.model.functions:
                 func = self._make_causal_conv_local_function(K, self.io_dtype)
