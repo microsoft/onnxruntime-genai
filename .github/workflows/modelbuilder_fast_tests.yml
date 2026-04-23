@@ -22,7 +22,7 @@ jobs:
       matrix:
         os: ["ubuntu-latest"]
         python-version: ["3.13"]
-        transformers-version: ["5.5"]
+        transformers-version: ["5.6"]
         torch-version: ["2.11"]
     steps:
       - uses: actions/checkout@v4
