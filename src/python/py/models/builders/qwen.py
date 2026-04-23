@@ -1020,14 +1020,14 @@ class Qwen35TextModel(Model):
         # Linear attention recurrence accumulates errors across the full sequence,
         # unlike softmax attention which normalizes per-step.
         #
-        # Control via extra_options quant_mode or QWEN35_QUANT_MODE env var:
+        # Control via extra_options quant_mode:
         #   "default"  - INT8 for all linear attn + MLP layers (original, most accurate)
         #   "hybrid"   - INT8 for linear attn projections only, INT4 for MLPs (balanced)
         #   "int4"     - INT4 for everything (fastest, may degrade quality)
-        import os
-        quant_mode = extra_options.get("quant_mode", "") or os.environ.get("QWEN35_QUANT_MODE", "")
-        if not quant_mode:
-            quant_mode = "default"
+        quant_mode = extra_options.get("quant_mode", "").strip().lower() or "default"
+        valid_modes = {"default", "hybrid", "int4"}
+        if quant_mode not in valid_modes:
+            raise ValueError(f"quant_mode must be one of {', '.join(sorted(valid_modes))}, got '{quant_mode}'")
 
         int8_nodes = {}
         if quant_mode == "default":
