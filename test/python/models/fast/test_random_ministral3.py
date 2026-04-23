@@ -662,13 +662,16 @@ class TestMinistral3(ModelBuilderTestCase):
         # num_image_tokens so the runtime calls the vision encoder.
         # The embedding model replaces the image placeholder positions with actual
         # image features from the vision encoder, matching the HF merged sequence.
+        # The vision encoder dtype follows the model precision: fp16 models
+        # expect float16 pixel_values; fp32 and int4 models expect float32.
+        genai_pixel_dtype = np.float16 if precision == "fp16" else np.float32
         og_model = og.Model(output_dir)
         full_prompt_ids = np.array([image_token_id] * n_merged_patches + text_ids, dtype=np.int64)
         params = og.GeneratorParams(og_model)
         params.set_search_options(do_sample=False, max_length=n_merged_patches + len(text_ids) + max_new_tokens, temperature=1.0, top_k=1)
         generator = og.Generator(og_model, params)
         named_tensors = og.NamedTensors()
-        named_tensors["pixel_values"] = cross_image
+        named_tensors["pixel_values"] = cross_image.astype(genai_pixel_dtype)
         named_tensors["num_image_tokens"] = np.array([n_merged_patches], dtype=np.int64)
         generator.set_inputs(named_tensors)
         generator.append_tokens(full_prompt_ids)
@@ -692,6 +695,235 @@ class TestMinistral3(ModelBuilderTestCase):
         # For lossy precisions (int4, …) the embedding table and linear layers
         # are quantised, so token mismatches are expected; just verify that the
         # correct number of tokens was generated without error.
+        if precision == "fp32":
+            self.assertEqual(pt_generated, og_generated)
+        else:
+            self.assertEqual(len(og_generated), max_new_tokens)
+
+    @hide_stdout()
+    def test_ministral3_apply_chat_template_fp32_cpu_genai(self):
+        self.common_ministral3_apply_chat_template_cpu_genai("fp32")
+
+    @hide_stdout()
+    def test_ministral3_apply_chat_template_fp16_cpu_genai(self):
+        self.common_ministral3_apply_chat_template_cpu_genai("fp16")
+
+    @hide_stdout()
+    def test_ministral3_apply_chat_template_int4_cpu_genai(self):
+        self.common_ministral3_apply_chat_template_cpu_genai("int4")
+
+    def common_ministral3_apply_chat_template_cpu_genai(self, precision):
+        """
+        Test that ``apply_chat_template`` with text and images produces the
+        same generation from HuggingFace and ``onnxruntime-genai``.
+
+        Flow:
+
+        1. Build a tiny randomly-initialised ``Mistral3ForConditionalGeneration``
+           and export both ``vision_encoder.onnx`` and ``model.onnx``.
+        2. Create a ``PreTrainedTokenizerFast`` whose vocabulary maps ``[IMG]``
+           to ``config.image_token_id`` (10).  Set a minimal Jinja2
+           ``chat_template`` that places ``[IMG]`` for each image content item
+           and the raw text for text items.
+        3. Apply the chat template to a conversation with one image and a
+           two-token text phrase:
+           ``tokenizer.apply_chat_template(messages, tokenize=False)``
+           → ``"[IMG] hello world"``.
+        4. Tokenize the template output (``add_special_tokens=False``) to get
+           compact token IDs, then **expand** every ``[IMG]`` (ID 10) into
+           ``n_merged_patches`` copies, mirroring what the pixtral processor
+           would do.
+        5. Run HF ``model.generate()`` with the expanded prompt,
+           ``pixel_values``, and ``image_sizes``.
+        6. Run ``onnxruntime-genai`` with the same inputs.
+        7. Assert that both backends produce identical tokens (fp32) or the
+           correct number of tokens (lossy precisions such as int4).
+
+        Requires ``onnxruntime-genai`` with ``vision_encoder`` support in
+        ``genai_config.json``; run with ``LONGTEST=1``.
+        """
+        import torch
+        import onnxruntime_genai as og
+
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import WhitespaceSplit
+        from transformers import (
+            Ministral3Config,
+            Mistral3Config,
+            Mistral3ForConditionalGeneration,
+            PixtralVisionConfig,
+            PreTrainedTokenizerFast,
+        )
+
+        from modelbuilder.builder import create_model
+
+        # --- Tiny model configuration (same geometry as sibling tests) ---
+        num_hidden_layers = 1
+        image_size = 56
+        patch_size = 14
+        spatial_merge_size = 2
+
+        vision_config = PixtralVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            head_dim=16,
+            image_size=image_size,
+            patch_size=patch_size,
+        )
+        text_config = Ministral3Config(
+            bos_token_id=1,
+            eos_token_id=2,
+            hidden_act="silu",
+            hidden_size=512,
+            intermediate_size=1376,
+            max_position_embeddings=1024,
+            num_attention_heads=8,
+            num_hidden_layers=num_hidden_layers,
+            num_key_value_heads=4,
+            head_dim=64,
+            rms_norm_eps=1e-05,
+            sliding_window=None,
+            vocab_size=32000,
+        )
+        config = Mistral3Config(text_config=text_config, vision_config=vision_config, spatial_merge_size=spatial_merge_size)
+        config.architectures = ["Mistral3ForConditionalGeneration"]
+
+        basename = f"test_ministral3_apply_chat_template_{precision}_cpu_genai"
+        model_dir = self.get_model_dir(basename)
+        output_dir, cache_dir = self.get_dirs(basename)
+
+        torch.manual_seed(0)
+        model = Mistral3ForConditionalGeneration(config)
+        model.eval()
+        model.save_pretrained(model_dir)
+
+        # Build a tokenizer whose vocabulary maps [IMG] → config.image_token_id
+        # (10) so that apply_chat_template → tokenize → expand mirrors the
+        # pixtral-processor flow used in production.
+        # A WhitespaceSplit pre-tokenizer is required so that the WordLevel model
+        # splits "[IMG] hello world" into ["[IMG]", "hello", "world"] before
+        # doing vocabulary lookups; without it the entire string is treated as
+        # a single unknown token (ID 0).  WhitespaceSplit (not Whitespace) must
+        # be used because Whitespace also splits on punctuation, which would
+        # break "[IMG]" into ["[", "IMG", "]"], none of which map to the image
+        # token ID.
+        image_token_id = config.image_token_id  # 10 for Mistral3
+        vocab = {"<unk>": 0, "<s>": 1, "</s>": 2, "[IMG]": image_token_id, "hello": 100, "world": 101}
+        tokenizer_object = Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>"))
+        tokenizer_object.pre_tokenizer = WhitespaceSplit()
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer_object, bos_token="<s>", eos_token="</s>", unk_token="<unk>")
+
+        # Minimal Jinja2 chat template: emits "[IMG] " for each image content
+        # item and the raw text for text items.  Space-separated tokens allow
+        # the WordLevel tokenizer to split correctly on whitespace.
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'user' %}"
+            "{% for item in message['content'] %}"
+            "{% if item['type'] == 'image' %}[IMG] "
+            "{% elif item['type'] == 'text' %}{{ item['text'] }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% endif %}"
+            "{% endfor %}"
+        )
+        tokenizer.save_pretrained(model_dir)
+
+        create_model(
+            model_name=MINISTRAL3_MODEL_NAME,
+            input_path=model_dir,
+            output_dir=output_dir,
+            precision=precision,
+            execution_provider="cpu",
+            cache_dir=cache_dir,
+            num_hidden_layers=num_hidden_layers,
+        )
+
+        # --- Draw a dummy cross image (white cross on black background) ---
+        img_plane = np.zeros((image_size, image_size), dtype=np.float32)
+        bar = slice(image_size // 3, 2 * image_size // 3)
+        img_plane[bar, :] = 1.0  # horizontal bar
+        img_plane[:, bar] = 1.0  # vertical bar
+        # shape: [1, num_channels, H, W]
+        cross_image = np.stack([img_plane] * vision_config.num_channels, axis=0)[np.newaxis]
+
+        # 56×56 / (patch_size=14 * spatial_merge_size=2)² → 4 merged patches
+        n_merged_patches = (image_size // patch_size) ** 2 // spatial_merge_size**2
+
+        # --- apply_chat_template: conversation with one image + two text tokens ---
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "hello world"}]}]
+        # tokenize=False → "[IMG] hello world" (single [IMG] marker + text)
+        chat_text = tokenizer.apply_chat_template(messages, tokenize=False)
+
+        # Tokenize without adding BOS/EOS (the template owns the structure).
+        # WordLevel splits on whitespace: ["[IMG]", "hello", "world"] → [10, 100, 101]
+        compact_ids = tokenizer.encode(chat_text, add_special_tokens=False)
+
+        # Expand every [IMG] token (ID == image_token_id) to n_merged_patches
+        # copies, mirroring the pixtral processor expansion that the runtime
+        # expects before calling vision_encoder.
+        expanded_ids = []
+        for tid in compact_ids:
+            if tid == image_token_id:
+                expanded_ids.extend([image_token_id] * n_merged_patches)
+            else:
+                expanded_ids.append(tid)
+
+        # --- HF reference: generate with expanded prompt + pixel_values ---
+        hf_prompt = torch.tensor([expanded_ids])
+        image_sizes = torch.tensor([[image_size, image_size]])
+        cross_pixel_values = torch.tensor(cross_image)
+
+        max_new_tokens = 5
+        with torch.no_grad():
+            pt_output = model.generate(
+                input_ids=hf_prompt,
+                pixel_values=cross_pixel_values,
+                image_sizes=image_sizes,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=config.text_config.eos_token_id,
+            )
+        pt_generated = pt_output[0].tolist()[hf_prompt.shape[1] :]
+
+        # --- genai: same pixel_values + expanded prompt ---
+        # The vision encoder dtype follows the model precision: fp16 models
+        # expect float16 pixel_values; fp32 and int4 models expect float32.
+        genai_pixel_dtype = np.float16 if precision == "fp16" else np.float32
+        genai_pixel_values = cross_image.astype(genai_pixel_dtype)
+
+        og_model = og.Model(output_dir)
+        full_prompt_ids = np.array(expanded_ids, dtype=np.int64)
+        params = og.GeneratorParams(og_model)
+        params.set_search_options(do_sample=False, max_length=len(expanded_ids) + max_new_tokens, temperature=1.0, top_k=1)
+        generator = og.Generator(og_model, params)
+        named_tensors = og.NamedTensors()
+        named_tensors["pixel_values"] = genai_pixel_values
+        named_tensors["num_image_tokens"] = np.array([n_merged_patches], dtype=np.int64)
+        generator.set_inputs(named_tensors)
+        generator.append_tokens(full_prompt_ids)
+        og_generated = []
+        while not generator.is_done():
+            generator.generate_next_token()
+            og_generated.append(int(generator.get_next_tokens()[0]))
+
+        log_data = dict(
+            precision=precision,
+            model_id=MINISTRAL3_MODEL_NAME,
+            experiment="genai_vision_generate_chat_template",
+            provider="cpu",
+            test=basename,
+            input_type="vision+text",
+            kind="fast",
+        )
+        diff = self.first_token_diff(pt_generated, og_generated)
+        self.log_results({**log_data, **diff})
+        # For fp32 the computation is exact and both backends must agree.
+        # For lossy precisions (int4, …) token values may differ; verify only
+        # that the correct number of tokens was generated without error.
         if precision == "fp32":
             self.assertEqual(pt_generated, og_generated)
         else:

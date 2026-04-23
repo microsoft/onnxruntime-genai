@@ -630,10 +630,10 @@ class Ministral3EmbeddingModel(Model):
     """
 
     FILENAME = "embedding.onnx"
-    filename = FILENAME
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.filename = self.FILENAME
         self.image_token_id = extra_options["image_token_id"]
 
     # ------------------------------------------------------------------
@@ -665,28 +665,39 @@ class Ministral3EmbeddingModel(Model):
         # Graph inputs (dynamic shapes).
         # ORT-GenAI passes input_ids as 2D [batch, seq_len].
         self.graph.inputs.append(self.make_value("input_ids", ir.DataType.INT64, shape=[None, None]))
-        self.graph.inputs.append(self.make_value("image_features", ir.DataType.FLOAT, shape=[None, self.hidden_size]))
+        # image_features dtype follows io_dtype so that it matches the vision
+        # encoder output (float16 for fp16 models, float32 for fp32/int4).
+        self.graph.inputs.append(self.make_value("image_features", self.io_dtype, shape=[None, self.hidden_size]))
 
         # Nodes:
-        # 1. Embed all tokens: input_ids [1, T] -> text_embeds [1, T, H]
+        # 1. Embed all tokens: input_ids [1, T] -> text_embeds [1, T, H] (fp32, weights are float32)
         self.make_node("Gather", inputs=["embed_tokens_weight", "input_ids"], outputs=["text_embeds"], name="/embed/Gather", axis=0)
-        # 2. Squeeze batch dim for easier indexing: [1, T, H] → [T, H]
-        self.make_node("Squeeze", inputs=["text_embeds", "squeeze_batch_axes"], outputs=["text_2d"], name="/embed/Squeeze_3d")
-        # 3. Flatten input_ids: [1, T] → [T]
+        # 2. Squeeze batch dim for easier indexing: [1, T, H] → [T, H] (still fp32)
+        self.make_node("Squeeze", inputs=["text_embeds", "squeeze_batch_axes"], outputs=["text_2d_fp32"], name="/embed/Squeeze_3d")
+        # 3. Cast text embeddings from float32 to io_dtype so that ScatterND
+        #    receives tensors of the same dtype (for fp32/int4 this Cast is a
+        #    no-op that ORT optimises away at runtime).
+        self.make_cast("/embed/Cast_text_2d", "text_2d_fp32", self.io_dtype, [None, self.hidden_size])
+        # 4. Flatten input_ids: [1, T] → [T]
         self.make_node("Squeeze", inputs=["input_ids", "squeeze_batch_axes"], outputs=["flat_ids"], name="/embed/Squeeze_ids")
-        # 4. Boolean mask where tokens are image placeholders: [T] bool
+        # 5. Boolean mask where tokens are image placeholders: [T] bool
         self.make_node("Equal", inputs=["flat_ids", "image_token_id_const"], outputs=["is_image"], name="/embed/Equal")
-        # 5. Positions of image placeholders: [1, N] int64
+        # 6. Positions of image placeholders: [1, N] int64
         self.make_node("NonZero", inputs=["is_image"], outputs=["img_pos"], name="/embed/NonZero")
-        # 6. Transpose to [N, 1] for ScatterND
+        # 7. Transpose to [N, 1] for ScatterND
         self.make_node("Transpose", inputs=["img_pos"], outputs=["img_pos_idx"], name="/embed/Transpose", perm=[1, 0])
-        # 7. Scatter image_features into text embeddings at placeholder positions
-        self.make_node("ScatterND", inputs=["text_2d", "img_pos_idx", "image_features"], outputs=["scattered_2d"], name="/embed/ScatterND")
-        # 8. Re-add batch dimension: [T, H] → [1, T, H]
+        # 8. Scatter image_features into text embeddings at placeholder positions
+        self.make_node(
+            "ScatterND",
+            inputs=["/embed/Cast_text_2d/output_0", "img_pos_idx", "image_features"],
+            outputs=["scattered_2d"],
+            name="/embed/ScatterND",
+        )
+        # 9. Re-add batch dimension: [T, H] → [1, T, H]
         self.make_node("Unsqueeze", inputs=["scattered_2d", "squeeze_batch_axes"], outputs=["inputs_embeds"], name="/embed/Unsqueeze")
 
-        # Graph output
-        self.graph.outputs.append(self.make_value("inputs_embeds", ir.DataType.FLOAT, shape=[1, None, self.hidden_size]))
+        # Graph output — dtype matches io_dtype (float16 for fp16 models, float32 for fp32/int4)
+        self.graph.outputs.append(self.make_value("inputs_embeds", self.io_dtype, shape=[1, None, self.hidden_size]))
 
         self.graph.sort()
 
