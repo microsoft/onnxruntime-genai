@@ -15,8 +15,6 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from builder import VALID_QUANT_MODES
-
 from .base import Model
 
 
@@ -1027,8 +1025,8 @@ class Qwen35TextModel(Model):
         #   "hybrid"   - INT8 for linear attn projections only, INT4 for MLPs (balanced)
         #   "int4"     - INT4 for everything (fastest, may degrade quality)
         quant_mode = extra_options.get("quant_mode", "").strip().lower() or "default"
-        if quant_mode not in VALID_QUANT_MODES:
-            raise ValueError(f"quant_mode must be one of {', '.join(sorted(VALID_QUANT_MODES))}, got '{quant_mode}'")
+        if quant_mode not in ("default", "hybrid", "int4"):
+            raise ValueError(f"quant_mode must be one of default, hybrid, int4, got '{quant_mode}'")
 
         linear_attn_projs = ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj")
         mlp_projs = ("gate_proj", "up_proj", "down_proj")
