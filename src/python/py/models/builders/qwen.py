@@ -1021,32 +1021,25 @@ class Qwen35TextModel(Model):
         # unlike softmax attention which normalizes per-step.
         #
         # Control via extra_options quant_mode:
-        #   "default"  - INT8 for all linear attn + MLP layers (original, most accurate)
+        #   "default"  - INT8 for all linear attn + MLP layers (most accurate)
         #   "hybrid"   - INT8 for linear attn projections only, INT4 for MLPs (balanced)
         #   "int4"     - INT4 for everything (fastest, may degrade quality)
         quant_mode = extra_options.get("quant_mode", "").strip().lower() or "default"
-        valid_modes = {"default", "hybrid", "int4"}
-        if quant_mode not in valid_modes:
-            raise ValueError(f"quant_mode must be one of {', '.join(sorted(valid_modes))}, got '{quant_mode}'")
+        if quant_mode not in ("default", "hybrid", "int4"):
+            raise ValueError(f"quant_mode must be one of default, hybrid, int4, got '{quant_mode}'")
+
+        linear_attn_projs = ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj")
+        mlp_projs = ("gate_proj", "up_proj", "down_proj")
 
         int8_nodes = {}
-        if quant_mode == "default":
+        if quant_mode in ("default", "hybrid"):
             for i, lt in enumerate(self.layer_types):
                 if lt == "linear_attention":
-                    # All linear attention projections: INT8
-                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    for proj in linear_attn_projs:
                         int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                    # MLP projections in linear attention layers: INT8
-                    for proj in ("gate_proj", "up_proj", "down_proj"):
-                        int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-        elif quant_mode == "hybrid":
-            for i, lt in enumerate(self.layer_types):
-                if lt == "linear_attention":
-                    # Only linear attention projections: INT8 (recurrence-sensitive)
-                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                        int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                    # MLP layers stay INT4 (feedforward, no error accumulation)
-        # quant_mode == "int4": no overrides, everything INT4
+                    if quant_mode == "default":
+                        for proj in mlp_projs:
+                            int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
         if int8_nodes:
             algo_config = self.quant_attrs["int4"].get("algo_config")
