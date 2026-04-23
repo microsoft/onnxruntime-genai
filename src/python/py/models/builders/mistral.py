@@ -630,10 +630,10 @@ class Ministral3EmbeddingModel(Model):
     """
 
     FILENAME = "embedding.onnx"
+    filename = FILENAME
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.filename = self.FILENAME
         self.image_token_id = extra_options["image_token_id"]
 
     # ------------------------------------------------------------------
