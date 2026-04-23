@@ -754,7 +754,7 @@ class Model:
         already_quantized_in_qdq_format = (
             self.quant_type is not None and self.quant_attrs["use_qdq"]
         )  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format and self.quant_type is None:
             model = self.to_int4()
         else:
             model = self.model
