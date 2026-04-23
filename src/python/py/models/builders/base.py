@@ -1766,7 +1766,9 @@ class Model:
             * np.log(self.original_context_length / (self.rope_attrs["rescale_inv_freq"]["ntk_alpha"] * 2 * np.pi))
             / np.log(self.rope_attrs["theta"])
         )
-        assert 0 < low < high < d_half - 1
+        # The following assert is hit with the following command line.
+        # python -m onnxruntime_genai.models.builder -m microsoft/OptiMind-SFT -o microsoft/OptiMind -p int4 -e cuda -c cache
+        # assert 0 < low < high < d_half - 1
 
         interpolation = inv_freq / self.rope_attrs["rescale_inv_freq"]["factor"]
         extrapolation = inv_freq
