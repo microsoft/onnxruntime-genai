@@ -947,6 +947,20 @@ class Qwen35TextModel(Model):
             if "partial_rotary_factor" in config.rope_scaling:
                 config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
 
+        # Parse layer types before super().__init__() because
+        # make_int4_algo_config() is called from the base class init
+        # and needs self.layer_types to identify linear attention layers.
+        num_layers = getattr(getattr(config, "text_config", config), "num_hidden_layers", 0)
+        if hasattr(config, "layer_types") and config.layer_types is not None:
+            self.layer_types = list(config.layer_types)
+        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
+            interval = config.full_attention_interval
+            self.layer_types = [
+                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)
+            ]
+        else:
+            self.layer_types = ["full_attention"] * num_layers
+
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -984,17 +998,6 @@ class Qwen35TextModel(Model):
         # Pre-compute cos/sin cache tables and interleaving masks for mRoPE
         self._make_rotary_caches()
 
-        # Parse layer types
-        if hasattr(config, "layer_types") and config.layer_types is not None:
-            self.layer_types = list(config.layer_types)
-        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
-            interval = config.full_attention_interval
-            self.layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(self.num_layers)
-            ]
-        else:
-            self.layer_types = ["full_attention"] * self.num_layers
-
         # Store linear attention config
         self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
         self.linear_value_head_dim = getattr(config, "linear_value_head_dim", 128)
@@ -1013,32 +1016,30 @@ class Qwen35TextModel(Model):
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
 
-        # Mixed-precision quantization for linear attention layers.
-        # Baseline: whole model INT4. Override linear attention layer nodes
-        # to INT8 for better accuracy with modest size increase.
-        #
-        # Linear attention recurrence accumulates errors across the full sequence,
-        # unlike softmax attention which normalizes per-step.
-        int8_nodes = {}
-        for i, lt in enumerate(self.layer_types):
-            if lt == "linear_attention":
-                # All linear attention projections: INT8
-                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                # MLP projections in linear attention layers: INT8
-                for proj in ("gate_proj", "up_proj", "down_proj"):
-                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-
-        if int8_nodes:
-            algo_config = self.quant_attrs["int4"].get("algo_config")
-            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-                algo_config.customized_weight_config.update(int8_nodes)
-            else:
-                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
-                self.quant_attrs["int4"]["algo_config"] = algo_config
-
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
+
+    def make_int4_algo_config(self, quant_method: str):
+        """Extend base int4_algo_config with ``k_quant_linear``.
+
+        Promotes all linear attention projections and their MLPs from INT4 to
+        INT8, since linear attention recurrence accumulates quantization errors
+        across the full sequence (no softmax normalization).
+        """
+        if quant_method != "k_quant_linear":
+            return super().make_int4_algo_config(quant_method)
+
+        int8_nodes = {
+            f"/model/layers.{i}/{section}/{proj}/MatMul": {"bits": 8}
+            for i, lt in enumerate(self.layer_types)
+            if lt == "linear_attention"
+            for section, projs in (
+                ("linear_attn", ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj")),
+                ("mlp", ("gate_proj", "up_proj", "down_proj")),
+            )
+            for proj in projs
+        }
+        return RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
 
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
