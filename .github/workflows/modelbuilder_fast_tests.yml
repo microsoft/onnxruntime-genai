@@ -1,0 +1,135 @@
+name: Fast Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ci (${{ matrix.os }}, py${{ matrix.python-version }}, torch-${{ matrix.torch-version || 'stable' }}, transformers-${{ matrix.transformers-version || 'latest' }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: ["3.13"]
+        transformers-version: ["5.6"]
+        torch-version: ["2.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # we install torch first to avoid downloading any CUDA dependency
+
+      - name: Install nightly pytorch (cpu)
+        if: matrix.torch-version == 'nightly'
+        run: pip install --pre --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
+
+      - name: Install pytorch 2.11 (cpu)
+        if: matrix.torch-version == '2.11' && matrix.os != 'macos-latest'
+        run: pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl optree onnxruntime onnxruntime-genai peft py-cpuinfo tabulate
+
+      - name: Install dependencies
+        run: pip install -r test/python/requirements.txt
+
+      - name: ls
+        run: ls . -l
+
+      - name: Run fast tests
+        run: DOCLEAN=1 PYTHONPATH=./src/python/py pytest test/python/models/fast -v --cov=models --cov-report=xml --cov-report=term-missing --test_models=dump_models
+
+      # Code to upload coverage report.
+      # - name: Upload coverage reports to Codecov
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #    token: ${{ secrets.CODECOV_TOKEN }}
+      #     flags: modelbuilder-fast-tests
+
+      - name: Upload stats artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-${{ matrix.os }}-py${{ matrix.python-version }}-torch${{ matrix.torch-version }}-transformers${{ matrix.transformers-version }}
+          path: stats/
+          if-no-files-found: ignore
+
+      - name: Post test results as PR comment
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const statsDir = 'stats';
+            if (!fs.existsSync(statsDir)) {
+              console.log('No stats directory found, skipping PR comment');
+              return;
+            }
+
+            const files = fs.readdirSync(statsDir).filter(f => f.endsWith('.csv'));
+            if (files.length === 0) {
+              console.log('No CSV result files found in stats/, skipping PR comment');
+              return;
+            }
+
+            const matrixConfig = 'transformers=${{ matrix.transformers-version }}, torch=${{ matrix.torch-version }}, os=${{ matrix.os }}';
+            const marker = `<!-- fast-test-results-${{ matrix.transformers-version }}-${{ matrix.torch-version }}-${{ matrix.os }} -->`;
+            let body = `${marker}\n## Fast Test Results\n\n**Config:** ${matrixConfig}\n\n`;
+
+            for (const file of files.sort()) {
+              const content = fs.readFileSync(path.join(statsDir, file), 'utf8').trim();
+              const lines = content.split('\n');
+              if (lines.length < 2) continue;
+
+              body += `<details><summary>${file}</summary>\n\n`;
+
+              // Convert CSV to markdown table
+              const rows = lines.map(l => l.split(',').map(c => c.trim()));
+              const header = rows[0];
+              body += '| ' + header.join(' | ') + ' |\n';
+              body += '| ' + header.map(() => '---').join(' | ') + ' |\n';
+              for (const row of rows.slice(1)) {
+                body += '| ' + row.join(' | ') + ' |\n';
+              }
+              body += '\n</details>\n\n';
+            }
+
+            // Update existing comment for this matrix combination or create a new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

@@ -24,13 +24,9 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     RTNWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
-    AutoTokenizer,
-    GenerationConfig,
-)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoTokenizer, GenerationConfig
+
+from .local_functions import LocalFunctionsMixin
 
 
 def parse_hf_token(hf_token):
@@ -50,7 +46,7 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
-class Model:
+class Model(LocalFunctionsMixin):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
@@ -200,7 +196,7 @@ class Model:
         }
 
         # LayerNorm-specific variables
-        epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 1e-06
+        epsilon = getattr(config, "rms_norm_eps", getattr(config, "layer_norm_eps", 1e-06))
         self.layernorm_attrs = {
             "simple": True,             # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
             "first_layernorm": True,    # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
@@ -230,17 +226,7 @@ class Model:
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
         rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
-        rope_theta = (
-            config.rope_theta
-            if hasattr(config, "rope_theta")
-            else config.rope_embedding_base
-            if hasattr(config, "rope_embedding_base")
-            else config.rope_scaling["rope_theta"]
-            if hasattr(config, "rope_scaling")
-            and isinstance(config.rope_scaling, Mapping)
-            and "rope_theta" in config.rope_scaling
-            else 10000
-        )
+        rope_theta = self._rope_theta_from_config(config)
         self.rope_attrs = {
             "create_caches": True,                           # Create cos/sin caches for rotary embeddings
             "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
@@ -257,6 +243,8 @@ class Model:
         }
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             self.make_rope_init(config)
+        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
+            self.rope_attrs["rescale_factors"] = 1.0 / config.compression_ratio
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         attn_softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") and config.attn_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
@@ -425,10 +413,43 @@ class Model:
         if self.exclude_lm_head:
             del self.output_names["logits"]
 
+    @staticmethod
+    def _rope_theta_from_config(config, default=10000):
+        """Return the RoPE base frequency from ``config``, trying all standard attribute locations.
+
+        The lookup order is:
+        1. ``config.rope_theta`` – the standard HuggingFace attribute.
+        2. ``config.rope_embedding_base`` – used by some older models.
+        3. ``config.rope_parameters["rope_theta"]`` – a flat dict used by models
+           such as Ernie 4.5 that store all RoPE hyper-parameters together under
+           ``rope_parameters`` rather than as individual top-level attributes.
+        4. ``default`` (10000) if none of the above is present.
+        """
+        if hasattr(config, "rope_theta"):
+            return config.rope_theta
+        if hasattr(config, "rope_embedding_base"):
+            return config.rope_embedding_base
+        if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
+            theta = config.rope_parameters.get("rope_theta")
+            if theta is not None:
+                return theta
+        return default
+
     def make_rope_init(self, config):
+        # Some models (e.g. SmolLM3) store rope_theta inside rope_scaling
+        # instead of as a top-level config attribute. Override the default theta
+        # if rope_scaling provides one.
+        if "rope_theta" in config.rope_scaling:
+            self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
+
         if "short_factor" in config.rope_scaling:
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
-            self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
+            # Support both old ("type") and new ("rope_type") key names for rope scaling type
+            self.rope_attrs["mscale_policy"] = (
+                config.rope_scaling["type"]
+                if "type" in config.rope_scaling
+                else config.rope_scaling.get("rope_type", "")
+            )
             short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
             long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
 
@@ -474,6 +495,7 @@ class Model:
                 "factor": factor,
                 "ntk_alpha": beta_slow,
                 "ntk_beta": beta_fast,
+                "truncate": config.rope_scaling.get("truncate", True),
             }
 
         elif "mrope_section" in config.rope_scaling:
@@ -481,7 +503,11 @@ class Model:
             self.rope_attrs["mrope"] = {
                 "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
-
+            # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
+            # instead of as a top-level config attribute. Override the default theta
+            # if rope_scaling provides one.
+            if "rope_theta" in config.rope_scaling:
+                self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
             # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
             # instead of as a top-level config attribute. Override the default theta
             # if rope_scaling provides one.
@@ -491,6 +517,7 @@ class Model:
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
+            ("cpu", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.BFLOAT16),
             ("dml", ir.DataType.FLOAT16),
@@ -549,6 +576,43 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
+    def _make_search_section(self, config, context_length, extra_options, past_present_share_buffer):
+        """Build the ``search`` section of ``genai_config.json``.
+
+        Starts from :data:`GENAI_SEARCH_DEFAULTS` so that every field is always
+        initialized to a valid value.  Any attribute that exists on *config* and
+        is not ``None`` overrides the corresponding default, which is the correct
+        behaviour for both transformers < 5 (where attributes carry concrete
+        values) and transformers >= 5 (where they may be ``None``).
+        """
+        # Search-section defaults for onnxruntime-genai.  In transformers >= 5,
+        # GenerationConfig attributes default to None instead of concrete values,
+        # which can produce null entries in genai_config.json that
+        # onnxruntime-genai does not accept.
+        GENAI_SEARCH_DEFAULTS = {
+            "diversity_penalty": 0.0,
+            "do_sample": False,
+            "early_stopping": True,
+            "length_penalty": 1.0,
+            "min_length": 0,
+            "no_repeat_ngram_size": 0,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+            "repetition_penalty": 1.0,
+            "temperature": 1.0,
+            "top_k": 50,
+            "top_p": 1.0,
+        }
+
+        search = dict(GENAI_SEARCH_DEFAULTS)
+        for key in GENAI_SEARCH_DEFAULTS:
+            val = getattr(config, key, None)
+            if val is not None:
+                search[key] = val
+        search["max_length"] = context_length
+        search["past_present_share_buffer"] = False if "config_only" in extra_options else past_present_share_buffer
+        return search
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -572,8 +636,8 @@ class Model:
                 val = getattr(gen_config, key)
                 if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
-        except:
-            pass
+        except Exception as e:
+            print(f"Error: {e}")
 
         # Create inputs dict
         inputs = {}
@@ -591,7 +655,7 @@ class Model:
             inputs["past_value_names"] = "past_key_values.%d.value"
 
         # Create outputs dict
-        outputs = {} 
+        outputs = {}
         if "logits" in self.output_names:
             outputs["logits"] = self.output_names["logits"]
         if "present.key" in self.output_names:
@@ -631,22 +695,7 @@ class Model:
                 "type": self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
             },
-            "search": {
-                "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
-                "do_sample": config.do_sample if hasattr(config, "do_sample") else False,
-                "early_stopping": True,
-                "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
-                "max_length": self.context_length,
-                "min_length": 0,
-                "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
-                "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
-                "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
-                "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
-                "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k is not None else 50,
-                "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
-            },
+            "search": self._make_search_section(config, self.context_length, self.extra_options, self.past_present_share_buffer),
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
@@ -793,7 +842,7 @@ class Model:
             )
 
         # Delete temporary cache dir if empty
-        if not os.listdir(self.cache_dir):
+        if os.path.exists(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
     def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None):
@@ -838,6 +887,12 @@ class Model:
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
+        # When a com.microsoft contrib op with a local-function fallback is added, register it.
+        if domain == "com.microsoft" and op_type == "CausalConvWithState":
+            # inputs[3] is past_conv_state with shape [B, C, K-1]; K = shape[-1] + 1.
+            past_val = self.values.get(inputs[3]) if len(inputs) >= 4 else None
+            if past_val is not None and past_val.shape is not None and len(past_val.shape) >= 1:
+                self._register_causal_conv_local_function(int(past_val.shape[-1]) + 1)
 
     def make_value(
         self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None
@@ -891,7 +946,7 @@ class Model:
                     outputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
             else:
                 outputs.append(self.make_value(name, dtype=dtype, shape=shape))
-    
+
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{num}"
@@ -912,9 +967,16 @@ class Model:
         self.make_value(output, dtype, shape=shape)
 
     def make_reshape(self, name, inputs, dtype, shape):
+        if len(inputs) >= 2 and isinstance(inputs[1], (list, tuple)):
+            shape_name = f"{name}/shape"
+            ir_t = ir.tensor(np.array(inputs[1], dtype=np.int64), name=shape_name)
+            self.make_node("Constant", inputs=[], outputs=[shape_name], name=f"{shape_name}/Constant", value=ir_t)
+            self.make_value(shape_name, ir_t.dtype, ir_t.shape)
+            inputs = [inputs[0], shape_name]
         output = f"{name}/output_0"
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_shape(self, name, root_input, shape):
         output = f"{name}/output_0"
@@ -940,6 +1002,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_tile(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1023,6 +1086,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Add", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1039,20 +1103,58 @@ class Model:
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_slice(self, name, inputs, dtype, shape):
+    def make_slice(self, name, inputs, dtype, shape, *, starts=None, ends=None, axes=None):
+        """Create a Slice ONNX node.
+
+        When *starts*, *ends*, and *axes* are provided as Python lists the
+        method creates inline ``Constant`` nodes for each of them automatically
+        and *inputs* should be the single root tensor name (str).  Otherwise
+        *inputs* must be a list of already-resolved tensor name strings
+        ``[data, starts, ends, ...]`` in the usual ONNX Slice convention.
+
+        Returns the output tensor name.
+        """
+        if starts is not None or ends is not None or axes is not None:
+            assert starts is not None and ends is not None, "Both 'starts' and 'ends' must be provided together"
+            root_input = inputs
+            starts_name = f"{name}/starts"
+            ends_name = f"{name}/ends"
+            for tensor_name, values in [(starts_name, starts), (ends_name, ends)]:
+                np_data = np.array(values, dtype=np.int64)
+                ir_t = ir.tensor(np_data, name=tensor_name)
+                self.make_node("Constant", inputs=[], outputs=[tensor_name], name=f"{tensor_name}/Constant", value=ir_t)
+                self.make_value(tensor_name, ir_t.dtype, ir_t.shape)
+            actual_inputs = [root_input, starts_name, ends_name]
+            if axes is not None:
+                axes_name = f"{name}/axes"
+                np_axes = np.array(axes, dtype=np.int64)
+                ir_t = ir.tensor(np_axes, name=axes_name)
+                self.make_node("Constant", inputs=[], outputs=[axes_name], name=f"{axes_name}/Constant", value=ir_t)
+                self.make_value(axes_name, ir_t.dtype, ir_t.shape)
+                actual_inputs.append(axes_name)
+            inputs = actual_inputs
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+        return output
+
+    def make_neg(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Neg", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1068,6 +1170,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Softmax", inputs=[root_input], outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
@@ -1330,7 +1433,7 @@ class Model:
 
         matmul = PackedMatMul()
         return matmul
-    
+
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
         if not hasattr(q_matmul, "qweight"):
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
@@ -1392,7 +1495,7 @@ class Model:
         return add
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        add = self.make_packed_add_tensor(q_add, k_add, v_add)        
+        add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -1415,7 +1518,7 @@ class Model:
             self.make_reshape(
                 weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim]
             )
-            input_names = [weight_reshape_output, self.input_names["input_ids"], "lm_head.MatMul.weight_scale"];
+            input_names = [weight_reshape_output, self.input_names["input_ids"], "lm_head.MatMul.weight_scale"]
             if not self.quant_attrs["int4"]["is_symmetric"]:
                 input_names.append("lm_head.MatMul.weight_zp")
             self.make_node(
@@ -1695,10 +1798,13 @@ class Model:
             return 1.0
         return np.sqrt(1 + np.log(mscale) / np.log(self.original_context_length))
 
-    def make_mscale_yarn(self, mscale):
+    def make_mscale_yarn(self, mscale, alpha=1.0):
+        # Computes the YaRN magnitude scaling factor:
+        # yarn_get_mscale(s, alpha) = 0.1 * alpha * log(s) + 1 if s > 1 else 1
+        # alpha is the optional mscale multiplier from rope_scaling config (default 1.0).
         if mscale <= 1.0:
             return 1.0
-        return 0.1 * np.log(mscale) + 1.0
+        return 0.1 * alpha * np.log(mscale) + 1.0
 
     def make_mscale(self, mscale, config_mscale=0, config_mscale_all_dim=0):
         """Compute the magnitude scaling factor for rotary embeddings.
@@ -1712,8 +1818,10 @@ class Model:
         Otherwise, compute from the scaling factor using the policy-specific formula.
         """
         if config_mscale > 0 and config_mscale_all_dim > 0:
+
             def _get_mscale(scale, ms):
                 return (0.1 * ms * np.log(scale) + 1.0) if scale > 1 else 1.0
+
             return float(_get_mscale(mscale, config_mscale) / _get_mscale(mscale, config_mscale_all_dim))
         if config_mscale > 0:
             return float(config_mscale)
@@ -1755,7 +1863,12 @@ class Model:
 
     def make_inv_freq_rescaled_with_ntk(self, inv_freq):
         d_half = self.head_size / 2
-        # NTK by parts
+        # NTK by parts — mirror HuggingFace's _compute_yarn_parameters:
+        # low = find_correction_dim(beta_fast, dim, base, original_max_pos)
+        #      = (dim * log(max_pos / (beta_fast * 2π))) / (2 * log(base))
+        #      = d_half * log(max_pos / (beta_fast * 2π)) / log(base)
+        # When truncate=True (the default), boundaries are floor/ceil'd to integers.
+        truncate = self.rope_attrs["rescale_inv_freq"].get("truncate", True)
         low = (
             d_half
             * np.log(self.original_context_length / (self.rope_attrs["rescale_inv_freq"]["ntk_beta"] * 2 * np.pi))
@@ -1766,8 +1879,14 @@ class Model:
             * np.log(self.original_context_length / (self.rope_attrs["rescale_inv_freq"]["ntk_alpha"] * 2 * np.pi))
             / np.log(self.rope_attrs["theta"])
         )
+        if truncate:
+            low = np.floor(low)
+            high = np.ceil(high)
         assert 0 < low < high < d_half - 1
 
+        # HuggingFace convention:
+        #   inv_freq_extrapolation = 1 / pos_freqs = inv_freq  (keep original)
+        #   inv_freq_interpolation = 1 / (factor * pos_freqs) = inv_freq / factor
         interpolation = inv_freq / self.rope_attrs["rescale_inv_freq"]["factor"]
         extrapolation = inv_freq
 
@@ -2613,7 +2732,7 @@ class Model:
             unsqueeze_5_name,
             unsqueeze_5_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", self.num_kv_heads, 1, "sequence_length", self.head_size],
+            shape=["batch_size", self.num_kv_heads, 1, "total_sequence_length", self.head_size],
         )
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_5_name}/output_0", f"{where_name}/output_0"]
@@ -2625,7 +2744,7 @@ class Model:
                 "batch_size",
                 self.num_kv_heads,
                 self.num_attn_heads // self.num_kv_heads,
-                "sequence_length",
+                "total_sequence_length",
                 self.head_size,
             ],
         )
@@ -2635,7 +2754,7 @@ class Model:
             reshape_3_name,
             reshape_3_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", self.num_attn_heads, "sequence_length", self.head_size],
+            shape=["batch_size", self.num_attn_heads, "total_sequence_length", self.head_size],
         )
         transpose_2_name = f"{basename}/Transpose_2"
         transpose_2_input = f"{reshape_3_name}/output_0"
@@ -2643,7 +2762,7 @@ class Model:
             transpose_2_name,
             transpose_2_input,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads, self.head_size],
+            shape=["batch_size", "total_sequence_length", self.num_attn_heads, self.head_size],
             perm=[0, 2, 1, 3],
         )
         reshape_4_name = f"{basename}/Reshape_4"
@@ -2655,7 +2774,7 @@ class Model:
             reshape_4_name,
             reshape_4_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
+            shape=["batch_size", "total_sequence_length", self.num_attn_heads * self.head_size],
         )
 
         input_to_attention = f"{reshape_4_name}/output_0"
@@ -3015,7 +3134,7 @@ class Model:
                 self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
         # Get key-value cache names if they exist
-        (past_k, past_v, present_k, present_v) = self.make_key_value_cache_names(layer_id)
+        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
@@ -3689,10 +3808,11 @@ class Model:
         make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.io_dtype)
         make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.io_dtype)
 
+        output = f"{gate_reshape_name}/output_0"
         self.make_moe_op(
             moe_name,
             root_input=root_input,
-            router_probs=f"{gate_reshape_name}/output_0",
+            router_probs=output,
             weight1=moe_expert_weight_1_name,
             scales1=moe_expert_scales_1_name,
             weight2=moe_expert_weight_2_name,
