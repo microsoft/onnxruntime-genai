@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#pragma once
 #include "audio_features.h"
 #include "model.h"
 #include "input_ids.h"
@@ -33,14 +34,17 @@ struct AudioEncoderState : State {
 
   bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
 
- private:
+ protected:
+  // Template method hooks for derived classes (e.g., CohereEncoderState)
+  virtual void ComputeNumFrames(const std::vector<int64_t>& shape);
+  virtual void AddModelSpecificInputs(const std::vector<ExtraInput>& extra_inputs) {}
+
   friend struct WhisperState;
 
   const WhisperModel& model_;
 
   std::unique_ptr<AudioFeatures> audio_features_;  // { batch_size, num_mels, num_frames }
   std::unique_ptr<OrtValue> hidden_states_;        // { batch_size, num_frames / 2, hidden_size }
-  std::unique_ptr<OrtValue> mel_length_;           // { batch_size } — optional, for Cohere mel encoder
   int num_frames_{3000};                           // Whisper uses a default value of 3000
 };
 
@@ -87,7 +91,8 @@ struct WhisperDecoderState : State {
 };
 
 struct WhisperState : State {
-  WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths);
+  WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths,
+               std::unique_ptr<AudioEncoderState> encoder_state = nullptr);
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 

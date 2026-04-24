@@ -16,6 +16,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "cohere_model.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "marian.h"
@@ -826,8 +827,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
-  if (ModelType::IsALM(config->model.type))
+  if (ModelType::IsALM(config->model.type)) {
+    if (config->model.type == "cohere_transcribe")
+      return std::make_shared<CohereModel>(std::move(config), ort_env);
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsPipe(config->model.type))
