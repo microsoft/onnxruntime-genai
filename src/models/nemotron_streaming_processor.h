@@ -19,12 +19,12 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   std::unique_ptr<NamedTensors> Process(const float* audio_data, size_t num_samples) override;
   std::unique_ptr<NamedTensors> Flush() override;
 
-  int GetChunkSamples() const { return cache_config_.chunk_samples; }
-  int GetSampleRate() const { return cache_config_.sample_rate; }
+  int GetChunkSamples() const { return nemotron_config_.chunk_samples; }
+  int GetSampleRate() const { return nemotron_config_.sample_rate; }
 
  private:
   Model& model_;
-  NemotronCacheConfig cache_config_;
+  NemotronConfig nemotron_config_;
 
   // Log-mel feature extraction
   nemo_mel::NemoStreamingMelExtractor mel_extractor_;

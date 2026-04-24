@@ -3,14 +3,20 @@
 namespace Generators {
 
 void SoftmaxWithMax(std::span<float> scores, float temperature, float max_score) {
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
+  // Fused: compute exp and accumulate sum in a single pass
+  float inv_temp = 1.0f / temperature;
+  float exp_sum = 0.0f;
+  for (auto& score : scores) {
+    score = std::exp((score - max_score) * inv_temp);
+    exp_sum += score;
+  }
 
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
-
-  // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
+  // Normalize
+  if (exp_sum > 0.0f) {
+    float inv_sum = 1.0f / exp_sum;
+    for (auto& score : scores)
+      score *= inv_sum;
+  }
 }
 
 void Softmax(std::span<float> scores, float temperature) {
@@ -22,14 +28,18 @@ void Softmax(std::span<float> scores, float temperature) {
 void LogSoftMax(std::span<float> scores, float temperature) {
   float const max_score = *std::max_element(scores.begin(), scores.end());
 
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return (score - max_score) / temperature; });
+  // Fused: scale and compute sum of exponentials in a single pass
+  float inv_temp = 1.0f / temperature;
+  float exp_sum = 0.0f;
+  for (auto& score : scores) {
+    score = (score - max_score) * inv_temp;
+    exp_sum += std::exp(score);
+  }
 
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f, [](float a, float b) { return a + std::exp(b); });
-
-  // Subtract log of sum of exponentials from each score
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score - std::log(exp_sum); });
+  // Subtract log of sum of exponentials
+  float const log_sum_exp = std::log(exp_sum);
+  for (auto& score : scores)
+    score -= log_sum_exp;
 }
 
 }  // namespace Generators
