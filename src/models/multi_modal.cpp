@@ -483,6 +483,11 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   int64_t feat_offset = 0;
   size_t image_stride = static_cast<size_t>(channels * h_max * w_max) * pv_elem_size;
 
+  // TODO: Explore batching multiple images through the vision encoder to improve
+  // throughput. Currently processes one image at a time due to variable image
+  // resolutions producing different patch counts and 2D RoPE position grids.
+  // Potential approach: pad to uniform size or restructure the ONNX graph for
+  // batched inputs.
   for (int64_t img = 0; img < num_images_; ++img) {
     int64_t h_i = image_heights_[img];
     int64_t w_i = image_widths_[img];
