@@ -20,9 +20,11 @@ PROMPT_TOKENS = [
 
 
 def run(args):
-    print(f"Loading model from {args.model_path} ...")
+    print(f"Loading model from {args.model_path} ({args.execution_provider}) ...")
     config = og.Config(args.model_path)
-    config.clear_providers()  # CPU only
+    config.clear_providers()
+    if args.execution_provider == "cuda":
+        config.append_provider("cuda")
     model = og.Model(config)
     processor = model.create_multimodal_processor()
     tokenizer = og.Tokenizer(model)
@@ -49,6 +51,8 @@ def run(args):
         max_length=1024,
         num_beams=1,
         batch_size=batch_size,
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=4,
     )
 
     t0 = time.time()
@@ -79,5 +83,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cohere Transcribe ONNX inference")
     parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to ONNX model directory")
     parser.add_argument("-a", "--audio", type=str, required=True, help="Path to audio file(s), comma separated")
+    parser.add_argument("-e", "--execution_provider", type=str, default="cpu", choices=["cpu", "cuda"], help="Execution provider")
     args = parser.parse_args()
     run(args)
