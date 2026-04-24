@@ -111,7 +111,6 @@ TEST_F(GuidanceTests, UseJsonSchemaSingleTurn) {
   EXPECT_EQ(output, expected_output);
 }
 
-#if !USE_DML  // DML doesn't support continuous decoding
 TEST_F(GuidanceTests, UseLarkGrammarMultiTurn) {
   auto params = OgaGeneratorParams::Create(*model_);
   params->SetSearchOption("max_length", 1024);
@@ -170,7 +169,6 @@ TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
     EXPECT_EQ(output, expected_output);
   }
 }
-#endif        // USE_DML
 #endif        // #if 0
 
 #endif  // TEST_QWEN_2_5
