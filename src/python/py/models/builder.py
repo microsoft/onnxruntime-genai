@@ -21,6 +21,7 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4TextModel,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -233,6 +234,27 @@ def create_model(
         print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] in {"Gemma4ForConditionalGeneration", "Gemma4ForCausalLM"}:
+        # Gemma 4 ships multimodal-first. The text decoder config lives under
+        # `text_config` on the conditional-generation wrapper; weights are
+        # stored under the `model.language_model.*` prefix. We flatten the
+        # text_config onto the top-level config the way the Gemma 3 branch
+        # does, then hand off to the scaffolded Gemma 4 builder.
+        # NOTE (issue #2062): Gemma 4 support is incomplete. This branch
+        # currently only supports `--extra_options config_only=true`. See
+        # `builders/gemma4.py` for the full scope statement and the list
+        # of runtime changes required for end-to-end support.
+        if hasattr(config, "text_config"):
+            text_config = config.text_config
+            for key in text_config:
+                if not hasattr(config, key):
+                    setattr(config, key, getattr(text_config, key))
+        print("WARNING: Gemma 4 support is scaffolded but not yet end-to-end functional. See issue #2062.")
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Gemma4TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
