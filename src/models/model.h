@@ -53,6 +53,8 @@ struct State {
 
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
+  bool IsFirstRun() const { return first_run_; }
+
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false);
   bool first_run_{true};

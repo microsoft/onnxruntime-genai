@@ -30,25 +30,17 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  ComputeNumFrames(audio_features_->GetShape());
-
-  AddModelSpecificInputs(extra_inputs);
-
-  // Add encoder hidden states output only if the encoder model has it
-  if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
-    auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
-    hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_->GetType());
-    outputs_.push_back(hidden_states_.get());
-    output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
-  }
-}
-
-void AudioEncoderState::ComputeNumFrames(const std::vector<int64_t>& shape) {
-  // Standard Whisper: 3D mel features [batch, mels, 3000]
-  const int num_frames = static_cast<int>(shape[2]);
+  // Verify that the frame size is expected
+  const int num_frames = static_cast<int>(audio_features_->GetShape()[2]);
   if (num_frames != GetNumFrames()) {
     throw new std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
   }
+
+  // Add encoder hidden states
+  auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
+  hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_->GetType());
+  outputs_.push_back(hidden_states_.get());
+  output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
 }
 
 DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -176,25 +168,22 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
   }
 }
 
-WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths_unk,
-                           std::unique_ptr<AudioEncoderState> encoder_state)
+WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths_unk)
     : State{params, model},
       model_{model} {
-  encoder_state_ = encoder_state ? std::move(encoder_state) : std::make_unique<AudioEncoderState>(model, params);
+  encoder_state_ = std::make_unique<AudioEncoderState>(model, params);
   decoder_state_ = std::make_unique<WhisperDecoderState>(model, params, encoder_state_->GetNumFrames());
-  // Cross cache is created in SetExtraInputs after audio features determine the actual num_frames
-}
 
-void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  encoder_state_->SetExtraInputs(extra_inputs);
-
-  // Create cross cache now that num_frames is known from audio features
   if (encoder_state_->HasCrossKVCacheOutputs()) {
     cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
     encoder_state_->AddCrossCache(cross_cache_);
     decoder_state_->AddCrossCache(cross_cache_);
     transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
   }
+}
+
+void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  encoder_state_->SetExtraInputs(extra_inputs);
 
   if (!encoder_state_->HasCrossKVCacheOutputs()) {
     decoder_state_->inputs_.push_back(encoder_state_->hidden_states_.get());

@@ -34,11 +34,7 @@ struct AudioEncoderState : State {
 
   bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
 
- protected:
-  // Template method hooks for derived classes (e.g., CohereEncoderState)
-  virtual void ComputeNumFrames(const std::vector<int64_t>& shape);
-  virtual void AddModelSpecificInputs(const std::vector<ExtraInput>& extra_inputs) {}
-
+ private:
   friend struct WhisperState;
 
   const WhisperModel& model_;
@@ -63,6 +59,7 @@ struct WhisperDecoderState : State {
  private:
   // clang-format off
   friend struct WhisperState;
+  friend struct CohereState;
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool first_update);
 
@@ -91,8 +88,7 @@ struct WhisperDecoderState : State {
 };
 
 struct WhisperState : State {
-  WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths,
-               std::unique_ptr<AudioEncoderState> encoder_state = nullptr);
+  WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths);
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 
