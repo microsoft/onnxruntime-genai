@@ -53,6 +53,11 @@ struct ModelType {
     static constexpr std::array<std::string_view, 1> Pipe = {"decoder-pipeline"};
     return std::find(Pipe.begin(), Pipe.end(), model_type) != Pipe.end();
   }
+
+  inline static bool IsLFM2(const std::string& model_type) {
+    // Liquid Foundation Model 2: hybrid attention/conv architecture with conv state cache
+    return model_type == "lfm2";
+  }
 };
 
 }  // namespace Generators

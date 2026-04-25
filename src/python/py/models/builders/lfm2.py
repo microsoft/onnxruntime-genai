@@ -142,12 +142,12 @@ class LFM2Model(Model):
             self.make_initializer(conv_module.conv.bias, conv_bias_name, to=self.io_dtype)
             conv_inputs.append(conv_bias_name)
 
-        conv_out_full = f"{conv_op_name}/output_0"
-        self.make_node(
-            "Conv", inputs=conv_inputs, outputs=[conv_out_full], name=conv_op_name,
+        self.make_conv(
+            conv_op_name, conv_inputs, self.io_dtype,
+            shape=["batch_size", self.hidden_size, "conv_output_sequence_length"],
             kernel_shape=[self.conv_L_cache], pads=[0, 0], group=self.hidden_size,
         )
-        self.make_value(conv_out_full, self.io_dtype, shape=["batch_size", self.hidden_size, "conv_output_sequence_length"])
+        conv_out_full = f"{conv_op_name}/output_0"
 
         # Slice the conv output to keep only the last seq_len elements (obtained from root_input shape)
         shape_name = f"{basename}/Shape"
@@ -280,16 +280,3 @@ class LFM2Model(Model):
 
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)
-
-    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        super().save_processing(model_name_or_path, extra_kwargs, out_dir)
-
-        # Fix tokenizer_class if needed (TokenizersBackend is not recognized by ort-extensions)
-        tokenizer_config_path = os.path.join(out_dir, "tokenizer_config.json")
-        if os.path.exists(tokenizer_config_path):
-            with open(tokenizer_config_path, "r") as f:
-                tok_config = json.load(f)
-            if tok_config.get("tokenizer_class") == "TokenizersBackend":
-                tok_config["tokenizer_class"] = "PreTrainedTokenizerFast"
-                with open(tokenizer_config_path, "w") as f:
-                    json.dump(tok_config, f, indent=2)
