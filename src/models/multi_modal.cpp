@@ -377,7 +377,11 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   num_audio_tokens_ = num_audio_tokens;
 
-  audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Model output
+  // Create 2D [num_audio_tokens, hidden_size] output buffer for the speech model.
+  // The speech ONNX model outputs 3D [B, T, hidden] but the embedding model expects
+  // 2D [T, hidden]. Pass batch_size=-1 to skip the batch dimension in the shape.
+  // ORT will flatten the 3D output to match our 2D buffer for batch=1.
+  audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
                                                          model_.config_->model.speech.outputs.audio_features,
                                                          -1, num_audio_tokens_);
   audio_features_->Add();
@@ -414,13 +418,21 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
                                                            model_.config_->model.embedding.inputs.audio_features,
                                                            -1, num_audio_tokens_);
     audio_features_->Add();
+  } else if (model_.session_info_.HasInput(model_.config_->model.embedding.inputs.audio_features)) {
+    // No speech session, but embedding model requires audio_features — provide empty tensor with shape (0, hidden_size)
+    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
+                                                           model_.config_->model.embedding.inputs.audio_features,
+                                                           -1, 0);
+    audio_features_->Add();
+    // Pre-allocate an empty tensor since there's no speech session to provide one via ReuseFeaturesBuffer
+    audio_features_->AllocateEmptyFeatures();
   }
 }
 
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
   if (model_.vision_session_) image_features_->Update(is_prompt);
-  if (model_.speech_session_) audio_features_->Update(is_prompt);
+  if (audio_features_) audio_features_->Update(is_prompt);
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -437,6 +449,13 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
+
+  // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.input_ids)) {
+    decoder_input_ids_ = std::make_unique<DefaultInputIDs>(*this);
+    decoder_input_ids_->Add();
+  }
+
   position_inputs_->Add();
   logits_.Add();
   kv_cache_.Add();
@@ -457,6 +476,7 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
+  if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices, total_length);
   if (recurrent_state_)
@@ -467,6 +487,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
+  if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   kv_cache_.Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
@@ -554,7 +575,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) {
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     }
-    if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
+    if (speech_state_) {
+      embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
+    }
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 

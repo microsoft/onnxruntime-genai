@@ -19,7 +19,8 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
                         : model_.session_info_.GetOutputSymbolicShape(name).size();
 
   // If the model expects 3 dimensions, add a batch dimension
-  if (dims == 3) {
+  // batch_size <= 0 signals "skip batch dim even if model has 3D output"
+  if (dims == 3 && batch_size > 0) {
     shape_.push_back(batch_size);
   }
 
@@ -75,6 +76,11 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
   features_ = std::move(other.features_);
   state_.inputs_[index_] = other.state_.outputs_[other.index_];
+}
+
+void MultiModalFeatures::AllocateEmptyFeatures() {
+  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+  state_.inputs_[index_] = features_.get();
 }
 
 }  // namespace Generators

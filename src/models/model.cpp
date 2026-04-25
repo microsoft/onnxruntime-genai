@@ -918,6 +918,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"whisper", Processor::Create<WhisperProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
+          {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
+          {"gemma4_any_to_any", Processor::Create<Gemma4MultiModalProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},

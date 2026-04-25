@@ -207,6 +207,49 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
+  // Auto-detect per-layer head_dim from ONNX session input shapes.
+  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
+  // full-attention layers use global_head_dim=512.
+  {
+    bool has_varying_head_dim = false;
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    for (int i = 0; i < layer_count_; ++i) {
+      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (!input_shape.empty()) {
+        int64_t layer_head_dim = input_shape.back();
+        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
+          has_varying_head_dim = true;
+        }
+        if (layer_head_dim > 0) {
+          per_layer_head_dim[i] = layer_head_dim;
+        }
+      }
+    }
+    if (has_varying_head_dim) {
+      if (layer_shapes_.empty()) {
+        layer_shapes_.resize(layer_count_);
+        for (int i = 0; i < layer_count_; ++i) {
+          layer_shapes_[i] = shape_;
+        }
+      }
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i][3] = per_layer_head_dim[i];
+      }
+      if (g_log.enabled) {
+        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
+                        std::to_string(layer_count_) + " KV cache layers");
+      }
+
+      // Create per-layer empty past tensors since head_dim varies across layers
+      empty_pasts_.resize(layer_count_);
+      for (int i = 0; i < layer_count_; ++i) {
+        std::array<int64_t, 4> empty_shape = layer_shapes_[i];
+        empty_shape[2] = 0;  // sequence length = 0 for empty past
+        empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), empty_shape, type_);
+      }
+    }
+  }
+
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
     throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
@@ -251,6 +294,13 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
+
+    // If per-layer shapes exist (from head_dim auto-detection), update their sequence dim too
+    if (!layer_shapes_.empty()) {
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i][2] = state_.params_->search.max_length;
+      }
+    }
   }
 
   try {
@@ -286,7 +336,12 @@ void DefaultKeyValueCache::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    // Use per-layer empty past when head_dim varies across layers
+    if (!empty_pasts_.empty()) {
+      state_.inputs_.push_back(empty_pasts_[i / 2].get());
+    } else {
+      state_.inputs_.push_back(empty_past_.get());
+    }
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -321,7 +376,8 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
       const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      current_shape[2] = std::min(total_length, max_cache_length);
+      // If max_cache_length is 0 (unconstrained), use total_length directly
+      current_shape[2] = (max_cache_length > 0) ? std::min(total_length, max_cache_length) : total_length;
 
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
@@ -354,7 +410,11 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      state_.inputs_[input_index_ + i] = empty_past_.get();
+      if (!empty_pasts_.empty()) {
+        state_.inputs_[input_index_ + i] = empty_pasts_[i / 2].get();
+      } else {
+        state_.inputs_[input_index_ + i] = empty_past_.get();
+      }
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
