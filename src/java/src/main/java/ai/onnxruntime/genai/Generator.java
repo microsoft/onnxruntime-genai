@@ -133,6 +133,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   /**
    * Returns the token count in the generator.
    *
+   * @return The number of tokens.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public long tokenCount() throws GenAIException {

@@ -1256,6 +1256,8 @@ struct Search_Element : JSON::Element {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
+    } else if (name == "blank_penalty") {
+      v_.blank_penalty = static_cast<float>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
