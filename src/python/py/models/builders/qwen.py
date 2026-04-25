@@ -8,7 +8,6 @@
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
 from transformers import (
     AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -950,7 +949,9 @@ class Qwen35TextModel(Model):
         # Parse layer types before super().__init__() because
         # make_int4_algo_config() is called from the base class init
         # and needs self.layer_types to identify linear attention layers.
-        num_layers = getattr(getattr(config, "text_config", config), "num_hidden_layers", 0)
+        # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
+        text_config = getattr(config, "text_config", config)
+        num_layers = extra_options.get("num_hidden_layers", getattr(text_config, "num_hidden_layers", 0))
         if hasattr(config, "layer_types") and config.layer_types is not None:
             self.layer_types = list(config.layer_types)
         elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
@@ -1039,7 +1040,10 @@ class Qwen35TextModel(Model):
             )
             for proj in projs
         }
-        return RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
+        int4_algo_config = super().make_int4_algo_config("k_quant")
+        existing_weight_config = getattr(int4_algo_config, "customized_weight_config", None) or {}
+        int4_algo_config.customized_weight_config = {**existing_weight_config, **int8_nodes}
+        return int4_algo_config
 
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
