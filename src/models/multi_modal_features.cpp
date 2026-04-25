@@ -83,4 +83,23 @@ void MultiModalFeatures::AllocateEmptyFeatures() {
   state_.inputs_[index_] = features_.get();
 }
 
+void MultiModalFeatures::ReshapeFeatures(std::vector<int64_t> new_shape) {
+  if (!features_) return;
+  auto old_info = features_->GetTensorTypeAndShapeInfo();
+  int64_t old_count = static_cast<int64_t>(old_info->GetElementCount());
+  int64_t new_count = 1;
+  for (auto d : new_shape) new_count *= d;
+  if (old_count != new_count || old_count == 0) return;
+
+  auto old_features = std::move(features_);
+  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), new_shape, type_);
+  auto src = ByteWrapTensor(*model_.p_device_, *old_features);
+  auto dst = ByteWrapTensor(*model_.p_device_, *features_);
+  dst.CopyFrom(src);
+  shape_ = std::move(new_shape);
+  if (mode_ == Mode::Output && index_ != ~0U) {
+    state_.outputs_[index_] = features_.get();
+  }
+}
+
 }  // namespace Generators

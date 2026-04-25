@@ -24,6 +24,9 @@ struct MultiModalFeatures {
   // encoder session exists.
   void AllocateEmptyFeatures();
 
+  // Reshape features tensor in-place (e.g., flatten 3D [B, T, H] to 2D [B*T, H])
+  void ReshapeFeatures(std::vector<int64_t> new_shape);
+
   auto& GetShape() const { return shape_; }
   OrtValue* Get() { return features_.get(); }
 

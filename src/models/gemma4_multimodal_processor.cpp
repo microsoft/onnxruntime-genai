@@ -31,7 +31,8 @@ void ReplaceAll(std::string& text, const std::string& from, const std::string& t
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessGemma4ImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                          OrtxTensor* pixel_values, Ort::Allocator& allocator,
-                         size_t vision_soft_tokens_per_image) {
+                         size_t vision_soft_tokens_per_image,
+                         int64_t num_audio_tokens = 0) {
   constexpr char boi_token[] = "<|image>";
   constexpr char image_token[] = "<|image|>";
   constexpr char eoi_token[] = "<image|>";
@@ -91,6 +92,40 @@ ProcessGemma4ImagePrompt(const Generators::Tokenizer& tokenizer, const std::stri
   }
   const std::string full_image_sequence = "\n\n" + std::string(boi_token) + image_tokens_expanded + eoi_token + "\n\n";
   ReplaceAll(text, boi_token, full_image_sequence);
+
+  // Expand audio tokens: replace single <|audio|> from chat template with N audio soft tokens
+  if (num_audio_tokens > 0) {
+    constexpr char boa_token[] = "<|audio>";
+    constexpr char audio_token[] = "<|audio|>";
+    constexpr char eoa_token[] = "<audio|>";
+
+    std::string audio_tokens_expanded;
+    audio_tokens_expanded.reserve(static_cast<size_t>(num_audio_tokens) * (sizeof(audio_token) - 1));
+    for (int64_t i = 0; i < num_audio_tokens; ++i) {
+      audio_tokens_expanded += audio_token;
+    }
+    const std::string full_audio_sequence = "\n\n" + std::string(boa_token) + audio_tokens_expanded + eoa_token + "\n\n";
+
+    // Chat template inserts <|audio|> per audio clip — replace with expanded sequence
+    auto audio_marker_count = CountOccurrences(text, audio_token);
+    if (audio_marker_count > 0) {
+      // Replace only the first standalone <|audio|> (avoid replacing expanded image tokens
+      // that might share a substring). Use find to locate the first occurrence.
+      auto pos = text.find(audio_token);
+      if (pos != std::string::npos) {
+        text.replace(pos, sizeof(audio_token) - 1, full_audio_sequence);
+      }
+    } else {
+      // No audio marker in prompt — look for <|audio> (boa_token)
+      auto boa_count = CountOccurrences(text, boa_token);
+      if (boa_count > 0) {
+        ReplaceAll(text, boa_token, full_audio_sequence);
+      } else {
+        // No audio tokens at all — append before the text
+        text = full_audio_sequence + text;
+      }
+    }
+  }
 
   const std::vector<int32_t> input_ids = tokenizer.Encode(text.c_str());
   const auto seq_len = static_cast<int64_t>(input_ids.size());
@@ -189,8 +224,37 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     }
   }
 
+  // Process audio FIRST to compute num_audio_tokens (needed for prompt token expansion)
+  int64_t num_audio_tokens = 0;
+  if (payload.audios && has_speech_) {
+    ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
+    CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
+
+    OrtxTensor* audio_features = nullptr;
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_features));
+
+    EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
+
+    // Compute audio_sizes: the speech encoder uses 2-stage Conv2d with stride=2 each
+    const float* audio_data{};
+    const int64_t* audio_shape{};
+    size_t audio_dims;
+    CheckResult(OrtxGetTensorData(audio_features, reinterpret_cast<const void**>(&audio_data),
+                                  &audio_shape, &audio_dims));
+    int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
+    int64_t t_after_1 = (time_dim - 1) / 2 + 1;
+    int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
+    num_audio_tokens = t_after_2;
+    std::array<int64_t, 1> audio_sizes_shape = {1};
+    auto audio_sizes = OrtValue::CreateTensor<int64_t>(allocator, audio_sizes_shape);
+    audio_sizes->GetTensorMutableData<int64_t>()[0] = num_audio_tokens;
+    named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
+                           std::make_shared<Tensor>(std::move(audio_sizes)));
+  }
+
+  // Process prompt: expand image and audio tokens, then encode
   auto [input_ids, token_type_ids, num_img_tokens] =
-      ProcessGemma4ImagePrompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, actual_soft_tokens);
+      ProcessGemma4ImagePrompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, actual_soft_tokens, num_audio_tokens);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
@@ -252,17 +316,6 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
                                std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
       }
     }
-  }
-
-  // Process audio if present and speech encoder is available
-  if (payload.audios && has_speech_) {
-    ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
-    CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
-
-    OrtxTensor* audio_features = nullptr;
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_features));
-
-    EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
   }
 
   return named_tensors;

@@ -377,13 +377,11 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   num_audio_tokens_ = num_audio_tokens;
 
-  // Create 2D [num_audio_tokens, hidden_size] output buffer for the speech model.
-  // The speech ONNX model outputs 3D [B, T, hidden] but the embedding model expects
-  // 2D [T, hidden]. Pass batch_size=-1 to skip the batch dimension in the shape.
-  // ORT will flatten the 3D output to match our 2D buffer for batch=1.
+  // Allocate 3D [batch, num_audio_tokens, hidden_size] matching the speech ONNX model's
+  // output rank. Will be reshaped to 2D before passing to the embedding model.
   audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
                                                          model_.config_->model.speech.outputs.audio_features,
-                                                         -1, num_audio_tokens_);
+                                                         params_->BatchBeamSize(), num_audio_tokens_);
   audio_features_->Add();
   extra_inputs_.Add(extra_inputs, model_.speech_session_->GetInputNames());
 }
@@ -575,8 +573,18 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) {
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     }
-    if (speech_state_) {
+    if (speech_state_ && num_audio_tokens_ > 0) {
+      // Reshape speech output from 3D [B, T, hidden] to 2D [B*T, hidden]
+      // to match embedding model's expected 2D audio_features input rank.
+      auto& speech_shape = speech_state_->audio_features_->GetShape();
+      if (speech_shape.size() == 3) {
+        speech_state_->audio_features_->ReshapeFeatures(
+            {speech_shape[0] * speech_shape[1], speech_shape[2]});
+      }
       embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
+    } else if (embedding_state_->audio_features_) {
+      // No audio: provide empty 2D tensor [0, hidden_size] for the embedding model
+      embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);

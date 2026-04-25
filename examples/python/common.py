@@ -279,9 +279,10 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
     else:
-        # Gemma-3/4 style: structured content
+        # Gemma-3/4 style: structured content with image and audio entries
         image_tags = [{"type": "image"} for _ in range(num_images)]
-        content = image_tags + [{"type": "text", "text": prompt}]
+        audio_tags = [{"type": "audio"} for _ in range(num_audios)]
+        content = image_tags + audio_tags + [{"type": "text", "text": prompt}]
     return content
 
 @dataclass

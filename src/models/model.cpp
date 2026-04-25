@@ -828,8 +828,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  if (ModelType::IsVLM(config->model.type)) {
+    // Auto-detect speech support: if the config has a speech model filename, enable it
+    bool has_speech = !config->model.speech.filename.empty();
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech);
+  }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type))
