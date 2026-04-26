@@ -1,0 +1,71 @@
+{
+  "processor": {
+    "name": "pixtral_image_processor",
+    "transforms": [
+      {
+        "operation": {
+          "name": "decode_image",
+          "type": "DecodeImage",
+          "attrs": {
+            "color_space": "RGB"
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "convert_to_rgb",
+          "type": "ConvertRGB"
+        }
+      },
+      {
+        "operation": {
+          "name": "resize",
+          "type": "Resize",
+          "attrs": {
+            "height": 1540,
+            "width": 1540,
+            "smart_resize": 1,
+            "min_pixels": 784,
+            "max_pixels": 2371600,
+            "patch_size": 14,
+            "merge_size": 2
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "rescale",
+          "type": "Rescale",
+          "attrs": {
+            "rescale_factor": 0.00392156862745098
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "normalize",
+          "type": "Normalize",
+          "attrs": {
+            "mean": [0.48145466, 0.4578275, 0.40821073],
+            "std": [0.26862954, 0.26130258, 0.27577711]
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "to_channel_first",
+          "type": "Permute3D",
+          "attrs": {
+            "dims": [2, 0, 1]
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "pixtral_image_sizes",
+          "type": "PixtralImageSizes"
+        }
+      }
+    ]
+  }
+}

@@ -26,6 +26,7 @@ from builders import (
     GraniteModel,
     InternLM2Model,
     LlamaModel,
+    Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
@@ -246,6 +247,15 @@ def create_model(
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        if hasattr(config, "quantization_config"):
+            delattr(config, "quantization_config")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
