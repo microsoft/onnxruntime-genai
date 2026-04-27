@@ -9,6 +9,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import sys
 import textwrap
 from pathlib import Path
@@ -106,9 +107,10 @@ def _parse_args():
             "NMake Makefiles",
             "Unix Makefiles",
             "Visual Studio 17 2022",
+            "Visual Studio 18 2026",
             "Xcode",
         ],
-        default=("Visual Studio 17 2022" if util.is_windows() else "Unix Makefiles"),
+        default=("Visual Studio 18 2026" if util.is_windows() else "Unix Makefiles"),
         help="Specify the generator that CMake invokes.",
     )
     parser.add_argument(
@@ -380,9 +382,13 @@ def _validate_args(args: argparse.Namespace):
 def _create_env(args: argparse.Namespace):
     env = os.environ.copy()
 
+    if args.ort_home:
+        ort_lib_path = str(args.ort_home / "lib")
+        env["PATH"] = ort_lib_path + os.pathsep + env.get("PATH", "")
+
     if args.use_cuda or args.use_trt_rtx:
         env["CUDA_HOME"] = str(args.cuda_home)
-        env["PATH"] = str(args.cuda_home / "bin") + os.pathsep + os.environ["PATH"]
+        env["PATH"] = str(args.cuda_home / "bin") + os.pathsep + env["PATH"]
 
     if args.android:
         env["ANDROID_HOME"] = str(args.android_home)
@@ -728,10 +734,13 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
+        # Copy ORT libs to the build output directory so the test executable finds them
+        # before any system-installed ORT (e.g. in System32) via DLL search order.
+        util.copy_dependencies(args.ort_home / "lib", lib_dir)
         lib_dir = args.ort_home / "lib"
 
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir))
+    util.run(ctest_cmd, env=env, cwd=str(args.build_dir))
 
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
@@ -741,7 +750,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
 
     if args.build_java:
         ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-        util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
+        util.run(ctest_cmd, env=env, cwd=str(args.build_dir / "src" / "java"))
 
     if args.android:
         _run_android_tests(args)
@@ -765,7 +774,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     if build_dir.exists():
         log.info(f"Removing existing build directory: {build_dir}")
-        shutil.rmtree(build_dir)
+        shutil.rmtree(build_dir, onexc=lambda func, path, exc: (os.chmod(path, stat.S_IWRITE), func(path)))
 
     build_dir.mkdir()
 
@@ -777,8 +786,12 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DNEMOTRON_SPEECH=ON"
     ]
 
-    ort_include_dir = REPO_ROOT / "ort" / "include"
-    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    if args.ort_home:
+        ort_include_dir = args.ort_home / "include"
+        ort_lib_dir = args.ort_home / "lib"
+    else:
+        ort_include_dir = REPO_ROOT / "ort" / "include"
+        ort_lib_dir = REPO_ROOT / "ort" / "lib"
     oga_include_dir = REPO_ROOT / "src"
     oga_lib_dir = args.build_dir
     if util.is_windows():
