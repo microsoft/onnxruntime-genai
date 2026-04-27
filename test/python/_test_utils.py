@@ -61,6 +61,7 @@ def get_model_paths():
     # TODO: Uncomment the following models as needed in the CI pipeline.
 
     # Format: model alias: (HF repo name, create only 1 layer, enable graph capture)
+    # Note: enable_graph_capture currently only affects WebGPU EP (adds enable_webgpu_graph=true).
     hf_paths = {
         # "olmo": "amd/AMD-OLMo-1B-SFT-DPO",
         # "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
@@ -77,6 +78,7 @@ def get_model_paths():
     # Note: If a model has over 4B parameters, please add a quantized version
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
     # Format: model alias: (OS path, create only 1 layer, enable graph capture)
+    # Note: enable_graph_capture currently only affects WebGPU EP.
     ci_paths = {
         # "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
         # "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),

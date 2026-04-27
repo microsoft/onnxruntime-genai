@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Our working directory is generators/build so one up puts us in the root directory:
@@ -14,11 +15,13 @@
 
 namespace test_utils {
 
-// Helper function to get the appropriate model path based on available models
+// Helper function to get the appropriate model path based on available models.
+// Caches results per model_type so different models resolve independently.
 inline const std::string& GetModelPath(const std::string& model_type) {
-  static std::string model_path;
-  if (!model_path.empty()) {
-    return model_path;
+  static std::unordered_map<std::string, std::string> model_paths;
+  auto it = model_paths.find(model_type);
+  if (it != model_paths.end()) {
+    return it->second;
   }
 
   std::vector<std::string> candidate_paths = {
@@ -30,14 +33,12 @@ inline const std::string& GetModelPath(const std::string& model_type) {
   for (const auto& path : candidate_paths) {
     std::filesystem::path model_path_fs(path);
     if (std::filesystem::exists(model_path_fs / "genai_config.json")) {
-      model_path = path;
-      return model_path;
+      return model_paths.emplace(model_type, path).first->second;
     }
   }
 
   // Fallback to CPU path
-  model_path = std::string(MODEL_PATH) + model_type + "/int4/cpu";
-  return model_path;
+  return model_paths.emplace(model_type, std::string(MODEL_PATH) + model_type + "/int4/cpu").first->second;
 }
 
 // Helper to detect if we're using WebGPU or DML EP based on the model path
