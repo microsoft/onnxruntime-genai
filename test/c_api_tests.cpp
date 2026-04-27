@@ -1384,6 +1384,61 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
   EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
 }
 
+// Test RewindTo with the qwen-2.5 model. Exercises the static mask rewind path if
+// the EP supports it (DML by default, WebGPU with enableGraphCapture=1 set by
+// _test_utils.py), otherwise falls back to the dynamic mask path.
+// Skipped when qwen-2.5 model is not available.
+#if TEST_QWEN_2_5
+TEST(CAPITests, RewindQwen25CAPI) {
+  std::string model_path = QWEN_2_5_PATH;
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "qwen-2.5 model not available at " << model_path;
+  }
+
+  int max_length = 50;
+  std::vector<int32_t> input_ids{1, 2, 3, 4, 5};
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOptionBool("do_sample", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Save first-run output
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  // RewindTo(0) - full rewind
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  // Partial rewind
+  if (seq_len > 7) {
+    generator->RewindTo(seq_len - 3);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+
+    seq_len2 = generator->GetSequenceCount(0);
+    ASSERT_EQ(seq_len2, seq_len);
+    EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+  }
+}
+#endif  // TEST_QWEN_2_5
+
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
 #endif
