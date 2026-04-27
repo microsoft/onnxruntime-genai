@@ -4,8 +4,6 @@
 #include "../generators.h"
 #include "model.h"
 
-#include <fstream>
-
 namespace Generators {
 
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths) {

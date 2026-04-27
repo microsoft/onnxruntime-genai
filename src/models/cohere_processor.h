@@ -3,6 +3,7 @@
 #pragma once
 
 #include "processor.h"
+#include "nemo_mel_spectrogram.h"
 
 namespace Generators {
 
@@ -20,14 +21,15 @@ struct CohereProcessor : Processor {
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
       const float* samples, size_t num_samples, int sample_rate) const;
 
-  // Convert float32 samples to in-memory WAV bytes (16-bit PCM).
-  std::vector<uint8_t> SamplesToWavBytes(const float* samples, size_t num_samples, int sample_rate) const;
-
-  // Run mel extraction on WAV bytes, returns (mel_tensor, mel_length).
-  std::pair<std::unique_ptr<OrtValue>, int64_t> ExtractMel(const std::vector<uint8_t>& wav_bytes) const;
+  // Compute mel + normalize directly from PCM float32 samples. Returns OrtValue [1, num_mels, num_frames].
+  std::pair<std::unique_ptr<OrtValue>, int64_t> ComputeMelFromPCM(const float* samples, size_t num_samples) const;
 
   ONNXTensorElementDataType audio_features_type_;
-  ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;
+  ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;  // Fallback for non-chunked path
+
+  // Mel config (from audio_processor_config.json)
+  nemo_mel::NemoMelConfig mel_cfg_{128, 512, 160, 400, 16000, 0.97f, 5.96046448e-08f};
+  float norm_eps_{1e-5f};
 
   // Chunking parameters
   float max_audio_clip_s_{35.0f};
