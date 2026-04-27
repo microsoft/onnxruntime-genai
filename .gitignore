@@ -38,6 +38,7 @@ examples/csharp/ModelChat/models
 !test/test_models/qwen3-vl-vision-preprocessing/*.onnx
 !test/test_models/qwen35-hybrid-preprocessing/
 !test/test_models/qwen35-hybrid-preprocessing/*.onnx
+!test/test_models/mistral3-vision-preprocessing/
 
 .ipynb_checkpoints/
 /src/java/.gradle

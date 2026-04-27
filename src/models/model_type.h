@@ -21,13 +21,18 @@ struct ModelType {
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 6> VLM = {"fara", "gemma3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
+    static constexpr std::array<std::string_view, 7> VLM = {"fara", "gemma3", "mistral3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
     // Qwen-VL family: models requiring 3D mRoPE position IDs
     return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "qwen3_5";
+  }
+
+  inline static bool IsPixtralFamily(const std::string& model_type) {
+    // Pixtral family: per-image vision loop with variable resolution
+    return model_type == "mistral3";
   }
 
   inline static bool IsALM(const std::string& model_type) {

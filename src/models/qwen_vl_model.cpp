@@ -150,17 +150,16 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   vision_ran_ = true;
 }
 
-void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) {
+void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id) {
   if (stage_id != 0 || !vision_ran_) return;
 
   const auto& embeddings_config = vl_model_.config_->model.decoder.pipeline[0];
   if (!embeddings_config.outputs.empty()) {
-    InjectVisionEmbeddings(embeddings_config.outputs[0], next_tokens);
+    InjectVisionEmbeddings(embeddings_config.outputs[0]);
   }
 }
 
-void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddings_output_name,
-                                                      DeviceSpan<int32_t>& input_token_ids) {
+void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddings_output_name) {
   auto it = ortvalue_store_.find(embeddings_output_name);
   if (it == ortvalue_store_.end() || !it->second) {
     throw std::runtime_error("Vision embedding injection: embeddings output '" + embeddings_output_name + "' not found in ortvalue_store");

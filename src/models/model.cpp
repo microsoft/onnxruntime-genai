@@ -22,6 +22,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
 #include "../ryzenai/interface.h"
@@ -922,6 +923,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
+          {"mistral3", Processor::Create<Mistral3ImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
