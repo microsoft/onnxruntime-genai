@@ -52,6 +52,9 @@ from transformers import (
 )
 
 
+VALID_QUANT_MODES = frozenset({"default", "hybrid", "int4"})
+
+
 def check_extra_options(kv_pairs, execution_provider):
     """
     Check key-value pairs and set values correctly
@@ -72,6 +75,23 @@ def check_extra_options(kv_pairs, execution_provider):
         "disable_qkv_fusion",
         "prune_lm_head",
     ]
+
+    # Validate quant_mode if provided. Empty or whitespace-only values are
+    # treated as unset so downstream builders can apply their default behavior.
+    if "quant_mode" in kv_pairs:
+        quant_mode = kv_pairs["quant_mode"]
+        if isinstance(quant_mode, str):
+            quant_mode = quant_mode.strip().lower()
+
+        if not quant_mode:
+            del kv_pairs["quant_mode"]
+        elif quant_mode not in VALID_QUANT_MODES:
+            valid_modes_display = ", ".join(sorted(VALID_QUANT_MODES))
+            raise ValueError(
+                f"quant_mode must be one of {valid_modes_display}, got '{kv_pairs['quant_mode']}'"
+            )
+        else:
+            kv_pairs["quant_mode"] = quant_mode
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
