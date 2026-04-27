@@ -51,9 +51,11 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         og.register_execution_provider_library("CUDAExecutionProvider", ep_path)
     elif ep == "NvTensorRtRtx":
         og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
+    elif ep == "qnn":
+        og.register_execution_provider_library("QNNExecutionProvider", ep_path)
     else:
         print(f"Warning: EP registration not supported for {ep}")
-        print("Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs.")
+        print("Only 'cuda', 'NvTensorRtRtx', and 'qnn' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs.")
         return
 
     print(f"Registered {ep} successfully!")
