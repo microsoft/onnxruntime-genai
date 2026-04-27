@@ -131,6 +131,7 @@ struct Config {
     // Qwen2.5-VL specific token IDs
     int image_token_id{};
     int audio_token_id{};
+    int boa_token_id{};
     int video_token_id{};
     int vision_start_token_id{};
 

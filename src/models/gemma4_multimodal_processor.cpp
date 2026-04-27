@@ -235,13 +235,23 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 
-    // Compute audio_sizes: the speech encoder uses 2-stage Conv2d with stride=2 each
+    // Create input_features_mask: all-True for single-clip inference (no padding)
+    // Shape matches audio features: [batch, time] bool
     const float* audio_data{};
     const int64_t* audio_shape{};
     size_t audio_dims;
     CheckResult(OrtxGetTensorData(audio_features, reinterpret_cast<const void**>(&audio_data),
                                   &audio_shape, &audio_dims));
     int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
+    int64_t batch_dim = (audio_dims == 3) ? audio_shape[0] : 1;
+    {
+      auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
+      std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
+      named_tensors->emplace(std::string("input_features_mask"),
+                             std::make_shared<Tensor>(std::move(mask)));
+    }
+
+    // Compute audio_sizes: the speech encoder uses 2-stage Conv2d with stride=2 each
     int64_t t_after_1 = (time_dim - 1) / 2 + 1;
     int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
     num_audio_tokens = t_after_2;

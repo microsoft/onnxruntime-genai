@@ -1100,6 +1100,8 @@ struct Model_Element : JSON::Element {
       v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "audio_token_id") {
       v_.audio_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "boa_token_id") {
+      v_.boa_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "video_token_id") {
       v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "vision_start_token_id") {
