@@ -48,7 +48,16 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
     size_t pixel_values_num_dims;
     CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pixel_values_data),
                                   &pixel_values_shape, &pixel_values_num_dims));
-    num_images = pixel_values_shape[0];
+    // 3D: [batch/num_images, num_patches, patch_dim] → shape[0] is num_images
+    // 2D: [num_patches, patch_dim] → single image (no batch dim)
+    if (pixel_values_num_dims == 3) {
+      num_images = pixel_values_shape[0];
+    } else if (pixel_values_num_dims == 2) {
+      num_images = 1;
+    } else {
+      throw std::runtime_error("pixel_values has unexpected rank " + std::to_string(pixel_values_num_dims) +
+                               ". Expected 2 (num_patches, patch_dim) or 3 (batch, num_patches, patch_dim).");
+    }
   }
 
   std::string text = prompt;
@@ -179,6 +188,7 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
 
       config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
       config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
+      config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
     } else if (!config.model.speech.filename.empty()) {
       // Speech model is configured but the preprocessing config file is missing on disk
       throw std::runtime_error("Speech model is configured (speech.filename=" + config.model.speech.filename +
@@ -232,6 +242,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   // Process audio FIRST to compute num_audio_tokens (needed for prompt token expansion).
   // Currently only single-clip audio is supported per prompt.
   int64_t num_audio_tokens = 0;
+  if (payload.audios && !has_speech_) {
+    throw std::runtime_error("Audio input was provided but audio/speech support is not configured. "
+                             "Ensure the genai_config.json has a 'speech' section with both 'filename' and 'config_filename'.");
+  }
   if (payload.audios && has_speech_) {
     ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
