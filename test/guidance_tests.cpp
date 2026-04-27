@@ -69,7 +69,7 @@ TEST_F(GuidanceTests, UseRegex) {
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 }
 
-#if 0  // Temporarily disable JSON schema and LARK grammar tests
+#if 0   // Temporarily disable JSON schema and LARK grammar tests
 TEST_F(GuidanceTests, UseLarkGrammarSingleTurn) {
   auto input_string = get_qwen_2_5_prompt("What is the weather in Seattle?");
   auto input_sequences = OgaSequences::Create();
@@ -169,7 +169,7 @@ TEST_F(GuidanceTests, UseJsonSchemaMultiTurn) {
     EXPECT_EQ(output, expected_output);
   }
 }
-#endif        // #if 0
+#endif  // #if 0
 
 #endif  // TEST_QWEN_2_5
 
