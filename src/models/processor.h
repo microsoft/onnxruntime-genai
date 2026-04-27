@@ -33,6 +33,7 @@ struct Audios {
 
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios_;
   size_t num_audios_{};
+  std::vector<std::vector<uint8_t>> raw_bytes_;  // Original file bytes per audio (for WAV decoding)
 };
 
 std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths);

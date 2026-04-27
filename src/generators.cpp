@@ -6,6 +6,7 @@
 #include "generators.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/cohere_model.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -369,6 +370,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
+  is_cohere_model_ = model.config_->model.type == "cohere_transcribe";
+
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
 }
@@ -500,6 +503,11 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     set_extra_inputs_ = false;
   }
 
+  // Save prompt tokens for Cohere chunk re-feeding
+  if (is_cohere_model_ && input_ids.size() > 0) {
+    static_cast<CohereState*>(state_.get())->SetPromptTokens(input_ids);
+  }
+
   // Append tokens and run ComputeLogits after setting all other possible inputs
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
@@ -572,6 +580,38 @@ bool Generator::IsDone() {
 
   bool is_done = search_->IsDone();
   if (is_done) {
+    // Cohere multi-chunk: if there are more chunks, advance and continue
+    if (is_cohere_model_) {
+      auto* cohere_state = static_cast<CohereState*>(state_.get());
+      std::cerr << "[cohere] IsDone: chunk " << cohere_state->CurrentChunk()
+                << "/" << cohere_state->TotalChunks()
+                << " hasMore=" << cohere_state->HasMoreChunks() << std::endl;
+      if (cohere_state->HasMoreChunks()) {
+        std::cerr << "[cohere] Advancing to next chunk..." << std::endl;
+        cohere_state->AdvanceToNextChunk();
+        std::cerr << "[cohere] AdvanceToNextChunk done, rewinding search..." << std::endl;
+
+        // Reset search state so decoding can continue
+        search_->RewindTo(0);
+        std::cerr << "[cohere] RewindTo(0) done, re-feeding prompt..." << std::endl;
+
+        // Re-feed prompt tokens
+        const auto& prompt_tokens = cohere_state->GetPromptTokens();
+        std::cerr << "[cohere] prompt_tokens.size()=" << prompt_tokens.size() << std::endl;
+        if (!prompt_tokens.empty()) {
+          auto prompt_span = cpu_span<const int32_t>(prompt_tokens.data(), prompt_tokens.size());
+          auto prompt_device = AllocateInputIdsOnDevice(prompt_span);
+          std::cerr << "[cohere] AppendTokens..." << std::endl;
+          search_->AppendTokens(prompt_device);
+          set_extra_inputs_ = false;  // Extra inputs already set
+          std::cerr << "[cohere] ComputeLogits..." << std::endl;
+          ComputeLogits(prompt_device);
+          std::cerr << "[cohere] Chunk transition complete!" << std::endl;
+        }
+        return false;  // Not done yet, continue generating
+      }
+    }
+
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();

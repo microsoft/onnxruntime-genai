@@ -151,6 +151,11 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
+    // Cohere Transcribe chunking parameters
+    float max_audio_clip_s{35.0f};       // Maximum audio chunk length in seconds
+    float overlap_chunk_s{5.0f};         // Overlap/boundary search region in seconds
+    int min_energy_window_samples{1600}; // Window size for energy-based split point search
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;

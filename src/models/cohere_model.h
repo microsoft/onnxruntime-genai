@@ -20,6 +20,9 @@ struct CohereEncoderState : State {
   bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
   OrtValue* GetHiddenStates() { return hidden_states_.get(); }
 
+  // Re-initialize encoder with new audio features for next chunk
+  void SetChunkAudioFeatures(std::shared_ptr<Tensor> audio_features, std::shared_ptr<Tensor> mel_length);
+
  private:
   const WhisperModel& model_;
 
@@ -40,6 +43,14 @@ struct CohereState : State {
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
+  // Multi-chunk support
+  bool HasMoreChunks() const { return current_chunk_ + 1 < total_chunks_; }
+  int CurrentChunk() const { return current_chunk_; }
+  int TotalChunks() const { return total_chunks_; }
+  bool AdvanceToNextChunk();  // Returns true if advanced, false if no more chunks
+  const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
+  void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
+
  private:
   const WhisperModel& model_;
 
@@ -47,6 +58,13 @@ struct CohereState : State {
   std::unique_ptr<CrossCache> cross_cache_;
   std::unique_ptr<WhisperDecoderState> decoder_state_;
   std::unique_ptr<OrtValue> transpose_k_cache_buffer_;
+
+  // Multi-chunk state
+  int current_chunk_{0};
+  int total_chunks_{1};
+  std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
+  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
+  std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
 };
 
 // Cohere model — inherits WhisperModel, overrides CreateState.
