@@ -55,17 +55,9 @@ template <typename SrcT, typename DstT>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
 
 // Helper to emplace a processed tensor with correct type dispatch (float, bf16, fp16)
-inline void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
-                                   OrtxTensor* tensor, ONNXTensorElementDataType type,
-                                   Ort::Allocator& allocator) {
-  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(tensor, allocator)));
-  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(tensor, allocator)));
-  } else {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(tensor, allocator)));
-  }
-}
+void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
+                            OrtxTensor* tensor, ONNXTensorElementDataType type,
+                            Ort::Allocator& allocator);
 
 struct Processor {
   Processor() = default;

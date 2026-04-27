@@ -203,4 +203,16 @@ template std::unique_ptr<OrtValue> ProcessTensor<int32_t>(OrtxTensor* tensor, Or
 template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::Allocator& allocator);
 
+void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
+                            OrtxTensor* tensor, ONNXTensorElementDataType type,
+                            Ort::Allocator& allocator) {
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(tensor, allocator)));
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(tensor, allocator)));
+  } else {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(tensor, allocator)));
+  }
+}
+
 }  // namespace Generators
