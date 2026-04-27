@@ -60,16 +60,17 @@ def run(args):
         generator = og.Generator(model, params)
         generator.set_inputs(inputs)
 
+        stream = tokenizer.create_stream()
         tokens = []
         while not generator.is_done():
             generator.generate_next_token()
-            tokens.append(generator.get_sequence(0)[-1])
+            t = generator.get_sequence(0)[-1]
+            tokens.append(t)
+            print(stream.decode(t), end="", flush=True)
 
-        # Decode all tokens (includes tokens from all chunks)
-        stream = tokenizer.create_stream()
-        text = "".join(stream.decode(t) for t in tokens)
-        text = text.strip()
-        all_texts.append(text)
+        text = "".join(stream.decode(t) for t in tokens)  # already printed
+        all_texts.append(text.strip())
+        print()  # newline after streaming
 
     elapsed = time.time() - t0
 
