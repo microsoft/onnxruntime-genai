@@ -28,11 +28,13 @@ void ReplaceAll(std::string& text, const std::string& from, const std::string& t
   }
 }
 
+// Expand image and audio placeholder tokens in the prompt, then encode to input_ids.
+// Returns (input_ids, token_type_ids, num_img_tokens).
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
-ProcessGemma4ImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                         OrtxTensor* pixel_values, Ort::Allocator& allocator,
-                         size_t vision_soft_tokens_per_image,
-                         int64_t num_audio_tokens = 0) {
+ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
+                    OrtxTensor* pixel_values, Ort::Allocator& allocator,
+                    size_t vision_soft_tokens_per_image,
+                    int64_t num_audio_tokens = 0) {
   constexpr char boi_token[] = "<|image>";
   constexpr char image_token[] = "<|image|>";
   constexpr char eoi_token[] = "<image|>";
@@ -190,7 +192,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   // Text-only path: no images and no audio
   if (!payload.images && !payload.audios) {
     auto [input_ids, token_type_ids, num_img_tokens] =
-        ProcessGemma4ImagePrompt(tokenizer, std::string(payload.prompt), nullptr, allocator, vision_soft_tokens_per_image_);
+        ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), nullptr, allocator, vision_soft_tokens_per_image_);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
     return named_tensors;
   }
@@ -264,7 +266,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   // Process prompt: expand image and audio tokens, then encode
   auto [input_ids, token_type_ids, num_img_tokens] =
-      ProcessGemma4ImagePrompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, actual_soft_tokens, num_audio_tokens);
+      ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, actual_soft_tokens, num_audio_tokens);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
