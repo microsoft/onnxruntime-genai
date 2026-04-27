@@ -79,6 +79,9 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
 }
 
 void MultiModalFeatures::AllocateEmptyFeatures() {
+  // Skip if already allocated (avoids redundant allocation when called from
+  // both EmbeddingState::SetExtraInputs and the pipeline prompt path)
+  if (features_ && state_.inputs_[index_] == features_.get()) return;
   features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
   state_.inputs_[index_] = features_.get();
 }

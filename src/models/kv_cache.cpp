@@ -263,12 +263,18 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
-      // Use per-layer allocation based on sliding window layer indices
-      layer_shapes_.resize(layer_count_);
+      // Use per-layer allocation based on sliding window layer indices.
+      // If layer_shapes_ already exists (from head_dim auto-detection), preserve
+      // the per-layer head_dim values — only update the sequence length dimension.
+      if (layer_shapes_.empty()) {
+        layer_shapes_.resize(layer_count_);
+        for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+          layer_shapes_[layer_idx] = shape_;
+        }
+      }
 
-      // Initialize all layers with base shape and max_length
+      // Set all layers to max_length (sequence dim only)
       for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-        layer_shapes_[layer_idx] = shape_;
         layer_shapes_[layer_idx][2] = max_length;
       }
 

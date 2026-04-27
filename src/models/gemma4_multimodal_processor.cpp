@@ -95,11 +95,20 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
   const std::string full_image_sequence = "\n\n" + std::string(boi_token) + image_tokens_expanded + eoi_token + "\n\n";
   ReplaceAll(text, boi_token, full_image_sequence);
 
-  // Expand audio tokens: replace single <|audio|> from chat template with N audio soft tokens
+  // Expand audio tokens: replace single <|audio|> from chat template with N audio soft tokens.
+  // Currently only single-clip audio is supported. Multi-audio would require per-clip
+  // token counts from the speech encoder, which batch mel extraction doesn't provide.
   if (num_audio_tokens > 0) {
     constexpr char boa_token[] = "<|audio>";
     constexpr char audio_token[] = "<|audio|>";
     constexpr char eoa_token[] = "<audio|>";
+
+    // Validate: only single audio clip is supported
+    auto audio_marker_count = CountOccurrences(text, audio_token);
+    if (audio_marker_count > 1) {
+      throw std::runtime_error("Gemma4 audio processing currently supports only 1 audio clip per prompt, but found " +
+                               std::to_string(audio_marker_count) + " audio markers in the prompt.");
+    }
 
     std::string audio_tokens_expanded;
     audio_tokens_expanded.reserve(static_cast<size_t>(num_audio_tokens) * (sizeof(audio_token) - 1));
@@ -109,10 +118,7 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
     const std::string full_audio_sequence = "\n\n" + std::string(boa_token) + audio_tokens_expanded + eoa_token + "\n\n";
 
     // Chat template inserts <|audio|> per audio clip — replace with expanded sequence
-    auto audio_marker_count = CountOccurrences(text, audio_token);
-    if (audio_marker_count > 0) {
-      // Replace only the first standalone <|audio|> (avoid replacing expanded image tokens
-      // that might share a substring). Use find to locate the first occurrence.
+    if (audio_marker_count == 1) {
       auto pos = text.find(audio_token);
       if (pos != std::string::npos) {
         text.replace(pos, sizeof(audio_token) - 1, full_audio_sequence);
@@ -148,23 +154,14 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
   return {std::move(input_ids_value), std::move(token_type_ids), std::move(num_img_tokens)};
 }
 
-// Helper to avoid repeating the float/bf16/fp16 type dispatch for every tensor
-void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
-                            OrtxTensor* tensor, ONNXTensorElementDataType type,
-                            Ort::Allocator& allocator) {
-  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(tensor, allocator)));
-  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(tensor, allocator)));
-  } else {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(tensor, allocator)));
-  }
-}
-
 }  // namespace
 
 Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
+  // Query pixel_position_ids type (int32 or int64) if the vision model has this input
+  if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
+    pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
+  }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
@@ -181,6 +178,12 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
       CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), speech_config_path.string().c_str()));
 
       config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
+      config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
+    } else if (!config.model.speech.filename.empty()) {
+      // Speech model is configured but the preprocessing config file is missing on disk
+      throw std::runtime_error("Speech model is configured (speech.filename=" + config.model.speech.filename +
+                               ") but the audio processor config file was not found at: " +
+                               speech_config_path.string());
     }
   }
 }
@@ -226,7 +229,8 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     }
   }
 
-  // Process audio FIRST to compute num_audio_tokens (needed for prompt token expansion)
+  // Process audio FIRST to compute num_audio_tokens (needed for prompt token expansion).
+  // Currently only single-clip audio is supported per prompt.
   int64_t num_audio_tokens = 0;
   if (payload.audios && has_speech_) {
     ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
@@ -246,10 +250,14 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
                                   &audio_shape, &audio_dims));
     int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
     int64_t batch_dim = (audio_dims == 3) ? audio_shape[0] : 1;
+    if (batch_dim > 1) {
+      throw std::runtime_error("Gemma4 audio processing currently supports only 1 audio clip per prompt, "
+                               "but received " + std::to_string(batch_dim) + " clips.");
+    }
     {
       auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
       std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
-      named_tensors->emplace(std::string("input_features_mask"),
+      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
                              std::make_shared<Tensor>(std::move(mask)));
     }
 
@@ -289,13 +297,25 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
 
     if (actual_patches < num_padded_patches) {
-      // Trim: copy only the first actual_patches from the padded tensor
-      auto trimmed_shape = (pv_dims == 3)
-          ? std::vector<int64_t>{pv_shape[0], actual_patches, patch_dim}
-          : std::vector<int64_t>{actual_patches, patch_dim};
-      auto trimmed_pv = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
-      std::memcpy(trimmed_pv->GetTensorMutableData<float>(), pv_data,
-                  static_cast<size_t>(actual_patches * patch_dim) * sizeof(float));
+      // Trim: copy only the first actual_patches from the padded tensor.
+      // For 3D [batch, patches, dim], copy batch * actual_patches * dim elements.
+      const int64_t batch = (pv_dims == 3) ? pv_shape[0] : 1;
+      auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
+                                           : std::vector<int64_t>{actual_patches, patch_dim};
+
+      // Respect the model's pixel_values type (float, fp16, or bf16)
+      auto trimmed_pv = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
+      const size_t elem_size = (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 4 : 2;  // float=4, fp16/bf16=2
+      // For 3D with batch > 1, copy each batch slice separately (padded stride differs from trimmed stride).
+      // Use raw byte pointers since the type may be float, fp16, or bf16.
+      auto* dst = static_cast<uint8_t*>(trimmed_pv->GetTensorMutableRawData());
+      const auto* src = reinterpret_cast<const uint8_t*>(pv_data);
+      const size_t src_stride = static_cast<size_t>(num_padded_patches * patch_dim) * elem_size;
+      const size_t dst_stride = static_cast<size_t>(actual_patches * patch_dim) * elem_size;
+      for (int64_t b = 0; b < batch; ++b) {
+        std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+      }
+
       named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                              std::make_shared<Tensor>(std::move(trimmed_pv)));
     } else {
@@ -306,26 +326,40 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     // Trim pixel_position_ids similarly
     if (pixel_position_ids) {
-      const int64_t* pos_data{};
+      const void* pos_data_raw{};
       const int64_t* pos_shape{};
       size_t pos_dims;
-      CheckResult(OrtxGetTensorData(pixel_position_ids, reinterpret_cast<const void**>(&pos_data), &pos_shape, &pos_dims));
+      CheckResult(OrtxGetTensorData(pixel_position_ids, &pos_data_raw, &pos_shape, &pos_dims));
 
       const int64_t num_padded_pos = (pos_dims == 3) ? pos_shape[1] : pos_shape[0];
       const int64_t pos_last_dim = (pos_dims == 3) ? pos_shape[2] : pos_shape[1];
 
       if (actual_patches < num_padded_pos) {
-        auto trimmed_pos_shape = (pos_dims == 3)
-            ? std::vector<int64_t>{pos_shape[0], actual_patches, pos_last_dim}
-            : std::vector<int64_t>{actual_patches, pos_last_dim};
-        auto trimmed_pos = OrtValue::CreateTensor<int64_t>(allocator, trimmed_pos_shape);
-        std::memcpy(trimmed_pos->GetTensorMutableData<int64_t>(), pos_data,
-                    static_cast<size_t>(actual_patches * pos_last_dim) * sizeof(int64_t));
+        // Trim position_ids: for 3D, copy per-batch with correct stride.
+        // Detect the element type from the vision model's input to handle both int32 and int64.
+        const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
+        auto trimmed_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, actual_patches, pos_last_dim}
+                                                 : std::vector<int64_t>{actual_patches, pos_last_dim};
+
+        auto trimmed_pos = OrtValue::CreateTensor(allocator, trimmed_pos_shape, pixel_position_ids_type_);
+        const size_t pos_elem_size = (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) ? 4 : 8;
+        auto* dst = static_cast<uint8_t*>(trimmed_pos->GetTensorMutableRawData());
+        const auto* src = static_cast<const uint8_t*>(pos_data_raw);
+        const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim) * pos_elem_size;
+        const size_t dst_stride = static_cast<size_t>(actual_patches * pos_last_dim) * pos_elem_size;
+        for (int64_t b = 0; b < pos_batch; ++b) {
+          std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+        }
         named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
                                std::make_shared<Tensor>(std::move(trimmed_pos)));
       } else {
-        named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                               std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
+        if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(pixel_position_ids, allocator)));
+        } else {
+          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
+        }
       }
     }
   }

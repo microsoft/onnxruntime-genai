@@ -16,6 +16,7 @@ struct Gemma4MultiModalProcessor : Processor {
   ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> audio_processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
+  ONNXTensorElementDataType pixel_position_ids_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64};
   ONNXTensorElementDataType audio_features_type_;
 
   bool has_speech_{false};

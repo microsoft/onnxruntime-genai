@@ -834,9 +834,20 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
-    // Auto-detect speech support: if the config has a speech model filename, enable it
-    bool has_speech = !config->model.speech.filename.empty();
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech);
+    // Auto-detect speech support: require both the speech ONNX model filename
+    // and the preprocessing config to be present. If only one is set, throw
+    // a clear error so misconfigurations don't silently disable audio.
+    bool has_speech_model = !config->model.speech.filename.empty();
+    bool has_speech_config = !config->model.speech.config_filename.empty();
+    if (has_speech_model && !has_speech_config) {
+      throw std::runtime_error("speech.filename is set but speech.config_filename is missing. "
+                               "Both are required for audio support.");
+    }
+    if (!has_speech_model && has_speech_config) {
+      throw std::runtime_error("speech.config_filename is set but speech.filename is missing. "
+                               "Both are required for audio support.");
+    }
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
