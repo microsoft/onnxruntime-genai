@@ -50,20 +50,7 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
   CheckResult(OrtxLoadAudios(audios.ToBeAssigned(), audio_paths.data(), audio_paths.size()));
 
-  auto result = std::make_unique<Audios>(std::move(audios), audio_paths.size());
-
-  // Read raw file bytes for processors that need waveform access
-  for (const char* audio_path : audio_paths) {
-    std::ifstream f(audio_path, std::ios::binary | std::ios::ate);
-    if (f.is_open()) {
-      auto sz = f.tellg();
-      f.seekg(0);
-      std::vector<uint8_t> bytes(sz);
-      f.read(reinterpret_cast<char*>(bytes.data()), sz);
-      result->raw_bytes_.push_back(std::move(bytes));
-    }
-  }
-  return result;
+  return std::make_unique<Audios>(std::move(audios), audio_paths.size());
 }
 
 std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
@@ -80,14 +67,7 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
   CheckResult(OrtxCreateRawAudios(audios.ToBeAssigned(), audio_data.data(), sizes.data(), audio_data.size()));
 
-  auto result = std::make_unique<Audios>(std::move(audios), audio_data.size());
-
-  // Store raw bytes for processors that need waveform access
-  for (size_t i = 0; i < audio_data.size(); ++i) {
-    const auto* p = static_cast<const uint8_t*>(audio_data[i]);
-    result->raw_bytes_.emplace_back(p, p + audio_data_sizes[i]);
-  }
-  return result;
+  return std::make_unique<Audios>(std::move(audios), audio_data.size());
 }
 
 template <typename T>

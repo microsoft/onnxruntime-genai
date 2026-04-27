@@ -23,69 +23,39 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
 }
 
-// --- WAV decoding: parse raw WAV bytes to mono float32 PCM ---
+// --- WAV decoding: use OrtxDecodeAudio to get PCM from raw audio ---
 
-static std::pair<std::vector<float>, int> ParseWavBytes(const uint8_t* data, size_t size) {
-  if (size < 44 || std::memcmp(data, "RIFF", 4) != 0 || std::memcmp(data + 8, "WAVE", 4) != 0)
-    throw std::runtime_error("CohereProcessor: not a valid WAV file");
+static std::pair<const float*, size_t> GetDecodedPCM(
+    OrtxRawAudios* raw_audios, size_t index,
+    ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder,
+    int& out_sample_rate) {
+  OrtxTensorResult* decode_result = nullptr;
+  CheckResult(OrtxDecodeAudio(raw_audios, index, 0 /* native rate */, &decode_result));
+  decode_result_holder.reset(decode_result);
 
-  int16_t num_channels = 0;
-  int32_t sample_rate = 0;
-  int16_t bits_per_sample = 0;
-  const uint8_t* audio_data = nullptr;
-  size_t audio_bytes = 0;
+  // [0] = float32 PCM, [1] = int64 sample rate
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
+  CheckResult(OrtxTensorResultGetAt(decode_result, 0, pcm_tensor.ToBeAssigned()));
 
-  size_t pos = 12;
-  while (pos + 8 <= size) {
-    uint32_t chunk_sz;
-    std::memcpy(&chunk_sz, data + pos + 4, 4);
+  ort_extensions::OrtxObjectPtr<OrtxTensor> sr_tensor;
+  CheckResult(OrtxTensorResultGetAt(decode_result, 1, sr_tensor.ToBeAssigned()));
 
-    if (std::memcmp(data + pos, "fmt ", 4) == 0) {
-      std::memcpy(&num_channels, data + pos + 10, 2);
-      std::memcpy(&sample_rate, data + pos + 12, 4);
-      std::memcpy(&bits_per_sample, data + pos + 22, 2);
-    } else if (std::memcmp(data + pos, "data", 4) == 0) {
-      audio_data = data + pos + 8;
-      audio_bytes = std::min(static_cast<size_t>(chunk_sz), size - pos - 8);
-    }
-    pos += 8 + chunk_sz;
-  }
+  const void* pcm_data = nullptr;
+  const int64_t* pcm_shape = nullptr;
+  size_t pcm_dims = 0;
+  CheckResult(OrtxGetTensorData(pcm_tensor.get(), &pcm_data, &pcm_shape, &pcm_dims));
 
-  if (!audio_data || num_channels == 0 || sample_rate == 0)
-    throw std::runtime_error("CohereProcessor: invalid WAV structure");
+  const void* sr_data = nullptr;
+  const int64_t* sr_shape = nullptr;
+  size_t sr_dims = 0;
+  CheckResult(OrtxGetTensorData(sr_tensor.get(), &sr_data, &sr_shape, &sr_dims));
 
-  size_t num_samples = audio_bytes / (bits_per_sample / 8) / num_channels;
-  std::vector<float> samples(num_samples);
+  out_sample_rate = static_cast<int>(*static_cast<const int64_t*>(sr_data));
 
-  if (bits_per_sample == 16) {
-    const int16_t* raw = reinterpret_cast<const int16_t*>(audio_data);
-    for (size_t i = 0; i < num_samples; ++i) {
-      if (num_channels == 1) {
-        samples[i] = raw[i] / 32768.0f;
-      } else {
-        float sum = 0.0f;
-        for (int c = 0; c < num_channels; ++c)
-          sum += raw[i * num_channels + c];
-        samples[i] = (sum / num_channels) / 32768.0f;
-      }
-    }
-  } else if (bits_per_sample == 32) {
-    const int32_t* raw = reinterpret_cast<const int32_t*>(audio_data);
-    for (size_t i = 0; i < num_samples; ++i) {
-      if (num_channels == 1) {
-        samples[i] = raw[i] / 2147483648.0f;
-      } else {
-        float sum = 0.0f;
-        for (int c = 0; c < num_channels; ++c)
-          sum += raw[i * num_channels + c] / 2147483648.0f;
-        samples[i] = sum / num_channels;
-      }
-    }
-  } else {
-    throw std::runtime_error("CohereProcessor: unsupported bits_per_sample=" + std::to_string(bits_per_sample));
-  }
+  size_t num_samples = 1;
+  for (size_t d = 0; d < pcm_dims; ++d) num_samples *= pcm_shape[d];
 
-  return {std::move(samples), sample_rate};
+  return {static_cast<const float*>(pcm_data), num_samples};
 }
 
 std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
@@ -214,20 +184,20 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
-  // Try waveform-level chunking if raw bytes are available
-  bool have_raw = !audios->raw_bytes_.empty() && !audios->raw_bytes_[0].empty();
+  // Decode audio to PCM for waveform-level chunking
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> decode_result;
+  int sample_rate = 0;
+  auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, decode_result, sample_rate);
+  bool have_raw = pcm_data != nullptr && num_samples > 0;
 
   if (have_raw) {
-    // Parse WAV to get raw PCM samples
-    auto [samples, sample_rate] = ParseWavBytes(audios->raw_bytes_[0].data(), audios->raw_bytes_[0].size());
-
     // Split waveform at energy boundaries
-    auto chunk_ranges = SplitWaveformIntoChunks(samples.data(), samples.size(), sample_rate);
+    auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
 
     // Process first chunk
     {
       auto [start, end] = chunk_ranges[0];
-      auto wav = SamplesToWavBytes(samples.data() + start, end - start, sample_rate);
+      auto wav = SamplesToWavBytes(pcm_data + start, end - start, sample_rate);
       auto [mel_tensor, mel_frames] = ExtractMel(wav);
 
       named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
@@ -242,7 +212,7 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
     // Process remaining chunks
     for (size_t i = 1; i < chunk_ranges.size(); ++i) {
       auto [start, end] = chunk_ranges[i];
-      auto wav = SamplesToWavBytes(samples.data() + start, end - start, sample_rate);
+      auto wav = SamplesToWavBytes(pcm_data + start, end - start, sample_rate);
       auto [mel_tensor, mel_frames] = ExtractMel(wav);
 
       named_tensors->emplace("cohere_chunk_" + std::to_string(i),
