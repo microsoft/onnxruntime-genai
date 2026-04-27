@@ -954,16 +954,6 @@ class Qwen35TextModel(Model):
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # HF Qwen3_5RMSNorm always computes in float32 regardless of model
-        # dtype.  Force the builder to cast inputs to fp32 before LayerNorm
-        # and cast back after, matching HF behaviour and preventing precision
-        # loss that compounds across 36+ layers in fp16/bf16 builds.
-        self.layernorm_attrs["cast"]["use_fp32"] = True
-        self.layernorm_attrs["cast"]["root_input"] = True
-        self.layernorm_attrs["cast"]["skip_input"] = True
-        self.layernorm_attrs["cast"]["output_0"] = True
-        self.layernorm_attrs["cast"]["output_3"] = True
-
         # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         self.input_names["position_ids"] = "position_ids"
