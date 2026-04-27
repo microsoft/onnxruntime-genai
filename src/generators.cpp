@@ -583,32 +583,22 @@ bool Generator::IsDone() {
     // Cohere multi-chunk: if there are more chunks, advance and continue
     if (is_cohere_model_) {
       auto* cohere_state = static_cast<CohereState*>(state_.get());
-      std::cerr << "[cohere] IsDone: chunk " << cohere_state->CurrentChunk()
-                << "/" << cohere_state->TotalChunks()
-                << " hasMore=" << cohere_state->HasMoreChunks() << std::endl;
       if (cohere_state->HasMoreChunks()) {
-        std::cerr << "[cohere] Advancing to next chunk..." << std::endl;
         cohere_state->AdvanceToNextChunk();
-        std::cerr << "[cohere] AdvanceToNextChunk done, rewinding search..." << std::endl;
 
         // Reset search state so decoding can continue
         search_->RewindTo(0);
-        std::cerr << "[cohere] RewindTo(0) done, re-feeding prompt..." << std::endl;
 
         // Re-feed prompt tokens
         const auto& prompt_tokens = cohere_state->GetPromptTokens();
-        std::cerr << "[cohere] prompt_tokens.size()=" << prompt_tokens.size() << std::endl;
         if (!prompt_tokens.empty()) {
           auto prompt_span = cpu_span<const int32_t>(prompt_tokens.data(), prompt_tokens.size());
           auto prompt_device = AllocateInputIdsOnDevice(prompt_span);
-          std::cerr << "[cohere] AppendTokens..." << std::endl;
           search_->AppendTokens(prompt_device);
-          set_extra_inputs_ = false;  // Extra inputs already set
-          std::cerr << "[cohere] ComputeLogits..." << std::endl;
+          set_extra_inputs_ = false;
           ComputeLogits(prompt_device);
-          std::cerr << "[cohere] Chunk transition complete!" << std::endl;
         }
-        return false;  // Not done yet, continue generating
+        return false;
       }
     }
 

@@ -177,26 +177,18 @@ bool CohereState::AdvanceToNextChunk() {
   if (!HasMoreChunks()) return false;
 
   size_t chunk_idx = current_chunk_;
-  std::cerr << "[cohere] AdvanceToNextChunk: chunk_idx=" << chunk_idx
-            << " chunk_mels_.size()=" << chunk_mels_.size()
-            << " chunk_mel_lengths_.size()=" << chunk_mel_lengths_.size() << std::endl;
-
   auto& next_mel = chunk_mels_[chunk_idx];
   auto& next_mel_length = chunk_mel_lengths_[chunk_idx];
 
-  std::cerr << "[cohere] SetChunkAudioFeatures..." << std::endl;
   encoder_state_->SetChunkAudioFeatures(next_mel, next_mel_length);
 
   int new_num_frames = encoder_state_->GetNumFrames();
-  std::cerr << "[cohere] new_num_frames=" << new_num_frames << std::endl;
 
   encoder_state_->outputs_.clear();
   encoder_state_->output_names_.clear();
 
-  std::cerr << "[cohere] Creating new WhisperDecoderState..." << std::endl;
   decoder_state_ = std::make_unique<WhisperDecoderState>(model_, *params_, new_num_frames);
 
-  std::cerr << "[cohere] Creating new CrossCache..." << std::endl;
   if (encoder_state_->HasCrossKVCacheOutputs()) {
     cross_cache_ = std::make_unique<CrossCache>(*this, new_num_frames / 2);
     encoder_state_->AddCrossCache(cross_cache_);

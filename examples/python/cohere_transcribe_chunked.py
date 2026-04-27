@@ -46,12 +46,8 @@ def run(args):
     for audio_path in audio_paths:
         print(f"Audio: {audio_path}")
 
-        # Load full audio — chunking happens inside C++ CohereProcessor
-        print("  Loading audio...", flush=True)
         audios = og.Audios.open(audio_path)
-        print("  Audio loaded, running processor...", flush=True)
         inputs = processor([prompt], audios=audios)
-        print("  Processor done, creating params...", flush=True)
 
         params = og.GeneratorParams(model)
         params.set_search_options(
@@ -60,36 +56,14 @@ def run(args):
             num_beams=1,
             batch_size=1,
         )
-        print("  Creating generator...", flush=True)
 
         generator = og.Generator(model, params)
-        print("  Setting inputs...", flush=True)
         generator.set_inputs(inputs)
-        print("  Starting generation...", flush=True)
 
-        # Generate — chunk transitions are handled internally by Generator.IsDone()
         tokens = []
-        step = 0
-        while True:
-            print(f"    step {step}: checking is_done...", end="", flush=True)
-            try:
-                done = generator.is_done()
-            except Exception as e:
-                print(f" EXCEPTION in is_done: {e}")
-                break
-            print(f" done={done}", flush=True)
-            if done:
-                break
-            print(f"    step {step}: generating next token...", end="", flush=True)
-            try:
-                generator.generate_next_token()
-            except Exception as e:
-                print(f" EXCEPTION in generate_next_token: {e}")
-                break
-            new_token = generator.get_sequence(0)[-1]
-            tokens.append(new_token)
-            step += 1
-            print(f" token={new_token}", flush=True)
+        while not generator.is_done():
+            generator.generate_next_token()
+            tokens.append(generator.get_sequence(0)[-1])
 
         # Decode all tokens (includes tokens from all chunks)
         stream = tokenizer.create_stream()
@@ -106,6 +80,18 @@ def run(args):
         print(text)
 
     print(f"\nElapsed: {elapsed:.2f}s")
+
+    # Print RTFx if we can determine audio duration
+    try:
+        import wave
+        total_dur = 0.0
+        for p in audio_paths:
+            with wave.open(p, "rb") as wf:
+                total_dur += wf.getnframes() / wf.getframerate()
+        if total_dur > 0:
+            print(f"Audio: {total_dur:.1f}s | RTFx: {total_dur / elapsed:.1f}")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
