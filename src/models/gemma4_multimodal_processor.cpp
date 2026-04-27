@@ -251,8 +251,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
     int64_t batch_dim = (audio_dims == 3) ? audio_shape[0] : 1;
     if (batch_dim > 1) {
-      throw std::runtime_error("Gemma4 audio processing currently supports only 1 audio clip per prompt, "
-                               "but received " + std::to_string(batch_dim) + " clips.");
+      throw std::runtime_error(
+          "Gemma4 audio processing currently supports only 1 audio clip per prompt, "
+          "but received " +
+          std::to_string(batch_dim) + " clips.");
     }
     {
       auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
@@ -301,7 +303,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       // For 3D [batch, patches, dim], copy batch * actual_patches * dim elements.
       const int64_t batch = (pv_dims == 3) ? pv_shape[0] : 1;
       auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
-                                           : std::vector<int64_t>{actual_patches, patch_dim};
+                                          : std::vector<int64_t>{actual_patches, patch_dim};
 
       // Respect the model's pixel_values type (float, fp16, or bf16)
       auto trimmed_pv = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);

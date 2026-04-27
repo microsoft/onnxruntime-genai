@@ -131,7 +131,7 @@ struct Config {
     // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
     int image_token_id{};
     int audio_token_id{};
-    int boa_token_id{};             // Beginning-of-audio token ID
+    int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
 
