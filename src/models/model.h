@@ -51,6 +51,7 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
+  bool prompt_gen_{};
 
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false);

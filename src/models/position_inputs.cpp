@@ -131,10 +131,12 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
     // Initialize on first update
     if (is_first_update_) {
       position_ids_shape_[1] = new_length;
+      if (state_.prompt_gen_)
+        position_ids_shape_[1] = state_.params_->search.max_length;
       if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializePositionIDs<int32_t>(next_tokens, position_ids_shape_);
+        CreateAndInitializePositionIDs<int32_t>(next_tokens, position_ids_shape_, new_length);
       else
-        CreateAndInitializePositionIDs<int64_t>(next_tokens, position_ids_shape_);
+        CreateAndInitializePositionIDs<int64_t>(next_tokens, position_ids_shape_, new_length);
     } else {
       UpdatePositionIDs(total_length, new_length);
     }
@@ -201,6 +203,8 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   // Reallocate position_ids when new_kv_length changes
   if (position_ids_shape_[1] != new_kv_length) {
     position_ids_shape_[1] = new_kv_length;
+    if (state_.prompt_gen_)
+      position_ids_shape_[1] = state_.params_->search.max_length;
     CreateNextPositionIDsTensor();
     state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
   }
@@ -252,28 +256,34 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
 }
 
 template <typename T>
-void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
-  // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
-  // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
+void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape,
+                                                           int seq_length) {
+  // shape[1] may be larger than seq_length when padded for AMDGPU static shapes.
+  // seq_length is the actual number of tokens per batch row in next_tokens.
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* position_data = position_ids->GetTensorMutableData<T>();
   auto position_ids_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   auto* position_data_next = position_ids_next->GetTensorMutableData<T>();
+
+  // Zero-fill entire tensor (covers padded region beyond seq_length)
+  std::fill(position_data, position_data + shape[0] * shape[1], T{0});
+
   // If batch_size is 1 we have no padding, so we do simple ascending
   if (shape[0] == 1) {
-    for (int i = 0; i < shape[1]; ++i) {
+    for (int i = 0; i < seq_length; ++i) {
       position_data[i] = static_cast<T>(i);
     }
-    position_data_next[0] = static_cast<T>(shape[1]) - 1;
+    position_data_next[0] = static_cast<T>(seq_length) - 1;
     // Otherwise we iterate backwards as to not misinterpret any right pad tokens
   } else {
-    const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
-    auto* position = position_data + shape[0] * shape[1] - 1;
+    // Use seq_length to index into next_tokens safely (it may be shorter than shape[1])
+    const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * seq_length - 1;
     bool found_first_non_pad = false;
     for (int i = static_cast<int>(shape[0] - 1); i >= 0; i--) {
-      T abs_position = static_cast<T>(shape[1] - 1);
+      T abs_position = static_cast<T>(seq_length - 1);
       found_first_non_pad = false;
-      for (int j = static_cast<int>(shape[1] - 1); j >= 0; j--, word_id--, position--) {
+      auto* position = position_data + i * shape[1] + seq_length - 1;
+      for (int j = seq_length - 1; j >= 0; j--, word_id--, position--) {
         // Non-pad tokens are set to their corresponding position
         if (found_first_non_pad) {
           *position = abs_position;
