@@ -41,7 +41,13 @@ jobs:
         run: pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl optree onnxruntime onnxruntime-genai peft py-cpuinfo tabulate
+        run: pip install torch "transformers==${{ matrix.transformers-version }}" tokenizers pandas openpyxl optree peft py-cpuinfo tabulate
+
+      - name: Install nightly onnxruntime
+        run: pip install onnxruntime --pre --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+
+      - name: Install onnxruntime-genai
+        run: pip install onnxruntime-genai
 
       - name: Install dependencies
         run: pip install -r test/python/requirements.txt
