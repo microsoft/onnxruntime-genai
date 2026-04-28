@@ -1020,31 +1020,6 @@ class Qwen35TextModel(Model):
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
 
-    def make_int4_algo_config(self, quant_method: str):
-        """Extend base int4_algo_config with ``k_quant_linear``.
-
-        Promotes all linear attention projections and their MLPs from INT4 to
-        INT8, since linear attention recurrence accumulates quantization errors
-        across the full sequence (no softmax normalization).
-        """
-        if quant_method != "k_quant_linear":
-            return super().make_int4_algo_config(quant_method)
-
-        int8_nodes = {
-            f"/model/layers.{i}/{section}/{proj}/MatMul": {"bits": 8}
-            for i, lt in enumerate(self.layer_types)
-            if lt == "linear_attention"
-            for section, projs in (
-                ("linear_attn", ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj")),
-                ("mlp", ("gate_proj", "up_proj", "down_proj")),
-            )
-            for proj in projs
-        }
-        int4_algo_config = super().make_int4_algo_config("k_quant")
-        existing_weight_config = getattr(int4_algo_config, "customized_weight_config", None) or {}
-        int4_algo_config.customized_weight_config = {**existing_weight_config, **int8_nodes}
-        return int4_algo_config
-
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
         conv_state + recurrent_state for linear attention layers."""
