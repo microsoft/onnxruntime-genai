@@ -243,8 +243,9 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   // Currently only single-clip audio is supported per prompt.
   int64_t num_audio_tokens = 0;
   if (payload.audios && !has_speech_) {
-    throw std::runtime_error("Audio input was provided but audio/speech support is not configured. "
-                             "Ensure the genai_config.json has a 'speech' section with both 'filename' and 'config_filename'.");
+    throw std::runtime_error(
+        "Audio input was provided but audio/speech support is not configured. "
+        "Ensure the genai_config.json has a 'speech' section with both 'filename' and 'config_filename'.");
   }
   if (payload.audios && has_speech_) {
     ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
