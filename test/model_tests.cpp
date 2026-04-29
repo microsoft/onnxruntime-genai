@@ -241,6 +241,94 @@ TEST(ModelTests, BeamSearchGptCuda) {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
+
+// Test that CUDA graph capture produces correct outputs for greedy search.
+// This validates that pointer stability (KV cache, recurrent state) is
+// maintained when graph capture is enabled.
+void Test_GreedySearch_Gpt_CudaGraphCapture(const char* model_path, const char* model_label) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  std::vector<int32_t> expected_output{
+      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  config->SetProviderOption("cuda", "enable_cuda_graph", "1");
+  auto model = OgaModel::Create(*config);
+
+  int max_length = 10;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected — graph capture must not alter results
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+  }
+}
+
+TEST(ModelTests, GreedySearchGptCudaGraphCapture) {
+  for (auto model_path : c_tiny_gpt2_model_paths)
+    Test_GreedySearch_Gpt_CudaGraphCapture(model_path.first, model_path.second);
+}
+
+// Test continuous decoding (RewindTo) with CUDA graph capture enabled.
+// Verifies that rewinding and resuming generation works correctly when
+// the graph has captured fixed memory addresses.
+void Test_ContinuousDecoding_Gpt_CudaGraphCapture(const char* model_path, const char* model_label) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+  std::vector<int32_t> expected_output{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  config->SetProviderOption("cuda", "enable_cuda_graph", "1");
+  auto model = OgaModel::Create(*config);
+
+  int max_length = 10;
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", 1);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto sequence = generator->GetSequence(0);
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence.data(), max_length * sizeof(int32_t)));
+
+  // Rewind and regenerate — graph capture must handle pointer rebinding correctly
+  generator->RewindTo(3);
+  std::vector<int32_t> next_ids{731, 731};
+  generator->AppendTokens(next_ids);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  sequence = generator->GetSequence(0);
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence.data(), max_length * sizeof(int32_t)));
+}
+
+TEST(ModelTests, ContinuousDecodingGptCudaGraphCapture) {
+  for (auto model_path : c_tiny_gpt2_model_paths)
+    Test_ContinuousDecoding_Gpt_CudaGraphCapture(model_path.first, model_path.second);
+}
 #endif
 
 // NvTensorRT test cases using Phi3 models

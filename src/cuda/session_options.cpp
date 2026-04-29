@@ -85,8 +85,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   auto device = GetDeviceInterface(DeviceType::CUDA);
   AddCudaStreamConfig(session_options, device);
 
-  // For non-decoder sessions, disable CUDA graph capture since they can have
-  // dynamic shapes incompatible with graph capture.
+  // When the caller requests graph capture to be disabled (e.g. for vision or
+  // embedding sessions with dynamic shapes), override enable_cuda_graph to "0".
   Config::ProviderOptions effective_options = provider_options;
   if (disable_graph_capture) {
     for (auto& option : effective_options.options) {

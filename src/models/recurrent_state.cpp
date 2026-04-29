@@ -140,10 +140,10 @@ void RecurrentState::Update() {
   const int num_layers = static_cast<int>(layer_indices_.size());
 
   if (state_.params_->use_graph_capture) {
-    // When CUDA graph capture is enabled, we must not swap pointers because
-    // the graph has captured the original memory addresses. Instead, copy
-    // present→past in-place so the pointers remain stable.
-    // Uses cached byte spans to avoid recomputing tensor metadata each step.
+    // When graph capture is enabled, we must not swap pointers because the
+    // graph has captured the original memory addresses. Instead, copy
+    // present→past in-place so the pointers remain stable. Uses cached byte
+    // spans to avoid recomputing tensor metadata each step.
     for (int i = 0; i < num_layers * 2; ++i) {
       past_byte_spans_[i].CopyFrom(present_byte_spans_[i]);
     }
@@ -172,7 +172,7 @@ void RecurrentState::RewindTo(size_t index) {
   const int num_layers = static_cast<int>(layer_indices_.size());
 
   // Zero existing buffers in-place instead of reallocating, to preserve
-  // device pointers and avoid invalidating captured CUDA graphs.
+  // device pointers and avoid invalidating captured graphs.
   ZeroStates(pasts_);
   ZeroStates(presents_);
 
