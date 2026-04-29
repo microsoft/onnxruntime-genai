@@ -1392,56 +1392,60 @@ class Qwen35TextModel(Model):
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, pos_ids_input, [3])
+        self.make_shape(shape_name, root_input=pos_ids_input, shape=[3])
 
         # Slice shape[1:3] → [B, S] (used as reshape target at the end)
         bs_shape_name = f"{basename}/bs_shape/Slice"
         self.make_slice(
             bs_shape_name,
-            [
+            inputs=[
                 f"{shape_name}/output_0",
                 "/model/constants/INT64/[1]",
                 "/model/constants/INT64/[3]",
                 "/model/constants/INT64/[0]",
             ],
-            ir.DataType.INT64,
-            [2],
+            dtype=ir.DataType.INT64,
+            shape=[2],
         )
 
         # Reshape position_ids [3, B, S] → [3, -1] to get B*S implicitly
         flat_name = f"{basename}/flat/Reshape"
         self.make_reshape(
             flat_name,
-            [pos_ids_input, "/model/constants/INT64/[3, -1]"],
-            ir.DataType.INT64,
-            [3, "batch_seq"],
+            inputs=[pos_ids_input, "/model/constants/INT64/[3, -1]"],
+            dtype=ir.DataType.INT64,
+            shape=[3, "batch_seq"],
         )
 
         # Shape([3, B*S]) → [3, B*S], Gather scalar index 1 → scalar B*S
         shape2_name = f"{basename}/Shape2"
-        self.make_shape(shape2_name, f"{flat_name}/output_0", [2])
+        self.make_shape(shape2_name, root_input=f"{flat_name}/output_0", shape=[2])
 
         total_name = f"{basename}/total/Gather"
         self.make_gather(
-            total_name, [f"{shape2_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], axis=0
+            total_name,
+            inputs=[f"{shape2_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=[],
+            axis=0,
         )
 
         # Range(0, B*S, 1)
         range_name = f"{basename}/range/Range"
         self.make_range(
             range_name,
-            ["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
-            ir.DataType.INT64,
-            ["batch_seq"],
+            inputs=["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_seq"],
         )
 
         # Reshape to [B, S]
         pos_ids_name = f"{basename}/Reshape"
         self.make_reshape(
             pos_ids_name,
-            [f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
-            ir.DataType.INT64,
-            ["batch_size", "sequence_length"],
+            inputs=[f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_size", "sequence_length"],
         )
 
         return f"{pos_ids_name}/output_0"
