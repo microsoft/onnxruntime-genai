@@ -127,6 +127,7 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
 
   switch (params.benchmark_function) {
     case BenchmarkFunction::TopP:
+      generator_params->SetSearchOption("top_k", 0);  // top_k=0 routes to SampleTopP
       generator_params->SetSearchOption("top_p", 0.95f);
       break;
     case BenchmarkFunction::TopK:
@@ -212,4 +213,473 @@ TEST(SamplingBenchmarks, PerformanceTests) {
   }
 
   PrintSummary(all_results);
+}
+
+// Targeted benchmark for ApplyRepetitionPenalty.
+// The main PerformanceTests benchmark uses repetition_penalty=1.0 (no-op early return),
+// so it cannot measure the impact of the flat-array optimization. This test sets
+// repetition_penalty=1.2 and pre-fills the sequence with tokens to simulate a long
+// context where repetition penalty must scan many tokens.
+TEST(SamplingBenchmarks, DISABLED_RepetitionPenaltyBenchmark) {
+  const int vocab_size = 1000;  // Must match the tiny-random-gpt2-fp32 model's actual vocab
+  const int batch_size = 1;
+  const int total_runs = 500;
+  const int warm_up_runs = 5;
+  // Number of tokens to pre-fill in the sequence before measuring.
+  // This controls how many tokens ApplyRepetitionPenalty must scan.
+  const std::vector<int> prefill_lengths = {10, 50, 100};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<int32_t> token_dist(0, vocab_size - 1);
+
+  const int64_t tensor_size = static_cast<int64_t>(batch_size) * static_cast<int64_t>(vocab_size);
+  std::vector<float> logits_data(tensor_size);
+  auto logits_tensor = OgaTensor::Create(
+      logits_data.data(),
+      std::array<int64_t, 2>{static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)});
+
+  std::cout << "\n--- Repetition Penalty Benchmark (vocab=" << vocab_size
+            << ", batch=" << batch_size << ", penalty=1.2) ---\n";
+  std::cout << std::left << std::setw(15) << "SeqLen"
+            << std::setw(15) << "Mean(us)"
+            << std::setw(15) << "Stdev(us)"
+            << std::setw(15) << "P95(us)" << "\n";
+  std::cout << std::string(60, '-') << "\n";
+
+  for (int seq_len : prefill_lengths) {
+    std::vector<double> latencies;
+
+    for (int i = 0; i < warm_up_runs + total_runs; i++) {
+      auto params = OgaGeneratorParams::Create(*model);
+      params->SetSearchOption("max_length", seq_len + 10);
+      params->SetSearchOption("batch_size", batch_size);
+      params->SetSearchOptionBool("do_sample", true);
+      params->SetSearchOption("top_k", 50);
+      params->SetSearchOption("repetition_penalty", 1.2);
+
+      // Pre-fill the sequence with random tokens
+      std::vector<int32_t> prefill_tokens(seq_len);
+      for (auto& t : prefill_tokens) t = token_dist(engine);
+
+      auto generator = OgaGenerator::Create(*model, *params);
+      generator->AppendTokens(prefill_tokens.data(), seq_len);
+
+      // Now measure a single GenerateNextToken call with the pre-filled sequence
+      CreateRandomLogits(logits_data.data(), 10, vocab_size, batch_size, engine);
+      generator->SetLogits(*logits_tensor);
+
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto stop = std::chrono::high_resolution_clock::now();
+
+      if (i >= warm_up_runs) {
+        latencies.push_back(static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count()));
+      }
+    }
+
+    double mean_us_val = mean(latencies);
+    double stdev_us_val = stdev(latencies);
+    double p95_us_val = percentile(latencies, 95.0);
+
+    std::cout << std::left << std::fixed << std::setprecision(2)
+              << std::setw(15) << seq_len
+              << std::setw(15) << mean_us_val
+              << std::setw(15) << stdev_us_val
+              << std::setw(15) << p95_us_val << "\n";
+  }
+}
+
+// Benchmark for BeamSearch_Cpu::SelectTop.
+// Measures the time for a single GenerateNextToken call with beam search (num_beams=4).
+TEST(SamplingBenchmarks, DISABLED_BeamSearchBenchmark) {
+  const int batch_size = 3;
+  const int num_beams = 4;
+  const int max_length = 20;
+  const int total_runs = 50;
+  const int warm_up_runs = 5;
+
+  std::vector<int32_t> input_ids{
+      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
+      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
+      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  std::vector<double> latencies;
+
+  for (int i = 0; i < warm_up_runs + total_runs; i++) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", max_length);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("num_beams", num_beams);
+    params->SetSearchOption("length_penalty", 1.0f);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(input_ids);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+    auto stop = std::chrono::high_resolution_clock::now();
+
+    if (i >= warm_up_runs) {
+      latencies.push_back(static_cast<double>(
+          std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count()));
+    }
+  }
+
+  double mean_us_val = mean(latencies);
+  double stdev_us_val = stdev(latencies);
+  double p95_us_val = percentile(latencies, 95.0);
+
+  std::cout << "\n--- Beam Search Benchmark (batch=" << batch_size
+            << ", beams=" << num_beams << ", max_length=" << max_length << ") ---\n";
+  std::cout << std::fixed << std::setprecision(2)
+            << "Mean: " << mean_us_val << " us, Stdev: " << stdev_us_val
+            << " us, P95: " << p95_us_val << " us\n";
+}
+
+// Direct micro-benchmark for ApplyRepetitionPenalty, bypassing the model.
+// Creates a GreedySearch_Cpu with pre-filled sequences and measures
+// the cost of ApplyRepetitionPenalty in isolation.
+TEST(SamplingBenchmarks, DISABLED_RepetitionPenaltyMicro) {
+  const int vocab_size = 1000;  // Must match actual model vocab
+  const int total_runs = 2000;
+  const int warm_up_runs = 100;
+  const std::vector<int> seq_lengths = {10, 50, 100, 200, 400};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<int32_t> token_dist(0, vocab_size - 1);
+
+  std::cout << "\n--- RepetitionPenalty Micro-Benchmark (vocab=" << vocab_size << ", penalty=1.2) ---\n";
+  std::cout << std::left << std::setw(12) << "SeqLen"
+            << std::setw(15) << "Mean(us)"
+            << std::setw(15) << "Stdev(us)"
+            << std::setw(15) << "P95(us)" << "\n";
+  std::cout << std::string(57, '-') << "\n";
+
+  for (int seq_len : seq_lengths) {
+    std::vector<double> latencies;
+
+    for (int run = 0; run < warm_up_runs + total_runs; run++) {
+      // Create generator with greedy search, pre-fill sequence
+      auto params = OgaGeneratorParams::Create(*model);
+      params->SetSearchOption("max_length", seq_len + 10);
+      params->SetSearchOption("batch_size", 1);
+      params->SetSearchOptionBool("do_sample", true);
+      params->SetSearchOption("top_k", 50);
+      params->SetSearchOption("repetition_penalty", 1.2);
+
+      std::vector<int32_t> prefill(seq_len);
+      for (auto& t : prefill) t = token_dist(engine);
+
+      auto generator = OgaGenerator::Create(*model, *params);
+      generator->AppendTokens(prefill.data(), seq_len);
+
+      // Set random logits so SetLogits succeeds
+      std::vector<float> logits(vocab_size, 0.0f);
+      for (auto& l : logits) l = std::uniform_real_distribution<float>(-5.0f, 5.0f)(engine);
+      auto logits_tensor = OgaTensor::Create(logits.data(), std::array<int64_t, 2>{1LL, static_cast<int64_t>(vocab_size)});
+      generator->SetLogits(*logits_tensor);
+
+      // Measure just GenerateNextToken (which includes ApplyRepetitionPenalty internally)
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto stop = std::chrono::high_resolution_clock::now();
+
+      if (run >= warm_up_runs) {
+        latencies.push_back(static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count()) / 1000.0);
+      }
+    }
+
+    std::cout << std::left << std::fixed << std::setprecision(2)
+              << std::setw(12) << seq_len
+              << std::setw(15) << mean(latencies)
+              << std::setw(15) << stdev(latencies)
+              << std::setw(15) << percentile(latencies, 95.0) << "\n";
+  }
+}
+
+// Pure sampling throughput benchmark.
+// Bypasses model inference by calling SetLogits + GenerateNextToken in a loop.
+// This measures ONLY the sampling pipeline (ApplyMinLength, ApplyRepetitionPenalty,
+// SampleTopKTopP) using the tiny-random-gpt2-fp32 test model (vocab=1000).
+// The small vocab makes this a proxy for isolating relative seq_len-dependent
+// overheads (e.g. repetition penalty scaling), not for measuring absolute
+// throughput at production vocab sizes (128K-200K).
+TEST(SamplingBenchmarks, DISABLED_PureSamplingThroughput) {
+  const int vocab_size = 1000;  // Must match model's actual vocab
+  const int total_runs = 20;
+  const int warm_up_runs = 2;
+  const std::vector<int> seq_lengths = {1, 32, 128};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<int32_t> token_dist(0, vocab_size - 1);
+
+  const int64_t tensor_size = static_cast<int64_t>(vocab_size);
+  std::vector<float> logits_data(tensor_size);
+
+  std::cout << "\n--- Pure Sampling Throughput (vocab=" << vocab_size
+            << ", top_k=40, top_p=0.8, rep_penalty=1.1, temp=0.7) ---\n"
+            << "Each measurement: single SetLogits + GenerateNextToken (no model inference).\n"
+            << "Sequence is pre-filled to simulate decoding at different context lengths.\n\n";
+  std::cout << std::left << std::setw(12) << "SeqLen"
+            << std::setw(18) << "Mean(us/sample)"
+            << std::setw(15) << "Stdev(us)"
+            << std::setw(15) << "P95(us)"
+            << std::setw(18) << "Throughput(k/s)" << "\n";
+  std::cout << std::string(78, '-') << "\n";
+
+  for (int seq_len : seq_lengths) {
+    std::vector<double> latencies;
+    const int iterations = 2000;
+
+    for (int run = 0; run < warm_up_runs * iterations / total_runs + iterations; run++) {
+      auto params = OgaGeneratorParams::Create(*model);
+      params->SetSearchOption("max_length", seq_len + 10);
+      params->SetSearchOption("batch_size", 1);
+      params->SetSearchOptionBool("do_sample", true);
+      params->SetSearchOption("top_k", 40);
+      params->SetSearchOption("top_p", 0.8);
+      params->SetSearchOption("temperature", 0.7);
+      params->SetSearchOption("repetition_penalty", 1.1);
+
+      std::vector<int32_t> prefill(seq_len);
+      for (auto& t : prefill) t = token_dist(engine);
+
+      auto generator = OgaGenerator::Create(*model, *params);
+      generator->AppendTokens(prefill.data(), seq_len);
+
+      CreateRandomLogits(logits_data.data(), 10, vocab_size, 1, engine);
+      auto logits_tensor = OgaTensor::Create(
+          logits_data.data(),
+          std::array<int64_t, 2>{1LL, static_cast<int64_t>(vocab_size)});
+      generator->SetLogits(*logits_tensor);
+
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto stop = std::chrono::high_resolution_clock::now();
+
+      if (run >= static_cast<int>(warm_up_runs * iterations / total_runs)) {
+        latencies.push_back(static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count()) / 1000.0);
+      }
+    }
+
+    double mean_us = mean(latencies);
+    double stdev_us = stdev(latencies);
+    double p95_us = percentile(latencies, 95.0);
+
+    std::cout << std::left << std::fixed
+              << std::setw(12) << seq_len
+              << std::setw(18) << std::setprecision(2) << mean_us
+              << std::setw(15) << stdev_us
+              << std::setw(15) << p95_us
+              << std::setw(18) << std::setprecision(1) << (1000000.0 / mean_us / 1000.0)
+              << "\n";
+  }
+}
+
+// P1 Benchmark: Measures GenerateNextToken orchestration overhead.
+// Uses SetLogits to bypass model inference entirely, isolating the CPU-side
+// work: NemotronSpeechState dynamic_cast check, Phi3 ROPE string comparisons,
+// sampling dispatch conditionals, ApplyMinLength, ApplyRepetitionPenalty.
+// The P1 optimization caches these checks at Generator construction time.
+TEST(SamplingBenchmarks, DISABLED_P1_OrchestrationOverhead) {
+  const int vocab_size = 1000;  // Use model's actual vocab to avoid overlay issues with AppendTokens
+  const int total_runs = 5000;
+  const int warm_up_runs = 200;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+
+  std::vector<float> logits_data(vocab_size);
+  auto logits_tensor = OgaTensor::Create(
+      logits_data.data(), std::array<int64_t, 2>{1LL, static_cast<int64_t>(vocab_size)});
+
+  struct TestCase {
+    const char* label;
+    bool do_sample;
+    int top_k;
+    float top_p;
+    float temperature;
+  };
+
+  // Test multiple sampling paths to capture P1 dispatch overhead across methods
+  std::vector<TestCase> cases = {
+      {"Greedy",           false, 1,  1.0f,  1.0f},
+      {"TopK(k=50)",       true, 50, 1.0f,  0.8f},
+      {"TopP(p=0.95)",     true,  0, 0.95f, 0.8f},
+      {"TopKTopP(k=50)",   true, 50, 0.95f, 0.8f},
+  };
+
+  std::cout << "\n--- P1: GenerateNextToken Orchestration Overhead ---\n"
+            << "Measures GenerateNextToken only (no model inference).\n"
+            << "Vocab=" << vocab_size << ", Batch=1, Runs=" << total_runs << "\n\n";
+  std::cout << std::left
+            << std::setw(22) << "Method"
+            << std::setw(15) << "Mean(us)"
+            << std::setw(15) << "Stdev(us)"
+            << std::setw(15) << "P95(us)"
+            << std::setw(15) << "Min(us)" << "\n";
+  std::cout << std::string(82, '-') << "\n";
+
+  for (const auto& tc : cases) {
+    std::vector<double> latencies;
+
+    for (int i = 0; i < warm_up_runs + total_runs; i++) {
+      auto params = OgaGeneratorParams::Create(*model);
+      params->SetSearchOption("max_length", 10);
+      params->SetSearchOption("batch_size", 1);
+      params->SetSearchOptionBool("do_sample", tc.do_sample);
+      params->SetSearchOption("top_k", tc.top_k);
+      params->SetSearchOption("top_p", tc.top_p);
+      params->SetSearchOption("temperature", tc.temperature);
+      params->SetSearchOption("random_seed", static_cast<double>(i));
+
+      auto generator = OgaGenerator::Create(*model, *params);
+
+      CreateRandomLogits(logits_data.data(), 5, vocab_size, 1, engine);
+      generator->SetLogits(*logits_tensor);
+
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto stop = std::chrono::high_resolution_clock::now();
+
+      if (i >= warm_up_runs) {
+        latencies.push_back(static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count()) / 1000.0);
+      }
+    }
+
+    auto sorted = latencies;
+    std::sort(sorted.begin(), sorted.end());
+    double min_us = sorted.front();
+
+    std::cout << std::left << std::fixed << std::setprecision(2)
+              << std::setw(22) << tc.label
+              << std::setw(15) << mean(latencies)
+              << std::setw(15) << stdev(latencies)
+              << std::setw(15) << percentile(latencies, 95.0)
+              << std::setw(15) << min_us << "\n";
+  }
+}
+
+// P3 Benchmark: Measures SampleTopP across vocab sizes, top_p values, and
+// logit distributions to quantify the tail-bound optimization.
+// The P3 optimization eliminates the O(V) exp() pass by using a log-space
+// tail bound in FindNucleus, saving ~V calls to std::exp() per token.
+TEST(SamplingBenchmarks, DISABLED_P3_TopPScaling) {
+  const int total_runs = 500;
+  const int warm_up_runs = 20;
+
+  struct TopPScenario {
+    const char* label;
+    int vocab_size;
+    float top_p;
+    int num_large;  // Number of high-logit tokens (controls distribution peakedness)
+  };
+
+  std::vector<TopPScenario> scenarios = {
+      // Vocab size scaling (peaked distribution, typical p)
+      {"V=32K,  peaked, p=0.95",  32000,  0.95f, 10},
+      {"V=128K, peaked, p=0.95", 128256,  0.95f, 10},
+      {"V=200K, peaked, p=0.95", 201088,  0.95f, 10},
+
+      // Distribution shape (large vocab, typical p)
+      {"V=128K, 5 hot,  p=0.95", 128256,  0.95f,  5},
+      {"V=128K, 50 hot, p=0.95", 128256,  0.95f, 50},
+
+      // top_p value sweep (peaked, large vocab)
+      {"V=128K, peaked, p=0.80", 128256,  0.80f, 10},
+      {"V=128K, peaked, p=0.90", 128256,  0.90f, 10},
+      {"V=128K, peaked, p=0.99", 128256,  0.99f, 10},
+  };
+
+  std::cout << "\n--- P3: SampleTopP Scaling Benchmark ---\n"
+            << "Measures GenerateNextToken with top_p sampling (after SetLogits).\n"
+            << "Batch=1, Runs=" << total_runs << "\n\n";
+  std::cout << std::left
+            << std::setw(30) << "Scenario"
+            << std::setw(15) << "Mean(us)"
+            << std::setw(15) << "Stdev(us)"
+            << std::setw(15) << "P95(us)"
+            << std::setw(15) << "Min(us)" << "\n";
+  std::cout << std::string(90, '-') << "\n";
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+
+  for (const auto& sc : scenarios) {
+    auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+    std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(sc.vocab_size) + R"( } })";
+    config->Overlay(overlay.c_str());
+    config->ClearProviders();
+
+    auto model = OgaModel::Create(*config);
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 10);
+    params->SetSearchOption("batch_size", 1);
+    params->SetSearchOptionBool("do_sample", true);
+    params->SetSearchOption("top_k", 0);
+    params->SetSearchOption("top_p", sc.top_p);
+    params->SetSearchOption("temperature", 0.8f);
+
+    const int64_t tensor_size = static_cast<int64_t>(sc.vocab_size);
+    std::vector<float> logits_data(tensor_size);
+    auto logits_tensor = OgaTensor::Create(
+        logits_data.data(), std::array<int64_t, 2>{1LL, static_cast<int64_t>(sc.vocab_size)});
+
+    std::vector<double> latencies;
+
+    for (int i = 0; i < warm_up_runs + total_runs; i++) {
+      params->SetSearchOption("random_seed", static_cast<double>(i));
+      auto generator = OgaGenerator::Create(*model, *params);
+
+      CreateRandomLogits(logits_data.data(), sc.num_large, sc.vocab_size, 1, engine);
+      generator->SetLogits(*logits_tensor);
+
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto stop = std::chrono::high_resolution_clock::now();
+
+      if (i >= warm_up_runs) {
+        latencies.push_back(static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count()) / 1000.0);
+      }
+    }
+
+    auto sorted = latencies;
+    std::sort(sorted.begin(), sorted.end());
+    double min_us = sorted.front();
+
+    std::cout << std::left << std::fixed << std::setprecision(2)
+              << std::setw(30) << sc.label
+              << std::setw(15) << mean(latencies)
+              << std::setw(15) << stdev(latencies)
+              << std::setw(15) << percentile(latencies, 95.0)
+              << std::setw(15) << min_us << "\n";
+  }
 }

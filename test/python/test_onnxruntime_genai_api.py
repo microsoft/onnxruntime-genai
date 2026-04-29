@@ -942,6 +942,22 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
+def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+
+    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
+    audios = og.Audios.open(audio_path)
+
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    prompt = "".join(decoder_prompt_tokens)
+    _ = processor(prompt, audios=audios)
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
