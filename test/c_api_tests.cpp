@@ -1388,9 +1388,7 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 // the EP supports it (DML by default, WebGPU with enableGraphCapture=1 set by
 // _test_utils.py), otherwise falls back to the dynamic mask path.
 // Skipped when qwen-2.5 model is not available.
-// CUDA EP: RewindTo on the dynamic mask path has a pre-existing issue that this
-// test exposes. Excluded here; fix tracked in a separate PR.
-#if TEST_QWEN_2_5 && !USE_CUDA
+#if TEST_QWEN_2_5
 TEST(CAPITests, RewindQwen25CAPI) {
   std::string model_path = QWEN_2_5_PATH;
   if (!std::filesystem::exists(model_path)) {
