@@ -140,6 +140,7 @@ void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
   const auto& layer_state = per_layer_states_[layer_idx];
 
   const auto window_size = layer_state.window_size;
+  const auto seq_len = layer_state.window_index * layer_state.window_size;
   const auto& key_cache_shape_in = layer_state.key_cache_shape_in;
   const auto& key_cache_shape_out = layer_state.key_cache_shape_out;
   const auto& value_cache_shape_in = layer_state.value_cache_shape_in;
@@ -151,10 +152,10 @@ void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
   int64_t num_key_cache_chunks = key_cache_shape_in[0] * key_cache_shape_in[2];
   for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
     {
-      cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in[3],
-                                      key_cache_shape_in[3] - window_size);
-      cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in[3] + window_size,
-                                      key_cache_shape_in[3] - window_size);
+      cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in[3] + key_cache_shape_in[3] - seq_len - window_size,
+                                      seq_len);
+      cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in[3] + key_cache_shape_in[3] - seq_len,
+                                      seq_len);
       std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
     }
     {
@@ -171,11 +172,12 @@ void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
 
   for (int64_t j = 0; j < value_cache_shape_in[0]; ++j) {
     {
-      cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in[2] * value_cache_shape_in[3]),
-                                        (value_cache_shape_in[2] - window_size) * value_cache_shape_in[3]);
+      cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in[2] * value_cache_shape_in[3]) + 
+                                        ((value_cache_shape_in[2] - seq_len - window_size) * value_cache_shape_in[3]),
+                                        seq_len * value_cache_shape_in[3]);
       cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in[2] * value_cache_shape_in[3]) +
-                                            (window_size * value_cache_shape_in[3]),
-                                        (value_cache_shape_in[2] - window_size) * value_cache_shape_in[3]);
+                                        ((value_cache_shape_in[2] - seq_len) * value_cache_shape_in[3]),
+                                        seq_len * value_cache_shape_in[3]);
       std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
     }
     {
@@ -287,6 +289,7 @@ void WindowedKeyValueCache::TransitionLayerToTokenGeneration(size_t layer_idx) {
   value_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_out, type_);
 
   // update values in per-layer state
+  layer_state.window_index = layer_state.window_index * layer_state.window_size / updated_window_size;
   layer_state.window_size = updated_window_size;
   layer_state.key_cache_shape_in = updated_key_cache_shape_in;
   layer_state.value_cache_shape_in = updated_value_cache_shape_in;
