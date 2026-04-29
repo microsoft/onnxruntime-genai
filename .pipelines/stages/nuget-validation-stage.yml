@@ -17,6 +17,9 @@ parameters:
   type: boolean
 - name: enable_linux_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -90,6 +93,16 @@ stages:
     - template: jobs/nuget-validation-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'

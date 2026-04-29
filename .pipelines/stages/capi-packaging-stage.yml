@@ -11,6 +11,9 @@ parameters:
   type: boolean
 - name: enable_linux_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -130,6 +133,18 @@ stages:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'

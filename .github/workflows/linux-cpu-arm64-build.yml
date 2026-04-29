@@ -117,3 +117,21 @@ jobs:
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/unit_tests"
+
+      - name: Docker -- Build and Run the C# Tests
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            cd /onnxruntime_src/test/csharp && \
+            dotnet test /p:Configuration=Release /p:NativeBuildOutputDir=../../build/cpu/ /p:OrtLibDir=../../ort/lib/ --verbosity normal"
+
+      - name: Docker -- Build the C# Examples
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            cd /onnxruntime_src/examples/csharp/ModelChat && dotnet build -c Release && \
+            cd /onnxruntime_src/examples/csharp/ModelMM && dotnet build -c Release"

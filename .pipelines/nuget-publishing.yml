@@ -18,6 +18,11 @@ parameters:
     type: boolean
     default: true
 
+  - name: enable_linux_arm64_cpu
+    displayName: 'Whether Linux ARM64 CPU package is built.'
+    type: boolean
+    default: true
+
   - name: enable_linux_cuda
     displayName: 'Whether Linux CUDA package is built.'
     type: boolean
@@ -148,6 +153,7 @@ extends:
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
@@ -169,6 +175,7 @@ extends:
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
@@ -189,6 +196,7 @@ extends:
               enable_win_cpu: ${{ parameters.enable_win_cpu }}
               enable_win_cuda: ${{ parameters.enable_win_cuda }}
               enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+              enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
               enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
               enable_win_dml: ${{ parameters.enable_win_dml }}
               enable_win_arm64: ${{ parameters.enable_win_arm64 }}

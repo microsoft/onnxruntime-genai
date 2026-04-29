@@ -29,6 +29,11 @@ parameters:
     type: boolean
     default: true
 
+  - name: enable_linux_arm64_cpu
+    displayName: 'Whether Linux ARM64 CPU package is built.'
+    type: boolean
+    default: true
+
   - name: enable_linux_cuda
     displayName: 'Whether Linux CUDA package is built.'
     type: boolean
@@ -105,6 +110,7 @@ extends:
       - template: stages/py-packaging-stage.yml
         parameters:
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
@@ -125,6 +131,7 @@ extends:
           - template: stages/py-validation-stage.yml
             parameters:
               enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+              enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
               enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
               enable_win_cpu: ${{ parameters.enable_win_cpu }}
               enable_win_cuda: ${{ parameters.enable_win_cuda }}
