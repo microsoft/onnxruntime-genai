@@ -106,7 +106,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
 
       - name: Run the Java tests
         run: |
