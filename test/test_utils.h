@@ -15,7 +15,9 @@
 
 namespace test_utils {
 
-// Helper function to get the appropriate model path based on available models.
+// Tests run across different environments where only one EP's model artifacts
+// may be present. This helper probes cuda/dml/webgpu/cpu directories in order
+// and returns the first path containing genai_config.json.
 // Caches results per model_type so different models resolve independently.
 inline const std::string& GetModelPath(const std::string& model_type) {
   static std::unordered_map<std::string, std::string> model_paths;
