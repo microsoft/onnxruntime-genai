@@ -439,17 +439,17 @@ class Qwen25VLTextModel(Model):
         shape_node = f"{basename}/Shape"
         self.make_shape(shape_node, q_or_k_path, [3])
 
-        # Extract B and S
+        # Extract B and S (scalar Gather indices → scalar outputs)
         batch_size_node = f"{basename}/BatchSize/Gather"
         batch_size_out = f"{batch_size_node}/output_0"
         self.make_gather(
-            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [], 0
+            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/0"], ir.DataType.INT64, [], 0
         )
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
         self.make_gather(
-            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [], 0
+            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
         )
 
         # Calculate Total Tokens = B * S
@@ -1417,20 +1417,20 @@ class Qwen35TextModel(Model):
             [3, "batch_seq"],
         )
 
-        # Shape([3, B*S]) → [3, B*S], Gather index 1 → B*S
+        # Shape([3, B*S]) → [3, B*S], Gather scalar index 1 → scalar B*S
         shape2_name = f"{basename}/Shape2"
         self.make_shape(shape2_name, f"{flat_name}/output_0", [2])
 
         total_name = f"{basename}/total/Gather"
         self.make_gather(
-            total_name, [f"{shape2_name}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0
+            total_name, [f"{shape2_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], axis=0
         )
 
         # Range(0, B*S, 1)
         range_name = f"{basename}/range/Range"
         self.make_range(
             range_name,
-            ["/model/constants/INT64/[0]", f"{total_name}/output_0", "/model/constants/INT64/[1]"],
+            ["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
             ir.DataType.INT64,
             ["batch_seq"],
         )
