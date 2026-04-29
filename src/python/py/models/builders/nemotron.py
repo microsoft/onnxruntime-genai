@@ -187,7 +187,7 @@ class NemotronHModel(LlamaModel):
         self.make_transpose(h_B_C_T_name, h_B_C_out, self.io_dtype, ["batch_size", conv_dim, "sequence_length"], [0, 2, 1])
 
         conv_w_name = f"model.layers.{layer_id}.mamba.conv1d.weight"
-        self.make_initializer(mamba.conv1d.weight.squeeze(1).detach(), conv_w_name, to=self.io_dtype)
+        self.make_initializer(mamba.conv1d.weight.detach(), conv_w_name, to=self.io_dtype)
         conv_b_name = f"model.layers.{layer_id}.mamba.conv1d.bias"
         conv_bias = mamba.conv1d.bias if mamba.conv1d.bias is not None else torch.zeros(conv_dim)
         self.make_initializer(conv_bias.detach(), conv_b_name, to=self.io_dtype)
