@@ -166,12 +166,12 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
 
   // Append tokens
   CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-  if (!*done_cpu_) {
+  if (!*done_cpu_ && sequences_.GetSequenceLength() < static_cast<size_t>(params_->search.max_length)) {
     cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
@@ -223,17 +223,21 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   ResetDone();
 
   auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
+  if (sequences_.GetSequenceLength() < static_cast<size_t>(params_->search.max_length)) {
+    cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
+  }
 
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
+  if (sequences_.GetSequenceLength() >= static_cast<size_t>(params_->search.max_length)) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
     return;
   }
 
-  ResetDone();
+  // Only reset done_ if buffer is not full
+  if (sequences_.GetSequenceLength() < static_cast<size_t>(params_->search.max_length))
+    ResetDone();
 }
 
 void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {

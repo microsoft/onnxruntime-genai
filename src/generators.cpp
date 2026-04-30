@@ -596,6 +596,11 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length)
+    throw std::runtime_error(
+        "GenerateNextToken called with sequence length already at max_length (" +
+        std::to_string(state_->params_->search.max_length) + ")");
+
   // RNNT models: yield one token per call from the decoder state machine
   if (is_nemotron_speech_model_) {
     state_->SetExtraInputs(extra_inputs_);
