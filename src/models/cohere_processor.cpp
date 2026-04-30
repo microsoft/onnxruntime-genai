@@ -112,19 +112,20 @@ std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
   return chunks;
 }
 
-// --- Compute mel + normalize directly from PCM float32 ---
+// --- Compute mel + normalize from PCM float32 ---
 
 std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM(
     const float* samples, size_t num_samples) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
 
-  // NemoLogMel: PCM -> log-mel spectrogram
+  // NemoLogMel: PCM -> log-mel spectrogram (via onnxruntime-extensions)
   int num_frames = 0;
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(samples, num_samples, mel_cfg_, num_frames);
 
   int64_t num_mels = mel_cfg_.num_mels;
 
   // PerFeatureNormalize: per-row mean/std normalization
+  // Matches ort_extensions::PerFeatureNormalize with feature_first=1, eps=norm_eps_
   if (num_frames > 1) {
     for (int64_t f = 0; f < num_mels; ++f) {
       float* row = mel_data.data() + f * num_frames;

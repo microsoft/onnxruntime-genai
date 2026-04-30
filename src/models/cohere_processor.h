@@ -27,7 +27,7 @@ struct CohereProcessor : Processor {
   ONNXTensorElementDataType audio_features_type_;
   ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;  // Fallback for non-chunked path
 
-  // Mel config (from audio_processor_config.json)
+  // Mel config (NeMo-compatible defaults)
   nemo_mel::NemoMelConfig mel_cfg_{128, 512, 160, 400, 16000, 0.97f, 5.96046448e-08f};
   float norm_eps_{1e-5f};
 
