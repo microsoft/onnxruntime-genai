@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include <limits>
 #include <numeric>
 #include <regex>
 
@@ -231,8 +232,40 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
     int64_t height_patches = height / kPatchSize;
     int64_t width_patches = width / kPatchSize;
+
+    // Validate dimensions to prevent integer overflow in subsequent multiplications
+    if (height_patches <= 0 || width_patches <= 0 || channels <= 0) {
+      throw std::runtime_error("Invalid image dimensions for patching: height_patches=" +
+                               std::to_string(height_patches) + ", width_patches=" +
+                               std::to_string(width_patches) + ", channels=" +
+                               std::to_string(channels));
+    }
+
+    // Check overflow for total_patches = height_patches * width_patches
+    if (height_patches > std::numeric_limits<int64_t>::max() / width_patches) {
+      throw std::runtime_error("Integer overflow computing total_patches");
+    }
     int64_t total_patches = height_patches * width_patches;
-    int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
+
+    // Check overflow for patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize
+    int64_t patch_dim = channels;
+    if (patch_dim > std::numeric_limits<int64_t>::max() / kTemporalPatchSize) {
+      throw std::runtime_error("Integer overflow computing patch_dim");
+    }
+    patch_dim *= kTemporalPatchSize;
+    if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+      throw std::runtime_error("Integer overflow computing patch_dim");
+    }
+    patch_dim *= kPatchSize;
+    if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+      throw std::runtime_error("Integer overflow computing patch_dim");
+    }
+    patch_dim *= kPatchSize;
+
+    // Check overflow for total buffer size = total_patches * patch_dim
+    if (total_patches > std::numeric_limits<int64_t>::max() / patch_dim) {
+      throw std::runtime_error("Integer overflow computing patched buffer size");
+    }
 
     // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
     // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
