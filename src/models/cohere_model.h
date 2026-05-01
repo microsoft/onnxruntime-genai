@@ -54,19 +54,18 @@ struct CohereState : State {
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
-  // Per-chunk token accumulation for clean text joining
+  // Per-chunk token accumulation (for diagnostics / future joins). Streaming
+  // does NOT use this — use committed_tokens_ instead.
   void SaveChunkTokens(const int32_t* tokens, size_t count);
   const std::vector<std::vector<int32_t>>& GetCompletedChunkTokens() const { return completed_chunk_tokens_; }
 
-  // PyTorch-parity finalization: decode each chunk's tokens, strip ASCII whitespace,
-  // filter empty parts, and join with `separator`. Mirrors CohereAsr's
-  // `join_chunk_texts(texts, separator=get_chunk_separator(language))` (modeling_cohere_asr.py:1525).
-  std::string GetJoinedChunkText(const Tokenizer& tokenizer, const std::string& separator) const;
-
-  // ----- Streaming (committed/pending) state, all internal -----
-  // The Generator uses these to expose an incremental, dedup'd token stream
-  // through the standard API (GetSequence + GenerateNextToken). User never
-  // sees raw per-chunk tokens; only words confirmed past chunk-overlap dedup.
+  // ----- Streaming (committed) state, all internal -----
+  // The Generator uses these to expose an incremental token stream through
+  // the standard API (GetSequence + GenerateNextToken). Chunks are emitted by
+  // the processor without audio overlap; the only cleanup performed at chunk
+  // boundaries is stripping trailing whitespace/punctuation/special tokens
+  // from each non-final chunk so seams like "...scams. " + "In the UK..."
+  // don't surface awkward dot-then-capital fragments.
   void CommitChunkText(const std::string& chunk_text, const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
   size_t StreamedCount() const { return streamed_count_; }
   void AdvanceStreamedCount() { ++streamed_count_; }
@@ -92,10 +91,8 @@ struct CohereState : State {
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
   std::vector<std::vector<int32_t>> completed_chunk_tokens_;  // Per-chunk generated tokens (excl prompt/EOS)
 
-  // Streaming/dedup state
+  // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
-  std::vector<int32_t> pending_tokens_;    // Tokens held back for potential overlap dedup
-  std::string pending_text_;               // Tail words held back (may be revised by next chunk)
   size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
   bool fully_done_{false};                 // True once the last chunk has been committed
 };

@@ -17,11 +17,12 @@ struct CohereProcessor : Processor {
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
  private:
-  // Split waveform into fixed-size overlapping windows. Adjacent chunks share
-  // `overlap_chunk_s_` of audio so word-level dedup at the seam (in CohereState)
-  // can recover seam-free text.
+  // Split waveform into non-overlapping chunks of length `max_audio_clip_s_`,
+  // refining each chunk's tail by searching for the lowest-energy point inside
+  // the last `boundary_chunk_s_` of the chunk. This places splits at quiet
+  // points (between words/sentences) so the model rarely chops mid-word.
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
-      size_t num_samples, int sample_rate) const;
+      const float* samples, size_t num_samples, int sample_rate) const;
 
   // Compute mel + normalize directly from PCM float32 samples. Returns OrtValue [1, num_mels, num_frames].
   std::pair<std::unique_ptr<OrtValue>, int64_t> ComputeMelFromPCM(const float* samples, size_t num_samples) const;
@@ -35,7 +36,7 @@ struct CohereProcessor : Processor {
 
   // Chunking parameters (from genai_config.json model section)
   float max_audio_clip_s_{35.0f};
-  float overlap_chunk_s_{5.0f};
+  float boundary_chunk_s_{5.0f};
 };
 
 }  // namespace Generators

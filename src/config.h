@@ -154,7 +154,7 @@ struct Config {
 
     // Cohere Transcribe chunking parameters
     float max_audio_clip_s{35.0f};  // Maximum audio chunk length in seconds
-    float overlap_chunk_s{5.0f};    // Overlap between adjacent chunks in seconds
+    float boundary_chunk_s{5.0f};   // Energy-search window at chunk tail for boundary detection (seconds)
 
     struct Encoder {
       std::string filename;

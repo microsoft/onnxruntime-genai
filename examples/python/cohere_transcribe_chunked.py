@@ -41,7 +41,7 @@ def compute_wer(reference, hypothesis):
 
 PROMPT_TOKENS = [
     "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>",
-    "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
+    "<|es|>", "<|es|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
 ]
 
 

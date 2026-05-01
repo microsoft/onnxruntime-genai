@@ -10,13 +10,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace Generators {
 
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       max_audio_clip_s_{config.model.max_audio_clip_s},
-      overlap_chunk_s_{config.model.overlap_chunk_s} {
+      boundary_chunk_s_{config.model.boundary_chunk_s} {
   mel_cfg_.num_mels    = config.model.num_mels;
   mel_cfg_.fft_size    = config.model.fft_size;
   mel_cfg_.hop_length  = config.model.hop_length;
@@ -64,36 +65,65 @@ static std::pair<const float*, size_t> GetDecodedPCM(
   return {static_cast<const float*>(pcm_data), num_samples};
 }
 
-// Waveform splitting with FIXED OVERLAP between chunks
+// Waveform splitting with ENERGY-BASED non-overlapping boundaries.
 //
-// The model's training-time chunker uses energy-based, non-overlapping splits,
-// meaning this model was trained with long utterances in mind. Even though text is
-// largely correct, this produces seam artifacts at chunk boundaries (e.g. "...UK. Come from..."
-// when a sentence is split mid-utterance) because each chunk's decoder runs
-// independently and naturally terminates with sentence-end punctuation.
+// The model is trained with long utterances and energy-based non-overlapping
+// chunking. We mirror that: each chunk is up to `max_audio_clip_s_` long and
+// adjacent chunks share NO audio. To avoid splitting mid-word, the actual
+// split point inside each chunk's tail `boundary_chunk_s_` window is moved to
+// the local energy minimum (a quiet point — typically between words).
 //
-// We instead emit overlapping windows of length max_audio_clip_s_ stepping by
-// (max_audio_clip_s_ - overlap_chunk_s_). The same audio (and hence the same
-// words) appears at the tail of chunk N and the head of chunk N+1; the
-// downstream merge step (CohereState::GetJoinedChunkText) does word-level
-// dedup so the final transcript is seam-free.
-
-// While we could integrate Silero VAD to find word boundaries to reduce risk
-// of splitting mid-word, empirical experiments and benchmark evaluation show
-// that this approach is both faster and more accurate as VAD seems not to be as
-// accurate on finding proper word boundaries. Silero VAD could get integrated in future
-// for long silences, but provides no benefit for normal audio transcription use case.
+// Algorithm per chunk:
+//   tentative_end = min(start + chunk_size, num_samples)
+//   if tentative_end == num_samples: emit [start, end] and stop
+//   else: search [tentative_end - boundary_window, tentative_end] for the
+//         frame with minimum short-term energy and split there
+//
+// Short-term energy uses non-overlapping 10ms frames (sum of squares). This
+// is cheap (single linear pass per chunk tail) and reliable for finding
+// inter-word silences/pauses.
 std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
-    size_t num_samples, int sample_rate) const {
+    const float* samples, size_t num_samples, int sample_rate) const {
   const size_t chunk_size = static_cast<size_t>(max_audio_clip_s_ * sample_rate);
-  const size_t overlap = static_cast<size_t>(overlap_chunk_s_ * sample_rate);
-  const size_t step = chunk_size - overlap;
+  const size_t boundary_window = static_cast<size_t>(boundary_chunk_s_ * sample_rate);
+  const size_t frame_size = static_cast<size_t>(0.010f * sample_rate);  // 10ms
+  const size_t min_chunk_samples = std::max<size_t>(frame_size * 10, sample_rate / 10);  // >=100ms
+
+  auto find_quietest_split = [&](size_t lo, size_t hi) -> size_t {
+    // Search frames in [lo, hi); return the start sample of the lowest-energy frame.
+    if (hi <= lo + frame_size) return hi;
+    size_t best = lo;
+    double best_energy = std::numeric_limits<double>::infinity();
+    for (size_t f = lo; f + frame_size <= hi; f += frame_size) {
+      double e = 0.0;
+      for (size_t i = 0; i < frame_size; ++i) {
+        float v = samples[f + i];
+        e += static_cast<double>(v) * v;
+      }
+      if (e < best_energy) {
+        best_energy = e;
+        best = f;
+      }
+    }
+    return best;
+  };
 
   std::vector<std::pair<size_t, size_t>> chunks;
-  for (size_t idx = 0; idx < num_samples; idx += step) {
-    const size_t end = std::min(idx + chunk_size, num_samples);
-    chunks.push_back({idx, end});
-    if (end == num_samples) break;
+  size_t start = 0;
+  while (start < num_samples) {
+    size_t tentative_end = std::min(start + chunk_size, num_samples);
+    if (tentative_end == num_samples) {
+      chunks.push_back({start, tentative_end});
+      break;
+    }
+    size_t window_lo = (tentative_end > boundary_window) ? tentative_end - boundary_window : start;
+    if (window_lo < start + min_chunk_samples) window_lo = start + min_chunk_samples;
+    size_t end = (window_lo + frame_size <= tentative_end)
+                     ? find_quietest_split(window_lo, tentative_end)
+                     : tentative_end;
+    if (end <= start + min_chunk_samples) end = tentative_end;  // safety
+    chunks.push_back({start, end});
+    start = end;
   }
   return chunks;
 }
@@ -151,7 +181,7 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
 
   // Split waveform at energy boundaries
-  auto chunk_ranges = SplitWaveformIntoChunks(num_samples, sample_rate);
+  auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
 
   // Compute mel for first chunk
   {
