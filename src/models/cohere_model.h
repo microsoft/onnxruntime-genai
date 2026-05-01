@@ -26,7 +26,10 @@ struct CohereEncoderState : State {
  private:
   const WhisperModel& model_;
 
-  std::unique_ptr<AudioFeatures> audio_features_;
+  // Update num_frames_ and (re)create hidden_states_ output to match audio_features_'s shape/type.
+  void UpdateForCurrentAudio();
+
+  std::unique_ptr<OrtValue> audio_features_;  // device-resident mel for the current chunk
   std::unique_ptr<OrtValue> hidden_states_;
   std::unique_ptr<OrtValue> mel_length_;
   int num_frames_{0};

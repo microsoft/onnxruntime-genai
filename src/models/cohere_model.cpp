@@ -15,13 +15,11 @@ CohereEncoderState::CohereEncoderState(const WhisperModel& model, const Generato
     : State{params, model},
       model_{model} {}
 
-void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  // Add audio features
-  audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
-  audio_features_->Add();
-
-  // Compute num_frames from audio input shape and audio_stride
-  auto shape = audio_features_->GetShape();
+// Update num_frames_ and (re)create hidden_states_ output for the current
+// audio_features_ tensor. Returns the input slot index of the audio features.
+void CohereEncoderState::UpdateForCurrentAudio() {
+  auto shape_info = audio_features_->GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
   int audio_stride = model_.config_->model.encoder.audio_stride;
 
   if (audio_stride > 0 && shape.size() == 2) {
@@ -39,10 +37,37 @@ void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inp
                              " with input rank=" + std::to_string(shape.size()));
   }
 
-  // Add mel_length input if provided
+  if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
+    auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
+    hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape,
+                                            shape_info->GetElementType());
+  }
+}
+
+void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  const std::string& audio_name = model_.config_->model.encoder.inputs.audio_features;
+
+  // Add audio features (CPU -> encoder device).
+  for (const auto& [name, value] : extra_inputs) {
+    if (name == audio_name) {
+      audio_features_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
+      break;
+    }
+  }
+  if (audio_features_ == nullptr) {
+    throw std::runtime_error("audio_features must be provided via SetInputs");
+  }
+
+  input_names_.push_back(audio_name.c_str());
+  inputs_.push_back(audio_features_.get());
+
+  UpdateForCurrentAudio();
+
+  // Add mel_length input if provided. Route through ExpandInputs so it ends
+  // up on the same device as the encoder (CUDA copies CPU->device here).
   for (const auto& [name, value] : extra_inputs) {
     if (name == "mel_length") {
-      mel_length_ = std::move(reinterpret_cast<Tensor*>(value.get())->ort_tensor_);
+      mel_length_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
       input_names_.push_back("mel_length");
       inputs_.push_back(mel_length_.get());
       break;
@@ -50,41 +75,29 @@ void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inp
   }
 
   // Add encoder hidden states output if the model has it
-  if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
-    auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
-    hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_->GetType());
+  if (hidden_states_) {
     outputs_.push_back(hidden_states_.get());
     output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
   }
 }
 
 void CohereEncoderState::SetChunkAudioFeatures(std::shared_ptr<Tensor> audio_features_tensor, std::shared_ptr<Tensor> mel_length_tensor) {
-  // Replace audio features input
-  auto* ort_tensor = audio_features_tensor->ort_tensor_.get();
-  auto shape_info = ort_tensor->GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-  int audio_stride = model_.config_->model.encoder.audio_stride;
+  // Replace audio features input. Copy CPU -> encoder device via ExpandInputs.
+  audio_features_ = model_.ExpandInputs(audio_features_tensor->ort_tensor_, params_->search.num_beams);
 
-  if (audio_stride > 0 && shape.size() == 3) {
-    int T_mel = static_cast<int>(shape[2]);
-    int T_enc = (T_mel - 1) / 8 + 1;
-    num_frames_ = T_enc * 2;
-  }
+  UpdateForCurrentAudio();
 
-  // Find and replace the audio features in inputs_
-  std::string audio_name = model_.config_->model.encoder.inputs.audio_features;
+  const std::string& audio_name = model_.config_->model.encoder.inputs.audio_features;
   for (size_t i = 0; i < input_names_.size(); ++i) {
-    if (input_names_[i] == audio_name.c_str() || std::string(input_names_[i]) == audio_name) {
-      // We need to keep the AudioFeatures object alive - create a new one
-      // But since AudioFeatures takes extra_inputs, we directly replace the pointer
-      inputs_[i] = ort_tensor;
+    if (std::string(input_names_[i]) == audio_name) {
+      inputs_[i] = audio_features_.get();
       break;
     }
   }
 
-  // Replace mel_length
+  // Replace mel_length (CPU -> device)
   if (mel_length_tensor) {
-    mel_length_ = std::move(mel_length_tensor->ort_tensor_);
+    mel_length_ = model_.ExpandInputs(mel_length_tensor->ort_tensor_, params_->search.num_beams);
     for (size_t i = 0; i < input_names_.size(); ++i) {
       if (std::string(input_names_[i]) == "mel_length") {
         inputs_[i] = mel_length_.get();
@@ -93,12 +106,8 @@ void CohereEncoderState::SetChunkAudioFeatures(std::shared_ptr<Tensor> audio_fea
     }
   }
 
-  // Update hidden states output shape if applicable
-  if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
-    auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
-    hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape,
-                                            shape_info->GetElementType());
-    // Update the output pointer
+  // Update hidden states output pointer if applicable
+  if (hidden_states_) {
     for (size_t i = 0; i < output_names_.size(); ++i) {
       if (std::string(output_names_[i]) == model_.config_->model.encoder.outputs.hidden_states) {
         outputs_[i] = hidden_states_.get();
