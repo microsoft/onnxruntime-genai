@@ -314,16 +314,20 @@ void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tok
   if (first >= tokens.size()) return;
 
   std::string text = DecodeOne(tokenizer, tokens[first]);
-  // Lowercase the first ASCII uppercase letter.
+  // Lowercase the first ASCII uppercase letter, but only if it appears before
+  // any non-ASCII byte. This keeps the function safe for non-Latin scripts
+  // (CJK, Arabic, etc.0 - no-op) and avoids mis-lowercasing a later ASCII
+  // letter when the leading character is a non-ASCII capital like Ñ/É/Ü.
   bool changed = false;
   for (size_t i = 0; i < text.size(); ++i) {
     unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c >= 0x80) break;            // hit non-ASCII byte: bail out
     if (c >= 'A' && c <= 'Z') {
       text[i] = static_cast<char>(c + ('a' - 'A'));
       changed = true;
       break;
     }
-    if (std::isalnum(c)) break;  // already lowercase or non-ASCII alpha
+    if (std::isalnum(c)) break;
   }
   if (!changed) return;
 
