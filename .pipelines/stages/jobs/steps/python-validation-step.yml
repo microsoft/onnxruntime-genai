@@ -39,9 +39,6 @@ steps:
         python -m pip install -r test/python/webgpu/torch/requirements.txt
         python -m pip install -r test/python/webgpu/ort/requirements.txt
       }
-      elseif ("$(arch)" -eq "arm64") {
-        python -m pip install onnxruntime-qnn
-      }
       else {
         python -m pip install -r test/python/cpu/torch/requirements.txt
         python -m pip install -r test/python/cpu/ort/requirements.txt
@@ -71,7 +68,6 @@ steps:
         --rm \
         --volume $(Build.Repository.LocalPath):/ort_genai_src \
         --volume $(Build.BinariesDirectory):/ort_genai_binary \
-        -e HF_TOKEN=$HF_TOKEN \
         -w /ort_genai_src/ $(cuda_docker_image) \
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
