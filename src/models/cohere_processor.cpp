@@ -113,7 +113,6 @@ std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
     size_t end = (window_lo + min_chunk_samples <= tentative_end)
                      ? find_quietest_split(window_lo, tentative_end)
                      : tentative_end;
-    if (end <= start + min_chunk_samples) end = tentative_end;  // safety
     chunks.push_back({start, end});
     start = end;
   }

@@ -143,6 +143,12 @@ struct Generator : LeakChecked<Generator> {
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 
+  // Run one decode step: ensure logits, apply guidance/min-length/repetition
+  // penalty, log, then sample using the configured method. Order matches the
+  // original tail of GenerateNextToken exactly. Used by both GenerateNextToken
+  // and the Cohere chunk loop.
+  void SampleNextToken();
+
   // Cohere-only: run the inner search loop until the current chunk hits EOS,
   // then dedup against the previous chunk's tail and commit stable tokens to
   // the streamable buffer. Advances to the next chunk if more remain.

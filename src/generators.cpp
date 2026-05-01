@@ -647,6 +647,10 @@ void Generator::GenerateNextToken() {
     AppendTokens(current_seq);
   }
 
+  SampleNextToken();
+}
+
+void Generator::SampleNextToken() {
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
@@ -727,40 +731,9 @@ DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
 
 void Generator::RunCohereChunkUntilEOS() {
   auto* cs = static_cast<CohereState*>(state_.get());
-  auto& search = state_->params_->search;
-
   // Step the search until the model produces EOS for this chunk.
   while (!search_->IsDone()) {
-    if (!computed_logits_) {
-      auto next_tokens = search_->GetNextTokens();
-      if (last_action_ == Action::rewound)
-        search_->AppendTokens(next_tokens);
-      ComputeLogits(next_tokens);
-    }
-    if (guidance_logits_processor_) {
-      auto logits = GetLogits();
-      guidance_logits_processor_->ProcessLogits(logits);
-    }
-    computed_logits_ = false;
-    search_->ApplyMinLength(search.min_length);
-    search_->ApplyRepetitionPenalty(search.repetition_penalty);
-    last_action_ = Action::generated;
-    switch (sampling_method_) {
-      case SamplingMethod::kGreedy:
-        search_->SelectTop();
-        break;
-      case SamplingMethod::kTopKTopP:
-        search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
-        break;
-      case SamplingMethod::kTopK:
-        search_->SampleTopK(search.top_k, search.temperature);
-        break;
-      case SamplingMethod::kTopP:
-        search_->SampleTopP(search.top_p, search.temperature);
-        break;
-      default:
-        throw std::runtime_error("Unknown sampling method");
-    }
+    SampleNextToken();
   }
 
   // Extract this chunk's generated tokens (skip prompt at start, conditionally skip EOS at end).
