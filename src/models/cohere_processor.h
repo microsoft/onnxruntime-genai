@@ -19,8 +19,8 @@ struct CohereProcessor : Processor {
  private:
   // Split waveform into non-overlapping chunks of at most max_audio_clip_s_
   // seconds each, with cut points snapped to the quietest 100ms window inside
-  // the last overlap_chunk_s_ seconds (energy-based silence boundaries).
-  // Mirrors CohereAsrFeatureExtractor._split_audio_chunks_energy.
+  // the last boundary_chunk_s_ seconds (energy-based silence boundaries).
+  // Mirrors exactly CohereAsrFeatureExtractor._split_audio_chunks_energy.
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
       const float* samples, size_t num_samples, int sample_rate) const;
 
@@ -36,7 +36,7 @@ struct CohereProcessor : Processor {
 
   // Chunking parameters (from genai_config.json model section)
   float max_audio_clip_s_{35.0f};
-  float overlap_chunk_s_{5.0f};
+  float boundary_chunk_s_{5.0f};
 };
 
 }  // namespace Generators

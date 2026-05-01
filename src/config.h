@@ -153,8 +153,8 @@ struct Config {
     int max_symbols_per_step{};
 
     // Cohere Transcribe chunking parameters
-    float max_audio_clip_s{35.0f};  // Maximum audio chunk length in seconds
-    float overlap_chunk_s{5.0f};    // Overlap between adjacent chunks in seconds
+    float max_audio_clip_s{35.0f};   // Maximum audio chunk length in seconds
+    float boundary_chunk_s{5.0f};    // Tail-of-chunk window (seconds) searched for the quietest split point
 
     struct Encoder {
       std::string filename;

@@ -17,7 +17,7 @@ namespace Generators {
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       max_audio_clip_s_{config.model.max_audio_clip_s},
-      overlap_chunk_s_{config.model.overlap_chunk_s} {
+      boundary_chunk_s_{config.model.boundary_chunk_s} {
   mel_cfg_.num_mels    = config.model.num_mels;
   mel_cfg_.fft_size    = config.model.fft_size;
   mel_cfg_.hop_length  = config.model.hop_length;
@@ -31,33 +31,22 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
 }
 
-// Decode audio to PCM via OrtxDecodeAudio in extensions
+// Decode audio to PCM via OrtxDecodeAudio in extensions. The decoder
+// resamples to `target_sample_rate`, so the caller already knows the rate.
 static std::pair<const float*, size_t> GetDecodedPCM(
     OrtxRawAudios* raw_audios, size_t index, int target_sample_rate,
-    ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder,
-    int& out_sample_rate) {
+    ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder) {
   OrtxTensorResult* decode_result = nullptr;
-  // Pass target_sample_rate so ortx resamples on decode.
   CheckResult(OrtxDecodeAudio(raw_audios, index, target_sample_rate, &decode_result));
   decode_result_holder.reset(decode_result);
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
   CheckResult(OrtxTensorResultGetAt(decode_result, 0, pcm_tensor.ToBeAssigned()));
 
-  ort_extensions::OrtxObjectPtr<OrtxTensor> sr_tensor;
-  CheckResult(OrtxTensorResultGetAt(decode_result, 1, sr_tensor.ToBeAssigned()));
-
   const void* pcm_data = nullptr;
   const int64_t* pcm_shape = nullptr;
   size_t pcm_dims = 0;
   CheckResult(OrtxGetTensorData(pcm_tensor.get(), &pcm_data, &pcm_shape, &pcm_dims));
-
-  const void* sr_data = nullptr;
-  const int64_t* sr_shape = nullptr;
-  size_t sr_dims = 0;
-  CheckResult(OrtxGetTensorData(sr_tensor.get(), &sr_data, &sr_shape, &sr_dims));
-
-  out_sample_rate = static_cast<int>(*static_cast<const int64_t*>(sr_data));
 
   size_t num_samples = 1;
   for (size_t d = 0; d < pcm_dims; ++d) num_samples *= pcm_shape[d];
@@ -71,7 +60,7 @@ static std::pair<const float*, size_t> GetDecodedPCM(
 // transformers reference implementation. Each chunk is at most
 // max_audio_clip_s_ seconds; the cut point is snapped to the quietest
 // `min_energy_window_samples`-sized window inside the last
-// `overlap_chunk_s_` seconds of the chunk. Chunks do NOT overlap, which
+// `boundary_chunk_s_` seconds of the chunk. Chunks do NOT overlap, which
 // matches the model's training-time chunker (whole utterances per chunk),
 // so the per-chunk decoded text can be plain space-joined without dedup.
 static size_t FindEnergySplitPoint(const float* samples, size_t start, size_t end,
@@ -102,7 +91,7 @@ std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
   const size_t chunk_size = std::max<size_t>(
       1, static_cast<size_t>(std::round(max_audio_clip_s_ * sample_rate)));
   const size_t boundary_ctx = std::max<size_t>(
-      1, static_cast<size_t>(std::round(overlap_chunk_s_ * sample_rate)));
+      1, static_cast<size_t>(std::round(boundary_chunk_s_ * sample_rate)));
   const size_t min_window = static_cast<size_t>(sample_rate) / 10;  // 100 ms
 
   std::vector<std::pair<size_t, size_t>> chunks;
@@ -168,8 +157,6 @@ std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM
   return {std::move(tensor), static_cast<int64_t>(num_frames)};
 }
 
-// --- Main Process ---
-
 std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
   const auto* audios = payload.audios;
   if (!audios || !audios->audios_)
@@ -180,39 +167,30 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
 
   // Decode audio to PCM, resampled to the model's expected sample rate.
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> decode_result;
-  int sample_rate = 0;
-  auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
+  auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result);
 
   // Split waveform at energy-based silence boundaries (no overlap).
-  auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
+  auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, mel_cfg_.sample_rate);
 
-  // Compute mel for first chunk
-  {
-    auto [start, end] = chunk_ranges[0];
-    auto [mel_tensor, mel_frames] = ComputeMelFromPCM(pcm_data + start, end - start);
-
-    named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
-                           std::make_shared<Tensor>(std::move(mel_tensor)));
-
-    auto ml_shape = std::array<int64_t, 1>{1};
-    auto ml_tensor = OrtValue::CreateTensor<int64_t>(allocator, std::span<int64_t>(ml_shape.data(), 1));
-    ml_tensor->GetTensorMutableData<int64_t>()[0] = mel_frames;
-    named_tensors->emplace("mel_length", std::make_shared<Tensor>(std::move(ml_tensor)));
-  }
-
-  // Compute mel for remaining chunks
-  for (size_t i = 1; i < chunk_ranges.size(); ++i) {
+  // Emit one (mel, mel_length) pair per chunk. Chunk 0 uses the canonical
+  // input names; chunks >=1 use indexed names so CohereState can pick them up.
+  for (size_t i = 0; i < chunk_ranges.size(); ++i) {
     auto [start, end] = chunk_ranges[i];
     auto [mel_tensor, mel_frames] = ComputeMelFromPCM(pcm_data + start, end - start);
 
-    named_tensors->emplace("cohere_chunk_" + std::to_string(i),
-                           std::make_shared<Tensor>(std::move(mel_tensor)));
+    const std::string mel_name = (i == 0)
+        ? std::string(Config::Defaults::AudioFeaturesName)
+        : "cohere_chunk_" + std::to_string(i);
+    const std::string ml_name = (i == 0)
+        ? std::string("mel_length")
+        : "cohere_chunk_mel_length_" + std::to_string(i);
+
+    named_tensors->emplace(mel_name, std::make_shared<Tensor>(std::move(mel_tensor)));
 
     auto ml_shape = std::array<int64_t, 1>{1};
     auto ml_tensor = OrtValue::CreateTensor<int64_t>(allocator, std::span<int64_t>(ml_shape.data(), 1));
     ml_tensor->GetTensorMutableData<int64_t>()[0] = mel_frames;
-    named_tensors->emplace("cohere_chunk_mel_length_" + std::to_string(i),
-                           std::make_shared<Tensor>(std::move(ml_tensor)));
+    named_tensors->emplace(ml_name, std::make_shared<Tensor>(std::move(ml_tensor)));
   }
 
   // Store chunk count
