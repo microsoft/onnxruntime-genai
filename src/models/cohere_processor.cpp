@@ -35,11 +35,12 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
 // --- Decode audio to PCM via OrtxDecodeAudio ---
 
 static std::pair<const float*, size_t> GetDecodedPCM(
-    OrtxRawAudios* raw_audios, size_t index,
+    OrtxRawAudios* raw_audios, size_t index, int target_sample_rate,
     ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder,
     int& out_sample_rate) {
   OrtxTensorResult* decode_result = nullptr;
-  CheckResult(OrtxDecodeAudio(raw_audios, index, 0 /* native rate */, &decode_result));
+  // Pass target_sample_rate so ortx resamples on decode (e.g. 22050->16000 for jfk.flac).
+  CheckResult(OrtxDecodeAudio(raw_audios, index, target_sample_rate, &decode_result));
   decode_result_holder.reset(decode_result);
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
@@ -151,10 +152,10 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
-  // Decode audio to PCM
+  // Decode audio to PCM, resampled to the model's expected sample rate.
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> decode_result;
   int sample_rate = 0;
-  auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, decode_result, sample_rate);
+  auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
 
   // Split waveform at energy boundaries
   auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);

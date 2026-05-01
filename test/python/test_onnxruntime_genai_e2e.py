@@ -83,6 +83,48 @@ def run_whisper():
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_cohere_transcribe():
+    log.debug("Running Cohere Transcribe Python E2E Test")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    ci_data_path = get_ci_data_path()
+    if not os.path.exists(ci_data_path):
+        return
+
+    audio_path = os.path.join(cwd, "..", "test_models", "audios", "jfk.flac")
+    if not os.path.exists(audio_path):
+        log.info(f"Test audio not found at {audio_path}, skipping Cohere Transcribe E2E test.")
+        return
+
+    expected_transcription = (
+        "And so my fellow Americans ask not what your country can do for you "
+        "ask what you can do for your country"
+    )
+
+    for execution_provider in ["cuda", "cpu"]:
+        ci_model = os.path.join(ci_data_path, "onnx", f"cohere-transcribe-{execution_provider}")
+        if not os.path.exists(ci_model):
+            continue
+        if execution_provider == "cuda" and not og.is_cuda_available():
+            continue
+
+        command = [
+            sys.executable,
+            os.path.join(cwd, "..", "..", "examples", "python", "cohere_transcribe_chunked.py"),
+            "-m",
+            ci_model,
+            "-e",
+            execution_provider,
+            "-a",
+            audio_path,
+            "--expected_transcription",
+            expected_transcription,
+            "--max_wer",
+            "0.10",
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def run_tool_calling():
     log.debug("Running tool calling Python E2E Tests")
 
@@ -223,6 +265,9 @@ if __name__ == "__main__":
 
     # Run Nemotron Speech E2E tests
     run_nemotron_speech()
+
+    # Run Cohere Transcribe E2E tests
+    run_cohere_transcribe()
 
     # Run tool calling E2E tests
     run_tool_calling()
