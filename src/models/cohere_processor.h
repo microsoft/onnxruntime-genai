@@ -28,10 +28,8 @@ struct CohereProcessor : Processor {
 
   ONNXTensorElementDataType audio_features_type_;
 
-  // Mel + normalize config — populated from the speech config JSON
-  // (model.speech.config_filename) at construction time. The same JSON is the
-  // schema the Ortx speech feature extractor would consume; we read it directly
-  // because Process() runs its own chunked mel pipeline.
+  // Mel + normalize config — populated from genai_config.json (model.* fields)
+  // at construction time. Defaults match Cohere Transcribe's published preset.
   nemo_mel::NemoMelConfig mel_cfg_{128, 512, 160, 400, 16000, 0.97f, 5.96046448e-08f};
   float norm_eps_{1e-5f};
 

@@ -1114,6 +1114,8 @@ struct Model_Element : JSON::Element {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
       v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "left_context") {

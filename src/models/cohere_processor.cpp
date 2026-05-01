@@ -6,73 +6,27 @@
 #include "cohere_processor.h"
 #include "speech_features.hpp"
 #include "c_api_utils.hpp"
-#include "../json.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 namespace Generators {
-
-// Flat JSON walker: descends into every object/array and captures any value
-// whose key matches one of the mel/normalize attribute names. Works because
-// the speech config schema (audio_processor_config.json) uses unique keys
-// across its nested operations.
-namespace {
-struct SpeechConfigCollector : JSON::Element {
-  nemo_mel::NemoMelConfig mel;
-  float norm_eps{1e-5f};
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    auto take_double = [&]() { return JSON::Get<double>(value); };
-    if (name == "num_mels") mel.num_mels = static_cast<int>(take_double());
-    else if (name == "fft_size") mel.fft_size = static_cast<int>(take_double());
-    else if (name == "hop_length") mel.hop_length = static_cast<int>(take_double());
-    else if (name == "win_length") mel.win_length = static_cast<int>(take_double());
-    else if (name == "sample_rate") mel.sample_rate = static_cast<int>(take_double());
-    else if (name == "preemph") mel.preemph = static_cast<float>(take_double());
-    else if (name == "log_eps") mel.log_eps = static_cast<float>(take_double());
-    else if (name == "eps") norm_eps = static_cast<float>(take_double());
-    // ignore everything else (operation names, types, decoder attrs, ...)
-  }
-
-  // Recurse into every nested object/array using this same collector so all
-  // attribute names are visible regardless of nesting depth.
-  Element& OnArray(std::string_view) override { return *this; }
-  Element& OnObject(std::string_view) override { return *this; }
-};
-
-void LoadSpeechConfig(const std::string& path, nemo_mel::NemoMelConfig& mel_cfg, float& norm_eps) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    throw std::runtime_error("CohereProcessor: cannot open speech config: " + path);
-  }
-  std::ostringstream buf;
-  buf << in.rdbuf();
-  std::string contents = buf.str();
-
-  SpeechConfigCollector collector;
-  // Seed with current header defaults so any field missing from the JSON keeps a sane value.
-  collector.mel = mel_cfg;
-  collector.norm_eps = norm_eps;
-  JSON::Parse(collector, contents);
-
-  mel_cfg = collector.mel;
-  norm_eps = collector.norm_eps;
-}
-}  // namespace
 
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       max_audio_clip_s_{config.model.max_audio_clip_s},
       overlap_chunk_s_{config.model.overlap_chunk_s} {
-  auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
-
-  // Load mel + per-feature-normalize parameters from the speech config JSON
-  // (single source of truth, shared with the Ortx speech feature extractor schema).
-  LoadSpeechConfig(processor_config, mel_cfg_, norm_eps_);
+  // Mel + per-feature-normalize parameters come from genai_config.json
+  // (model.* fields). Fall back to header defaults for any field left at 0.
+  if (config.model.num_mels > 0)    mel_cfg_.num_mels    = config.model.num_mels;
+  if (config.model.fft_size > 0)    mel_cfg_.fft_size    = config.model.fft_size;
+  if (config.model.hop_length > 0)  mel_cfg_.hop_length  = config.model.hop_length;
+  if (config.model.win_length > 0)  mel_cfg_.win_length  = config.model.win_length;
+  if (config.model.sample_rate > 0) mel_cfg_.sample_rate = config.model.sample_rate;
+  if (config.model.preemph != 0.0f) mel_cfg_.preemph     = config.model.preemph;
+  if (config.model.log_eps != 0.0f) mel_cfg_.log_eps     = config.model.log_eps;
+  norm_eps_ = config.model.norm_eps;
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);

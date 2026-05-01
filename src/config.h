@@ -142,6 +142,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{1e-5f};  // Per-feature normalize epsilon (Cohere Transcribe)
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
