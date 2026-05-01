@@ -106,7 +106,6 @@ def _parse_args():
             "NMake Makefiles",
             "Unix Makefiles",
             "Visual Studio 17 2022",
-            "Visual Studio 18 2026",
             "Xcode",
         ],
         default=("Visual Studio 17 2022" if util.is_windows() else "Unix Makefiles"),
