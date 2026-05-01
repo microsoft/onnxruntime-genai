@@ -5,20 +5,74 @@
 #include "model.h"
 #include "cohere_processor.h"
 #include "speech_features.hpp"
+#include "c_api_utils.hpp"
+#include "../json.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 
 namespace Generators {
+
+// Flat JSON walker: descends into every object/array and captures any value
+// whose key matches one of the mel/normalize attribute names. Works because
+// the speech config schema (audio_processor_config.json) uses unique keys
+// across its nested operations.
+namespace {
+struct SpeechConfigCollector : JSON::Element {
+  nemo_mel::NemoMelConfig mel;
+  float norm_eps{1e-5f};
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto take_double = [&]() { return JSON::Get<double>(value); };
+    if (name == "num_mels") mel.num_mels = static_cast<int>(take_double());
+    else if (name == "fft_size") mel.fft_size = static_cast<int>(take_double());
+    else if (name == "hop_length") mel.hop_length = static_cast<int>(take_double());
+    else if (name == "win_length") mel.win_length = static_cast<int>(take_double());
+    else if (name == "sample_rate") mel.sample_rate = static_cast<int>(take_double());
+    else if (name == "preemph") mel.preemph = static_cast<float>(take_double());
+    else if (name == "log_eps") mel.log_eps = static_cast<float>(take_double());
+    else if (name == "eps") norm_eps = static_cast<float>(take_double());
+    // ignore everything else (operation names, types, decoder attrs, ...)
+  }
+
+  // Recurse into every nested object/array using this same collector so all
+  // attribute names are visible regardless of nesting depth.
+  Element& OnArray(std::string_view) override { return *this; }
+  Element& OnObject(std::string_view) override { return *this; }
+};
+
+void LoadSpeechConfig(const std::string& path, nemo_mel::NemoMelConfig& mel_cfg, float& norm_eps) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("CohereProcessor: cannot open speech config: " + path);
+  }
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  std::string contents = buf.str();
+
+  SpeechConfigCollector collector;
+  // Seed with current header defaults so any field missing from the JSON keeps a sane value.
+  collector.mel = mel_cfg;
+  collector.norm_eps = norm_eps;
+  JSON::Parse(collector, contents);
+
+  mel_cfg = collector.mel;
+  norm_eps = collector.norm_eps;
+}
+}  // namespace
 
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       max_audio_clip_s_{config.model.max_audio_clip_s},
-      overlap_chunk_s_{config.model.overlap_chunk_s},
-      min_energy_window_samples_{config.model.min_energy_window_samples} {
+      overlap_chunk_s_{config.model.overlap_chunk_s} {
   auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
-  processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
+
+  // Load mel + per-feature-normalize parameters from the speech config JSON
+  // (single source of truth, shared with the Ortx speech feature extractor schema).
+  LoadSpeechConfig(processor_config, mel_cfg_, norm_eps_);
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
@@ -101,39 +155,34 @@ std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM
     const float* samples, size_t num_samples) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
 
-  // NemoLogMel: PCM -> log-mel spectrogram (via onnxruntime-extensions)
+  // Step 1: PCM -> log-mel spectrogram (onnxruntime-extensions kernel).
   int num_frames = 0;
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(samples, num_samples, mel_cfg_, num_frames);
+  const int64_t num_mels = mel_cfg_.num_mels;
 
-  int64_t num_mels = mel_cfg_.num_mels;
-
-  // PerFeatureNormalize: per-row mean/std normalization
-  // Matches ort_extensions::PerFeatureNormalize with feature_first=1, eps=norm_eps_
-  if (num_frames > 1) {
-    for (int64_t f = 0; f < num_mels; ++f) {
-      float* row = mel_data.data() + f * num_frames;
-      float sum = 0.0f;
-      for (int t = 0; t < num_frames; ++t) sum += row[t];
-      float mean = sum / num_frames;
-
-      float var_sum = 0.0f;
-      for (int t = 0; t < num_frames; ++t) {
-        float d = row[t] - mean;
-        var_sum += d * d;
-      }
-      float std_val = std::sqrt(var_sum / (num_frames - 1)) + norm_eps_;
-
-      for (int t = 0; t < num_frames; ++t)
-        row[t] = (row[t] - mean) / std_val;
-    }
-  } else if (num_frames == 1) {
-    std::fill(mel_data.begin(), mel_data.end(), 0.0f);
+  // Step 2: per-feature normalize (onnxruntime-extensions kernel).
+  // Wrap mel_data as the kernel input; the kernel allocates its own output buffer.
+  ort_extensions::PerFeatureNormalize norm_kernel;
+  ort_extensions::AttrDict norm_attrs{
+      {"eps", static_cast<double>(norm_eps_)},
+      {"feature_first", int64_t{1}},
+  };
+  if (auto status = norm_kernel.Init(norm_attrs); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Init failed: ") + status.Message());
+  }
+  std::vector<int64_t> mel_shape{num_mels, static_cast<int64_t>(num_frames)};
+  ortc::Tensor<float> norm_in(mel_shape, mel_data.data());
+  ortc::Tensor<float> norm_out(&ort_extensions::CppAllocator::Instance());
+  if (auto status = norm_kernel.Compute(norm_in, norm_out); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Compute failed: ") + status.Message());
   }
 
-  // Create OrtValue [1, num_mels, num_frames]
-  auto shape = std::array<int64_t, 3>{1, num_mels, num_frames};
+  // Step 3: copy normalized data into an OrtValue [1, num_mels, num_frames].
+  auto shape = std::array<int64_t, 3>{1, num_mels, static_cast<int64_t>(num_frames)};
   auto tensor = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(shape.data(), 3));
-  std::memcpy(tensor->GetTensorMutableData<float>(), mel_data.data(), mel_data.size() * sizeof(float));
+  std::memcpy(tensor->GetTensorMutableData<float>(),
+              norm_out.Data(),
+              static_cast<size_t>(num_mels) * num_frames * sizeof(float));
 
   return {std::move(tensor), static_cast<int64_t>(num_frames)};
 }
