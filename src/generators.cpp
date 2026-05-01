@@ -620,11 +620,10 @@ void Generator::GenerateNextToken() {
     return;
   }
 
-  // Cohere: each user-visible call yields exactly one *committed* token. If we
-  // don't have a committed token ready, run the next chunk(s) end-to-end (mel +
-  // decoder until EOS), dedup against the previous chunk, and add stable tokens
-  // to the committed buffer. This may take many internal model steps but is
-  // entirely transparent to the caller.
+  // Cohere: each user-visible call yields exactly one committed token. If we
+  // don't have a token ready, run the next chunk(s) end-to-end (mel + decoder
+  // until EOS) and append their tokens to the committed buffer. Chunks are
+  // non-overlapping (energy-split), so no dedup is needed.
   if (is_cohere_model_) {
     auto* cs = static_cast<CohereState*>(state_.get());
     while (cs->StreamedCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
@@ -719,7 +718,7 @@ DeviceSpan<float> Generator::GetLogits() {
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   if (is_cohere_model_) {
-    // Expose only committed (dedup'd) tokens — never raw per-chunk decode tokens.
+    // Expose only committed tokens — never raw per-chunk decode tokens.
     return static_cast<CohereState*>(state_.get())->GetCommittedSpan();
   }
   return search_->GetSequence(index);
@@ -783,16 +782,10 @@ void Generator::RunCohereChunkUntilEOS() {
     }
   }
 
-  // Decode chunk and merge into committed/pending text via overlap dedup.
-  auto tokenizer = state_->model_.CreateTokenizer();
-  std::string chunk_text;
-  if (!chunk_tokens.empty()) {
-    chunk_text = tokenizer->Decode(std::span<const int32_t>(chunk_tokens.data(), chunk_tokens.size()));
-  }
+  // Append this chunk's tokens to the visible stream.
+  cs->AppendChunkTokens(chunk_tokens);
 
   bool more = cs->HasMoreChunks();
-  cs->CommitChunkText(chunk_text, chunk_tokens, /*is_final=*/!more, *tokenizer);
-
   if (!more) {
     cs->MarkFullyDone();
     state_->Finalize(search_->GetSequenceLength());

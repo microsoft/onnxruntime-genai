@@ -17,11 +17,12 @@ struct CohereProcessor : Processor {
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
  private:
-  // Split waveform into fixed-size overlapping windows. Adjacent chunks share
-  // `overlap_chunk_s_` of audio so word-level dedup at the seam (in CohereState)
-  // can recover seam-free text.
+  // Split waveform into non-overlapping chunks of at most max_audio_clip_s_
+  // seconds each, with cut points snapped to the quietest 100ms window inside
+  // the last overlap_chunk_s_ seconds (energy-based silence boundaries).
+  // Mirrors CohereAsrFeatureExtractor._split_audio_chunks_energy.
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
-      size_t num_samples, int sample_rate) const;
+      const float* samples, size_t num_samples, int sample_rate) const;
 
   // Compute mel + normalize directly from PCM float32 samples. Returns OrtValue [1, num_mels, num_frames].
   std::pair<std::unique_ptr<OrtValue>, int64_t> ComputeMelFromPCM(const float* samples, size_t num_samples) const;

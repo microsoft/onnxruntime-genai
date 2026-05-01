@@ -48,26 +48,14 @@ struct CohereState : State {
 
   // Multi-chunk support
   bool HasMoreChunks() const { return current_chunk_ + 1 < total_chunks_; }
-  int CurrentChunk() const { return current_chunk_; }
-  int TotalChunks() const { return total_chunks_; }
   bool AdvanceToNextChunk();  // Returns true if advanced, false if no more chunks
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
-  // Per-chunk token accumulation for clean text joining
-  void SaveChunkTokens(const int32_t* tokens, size_t count);
-  const std::vector<std::vector<int32_t>>& GetCompletedChunkTokens() const { return completed_chunk_tokens_; }
-
-  // PyTorch-parity finalization: decode each chunk's tokens, strip ASCII whitespace,
-  // filter empty parts, and join with `separator`. Mirrors CohereAsr's
-  // `join_chunk_texts(texts, separator=get_chunk_separator(language))` (modeling_cohere_asr.py:1525).
-  std::string GetJoinedChunkText(const Tokenizer& tokenizer, const std::string& separator) const;
-
-  // ----- Streaming (committed/pending) state, all internal -----
-  // The Generator uses these to expose an incremental, dedup'd token stream
-  // through the standard API (GetSequence + GenerateNextToken). User never
-  // sees raw per-chunk tokens; only words confirmed past chunk-overlap dedup.
-  void CommitChunkText(const std::string& chunk_text, const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
+  // ----- Streaming state -----
+  // The Generator yields one token per GenerateNextToken call. Since chunks
+  // are non-overlapping, every chunk's tokens are appended verbatim.
+  void AppendChunkTokens(const std::vector<int32_t>& chunk_tokens);
   size_t StreamedCount() const { return streamed_count_; }
   void AdvanceStreamedCount() { ++streamed_count_; }
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
@@ -90,12 +78,9 @@ struct CohereState : State {
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
-  std::vector<std::vector<int32_t>> completed_chunk_tokens_;  // Per-chunk generated tokens (excl prompt/EOS)
 
-  // Streaming/dedup state
+  // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
-  std::vector<int32_t> pending_tokens_;    // Tokens held back for potential overlap dedup
-  std::string pending_text_;               // Tail words held back (may be revised by next chunk)
   size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
   bool fully_done_{false};                 // True once the last chunk has been committed
 };
