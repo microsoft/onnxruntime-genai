@@ -9,39 +9,20 @@ Usage:
 
 import argparse
 import os
-import re
-import sys
 import time
 
 import onnxruntime_genai as og
 
 
-def _normalize_words(s):
-    s = re.sub(r"[^0-9a-zA-Z]+", " ", s).lower().strip()
-    return s.split()
-
-
-def compute_wer(reference, hypothesis):
-    ref = _normalize_words(reference)
-    hyp = _normalize_words(hypothesis)
-    if not ref:
-        return 0.0 if not hyp else 1.0
-    # Word-level Levenshtein
-    dp = [[0] * (len(hyp) + 1) for _ in range(len(ref) + 1)]
-    for i in range(len(ref) + 1):
-        dp[i][0] = i
-    for j in range(len(hyp) + 1):
-        dp[0][j] = j
-    for i in range(1, len(ref) + 1):
-        for j in range(1, len(hyp) + 1):
-            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
-            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
-    return dp[len(ref)][len(hyp)] / len(ref)
-
-
+# <|noitn|> disables Inverse Text Normalization: numbers, dates, currency and
+# similar entities stay in spoken form (e.g. "twenty twenty four", "five
+# dollars", "three p m"). Swap to "<|itn|>" to get written/numeric form
+# instead ("2024", "$5", "3 PM"), which is usually what end users want.
+# Additionally, swap <|en|> for a different language (e.g. <|es|> for Spanish) 
+# if the audio is not English.
 PROMPT_TOKENS = [
     "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>",
-    "<|es|>", "<|es|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
+    "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
 ]
 
 
@@ -96,13 +77,6 @@ def run(args):
 
     print(f"\nElapsed: {elapsed:.2f}s")
 
-    if args.expected_transcription:
-        wer = compute_wer(args.expected_transcription, " ".join(all_texts))
-        print(f"WER: {wer * 100:.2f}%")
-        if wer >= args.max_wer:
-            print(f"ERROR: WER {wer * 100:.2f}% exceeds threshold {args.max_wer * 100:.2f}%")
-            sys.exit(1)
-
     # Print RTFx if we can determine audio duration
     try:
         import wave
@@ -121,8 +95,5 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to ONNX model directory")
     parser.add_argument("-a", "--audio", type=str, required=True, help="Path to audio file(s), comma separated")
     parser.add_argument("-e", "--execution_provider", type=str, default="cpu", choices=["cpu", "cuda"], help="Execution provider")
-    parser.add_argument("--expected_transcription", type=str, default=None,
-                        help="If set, compute WER against this reference and fail if it exceeds --max_wer")
-    parser.add_argument("--max_wer", type=float, default=0.10, help="Maximum allowed WER (0.0-1.0)")
     args = parser.parse_args()
     run(args)

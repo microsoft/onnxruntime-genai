@@ -21,6 +21,8 @@ struct CohereProcessor : Processor {
   // refining each chunk's tail by searching for the lowest-energy point inside
   // the last `boundary_chunk_s_` of the chunk. This places splits at quiet
   // points (between words/sentences) so the model rarely chops mid-word.
+  // Mirrors `split_audio_chunks_energy` / `_find_split_point_energy` in
+  // CohereLabs/cohere-transcribe-03-2026 (modeling_cohere_asr.py).
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
       const float* samples, size_t num_samples, int sample_rate) const;
 
@@ -30,13 +32,14 @@ struct CohereProcessor : Processor {
   ONNXTensorElementDataType audio_features_type_;
 
   // Mel + normalize config — populated from genai_config.json (model.* fields)
-  // at construction time. Defaults match Cohere Transcribe's published preset.
-  nemo_mel::NemoMelConfig mel_cfg_{128, 512, 160, 400, 16000, 0.97f, 5.96046448e-08f};
-  float norm_eps_{1e-5f};
+  // at construction time.
+  nemo_mel::NemoMelConfig mel_cfg_{};
+  float norm_eps_{};
 
   // Chunking parameters (from genai_config.json model section)
-  float max_audio_clip_s_{35.0f};
-  float boundary_chunk_s_{5.0f};
+  float max_audio_clip_s_{};
+  float boundary_chunk_s_{};
+  int min_energy_window_samples_{};
 };
 
 }  // namespace Generators

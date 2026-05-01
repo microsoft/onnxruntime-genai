@@ -1136,6 +1136,8 @@ struct Model_Element : JSON::Element {
       v_.max_audio_clip_s = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "boundary_chunk_s") {
       v_.boundary_chunk_s = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "min_energy_window_samples") {
+      v_.min_energy_window_samples = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
