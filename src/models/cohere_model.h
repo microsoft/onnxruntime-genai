@@ -54,11 +54,6 @@ struct CohereState : State {
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
-  // Per-chunk token accumulation (for diagnostics / future joins). Streaming
-  // does NOT use this — use committed_tokens_ instead.
-  void SaveChunkTokens(const int32_t* tokens, size_t count);
-  const std::vector<std::vector<int32_t>>& GetCompletedChunkTokens() const { return completed_chunk_tokens_; }
-
   // ----- Streaming (committed) state, all internal -----
   // The Generator uses these to expose an incremental token stream through
   // the standard API (GetSequence + GenerateNextToken). Chunks are emitted by
@@ -78,10 +73,13 @@ struct CohereState : State {
  private:
   const WhisperModel& model_;
 
+  // (Re)create decoder_state_ for the current encoder num_frames and wire it
+  // to the encoder via either cross-KV cache or encoder_hidden_states.
+  void RebuildDecoderForCurrentChunk();
+
   std::unique_ptr<CohereEncoderState> encoder_state_;
   std::unique_ptr<CrossCache> cross_cache_;
   std::unique_ptr<WhisperDecoderState> decoder_state_;
-  std::unique_ptr<OrtValue> transpose_k_cache_buffer_;
 
   // Multi-chunk state
   int current_chunk_{0};
@@ -89,7 +87,6 @@ struct CohereState : State {
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
-  std::vector<std::vector<int32_t>> completed_chunk_tokens_;  // Per-chunk generated tokens (excl prompt/EOS)
 
   // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence

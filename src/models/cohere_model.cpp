@@ -9,8 +9,6 @@
 
 namespace Generators {
 
-// --- CohereEncoderState ---
-
 CohereEncoderState::CohereEncoderState(const WhisperModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {}
@@ -167,18 +165,20 @@ void CohereState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
 
   encoder_state_->SetExtraInputs(encoder_inputs);
 
-  // Now that num_frames is known, create the decoder
-  decoder_state_ = std::make_unique<WhisperDecoderState>(model_, *params_, encoder_state_->GetNumFrames());
+  // Now that num_frames is known, create the decoder and wire it to the encoder.
+  RebuildDecoderForCurrentChunk();
+}
 
-  // Create cross cache
+void CohereState::RebuildDecoderForCurrentChunk() {
+  int num_frames = encoder_state_->GetNumFrames();
+  decoder_state_ = std::make_unique<WhisperDecoderState>(model_, *params_, num_frames);
+
   if (encoder_state_->HasCrossKVCacheOutputs()) {
-    cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
+    // Dividing by 2 such that we can directly reuse Whisper decoder.
+    cross_cache_ = std::make_unique<CrossCache>(*this, num_frames / 2);
     encoder_state_->AddCrossCache(cross_cache_);
     decoder_state_->AddCrossCache(cross_cache_);
-    transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
-  }
-
-  if (!encoder_state_->HasCrossKVCacheOutputs()) {
+  } else {
     decoder_state_->inputs_.push_back(encoder_state_->GetHiddenStates());
     decoder_state_->input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
   }
@@ -193,33 +193,15 @@ bool CohereState::AdvanceToNextChunk() {
 
   encoder_state_->SetChunkAudioFeatures(next_mel, next_mel_length);
 
-  int new_num_frames = encoder_state_->GetNumFrames();
-
   encoder_state_->outputs_.clear();
   encoder_state_->output_names_.clear();
 
-  decoder_state_ = std::make_unique<WhisperDecoderState>(model_, *params_, new_num_frames);
-
-  if (encoder_state_->HasCrossKVCacheOutputs()) {
-    cross_cache_ = std::make_unique<CrossCache>(*this, new_num_frames / 2);
-    encoder_state_->AddCrossCache(cross_cache_);
-    decoder_state_->AddCrossCache(cross_cache_);
-    transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
-  }
-
-  if (!encoder_state_->HasCrossKVCacheOutputs()) {
-    decoder_state_->inputs_.push_back(encoder_state_->GetHiddenStates());
-    decoder_state_->input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
-  }
+  RebuildDecoderForCurrentChunk();
 
   // Reset state for new chunk
   first_run_ = true;
   current_chunk_++;
   return true;
-}
-
-void CohereState::SaveChunkTokens(const int32_t* tokens, size_t count) {
-  completed_chunk_tokens_.emplace_back(tokens, tokens + count);
 }
 
 static std::string StripAsciiWhitespace(const std::string& s) {
@@ -320,14 +302,9 @@ void StripTrailingBoundaryTokens(std::vector<int32_t>& tokens, const Tokenizer& 
 }
 
 // Lowercase the first ASCII uppercase letter of a SINGLE token's decoded text.
-// Touches only the first non-special token — never re-encodes the rest of the
+// Touches only the first non-special token, never re-encodes the rest of the
 // chunk, so no whitespace tokens or word-boundary markers are introduced at
 // the seam.
-//
-// Note: SentencePiece's Encode prepends a word-boundary marker to its input.
-// If we encoded " in" we'd get [▁, ▁in] — TWO tokens, decoding to "  in"
-// (double space). So we strip the leading space before encoding: Encode("in")
-// returns a single token whose decoded form is already " in".
 void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tokenizer) {
   // Find first non-special token.
   size_t first = 0;
@@ -351,7 +328,7 @@ void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tok
   if (!changed) return;
 
   // Strip leading ASCII whitespace before encoding to avoid the SentencePiece
-  // double-boundary artifact described above.
+  // double-boundary artifact.
   size_t lead = 0;
   while (lead < text.size() && std::isspace(static_cast<unsigned char>(text[lead]))) ++lead;
   if (lead > 0) text.erase(0, lead);
