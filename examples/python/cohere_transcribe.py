@@ -172,10 +172,11 @@ def run(args):
             chunk_texts.append(text)
             print(text[:80] + ("..." if len(text) > 80 else ""))
 
-        # Join chunks, stripping trailing periods at boundaries to avoid ".."
-        parts = [t for t in chunk_texts if t]
-        for i in range(len(parts) - 1):
-            parts[i] = parts[i].rstrip(".")
+        # Join chunks: strip each, remove leading punct from non-first chunks
+        # (matches PyTorch join_chunk_texts behavior)
+        parts = [t.strip() for t in chunk_texts if t.strip()]
+        for i in range(1, len(parts)):
+            parts[i] = parts[i].lstrip(".,;:!? ")
         full_text = " ".join(parts)
         all_texts.append(full_text)
 

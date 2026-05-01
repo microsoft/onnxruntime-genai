@@ -58,13 +58,25 @@ static std::pair<const float*, size_t> GetDecodedPCM(
   return {static_cast<const float*>(pcm_data), num_samples};
 }
 
-// --- Waveform splitting at energy boundaries ---
-
+// --- Waveform splitting with FIXED OVERLAP between chunks ---
+//
+// The model's training-time chunker uses energy-based, non-overlapping splits.
+// That produces seam artifacts at chunk boundaries (e.g. "...UK. Come from..."
+// when a sentence is split mid-utterance) because each chunk's decoder runs
+// independently and naturally terminates with sentence-end punctuation.
+//
+// We instead emit overlapping windows of length max_audio_clip_s_ stepping by
+// (max_audio_clip_s_ - overlap_chunk_s_). The same audio (and hence the same
+// words) appears at the tail of chunk N and the head of chunk N+1; the
+// downstream merge step (CohereState::GetJoinedChunkText) does word-level
+// dedup so the final transcript is seam-free.
 std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
-    const float* samples, size_t num_samples, int sample_rate) const {
+    const float* /*samples*/, size_t num_samples, int sample_rate) const {
   size_t chunk_size = std::max(size_t(1), static_cast<size_t>(max_audio_clip_s_ * sample_rate));
-  size_t boundary_ctx = std::max(size_t(1), static_cast<size_t>(overlap_chunk_s_ * sample_rate));
-  size_t min_window = static_cast<size_t>(min_energy_window_samples_);
+  size_t overlap = static_cast<size_t>(overlap_chunk_s_ * sample_rate);
+  if (overlap >= chunk_size) overlap = chunk_size / 2;
+  size_t step = chunk_size - overlap;
+  if (step == 0) step = chunk_size;
 
   std::vector<std::pair<size_t, size_t>> chunks;
 
@@ -75,40 +87,11 @@ std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
 
   size_t idx = 0;
   while (idx < num_samples) {
-    if (idx + chunk_size >= num_samples) {
-      chunks.push_back({idx, num_samples});
-      break;
-    }
-
-    size_t search_start = std::max(idx, idx + chunk_size - boundary_ctx);
-    size_t search_end = std::min(idx + chunk_size, num_samples);
-
-    size_t split = idx + chunk_size;
-    if (search_end > search_start) {
-      float min_energy = std::numeric_limits<float>::infinity();
-      size_t quietest = search_start;
-
-      size_t upper = (search_end - search_start > min_window) ? search_end - search_start - min_window : 0;
-      for (size_t i = 0; i <= upper; i += min_window) {
-        size_t w_start = search_start + i;
-        size_t w_end = std::min(w_start + min_window, search_end);
-        float energy = 0.0f;
-        for (size_t j = w_start; j < w_end; ++j)
-          energy += samples[j] * samples[j];
-        energy = std::sqrt(energy / (w_end - w_start));
-        if (energy < min_energy) {
-          min_energy = energy;
-          quietest = w_start;
-        }
-      }
-      split = quietest;
-    }
-
-    split = std::max(idx + 1, std::min(split, num_samples));
-    chunks.push_back({idx, split});
-    idx = split;
+    size_t end = std::min(idx + chunk_size, num_samples);
+    chunks.push_back({idx, end});
+    if (end == num_samples) break;
+    idx += step;
   }
-
   return chunks;
 }
 

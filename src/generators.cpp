@@ -583,6 +583,21 @@ bool Generator::IsDone() {
     // Cohere multi-chunk: if there are more chunks, advance and continue
     if (is_cohere_model_) {
       auto* cohere_state = static_cast<CohereState*>(state_.get());
+
+      // Save current chunk's generated tokens (skip prompt, skip EOS)
+      {
+        auto seq = search_->GetSequence(0);
+        auto seq_cpu = seq.CopyDeviceToCpu();
+        size_t prompt_len = cohere_state->GetPromptTokens().size();
+        size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
+        // Skip prompt tokens at start; skip EOS token at end
+        if (seq_len > prompt_len + 1) {
+          cohere_state->SaveChunkTokens(seq_cpu.data() + prompt_len, seq_len - prompt_len - 1);
+        } else if (seq_len > prompt_len) {
+          // Only prompt + EOS, nothing to save
+        }
+      }
+
       if (cohere_state->HasMoreChunks()) {
         cohere_state->AdvanceToNextChunk();
 
@@ -599,6 +614,27 @@ bool Generator::IsDone() {
           ComputeLogits(prompt_device);
         }
         return false;
+      }
+
+      // All chunks done — replicate PyTorch's join_chunk_texts() exactly:
+      //   for each chunk: tokenizer.decode(trimmed) -> .strip()
+      //   filter empty, then " ".join(parts)
+      // This is the only correct way to match PyTorch because `.strip()` is a *text*
+      // operation that runs *after* BPE detokenization. Token-level concatenation
+      // cannot reproduce it (e.g. when chunk N starts with a non-whitespace punctuation
+      // token, raw concat yields "UK..Come" while PyTorch yields "UK. . Come").
+      const auto& all_chunks = cohere_state->GetCompletedChunkTokens();
+      if (!all_chunks.empty()) {
+        auto tokenizer = state_->model_.CreateTokenizer();
+        // TODO: derive separator from language (NO_SPACE_LANGS -> ""); default " " is
+        // correct for all languages this model supports except zh/ja/ko/vi.
+        const std::string joined = cohere_state->GetJoinedChunkText(*tokenizer, " ");
+        const auto final_tokens = tokenizer->Encode(joined.c_str());
+
+        search_->RewindTo(0);
+        auto final_span = cpu_span<const int32_t>(final_tokens.data(), final_tokens.size());
+        auto final_device = AllocateInputIdsOnDevice(final_span);
+        search_->AppendTokens(final_device);
       }
     }
 

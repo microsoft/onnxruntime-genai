@@ -61,14 +61,13 @@ def run(args):
         generator.set_inputs(inputs)
 
         stream = tokenizer.create_stream()
-        tokens = []
         while not generator.is_done():
             generator.generate_next_token()
-            t = generator.get_sequence(0)[-1]
-            tokens.append(t)
-            print(stream.decode(t), end="", flush=True)
+            print(stream.decode(generator.get_sequence(0)[-1]), end="", flush=True)
 
-        text = "".join(stream.decode(t) for t in tokens)  # already printed
+        # Get clean combined sequence (C++ strips EOS between chunks)
+        seq = generator.get_sequence(0)
+        text = tokenizer.decode(list(seq))
         all_texts.append(text.strip())
         print()  # newline after streaming
 

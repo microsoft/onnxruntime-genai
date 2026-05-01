@@ -51,6 +51,15 @@ struct CohereState : State {
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
+  // Per-chunk token accumulation for clean text joining
+  void SaveChunkTokens(const int32_t* tokens, size_t count);
+  const std::vector<std::vector<int32_t>>& GetCompletedChunkTokens() const { return completed_chunk_tokens_; }
+
+  // PyTorch-parity finalization: decode each chunk's tokens, strip ASCII whitespace,
+  // filter empty parts, and join with `separator`. Mirrors CohereAsr's
+  // `join_chunk_texts(texts, separator=get_chunk_separator(language))` (modeling_cohere_asr.py:1525).
+  std::string GetJoinedChunkText(const Tokenizer& tokenizer, const std::string& separator) const;
+
  private:
   const WhisperModel& model_;
 
@@ -65,6 +74,7 @@ struct CohereState : State {
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
+  std::vector<std::vector<int32_t>> completed_chunk_tokens_;  // Per-chunk generated tokens (excl prompt/EOS)
 };
 
 // Cohere model — inherits WhisperModel, overrides CreateState.

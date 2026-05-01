@@ -3,6 +3,8 @@
 #include "../generators.h"
 #include "cohere_model.h"
 
+#include <algorithm>
+#include <cctype>
 #include <map>
 
 namespace Generators {
@@ -205,6 +207,146 @@ bool CohereState::AdvanceToNextChunk() {
   first_run_ = true;
   current_chunk_++;
   return true;
+}
+
+void CohereState::SaveChunkTokens(const int32_t* tokens, size_t count) {
+  completed_chunk_tokens_.emplace_back(tokens, tokens + count);
+}
+
+static std::string StripAsciiWhitespace(const std::string& s) {
+  // Mirrors Python str.strip(): strips ASCII whitespace (space, \t, \n, \r, \v, \f).
+  static const char* ws = " \t\n\r\v\f";
+  const size_t start = s.find_first_not_of(ws);
+  if (start == std::string::npos) return {};
+  const size_t end = s.find_last_not_of(ws);
+  return s.substr(start, end - start + 1);
+}
+
+// --- Helpers for overlap-aware chunk text merging --------------------------
+//
+// The processor emits OVERLAPPING audio chunks; adjacent transcripts share
+// the same words at their seam. We dedup by finding the longest run of
+// matching normalized words between the tail of `prev` and the head of `next`
+// and dropping it from `next`. We also strip stray sentence-end punctuation
+// from the prev tail when the continuation starts with a lowercase word, so
+// "...UK." + "come from..." becomes "...UK come from..." not "...UK. come...".
+
+static std::string ToLowerAscii(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (unsigned char c : s) out.push_back(static_cast<char>(std::tolower(c)));
+  return out;
+}
+
+static std::string NormalizeWord(const std::string& w) {
+  // Lowercase and strip leading/trailing ASCII punctuation for matching.
+  static const char* punct = ".,!?;:\"')(";
+  size_t a = w.find_first_not_of(punct);
+  if (a == std::string::npos) return {};
+  size_t b = w.find_last_not_of(punct);
+  return ToLowerAscii(w.substr(a, b - a + 1));
+}
+
+static std::vector<std::string> SplitOnWhitespace(const std::string& s) {
+  std::vector<std::string> out;
+  size_t i = 0;
+  const size_t n = s.size();
+  while (i < n) {
+    while (i < n && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    size_t j = i;
+    while (j < n && !std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+    if (j > i) out.emplace_back(s.substr(i, j - i));
+    i = j;
+  }
+  return out;
+}
+
+static bool StartsWithLowerAscii(const std::string& w) {
+  // First non-punct alpha char check.
+  for (unsigned char c : w) {
+    if (std::isalpha(c)) return std::islower(c) != 0;
+    if (std::isalnum(c)) return false;
+  }
+  return false;
+}
+
+static std::string RStripSentencePunct(std::string w) {
+  while (!w.empty()) {
+    char c = w.back();
+    if (c == '.' || c == '!' || c == '?') {
+      w.pop_back();
+    } else {
+      break;
+    }
+  }
+  return w;
+}
+
+// Append `next` onto `prev` with overlap dedup. Returns merged text.
+static std::string MergeWithOverlapDedup(const std::string& prev, const std::string& next,
+                                         size_t min_match = 3, size_t max_lookback = 25) {
+  if (prev.empty()) return next;
+  if (next.empty()) return prev;
+  auto pw = SplitOnWhitespace(prev);
+  auto nw = SplitOnWhitespace(next);
+  if (pw.empty()) return next;
+  if (nw.empty()) return prev;
+
+  std::vector<std::string> pn(pw.size()), nn(nw.size());
+  for (size_t i = 0; i < pw.size(); ++i) pn[i] = NormalizeWord(pw[i]);
+  for (size_t i = 0; i < nw.size(); ++i) nn[i] = NormalizeWord(nw[i]);
+
+  size_t best_k = 0;
+  size_t upper = std::min({max_lookback, pw.size(), nw.size()});
+  for (size_t k = upper; k >= min_match; --k) {
+    bool ok = true;
+    for (size_t i = 0; i < k; ++i) {
+      if (pn[pn.size() - k + i] != nn[i]) { ok = false; break; }
+    }
+    if (ok) { best_k = k; break; }
+    if (k == 0) break;
+  }
+  if (best_k == 0 && !pn.back().empty() && pn.back() == nn.front()) {
+    best_k = 1;
+  }
+
+  // Strip terminal sentence punctuation from prev's last word if the
+  // continuation begins mid-sentence (lowercase).
+  if (best_k < nw.size() && StartsWithLowerAscii(nw[best_k])) {
+    pw.back() = RStripSentencePunct(pw.back());
+  }
+
+  std::string out;
+  for (size_t i = 0; i < pw.size(); ++i) {
+    if (i) out += ' ';
+    out += pw[i];
+  }
+  for (size_t i = best_k; i < nw.size(); ++i) {
+    out += ' ';
+    out += nw[i];
+  }
+  return out;
+}
+
+std::string CohereState::GetJoinedChunkText(const Tokenizer& tokenizer, const std::string& separator) const {
+  // Decode each chunk, strip whitespace, then merge with overlap-aware word
+  // dedup at the seams (chunks are emitted with audio overlap by the processor).
+  // `separator` is honored only as the inter-chunk fallback when no overlap is
+  // detected (e.g. zh/ja/ko/vi want "" — but those are not handled here yet).
+  (void)separator;
+  std::string merged;
+  for (const auto& chunk : completed_chunk_tokens_) {
+    if (chunk.empty()) continue;
+    auto raw = tokenizer.Decode(std::span<const int32_t>(chunk.data(), chunk.size()));
+    auto stripped = StripAsciiWhitespace(raw);
+    if (stripped.empty()) continue;
+    if (merged.empty()) {
+      merged = std::move(stripped);
+    } else {
+      merged = MergeWithOverlapDedup(merged, stripped);
+    }
+  }
+  return merged;
 }
 
 DeviceSpan<float> CohereState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
