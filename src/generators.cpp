@@ -763,15 +763,23 @@ void Generator::RunCohereChunkUntilEOS() {
     }
   }
 
-  // Extract this chunk's generated tokens (skip prompt at start, EOS at end).
+  // Extract this chunk's generated tokens (skip prompt at start, conditionally skip EOS at end).
   std::vector<int32_t> chunk_tokens;
   {
     auto seq = search_->GetSequence(0);
     auto seq_cpu = seq.CopyDeviceToCpu();
     size_t prompt_len = cs->GetPromptTokens().size();
     size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
-    if (seq_len > prompt_len + 1) {
-      chunk_tokens.assign(seq_cpu.data() + prompt_len, seq_cpu.data() + seq_len - 1);
+    if (seq_len > prompt_len) {
+      size_t end = seq_len;
+      // Only strip the last token if it is actually an EOS token.
+      // When max_length is hit, the last token is a real word — don't drop it.
+      if (end > prompt_len && contains(state_->params_->config.model.eos_token_id, seq_cpu[end - 1])) {
+        --end;
+      }
+      if (end > prompt_len) {
+        chunk_tokens.assign(seq_cpu.data() + prompt_len, seq_cpu.data() + end);
+      }
     }
   }
 
@@ -783,9 +791,16 @@ void Generator::RunCohereChunkUntilEOS() {
   }
 
   bool more = cs->HasMoreChunks();
-  cs->CommitChunkText(chunk_text, /*is_final=*/!more, *tokenizer);
+  cs->CommitChunkText(chunk_text, chunk_tokens, /*is_final=*/!more, *tokenizer);
 
-  if (more) {
+  if (!more) {
+    cs->MarkFullyDone();
+    state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
+  } else {
     // Reset decoder for the next chunk and re-feed the prompt.
     cs->AdvanceToNextChunk();
     search_->RewindTo(0);
@@ -796,13 +811,6 @@ void Generator::RunCohereChunkUntilEOS() {
       search_->AppendTokens(prompt_device);
       set_extra_inputs_ = false;
       ComputeLogits(prompt_device);
-    }
-  } else {
-    cs->MarkFullyDone();
-    state_->Finalize(search_->GetSequenceLength());
-    if (guidance_logits_processor_) {
-      guidance_logits_processor_->Reset();
-      last_action_ = Action::standard;
     }
   }
 }

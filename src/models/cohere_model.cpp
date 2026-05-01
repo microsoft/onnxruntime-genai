@@ -404,66 +404,169 @@ std::string CohereState::GetJoinedChunkText(const Tokenizer& tokenizer, const st
 // can still be discovered against pending_text_.
 static constexpr size_t kPendingTailWords = 25;
 
-void CohereState::CommitChunkText(const std::string& chunk_text, bool is_final, const Tokenizer& tokenizer) {
+void CohereState::CommitChunkText(const std::string& chunk_text, const std::vector<int32_t>& chunk_tokens,
+                                  bool is_final, const Tokenizer& tokenizer) {
   std::string stripped = StripAsciiWhitespace(chunk_text);
 
-  // Merge this chunk's text with whatever tail we held back from the previous chunk.
+  if (pending_text_.empty() && pending_tokens_.empty()) {
+    // First chunk or no overlap — just use chunk tokens directly.
+    if (is_final) {
+      // Only chunk: commit everything, no roundtrip.
+      for (auto t : chunk_tokens) committed_tokens_.push_back(t);
+      return;
+    }
+    // Not final: hold tail words back for dedup with next chunk.
+    auto words = SplitOnWhitespace(stripped);
+    if (words.size() <= kPendingTailWords) {
+      pending_text_ = stripped;
+      pending_tokens_ = chunk_tokens;
+      return;
+    }
+    // Commit the first N words by finding token boundary via decode length matching.
+    size_t commit_words = words.size() - kPendingTailWords;
+    // Build commit text and pending text
+    std::string commit_text;
+    for (size_t i = 0; i < commit_words; ++i) {
+      if (i) commit_text += ' ';
+      commit_text += words[i];
+    }
+    // Find how many tokens produce the commit_text prefix.
+    // Decode tokens one by one and count characters to find the split point.
+    size_t split_tok = chunk_tokens.size();
+    for (size_t t = 1; t <= chunk_tokens.size(); ++t) {
+      auto partial = tokenizer.Decode(std::span<const int32_t>(chunk_tokens.data(), t));
+      auto partial_stripped = StripAsciiWhitespace(partial);
+      auto partial_words = SplitOnWhitespace(partial_stripped);
+      if (partial_words.size() >= commit_words) {
+        // Check the first commit_words match
+        bool match = true;
+        for (size_t w = 0; w < commit_words && match; ++w) {
+          if (partial_words[w] != words[w]) match = false;
+        }
+        if (match) {
+          // If partial has exactly commit_words, this token completes the commit portion
+          // but we want to include tokens that contribute to commit words only.
+          // Find the minimal t where we have commit_words complete words.
+          split_tok = t;
+          break;
+        }
+      }
+    }
+    for (size_t i = 0; i < split_tok; ++i)
+      committed_tokens_.push_back(chunk_tokens[i]);
+    pending_tokens_.assign(chunk_tokens.begin() + split_tok, chunk_tokens.end());
+    std::string ptext;
+    for (size_t i = commit_words; i < words.size(); ++i) {
+      if (i > commit_words) ptext += ' ';
+      ptext += words[i];
+    }
+    pending_text_ = std::move(ptext);
+    return;
+  }
+
+  // We have pending text/tokens from previous chunk. Merge via text-level dedup.
   std::string merged;
-  if (pending_text_.empty()) {
-    merged = std::move(stripped);
-  } else if (stripped.empty()) {
+  if (stripped.empty()) {
     merged = pending_text_;
   } else {
     merged = MergeWithOverlapDedup(pending_text_, stripped);
   }
 
-  // Decide which words are "stable" (commit now) vs "pending" (hold for next chunk).
-  std::vector<std::string> words = SplitOnWhitespace(merged);
-  size_t commit_words;
+  // The pending_tokens_ cover pending_text_. The chunk_tokens cover stripped.
+  // After dedup, some words from the head of stripped are dropped (overlap).
+  // We need to figure out how many tokens from chunk_tokens to skip.
+  auto merged_words = SplitOnWhitespace(merged);
+  auto pending_words = SplitOnWhitespace(pending_text_);
+  auto chunk_words = SplitOnWhitespace(stripped);
+
+  // Find how many words from chunk were consumed by the overlap dedup.
+  // merged = pending_words + chunk_words[overlap_skip:]
+  // So: merged.size() = pending_words.size() + chunk_words.size() - overlap_skip
+  size_t overlap_skip = 0;
+  if (!chunk_words.empty() && merged_words.size() < pending_words.size() + chunk_words.size()) {
+    overlap_skip = pending_words.size() + chunk_words.size() - merged_words.size();
+  }
+
+  // Find token index in chunk_tokens that corresponds to skipping overlap_skip words.
+  size_t tok_skip = 0;
+  if (overlap_skip > 0 && overlap_skip < chunk_words.size()) {
+    for (size_t t = 1; t <= chunk_tokens.size(); ++t) {
+      auto partial = tokenizer.Decode(std::span<const int32_t>(chunk_tokens.data(), t));
+      auto partial_words = SplitOnWhitespace(StripAsciiWhitespace(partial));
+      if (partial_words.size() > overlap_skip) {
+        tok_skip = t - 1;
+        // The t-1'th token still produced the last overlap word; t starts the new content
+        // But actually we need the first token AFTER the overlap words are complete
+        // Re-check: if partial_words.size() > overlap_skip, the word at index overlap_skip
+        // has started, which means tokens 0..t-1 include it. We want to start from the
+        // token that first introduces word at overlap_skip.
+        // Let's find the exact boundary:
+        for (size_t t2 = t; t2 >= 1; --t2) {
+          auto p2 = tokenizer.Decode(std::span<const int32_t>(chunk_tokens.data(), t2 - 1));
+          auto pw2 = SplitOnWhitespace(StripAsciiWhitespace(p2));
+          if (pw2.size() <= overlap_skip) {
+            tok_skip = t2 - 1;
+            break;
+          }
+        }
+        break;
+      }
+    }
+    if (overlap_skip >= chunk_words.size()) {
+      tok_skip = chunk_tokens.size();  // all chunk words were overlap
+    }
+  } else if (overlap_skip >= chunk_words.size()) {
+    tok_skip = chunk_tokens.size();
+  }
+
+  // Now: commit pending_tokens_ + chunk_tokens[tok_skip:], but hold back tail if not final.
+  std::vector<int32_t> all_new_tokens;
+  all_new_tokens.insert(all_new_tokens.end(), pending_tokens_.begin(), pending_tokens_.end());
+  all_new_tokens.insert(all_new_tokens.end(), chunk_tokens.begin() + tok_skip, chunk_tokens.end());
+
   if (is_final) {
-    commit_words = words.size();  // last chunk: commit everything
-  } else if (words.size() > kPendingTailWords) {
-    commit_words = words.size() - kPendingTailWords;
-  } else {
-    commit_words = 0;  // not enough words yet to safely commit anything
+    // Commit everything.
+    for (auto t : all_new_tokens) committed_tokens_.push_back(t);
+    pending_tokens_.clear();
+    pending_text_.clear();
+    return;
   }
 
-  std::string new_commit_words_text;
-  for (size_t i = 0; i < commit_words; ++i) {
-    if (i) new_commit_words_text += ' ';
-    new_commit_words_text += words[i];
+  // Hold back tail words.
+  // Decode all_new_tokens to get the full merged text and find the split.
+  auto full_text = tokenizer.Decode(std::span<const int32_t>(all_new_tokens.data(), all_new_tokens.size()));
+  auto full_words = SplitOnWhitespace(StripAsciiWhitespace(full_text));
+  if (full_words.size() <= kPendingTailWords) {
+    pending_tokens_ = std::move(all_new_tokens);
+    std::string ptext;
+    for (size_t i = 0; i < full_words.size(); ++i) {
+      if (i) ptext += ' ';
+      ptext += full_words[i];
+    }
+    pending_text_ = std::move(ptext);
+    return;
   }
-  std::string new_pending_text;
-  for (size_t i = commit_words; i < words.size(); ++i) {
-    if (i > commit_words) new_pending_text += ' ';
-    new_pending_text += words[i];
+
+  size_t commit_words = full_words.size() - kPendingTailWords;
+  // Find token split point.
+  size_t split_tok = all_new_tokens.size();
+  for (size_t t = 1; t <= all_new_tokens.size(); ++t) {
+    auto partial = tokenizer.Decode(std::span<const int32_t>(all_new_tokens.data(), t));
+    auto partial_words = SplitOnWhitespace(StripAsciiWhitespace(partial));
+    if (partial_words.size() >= commit_words) {
+      split_tok = t;
+      break;
+    }
   }
-  pending_text_ = std::move(new_pending_text);
-
-  if (new_commit_words_text.empty()) return;
-
-  // Build the new full committed text and re-tokenize. The prefix of the resulting
-  // token sequence almost always matches existing committed_tokens_ exactly, but
-  // BPE merges occasionally shift at the seam. To keep streaming consistent, we
-  // never rewind past streamed_count_; tokens beyond that are replaced.
-  std::string new_full_text = committed_text_;
-  if (!new_full_text.empty()) new_full_text += ' ';
-  new_full_text += new_commit_words_text;
-
-  auto full_tokens = tokenizer.Encode(new_full_text.c_str());
-
-  size_t common = 0;
-  while (common < committed_tokens_.size() && common < full_tokens.size() &&
-         committed_tokens_[common] == full_tokens[common]) {
-    ++common;
+  for (size_t i = 0; i < split_tok; ++i)
+    committed_tokens_.push_back(all_new_tokens[i]);
+  pending_tokens_.assign(all_new_tokens.begin() + split_tok, all_new_tokens.end());
+  std::string ptext;
+  for (size_t i = commit_words; i < full_words.size(); ++i) {
+    if (i > commit_words) ptext += ' ';
+    ptext += full_words[i];
   }
-  if (common < streamed_count_) common = streamed_count_;
-
-  committed_tokens_.resize(common);
-  for (size_t i = common; i < full_tokens.size(); ++i) {
-    committed_tokens_.push_back(full_tokens[i]);
-  }
-  committed_text_ = std::move(new_full_text);
+  pending_text_ = std::move(ptext);
 }
 
 DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {

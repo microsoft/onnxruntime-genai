@@ -64,7 +64,7 @@ struct CohereState : State {
   // The Generator uses these to expose an incremental, dedup'd token stream
   // through the standard API (GetSequence + GenerateNextToken). User never
   // sees raw per-chunk tokens; only words confirmed past chunk-overlap dedup.
-  void CommitChunkText(const std::string& chunk_text, bool is_final, const Tokenizer& tokenizer);
+  void CommitChunkText(const std::string& chunk_text, const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
   size_t StreamedCount() const { return streamed_count_; }
   void AdvanceStreamedCount() { ++streamed_count_; }
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
@@ -91,7 +91,7 @@ struct CohereState : State {
 
   // Streaming/dedup state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
-  std::string committed_text_;             // Detokenized form of committed_tokens_
+  std::vector<int32_t> pending_tokens_;    // Tokens held back for potential overlap dedup
   std::string pending_text_;               // Tail words held back (may be revised by next chunk)
   size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
   bool fully_done_{false};                 // True once the last chunk has been committed
