@@ -574,70 +574,20 @@ bool Generator::IsDone() {
     return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
   }
 
+  if (is_cohere_model_) {
+    // Cohere is only "done" once every chunk has been processed AND every
+    // committed token has been yielded by GenerateNextToken. The user never
+    // observes the underlying multi-chunk decoding.
+    auto* cs = static_cast<CohereState*>(state_.get());
+    return cs->FullyDone() && cs->StreamedCount() >= cs->CommittedTokens().size();
+  }
+
   if (computed_logits_) {
     return false;
   }
 
   bool is_done = search_->IsDone();
   if (is_done) {
-    // Cohere multi-chunk: if there are more chunks, advance and continue
-    if (is_cohere_model_) {
-      auto* cohere_state = static_cast<CohereState*>(state_.get());
-
-      // Save current chunk's generated tokens (skip prompt, skip EOS)
-      {
-        auto seq = search_->GetSequence(0);
-        auto seq_cpu = seq.CopyDeviceToCpu();
-        size_t prompt_len = cohere_state->GetPromptTokens().size();
-        size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
-        // Skip prompt tokens at start; skip EOS token at end
-        if (seq_len > prompt_len + 1) {
-          cohere_state->SaveChunkTokens(seq_cpu.data() + prompt_len, seq_len - prompt_len - 1);
-        } else if (seq_len > prompt_len) {
-          // Only prompt + EOS, nothing to save
-        }
-      }
-
-      if (cohere_state->HasMoreChunks()) {
-        cohere_state->AdvanceToNextChunk();
-
-        // Reset search state so decoding can continue
-        search_->RewindTo(0);
-
-        // Re-feed prompt tokens
-        const auto& prompt_tokens = cohere_state->GetPromptTokens();
-        if (!prompt_tokens.empty()) {
-          auto prompt_span = cpu_span<const int32_t>(prompt_tokens.data(), prompt_tokens.size());
-          auto prompt_device = AllocateInputIdsOnDevice(prompt_span);
-          search_->AppendTokens(prompt_device);
-          set_extra_inputs_ = false;
-          ComputeLogits(prompt_device);
-        }
-        return false;
-      }
-
-      // All chunks done — replicate PyTorch's join_chunk_texts() exactly:
-      //   for each chunk: tokenizer.decode(trimmed) -> .strip()
-      //   filter empty, then " ".join(parts)
-      // This is the only correct way to match PyTorch because `.strip()` is a *text*
-      // operation that runs *after* BPE detokenization. Token-level concatenation
-      // cannot reproduce it (e.g. when chunk N starts with a non-whitespace punctuation
-      // token, raw concat yields "UK..Come" while PyTorch yields "UK. . Come").
-      const auto& all_chunks = cohere_state->GetCompletedChunkTokens();
-      if (!all_chunks.empty()) {
-        auto tokenizer = state_->model_.CreateTokenizer();
-        // TODO: derive separator from language (NO_SPACE_LANGS -> ""); default " " is
-        // correct for all languages this model supports except zh/ja/ko/vi.
-        const std::string joined = cohere_state->GetJoinedChunkText(*tokenizer, " ");
-        const auto final_tokens = tokenizer->Encode(joined.c_str());
-
-        search_->RewindTo(0);
-        auto final_span = cpu_span<const int32_t>(final_tokens.data(), final_tokens.size());
-        auto final_device = AllocateInputIdsOnDevice(final_span);
-        search_->AppendTokens(final_device);
-      }
-    }
-
     state_->Finalize(search_->GetSequenceLength());
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();
@@ -667,6 +617,22 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     static_cast<NemotronSpeechState*>(state_.get())->StepToken();
+    return;
+  }
+
+  // Cohere: each user-visible call yields exactly one *committed* token. If we
+  // don't have a committed token ready, run the next chunk(s) end-to-end (mel +
+  // decoder until EOS), dedup against the previous chunk, and add stable tokens
+  // to the committed buffer. This may take many internal model steps but is
+  // entirely transparent to the caller.
+  if (is_cohere_model_) {
+    auto* cs = static_cast<CohereState*>(state_.get());
+    while (cs->StreamedCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
+      RunCohereChunkUntilEOS();
+    }
+    if (cs->StreamedCount() < cs->CommittedTokens().size()) {
+      cs->AdvanceStreamedCount();
+    }
     return;
   }
 
@@ -752,7 +718,93 @@ DeviceSpan<float> Generator::GetLogits() {
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
+  if (is_cohere_model_) {
+    // Expose only committed (dedup'd) tokens — never raw per-chunk decode tokens.
+    return static_cast<CohereState*>(state_.get())->GetCommittedSpan();
+  }
   return search_->GetSequence(index);
+}
+
+void Generator::RunCohereChunkUntilEOS() {
+  auto* cs = static_cast<CohereState*>(state_.get());
+  auto& search = state_->params_->search;
+
+  // Step the search until the model produces EOS for this chunk.
+  while (!search_->IsDone()) {
+    if (!computed_logits_) {
+      auto next_tokens = search_->GetNextTokens();
+      if (last_action_ == Action::rewound)
+        search_->AppendTokens(next_tokens);
+      ComputeLogits(next_tokens);
+    }
+    if (guidance_logits_processor_) {
+      auto logits = GetLogits();
+      guidance_logits_processor_->ProcessLogits(logits);
+    }
+    computed_logits_ = false;
+    search_->ApplyMinLength(search.min_length);
+    search_->ApplyRepetitionPenalty(search.repetition_penalty);
+    last_action_ = Action::generated;
+    switch (sampling_method_) {
+      case SamplingMethod::kGreedy:
+        search_->SelectTop();
+        break;
+      case SamplingMethod::kTopKTopP:
+        search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+        break;
+      case SamplingMethod::kTopK:
+        search_->SampleTopK(search.top_k, search.temperature);
+        break;
+      case SamplingMethod::kTopP:
+        search_->SampleTopP(search.top_p, search.temperature);
+        break;
+      default:
+        throw std::runtime_error("Unknown sampling method");
+    }
+  }
+
+  // Extract this chunk's generated tokens (skip prompt at start, EOS at end).
+  std::vector<int32_t> chunk_tokens;
+  {
+    auto seq = search_->GetSequence(0);
+    auto seq_cpu = seq.CopyDeviceToCpu();
+    size_t prompt_len = cs->GetPromptTokens().size();
+    size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
+    if (seq_len > prompt_len + 1) {
+      chunk_tokens.assign(seq_cpu.data() + prompt_len, seq_cpu.data() + seq_len - 1);
+    }
+  }
+
+  // Decode chunk and merge into committed/pending text via overlap dedup.
+  auto tokenizer = state_->model_.CreateTokenizer();
+  std::string chunk_text;
+  if (!chunk_tokens.empty()) {
+    chunk_text = tokenizer->Decode(std::span<const int32_t>(chunk_tokens.data(), chunk_tokens.size()));
+  }
+
+  bool more = cs->HasMoreChunks();
+  cs->CommitChunkText(chunk_text, /*is_final=*/!more, *tokenizer);
+
+  if (more) {
+    // Reset decoder for the next chunk and re-feed the prompt.
+    cs->AdvanceToNextChunk();
+    search_->RewindTo(0);
+    const auto& prompt_tokens = cs->GetPromptTokens();
+    if (!prompt_tokens.empty()) {
+      auto prompt_span = cpu_span<const int32_t>(prompt_tokens.data(), prompt_tokens.size());
+      auto prompt_device = AllocateInputIdsOnDevice(prompt_span);
+      search_->AppendTokens(prompt_device);
+      set_extra_inputs_ = false;
+      ComputeLogits(prompt_device);
+    }
+  } else {
+    cs->MarkFullyDone();
+    state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
+  }
 }
 
 }  // namespace Generators

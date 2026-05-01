@@ -60,6 +60,19 @@ struct CohereState : State {
   // `join_chunk_texts(texts, separator=get_chunk_separator(language))` (modeling_cohere_asr.py:1525).
   std::string GetJoinedChunkText(const Tokenizer& tokenizer, const std::string& separator) const;
 
+  // ----- Streaming (committed/pending) state, all internal -----
+  // The Generator uses these to expose an incremental, dedup'd token stream
+  // through the standard API (GetSequence + GenerateNextToken). User never
+  // sees raw per-chunk tokens; only words confirmed past chunk-overlap dedup.
+  void CommitChunkText(const std::string& chunk_text, bool is_final, const Tokenizer& tokenizer);
+  size_t StreamedCount() const { return streamed_count_; }
+  void AdvanceStreamedCount() { ++streamed_count_; }
+  const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
+  bool FullyDone() const { return fully_done_; }
+  void MarkFullyDone() { fully_done_ = true; }
+  // Wrap committed_tokens_[0:streamed_count_] as a CPU-backed DeviceSpan.
+  DeviceSpan<int32_t> GetCommittedSpan() const;
+
  private:
   const WhisperModel& model_;
 
@@ -75,6 +88,13 @@ struct CohereState : State {
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
   std::vector<std::vector<int32_t>> completed_chunk_tokens_;  // Per-chunk generated tokens (excl prompt/EOS)
+
+  // Streaming/dedup state
+  std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
+  std::string committed_text_;             // Detokenized form of committed_tokens_
+  std::string pending_text_;               // Tail words held back (may be revised by next chunk)
+  size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
+  bool fully_done_{false};                 // True once the last chunk has been committed
 };
 
 // Cohere model — inherits WhisperModel, overrides CreateState.

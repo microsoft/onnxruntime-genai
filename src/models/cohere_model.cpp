@@ -239,12 +239,62 @@ static std::string ToLowerAscii(const std::string& s) {
 }
 
 static std::string NormalizeWord(const std::string& w) {
-  // Lowercase and strip leading/trailing ASCII punctuation for matching.
-  static const char* punct = ".,!?;:\"')(";
-  size_t a = w.find_first_not_of(punct);
-  if (a == std::string::npos) return {};
-  size_t b = w.find_last_not_of(punct);
-  return ToLowerAscii(w.substr(a, b - a + 1));
+  // Lowercase and strip leading/trailing non-alphanumeric codepoints for matching.
+  // Must handle non-ASCII punctuation like Spanish `¿`, `¡`, quotes `«»`, etc.,
+  // so e.g. "¿de" matches "de" across a chunk seam.
+  auto is_word_byte = [](unsigned char c) {
+    // ASCII alphanumeric, or any UTF-8 continuation/start byte (>= 0x80)
+    // — letters with diacritics like é, ó, ñ live in the 0x80+ range and
+    // should be kept; only ASCII punctuation/symbols are stripped.
+    return std::isalnum(c) != 0 || c >= 0x80;
+  };
+  // Strip leading non-word ASCII chars.
+  size_t a = 0;
+  while (a < w.size() && !is_word_byte(static_cast<unsigned char>(w[a]))) ++a;
+  // Strip trailing non-word ASCII chars.
+  size_t b = w.size();
+  while (b > a && !is_word_byte(static_cast<unsigned char>(w[b - 1]))) --b;
+  if (a >= b) return {};
+  // Now strip non-ASCII punctuation codepoints (¿ ¡ « » “ ” ‘ ’ — …) at the ends.
+  // These all start with bytes 0xC2/0xC3/0xE2 in UTF-8; we explicitly list the
+  // sequences we care about for matching.
+  static const char* kStripPrefixes[] = {
+      "\xC2\xBF",  // ¿
+      "\xC2\xA1",  // ¡
+      "\xC2\xAB",  // «
+      "\xE2\x80\x9C",  // “
+      "\xE2\x80\x98",  // ‘
+  };
+  static const char* kStripSuffixes[] = {
+      "\xC2\xBB",  // »
+      "\xE2\x80\x9D",  // ”
+      "\xE2\x80\x99",  // ’
+      "\xE2\x80\xA6",  // …
+      "\xE2\x80\x94",  // —
+      "\xE2\x80\x93",  // –
+  };
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto* p : kStripPrefixes) {
+      size_t plen = std::strlen(p);
+      if (b - a >= plen && std::memcmp(w.data() + a, p, plen) == 0) {
+        a += plen;
+        changed = true;
+        break;
+      }
+    }
+    for (auto* s : kStripSuffixes) {
+      size_t slen = std::strlen(s);
+      if (b - a >= slen && std::memcmp(w.data() + b - slen, s, slen) == 0) {
+        b -= slen;
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (a >= b) return {};
+  return ToLowerAscii(w.substr(a, b - a));
 }
 
 static std::vector<std::string> SplitOnWhitespace(const std::string& s) {
@@ -347,6 +397,80 @@ std::string CohereState::GetJoinedChunkText(const Tokenizer& tokenizer, const st
     }
   }
   return merged;
+}
+
+// Tail-words count to hold back for potential revision by the next chunk.
+// Must be >= MergeWithOverlapDedup's max_lookback so any future overlap match
+// can still be discovered against pending_text_.
+static constexpr size_t kPendingTailWords = 25;
+
+void CohereState::CommitChunkText(const std::string& chunk_text, bool is_final, const Tokenizer& tokenizer) {
+  std::string stripped = StripAsciiWhitespace(chunk_text);
+
+  // Merge this chunk's text with whatever tail we held back from the previous chunk.
+  std::string merged;
+  if (pending_text_.empty()) {
+    merged = std::move(stripped);
+  } else if (stripped.empty()) {
+    merged = pending_text_;
+  } else {
+    merged = MergeWithOverlapDedup(pending_text_, stripped);
+  }
+
+  // Decide which words are "stable" (commit now) vs "pending" (hold for next chunk).
+  std::vector<std::string> words = SplitOnWhitespace(merged);
+  size_t commit_words;
+  if (is_final) {
+    commit_words = words.size();  // last chunk: commit everything
+  } else if (words.size() > kPendingTailWords) {
+    commit_words = words.size() - kPendingTailWords;
+  } else {
+    commit_words = 0;  // not enough words yet to safely commit anything
+  }
+
+  std::string new_commit_words_text;
+  for (size_t i = 0; i < commit_words; ++i) {
+    if (i) new_commit_words_text += ' ';
+    new_commit_words_text += words[i];
+  }
+  std::string new_pending_text;
+  for (size_t i = commit_words; i < words.size(); ++i) {
+    if (i > commit_words) new_pending_text += ' ';
+    new_pending_text += words[i];
+  }
+  pending_text_ = std::move(new_pending_text);
+
+  if (new_commit_words_text.empty()) return;
+
+  // Build the new full committed text and re-tokenize. The prefix of the resulting
+  // token sequence almost always matches existing committed_tokens_ exactly, but
+  // BPE merges occasionally shift at the seam. To keep streaming consistent, we
+  // never rewind past streamed_count_; tokens beyond that are replaced.
+  std::string new_full_text = committed_text_;
+  if (!new_full_text.empty()) new_full_text += ' ';
+  new_full_text += new_commit_words_text;
+
+  auto full_tokens = tokenizer.Encode(new_full_text.c_str());
+
+  size_t common = 0;
+  while (common < committed_tokens_.size() && common < full_tokens.size() &&
+         committed_tokens_[common] == full_tokens[common]) {
+    ++common;
+  }
+  if (common < streamed_count_) common = streamed_count_;
+
+  committed_tokens_.resize(common);
+  for (size_t i = common; i < full_tokens.size(); ++i) {
+    committed_tokens_.push_back(full_tokens[i]);
+  }
+  committed_text_ = std::move(new_full_text);
+}
+
+DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
+  size_t n = std::min(streamed_count_, committed_tokens_.size());
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  return cpu->WrapMemory<int32_t>(
+      std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), n));
 }
 
 DeviceSpan<float> CohereState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
