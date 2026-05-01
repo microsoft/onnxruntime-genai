@@ -3032,6 +3032,10 @@ class Model:
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        self.attention_attrs["q_path"] = ""
+        self.attention_attrs["k_path"] = ""
+        self.attention_attrs["v_path"] = ""
+
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
 
