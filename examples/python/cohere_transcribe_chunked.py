@@ -5,9 +5,6 @@ The user just provides the full audio file, no manual splitting needed.
 
 Usage:
   python cohere_transcribe_chunked.py -m /path/to/model -a audio.wav [-e cuda]
-
-To compare with the Python-side chunking reference:
-  python cohere_transcribe.py -m /path/to/model -a audio.wav [-e cuda]
 """
 
 import argparse
@@ -50,12 +47,6 @@ def run(args):
         inputs = processor([prompt], audios=audios)
 
         params = og.GeneratorParams(model)
-        params.set_search_options(
-            do_sample=False,
-            max_length=1024,
-            num_beams=1,
-            batch_size=1,
-        )
 
         generator = og.Generator(model, params)
         generator.set_inputs(inputs)
@@ -65,7 +56,6 @@ def run(args):
             generator.generate_next_token()
             print(stream.decode(generator.get_sequence(0)[-1]), end="", flush=True)
 
-        # Get clean combined sequence (C++ strips EOS between chunks)
         seq = generator.get_sequence(0)
         text = tokenizer.decode(list(seq))
         all_texts.append(text.strip())
