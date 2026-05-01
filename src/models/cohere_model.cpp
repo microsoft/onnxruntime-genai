@@ -365,7 +365,7 @@ void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tok
 
 }  // namespace
 
-void CohereState::CommitChunkText(const std::string& /*chunk_text*/, const std::vector<int32_t>& chunk_tokens,
+void CohereState::CommitChunkText(const std::vector<int32_t>& chunk_tokens,
                                   bool is_final, const Tokenizer& tokenizer) {
   if (chunk_tokens.empty()) return;
 
@@ -392,7 +392,7 @@ void CohereState::CommitChunkText(const std::string& /*chunk_text*/, const std::
 
 
 DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
-  size_t n = std::min(streamed_count_, committed_tokens_.size());
+  size_t n = std::min(streamed_tokens_count_, committed_tokens_.size());
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   return cpu->WrapMemory<int32_t>(
       std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), n));

@@ -66,13 +66,13 @@ struct CohereState : State {
   // boundaries is stripping trailing whitespace/punctuation/special tokens
   // from each non-final chunk so seams like "...scams. " + "In the UK..."
   // don't surface awkward dot-then-capital fragments.
-  void CommitChunkText(const std::string& chunk_text, const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
-  size_t StreamedCount() const { return streamed_count_; }
-  void AdvanceStreamedCount() { ++streamed_count_; }
+  void CommitChunkText(const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
+  size_t StreamedTokensCount() const { return streamed_tokens_count_; }
+  void AdvanceStreamedTokensCount() { ++streamed_tokens_count_; }
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
   bool FullyDone() const { return fully_done_; }
   void MarkFullyDone() { fully_done_ = true; }
-  // Wrap committed_tokens_[0:streamed_count_] as a CPU-backed DeviceSpan.
+  // Wrap committed_tokens_[0:streamed_tokens_count_] as a CPU-backed DeviceSpan.
   DeviceSpan<int32_t> GetCommittedSpan() const;
 
  private:
@@ -93,7 +93,7 @@ struct CohereState : State {
 
   // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
-  size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
+  size_t streamed_tokens_count_{0};        // # of committed tokens already yielded by GenerateNextToken
   bool fully_done_{false};                 // True once the last chunk has been committed
 };
 

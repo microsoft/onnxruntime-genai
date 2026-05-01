@@ -579,7 +579,7 @@ bool Generator::IsDone() {
     // committed token has been yielded by GenerateNextToken. The user never
     // observes the underlying multi-chunk decoding.
     auto* cs = static_cast<CohereState*>(state_.get());
-    return cs->FullyDone() && cs->StreamedCount() >= cs->CommittedTokens().size();
+    return cs->FullyDone() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
   }
 
   if (computed_logits_) {
@@ -620,18 +620,22 @@ void Generator::GenerateNextToken() {
     return;
   }
 
-  // Cohere: each user-visible call yields exactly one *committed* token. If we
-  // don't have a committed token ready, run the next chunk(s) end-to-end (mel +
-  // decoder until EOS), dedup against the previous chunk, and add stable tokens
-  // to the committed buffer. This may take many internal model steps but is
-  // entirely transparent to the caller.
+  // Cohere: advance the user-visible stream by one committed token per call.
+  // If no unstreamed committed token is available, run subsequent chunks
+  // end-to-end (decode until EOS, strip trailing boundary tokens, append
+  // to the committed buffer) until a token becomes available or all chunks
+  // are exhausted. The multi-chunk decoding is hidden from the caller; only
+  // committed tokens are exposed via GetSequence().
   if (is_cohere_model_) {
     auto* cs = static_cast<CohereState*>(state_.get());
-    while (cs->StreamedCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
-      RunCohereChunkUntilEOS();
+    if (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
+      auto tokenizer = state_->model_.CreateTokenizer();
+      while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
+        RunCohereChunkUntilEOS(*tokenizer);
+      }
     }
-    if (cs->StreamedCount() < cs->CommittedTokens().size()) {
-      cs->AdvanceStreamedCount();
+    if (cs->StreamedTokensCount() < cs->CommittedTokens().size()) {
+      cs->AdvanceStreamedTokensCount();
     }
     return;
   }
@@ -723,13 +727,16 @@ DeviceSpan<float> Generator::GetLogits() {
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   if (is_cohere_model_) {
-    // Expose only committed (dedup'd) tokens — never raw per-chunk decode tokens.
+    // Return only the committed tokens that have already been yielded to
+    // the caller via GenerateNextToken. The underlying search sequence holds
+    // raw per-chunk decoder output (with prompt prefix and pre-cleanup
+    // boundary tokens), which is not what the user should observe.
     return static_cast<CohereState*>(state_.get())->GetCommittedSpan();
   }
   return search_->GetSequence(index);
 }
 
-void Generator::RunCohereChunkUntilEOS() {
+void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
   auto* cs = static_cast<CohereState*>(state_.get());
   // Step the search until the model produces EOS for this chunk.
   while (!search_->IsDone()) {
@@ -745,8 +752,8 @@ void Generator::RunCohereChunkUntilEOS() {
     size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
     if (seq_len > prompt_len) {
       size_t end = seq_len;
-      // Only strip the last token if it is actually an EOS token.
-      // When max_length is hit, the last token is a real word — don't drop it.
+      // Only strip the last token if it is actually an EOS token, this is needed for intermediate chunks
+      // When max_length is hit, the last token is a real word
       if (end > prompt_len && contains(state_->params_->config.model.eos_token_id, seq_cpu[end - 1])) {
         --end;
       }
@@ -756,15 +763,8 @@ void Generator::RunCohereChunkUntilEOS() {
     }
   }
 
-  // Decode chunk and merge into committed/pending text via overlap dedup.
-  auto tokenizer = state_->model_.CreateTokenizer();
-  std::string chunk_text;
-  if (!chunk_tokens.empty()) {
-    chunk_text = tokenizer->Decode(std::span<const int32_t>(chunk_tokens.data(), chunk_tokens.size()));
-  }
-
   bool more = cs->HasMoreChunks();
-  cs->CommitChunkText(chunk_text, chunk_tokens, /*is_final=*/!more, *tokenizer);
+  cs->CommitChunkText(chunk_tokens, /*is_final=*/!more, tokenizer);
 
   if (!more) {
     cs->MarkFullyDone();

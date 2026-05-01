@@ -150,9 +150,9 @@ struct Generator : LeakChecked<Generator> {
   void SampleNextToken();
 
   // Cohere-only: run the inner search loop until the current chunk hits EOS,
-  // then dedup against the previous chunk's tail and commit stable tokens to
+  // then strip trailing boundary tokens and commit the chunk's tokens to
   // the streamable buffer. Advances to the next chunk if more remain.
-  void RunCohereChunkUntilEOS();
+  void RunCohereChunkUntilEOS(const Tokenizer& tokenizer);
 };
 
 struct OrtGlobals {
