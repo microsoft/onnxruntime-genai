@@ -217,19 +217,6 @@ bool CohereState::AdvanceToNextChunk() {
   return true;
 }
 
-void CohereState::AppendChunkTokens(const std::vector<int32_t>& chunk_tokens) {
-  // Chunks are non-overlapping (energy-split), so each chunk's tokens go
-  // straight into the visible stream without any merging.
-  committed_tokens_.insert(committed_tokens_.end(), chunk_tokens.begin(), chunk_tokens.end());
-}
-
-DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
-  size_t n = std::min(streamed_count_, committed_tokens_.size());
-  auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  return cpu->WrapMemory<int32_t>(
-      std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), n));
-}
-
 DeviceSpan<float> CohereState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (encoder_state_->IsFirstRun()) {
     encoder_state_->Run(current_length, next_tokens, next_indices);

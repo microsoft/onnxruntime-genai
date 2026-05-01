@@ -52,18 +52,6 @@ struct CohereState : State {
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
-  // ----- Streaming state -----
-  // The Generator yields one token per GenerateNextToken call. Since chunks
-  // are non-overlapping, every chunk's tokens are appended verbatim.
-  void AppendChunkTokens(const std::vector<int32_t>& chunk_tokens);
-  size_t StreamedCount() const { return streamed_count_; }
-  void AdvanceStreamedCount() { ++streamed_count_; }
-  const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
-  bool FullyDone() const { return fully_done_; }
-  void MarkFullyDone() { fully_done_ = true; }
-  // Wrap committed_tokens_[0:streamed_count_] as a CPU-backed DeviceSpan.
-  DeviceSpan<int32_t> GetCommittedSpan() const;
-
  private:
   const WhisperModel& model_;
 
@@ -78,11 +66,6 @@ struct CohereState : State {
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
-
-  // Streaming state
-  std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
-  size_t streamed_count_{0};               // # of committed tokens already yielded by GenerateNextToken
-  bool fully_done_{false};                 // True once the last chunk has been committed
 };
 
 // Cohere model — inherits WhisperModel, overrides CreateState.

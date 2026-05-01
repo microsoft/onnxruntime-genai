@@ -35,8 +35,8 @@ struct CohereProcessor : Processor {
   float norm_eps_{1e-5f};
 
   // Chunking parameters (from genai_config.json model section)
-  float max_audio_clip_s_{35.0f};
-  float boundary_chunk_s_{5.0f};
+  float max_audio_clip_s_{};
+  float boundary_chunk_s_{};
 };
 
 }  // namespace Generators

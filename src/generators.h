@@ -142,11 +142,6 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
-
-  // Cohere-only: run the inner search loop until the current chunk hits EOS,
-  // then dedup against the previous chunk's tail and commit stable tokens to
-  // the streamable buffer. Advances to the next chunk if more remain.
-  void RunCohereChunkUntilEOS();
 };
 
 struct OrtGlobals {
