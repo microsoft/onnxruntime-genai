@@ -136,18 +136,18 @@ struct Config {
     int context_length{};
 
     // Streaming ASR / RNNT model parameters
-    int num_mels{};
-    int fft_size{};
-    int hop_length{};
-    int win_length{};
-    float preemph{};
-    float log_eps{};
+    int num_mels{128};
+    int fft_size{512};
+    int hop_length{160};
+    int win_length{400};
+    float preemph{0.97f};
+    float log_eps{5.96046448e-08f};
     float norm_eps{1e-5f};  // Per-feature normalize epsilon (Cohere Transcribe)
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
     int pre_encode_cache_size{};
-    int sample_rate{};
+    int sample_rate{16000};
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};

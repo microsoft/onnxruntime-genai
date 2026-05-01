@@ -21,7 +21,7 @@ struct CohereProcessor : Processor {
   // `overlap_chunk_s_` of audio so word-level dedup at the seam (in CohereState)
   // can recover seam-free text.
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
-      const float* samples, size_t num_samples, int sample_rate) const;
+      size_t num_samples, int sample_rate) const;
 
   // Compute mel + normalize directly from PCM float32 samples. Returns OrtValue [1, num_mels, num_frames].
   std::pair<std::unique_ptr<OrtValue>, int64_t> ComputeMelFromPCM(const float* samples, size_t num_samples) const;

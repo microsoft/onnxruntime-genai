@@ -17,29 +17,26 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       max_audio_clip_s_{config.model.max_audio_clip_s},
       overlap_chunk_s_{config.model.overlap_chunk_s} {
-  // Mel + per-feature-normalize parameters come from genai_config.json
-  // (model.* fields). Fall back to header defaults for any field left at 0.
-  if (config.model.num_mels > 0)    mel_cfg_.num_mels    = config.model.num_mels;
-  if (config.model.fft_size > 0)    mel_cfg_.fft_size    = config.model.fft_size;
-  if (config.model.hop_length > 0)  mel_cfg_.hop_length  = config.model.hop_length;
-  if (config.model.win_length > 0)  mel_cfg_.win_length  = config.model.win_length;
-  if (config.model.sample_rate > 0) mel_cfg_.sample_rate = config.model.sample_rate;
-  if (config.model.preemph != 0.0f) mel_cfg_.preemph     = config.model.preemph;
-  if (config.model.log_eps != 0.0f) mel_cfg_.log_eps     = config.model.log_eps;
+  mel_cfg_.num_mels    = config.model.num_mels;
+  mel_cfg_.fft_size    = config.model.fft_size;
+  mel_cfg_.hop_length  = config.model.hop_length;
+  mel_cfg_.win_length  = config.model.win_length;
+  mel_cfg_.sample_rate = config.model.sample_rate;
+  mel_cfg_.preemph     = config.model.preemph;
+  mel_cfg_.log_eps     = config.model.log_eps;
   norm_eps_ = config.model.norm_eps;
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
 }
 
-// --- Decode audio to PCM via OrtxDecodeAudio ---
-
+// Decode audio to PCM via OrtxDecodeAudio in extensions
 static std::pair<const float*, size_t> GetDecodedPCM(
     OrtxRawAudios* raw_audios, size_t index, int target_sample_rate,
     ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder,
     int& out_sample_rate) {
   OrtxTensorResult* decode_result = nullptr;
-  // Pass target_sample_rate so ortx resamples on decode (e.g. 22050->16000 for jfk.flac).
+  // Pass target_sample_rate so ortx resamples on decode.
   CheckResult(OrtxDecodeAudio(raw_audios, index, target_sample_rate, &decode_result));
   decode_result_holder.reset(decode_result);
 
@@ -67,10 +64,11 @@ static std::pair<const float*, size_t> GetDecodedPCM(
   return {static_cast<const float*>(pcm_data), num_samples};
 }
 
-// --- Waveform splitting with FIXED OVERLAP between chunks ---
+// Waveform splitting with FIXED OVERLAP between chunks
 //
-// The model's training-time chunker uses energy-based, non-overlapping splits.
-// That produces seam artifacts at chunk boundaries (e.g. "...UK. Come from..."
+// The model's training-time chunker uses energy-based, non-overlapping splits,
+// meaning this model was trained with long utterances in mind. Even though text is
+// largely correct, this produces seam artifacts at chunk boundaries (e.g. "...UK. Come from..."
 // when a sentence is split mid-utterance) because each chunk's decoder runs
 // independently and naturally terminates with sentence-end punctuation.
 //
@@ -79,33 +77,28 @@ static std::pair<const float*, size_t> GetDecodedPCM(
 // words) appears at the tail of chunk N and the head of chunk N+1; the
 // downstream merge step (CohereState::GetJoinedChunkText) does word-level
 // dedup so the final transcript is seam-free.
+
+// While we could integrate Silero VAD to find word boundaries to reduce risk
+// of splitting mid-word, empirical experiments and benchmark evaluation show
+// that this approach is both faster and more accurate as VAD seems not to be as
+// accurate on finding proper word boundaries. Silero VAD could get integrated in future
+// for long silences, but provides no benefit for normal audio transcription use case.
 std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
-    const float* /*samples*/, size_t num_samples, int sample_rate) const {
-  size_t chunk_size = std::max(size_t(1), static_cast<size_t>(max_audio_clip_s_ * sample_rate));
-  size_t overlap = static_cast<size_t>(overlap_chunk_s_ * sample_rate);
-  if (overlap >= chunk_size) overlap = chunk_size / 2;
-  size_t step = chunk_size - overlap;
-  if (step == 0) step = chunk_size;
+    size_t num_samples, int sample_rate) const {
+  const size_t chunk_size = static_cast<size_t>(max_audio_clip_s_ * sample_rate);
+  const size_t overlap = static_cast<size_t>(overlap_chunk_s_ * sample_rate);
+  const size_t step = chunk_size - overlap;
 
   std::vector<std::pair<size_t, size_t>> chunks;
-
-  if (num_samples <= chunk_size) {
-    chunks.push_back({0, num_samples});
-    return chunks;
-  }
-
-  size_t idx = 0;
-  while (idx < num_samples) {
-    size_t end = std::min(idx + chunk_size, num_samples);
+  for (size_t idx = 0; idx < num_samples; idx += step) {
+    const size_t end = std::min(idx + chunk_size, num_samples);
     chunks.push_back({idx, end});
     if (end == num_samples) break;
-    idx += step;
   }
   return chunks;
 }
 
-// --- Compute mel + normalize from PCM float32 ---
-
+// Compute mel + normalize from PCM float32.
 std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM(
     const float* samples, size_t num_samples) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
@@ -115,8 +108,7 @@ std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM
   auto mel_data = nemo_mel::NemoComputeLogMelBatch(samples, num_samples, mel_cfg_, num_frames);
   const int64_t num_mels = mel_cfg_.num_mels;
 
-  // Step 2: per-feature normalize (onnxruntime-extensions kernel).
-  // Wrap mel_data as the kernel input; the kernel allocates its own output buffer.
+  // Step 2: per-feature normalize with feature-first normalization.
   ort_extensions::PerFeatureNormalize norm_kernel;
   ort_extensions::AttrDict norm_attrs{
       {"eps", static_cast<double>(norm_eps_)},
@@ -125,6 +117,7 @@ std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM
   if (auto status = norm_kernel.Init(norm_attrs); !status.IsOk()) {
     throw std::runtime_error(std::string("PerFeatureNormalize::Init failed: ") + status.Message());
   }
+
   std::vector<int64_t> mel_shape{num_mels, static_cast<int64_t>(num_frames)};
   ortc::Tensor<float> norm_in(mel_shape, mel_data.data());
   ortc::Tensor<float> norm_out(&ort_extensions::CppAllocator::Instance());
@@ -158,7 +151,7 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
 
   // Split waveform at energy boundaries
-  auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
+  auto chunk_ranges = SplitWaveformIntoChunks(num_samples, sample_rate);
 
   // Compute mel for first chunk
   {
