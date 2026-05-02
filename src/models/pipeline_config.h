@@ -11,23 +11,26 @@ namespace Generators {
 // Pipeline-as-Config model: dispatches based on config version rather
 // than model_type strings.
 //
-// For v2 configs, CreateModel() routes here instead of the string-based
-// dispatch chain.
+// Inherits from DecoderOnly_Model which loads the decoder session and
+// provides session_decoder_.  For multi-session pipelines (VLM, encoder-
+// decoder), additional sessions are loaded from pipeline_config.sessions.
 //
-// For single-session (decoder-only) pipelines, PipelineConfigState directly
-// implements the same logic as DecoderOnly_State (same components, same order).
+// For single-session configs, CreateState() returns DecoderOnly_State
+// directly — zero code duplication, full decoder parity.
 //
-// For multi-session pipelines (VLM, encoder-decoder), loads all sessions
-// and uses FlowInterpreter to orchestrate execution order and dataflow.
-struct PipelineConfigModel : Model {
+// For multi-session configs, CreateState() returns PipelineConfigState
+// which uses FlowInterpreter to orchestrate non-decoder sessions around
+// a DecoderOnly_State that handles all decoder internals.
+struct PipelineConfigModel : DecoderOnly_Model {
   PipelineConfigModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(
       DeviceSpan<int32_t> sequence_lengths,
       const GeneratorParams& params) const override;
 
-  // Named sessions loaded from pipeline_config.sessions.
-  std::map<std::string, std::unique_ptr<OrtSession>> sessions_;
+  // Additional sessions for multi-session pipelines (vision, embedding, etc.)
+  // The decoder session is inherited from DecoderOnly_Model::session_decoder_.
+  std::map<std::string, std::unique_ptr<OrtSession>> extra_sessions_;
 
   // Per-session options for non-decoder sessions (graph capture disabled).
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> non_decoder_session_options_;
@@ -36,16 +39,12 @@ struct PipelineConfigModel : Model {
   std::unique_ptr<FlowInterpreter> flow_interpreter_;
 };
 
-// State for Pipeline-as-Config model execution.
+// State for multi-session Pipeline-as-Config model execution.
 //
-// Single-session mode (decoder-only):
-//   Behaves identically to DecoderOnly_State — same components, same flow.
-//
-// Multi-session mode (VLM/encoder-decoder):
-//   Non-decoder sessions (vision, embedding, encoder) are driven by
-//   FlowInterpreter which manages execution order and intermediate wiring.
-//   The decoder session uses existing components (KV cache, position inputs,
-//   logits) for full parity with DecoderOnly_State.
+// The decoder session is fully delegated to DecoderOnly_State (KV cache,
+// position inputs, logits, sliding window, chunking — all handled).
+// Non-decoder sessions (vision, embedding, encoder) are orchestrated by
+// FlowInterpreter which manages execution order and dataflow wiring.
 struct PipelineConfigState : State {
   PipelineConfigState(const PipelineConfigModel& model,
                       DeviceSpan<int32_t> sequence_lengths,
@@ -60,50 +59,36 @@ struct PipelineConfigState : State {
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens,
-                           DeviceSpan<int32_t> beam_indices,
-                           int total_length);
+  // Run a non-decoder session: set up I/O, execute, capture outputs.
+  void RunNonDecoderSession(const std::string& session_name);
 
+  // Run a flow step (decoder delegates to decoder_state_, others to RunNonDecoderSession).
   void RunFlowStep(const PipelineConfig::FlowStep& step,
                    int total_length,
                    DeviceSpan<int32_t>& next_tokens,
                    DeviceSpan<int32_t> next_indices);
 
-  // Run a non-decoder session: set up I/O, execute, capture outputs.
-  void RunNonDecoderSession(const std::string& session_name);
-
-  // Chunked context processing for decoder (mirrors DecoderOnly_State).
-  DeviceSpan<float> RunDecoderWithChunking(int total_length,
-                                           DeviceSpan<int32_t>& next_tokens,
-                                           DeviceSpan<int32_t> next_indices,
-                                           size_t chunk_size);
-
   const PipelineConfigModel& model_;
 
-  // Decoder session components (reuse existing proven implementations)
-  DefaultInputIDs input_ids_{*this};
-  Logits logits_{*this};
-  std::unique_ptr<KeyValueCache> kv_cache_;
-  std::unique_ptr<PositionInputs> position_inputs_;
-  ExtraInputs extra_inputs_{*this};
+  // Decoder session is fully delegated to DecoderOnly_State.
+  std::unique_ptr<DecoderOnly_State> decoder_state_;
 
   // Per-session extra inputs for non-decoder sessions.
   struct NonDecoderSessionIO {
     std::vector<const char*> input_names;
     std::vector<OrtValue*> inputs;
-    std::vector<const char*> output_names;
-    std::vector<OrtValue*> outputs;
   };
   std::map<std::string, NonDecoderSessionIO> non_decoder_io_;
 
   // Intermediate tensor store for wiring between sessions.
-  // Stores outputs from non-decoder sessions so they can be
-  // passed as inputs to downstream sessions.
   // Key: "session_name.tensor_name"
   std::map<std::string, std::unique_ptr<OrtValue>> intermediate_store_;
 
   // Persistent storage for wired input names to avoid dangling c_str() pointers.
-  std::vector<std::string> wired_input_names_;
+  std::vector<std::string> wired_decoder_input_names_;
+
+  // Logits from the last decoder run, saved by RunFlowStep("decoder").
+  DeviceSpan<float> last_logits_;
 
   bool is_prompt_{true};
 };

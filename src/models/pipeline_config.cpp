@@ -7,35 +7,34 @@
 namespace Generators {
 
 // ============================================================================
-// PipelineConfigModel — loads sessions from pipeline config
+// PipelineConfigModel
 // ============================================================================
 
 PipelineConfigModel::PipelineConfigModel(
     std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+    : DecoderOnly_Model{std::move(config), ort_env} {
+  // DecoderOnly_Model already loaded session_decoder_ and registered it
+  // with session_info_.  Now load any additional sessions for multi-session
+  // pipelines (vision, embedding, encoder, etc.).
   const auto& pipeline_config = config_->pipeline_config;
 
-  // Load each named session from the pipeline config
   for (const auto& [name, session_config] : pipeline_config.sessions) {
-    if (session_config.file.empty()) continue;
-
-    OrtSessionOptions* opts = session_options_.get();
+    if (name == "decoder" || session_config.file.empty()) continue;
 
     // Non-decoder sessions get separate options with graph capture disabled.
     // Vision/embedding/encoder sessions often have control flow nodes that
     // are incompatible with CUDA graph capture.
-    if (session_config.role != "decoder") {
-      auto custom_opts = OrtSessionOptions::Create();
-      CreateSessionOptionsFromConfig(
-          config_->model.decoder.session_options,
-          *custom_opts, /*is_primary_session_options=*/true,
-          /*disable_graph_capture=*/true);
-      non_decoder_session_options_[name] = std::move(custom_opts);
-      opts = non_decoder_session_options_[name].get();
-    }
+    auto custom_opts = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(
+        config_->model.decoder.session_options,
+        *custom_opts, /*is_primary_session_options=*/true,
+        /*disable_graph_capture=*/true);
+    non_decoder_session_options_[name] = std::move(custom_opts);
 
-    sessions_[name] = CreateSession(ort_env, session_config.file, opts);
-    session_info_.Add(*sessions_[name]);
+    extra_sessions_[name] = CreateSession(
+        ort_env, session_config.file,
+        non_decoder_session_options_[name].get());
+    session_info_.Add(*extra_sessions_[name]);
   }
 
   flow_interpreter_ = std::make_unique<FlowInterpreter>(pipeline_config);
@@ -44,12 +43,19 @@ PipelineConfigModel::PipelineConfigModel(
 std::unique_ptr<State> PipelineConfigModel::CreateState(
     DeviceSpan<int32_t> sequence_lengths,
     const GeneratorParams& params) const {
+  // For single-session (decoder-only) configs, use DecoderOnly_State directly.
+  // Zero code duplication — full decoder parity including sliding window,
+  // chunking, graph capture, and all future DecoderOnly_State improvements.
+  if (!flow_interpreter_->IsMultiSession()) {
+    return std::make_unique<DecoderOnly_State>(
+        *this, sequence_lengths, params);
+  }
   return std::make_unique<PipelineConfigState>(
       *this, sequence_lengths, params);
 }
 
 // ============================================================================
-// PipelineConfigState — orchestrates pipeline execution
+// PipelineConfigState — multi-session orchestration
 // ============================================================================
 
 PipelineConfigState::PipelineConfigState(
@@ -58,27 +64,17 @@ PipelineConfigState::PipelineConfigState(
     const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      kv_cache_(CreateKeyValueCache(*this)),
-      position_inputs_{CreatePositionInputs(
-          *this, sequence_lengths,
-          model_.config_->model.decoder.inputs.attention_mask)} {
-  input_ids_.Add();
-  position_inputs_->Add();
-  logits_.Add();
-  if (kv_cache_) kv_cache_->Add();
+      decoder_state_{std::make_unique<DecoderOnly_State>(
+          model_, sequence_lengths, params)} {
 }
 
 void PipelineConfigState::SetExtraInputs(
     const std::vector<ExtraInput>& extra_inputs) {
-  // Route extra inputs to the decoder session
-  if (model_.sessions_.count("decoder")) {
-    extra_inputs_.Add(extra_inputs,
-                      model_.sessions_.at("decoder")->GetInputNames());
-  }
+  // Route extra inputs to the decoder state
+  decoder_state_->SetExtraInputs(extra_inputs);
 
   // Route extra inputs to non-decoder sessions
-  for (const auto& [name, session] : model_.sessions_) {
-    if (name == "decoder") continue;
+  for (const auto& [name, session] : model_.extra_sessions_) {
     auto& io = non_decoder_io_[name];
     auto session_input_names = session->GetInputNames();
     for (const auto& extra : extra_inputs) {
@@ -94,8 +90,8 @@ void PipelineConfigState::SetExtraInputs(
 
 void PipelineConfigState::RunNonDecoderSession(
     const std::string& session_name) {
-  auto session_it = model_.sessions_.find(session_name);
-  if (session_it == model_.sessions_.end() || !session_it->second) {
+  auto session_it = model_.extra_sessions_.find(session_name);
+  if (session_it == model_.extra_sessions_.end() || !session_it->second) {
     throw std::runtime_error(
         "Pipeline flow error: session '" + session_name + "' not loaded");
   }
@@ -103,11 +99,10 @@ void PipelineConfigState::RunNonDecoderSession(
   auto& session = *session_it->second;
 
   // Build input arrays from extra inputs + wired intermediates.
-  // We maintain string ownership in input_name_strings to avoid dangling ptrs.
+  // Maintain string ownership in input_name_strings to avoid dangling ptrs.
   std::vector<std::string> input_name_strings;
   std::vector<OrtValue*> input_values;
 
-  // Add extra inputs that were set for this session
   auto io_it = non_decoder_io_.find(session_name);
   if (io_it != non_decoder_io_.end()) {
     for (size_t i = 0; i < io_it->second.input_names.size(); ++i) {
@@ -116,21 +111,18 @@ void PipelineConfigState::RunNonDecoderSession(
     }
   }
 
-  // Add wired intermediate inputs from upstream sessions
   auto wired_inputs = model_.flow_interpreter_->GetWiredInputs(session_name);
   for (auto& [input_name, value] : wired_inputs) {
     input_name_strings.push_back(input_name);
     input_values.push_back(value);
   }
 
-  // Build const char* array from owned strings
   std::vector<const char*> input_name_ptrs;
   input_name_ptrs.reserve(input_name_strings.size());
   for (const auto& name : input_name_strings) {
     input_name_ptrs.push_back(name.c_str());
   }
 
-  // Set up outputs: query session for expected output names
   auto output_name_strings = session.GetOutputNames();
   std::vector<const char*> output_name_ptrs;
   output_name_ptrs.reserve(output_name_strings.size());
@@ -139,7 +131,6 @@ void PipelineConfigState::RunNonDecoderSession(
   }
   std::vector<OrtValue*> output_values(output_name_strings.size(), nullptr);
 
-  // Run session
   session.Run(nullptr,
               input_name_ptrs.data(),
               reinterpret_cast<const OrtValue* const*>(input_values.data()),
@@ -148,7 +139,6 @@ void PipelineConfigState::RunNonDecoderSession(
               output_name_ptrs.size());
 
   // Store outputs as intermediates for downstream sessions.
-  // Take ownership of ORT-allocated output tensors.
   for (size_t i = 0; i < output_name_strings.size(); ++i) {
     if (output_values[i]) {
       auto key = session_name + "." + output_name_strings[i];
@@ -160,119 +150,59 @@ void PipelineConfigState::RunNonDecoderSession(
   }
 }
 
-DeviceSpan<float> PipelineConfigState::RunDecoderWithChunking(
-    int total_length, DeviceSpan<int32_t>& next_tokens,
-    DeviceSpan<int32_t> next_indices, size_t chunk_size) {
-  // Chunking logic for context phase — process in chunks.
-  // Mirrors DecoderOnly_State::RunWithChunking.
-  size_t num_tokens = next_tokens.size();
-  size_t processed_tokens = 0;
-  int length = total_length - static_cast<int>(num_tokens);
-
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
-  while (processed_tokens < num_tokens) {
-    size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
-    auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
-    length = length + static_cast<int>(current_chunk_size);
-
-    UpdateInputsOutputs(chunk_tokens, next_indices, length);
-
-    bool graph_capture_this_run = false;  // Disable during chunking
-    State::Run(*model_.sessions_.at("decoder"), graph_capture_this_run);
-
-    processed_tokens += current_chunk_size;
-  }
-
-  return logits_.Get();
-}
-
 void PipelineConfigState::RunFlowStep(
     const PipelineConfig::FlowStep& step,
     int total_length,
     DeviceSpan<int32_t>& next_tokens,
     DeviceSpan<int32_t> next_indices) {
   if (step.run == "decoder") {
-    // Decoder runs through the main state with managed components.
     // Wire any intermediate inputs (e.g. inputs_embeds from embedding session)
-    // into the decoder's input bindings.
+    // into the decoder state's input bindings before running.
     auto wired = model_.flow_interpreter_->GetWiredInputs("decoder");
     for (const auto& [input_name, value] : wired) {
-      // Find if this input is already bound in the state
       bool found = false;
-      for (size_t i = 0; i < input_names_.size(); ++i) {
-        if (std::strcmp(input_names_[i], input_name.c_str()) == 0) {
-          inputs_[i] = value;
+      for (size_t i = 0; i < decoder_state_->input_names_.size(); ++i) {
+        if (std::strcmp(decoder_state_->input_names_[i],
+                        input_name.c_str()) == 0) {
+          decoder_state_->inputs_[i] = value;
           found = true;
           break;
         }
       }
       if (!found) {
-        // Store name persistently and add new input binding
-        wired_input_names_.push_back(input_name);
-        input_names_.push_back(wired_input_names_.back().c_str());
-        inputs_.push_back(value);
+        wired_decoder_input_names_.push_back(input_name);
+        decoder_state_->input_names_.push_back(
+            wired_decoder_input_names_.back().c_str());
+        decoder_state_->inputs_.push_back(value);
       }
     }
 
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
-
-    bool graph_capture = params_->use_graph_capture &&
-                         input_ids_.GetShape()[1] == 1;
-    State::Run(*model_.sessions_.at("decoder"), graph_capture);
+    // Delegate to DecoderOnly_State::Run which handles everything:
+    // KV cache, position inputs, logits, sliding window, chunking,
+    // graph capture, run options.
+    last_logits_ = decoder_state_->Run(total_length, next_tokens, next_indices);
     return;
   }
 
-  // Non-decoder session
   RunNonDecoderSession(step.run);
 }
 
 DeviceSpan<float> PipelineConfigState::Run(
     int total_length, DeviceSpan<int32_t>& next_tokens,
     DeviceSpan<int32_t> next_indices) {
-  if (!model_.flow_interpreter_->IsMultiSession()) {
-    // Single session (decoder-only): handle chunking if configured
-    const auto& chunk_size_opt = model_.config_->search.chunk_size;
-    size_t num_tokens = next_tokens.size();
-
-    if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
-        num_tokens > chunk_size_opt.value()) {
-      return RunDecoderWithChunking(total_length, next_tokens, next_indices,
-                                    chunk_size_opt.value());
-    }
-
-    UpdateInputsOutputs(next_tokens, next_indices, total_length);
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
-    bool graph_capture = params_->use_graph_capture &&
-                         input_ids_.GetShape()[1] == 1;
-    State::Run(*model_.sessions_.at("decoder"), graph_capture);
-    return logits_.Get();
-  }
-
   // Multi-session pipeline execution
-  UpdateInputsOutputs(next_tokens, next_indices, total_length);
-
   if (is_prompt_) {
-    // Run prompt-only steps (vision, encoder, etc.)
     for (const auto& step : model_.flow_interpreter_->prompt_steps()) {
       RunFlowStep(step, total_length, next_tokens, next_indices);
     }
   }
 
-  // Run always-steps (embedding, decoder)
   for (const auto& step : model_.flow_interpreter_->always_steps()) {
     RunFlowStep(step, total_length, next_tokens, next_indices);
   }
 
   if (is_prompt_) {
     is_prompt_ = false;
-    // Clear prompt-only intermediates from both FlowInterpreter (non-owning)
-    // and intermediate_store_ (owning unique_ptrs)
     model_.flow_interpreter_->ClearPromptIntermediates();
     const auto& prompt_sessions = model_.flow_interpreter_->prompt_only_sessions();
     for (auto it = intermediate_store_.begin(); it != intermediate_store_.end();) {
@@ -286,43 +216,12 @@ DeviceSpan<float> PipelineConfigState::Run(
     }
   }
 
-  return logits_.Get();
-}
-
-void PipelineConfigState::UpdateInputsOutputs(
-    DeviceSpan<int32_t>& next_tokens,
-    DeviceSpan<int32_t> beam_indices,
-    int total_length) {
-  input_ids_.Update(next_tokens);
-  size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
-
-  // Determine effective lengths for position_ids and KV cache
-  // based on sliding window config (mirrors DecoderOnly_State behavior)
-  int position_length = total_length;
-  int kv_cache_length = total_length;
-
-  if (model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
-    const int window_size = model_.config_->model.decoder.sliding_window->window_size;
-
-    if (model_.config_->model.decoder.sliding_window->slide_inputs) {
-      position_length = std::min(total_length, window_size);
-    }
-
-    if (model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
-      kv_cache_length = std::min(total_length, window_size);
-    }
-  }
-
-  position_inputs_->Update(next_tokens, position_length,
-                           static_cast<int>(new_length));
-  if (kv_cache_) kv_cache_->Update(beam_indices, kv_cache_length);
-  logits_.Update(next_tokens, new_length);
+  // Logits were populated by DecoderOnly_State::Run inside RunFlowStep("decoder")
+  return last_logits_;
 }
 
 void PipelineConfigState::RewindTo(size_t index) {
-  if (kv_cache_) kv_cache_->RewindTo(index);
-  position_inputs_->RewindTo(index);
+  decoder_state_->RewindTo(index);
 }
 
 OrtValue* PipelineConfigState::GetInput(const char* name) {
@@ -334,19 +233,19 @@ OrtValue* PipelineConfigState::GetInput(const char* name) {
       }
     }
   }
-  return State::GetInput(name);
+  // Check decoder state
+  return decoder_state_->GetInput(name);
 }
 
 OrtValue* PipelineConfigState::GetOutput(const char* name) {
   // Check intermediate store for non-decoder outputs
   for (const auto& [key, value] : intermediate_store_) {
-    // Extract tensor name from "session.tensor" key
     auto dot = key.find('.');
     if (dot != std::string::npos && key.substr(dot + 1) == name) {
       return value.get();
     }
   }
-  return State::GetOutput(name);
+  return decoder_state_->GetOutput(name);
 }
 
 }  // namespace Generators
