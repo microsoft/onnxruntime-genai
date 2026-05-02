@@ -72,6 +72,12 @@ struct PipelineConfigState : State {
   // Run a non-decoder session: set up I/O, execute, capture outputs.
   void RunNonDecoderSession(const std::string& session_name);
 
+  // Chunked context processing for decoder (mirrors DecoderOnly_State).
+  DeviceSpan<float> RunDecoderWithChunking(int total_length,
+                                           DeviceSpan<int32_t>& next_tokens,
+                                           DeviceSpan<int32_t> next_indices,
+                                           size_t chunk_size);
+
   const PipelineConfigModel& model_;
 
   // Decoder session components (reuse existing proven implementations)

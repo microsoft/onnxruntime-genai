@@ -160,6 +160,34 @@ void PipelineConfigState::RunNonDecoderSession(
   }
 }
 
+DeviceSpan<float> PipelineConfigState::RunDecoderWithChunking(
+    int total_length, DeviceSpan<int32_t>& next_tokens,
+    DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+  // Chunking logic for context phase — process in chunks.
+  // Mirrors DecoderOnly_State::RunWithChunking.
+  size_t num_tokens = next_tokens.size();
+  size_t processed_tokens = 0;
+  int length = total_length - static_cast<int>(num_tokens);
+
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+  while (processed_tokens < num_tokens) {
+    size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
+    auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
+    length = length + static_cast<int>(current_chunk_size);
+
+    UpdateInputsOutputs(chunk_tokens, next_indices, length);
+
+    bool graph_capture_this_run = false;  // Disable during chunking
+    State::Run(*model_.sessions_.at("decoder"), graph_capture_this_run);
+
+    processed_tokens += current_chunk_size;
+  }
+
+  return logits_.Get();
+}
+
 void PipelineConfigState::RunFlowStep(
     const PipelineConfig::FlowStep& step,
     int total_length,
@@ -205,10 +233,18 @@ void PipelineConfigState::RunFlowStep(
 DeviceSpan<float> PipelineConfigState::Run(
     int total_length, DeviceSpan<int32_t>& next_tokens,
     DeviceSpan<int32_t> next_indices) {
-  UpdateInputsOutputs(next_tokens, next_indices, total_length);
-
   if (!model_.flow_interpreter_->IsMultiSession()) {
-    // Single session (decoder-only): simple path matching DecoderOnly_State
+    // Single session (decoder-only): handle chunking if configured
+    const auto& chunk_size_opt = model_.config_->search.chunk_size;
+    size_t num_tokens = next_tokens.size();
+
+    if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
+        num_tokens > chunk_size_opt.value()) {
+      return RunDecoderWithChunking(total_length, next_tokens, next_indices,
+                                    chunk_size_opt.value());
+    }
+
+    UpdateInputsOutputs(next_tokens, next_indices, total_length);
     if (model_.config_->model.decoder.run_options.has_value()) {
       State::SetRunOptions(model_.config_->model.decoder.run_options.value());
     }
@@ -219,6 +255,8 @@ DeviceSpan<float> PipelineConfigState::Run(
   }
 
   // Multi-session pipeline execution
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+
   if (is_prompt_) {
     // Run prompt-only steps (vision, encoder, etc.)
     for (const auto& step : model_.flow_interpreter_->prompt_steps()) {
@@ -257,9 +295,28 @@ void PipelineConfigState::UpdateInputsOutputs(
     int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
-  position_inputs_->Update(next_tokens, total_length,
+
+  // Determine effective lengths for position_ids and KV cache
+  // based on sliding window config (mirrors DecoderOnly_State behavior)
+  int position_length = total_length;
+  int kv_cache_length = total_length;
+
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0) {
+    const int window_size = model_.config_->model.decoder.sliding_window->window_size;
+
+    if (model_.config_->model.decoder.sliding_window->slide_inputs) {
+      position_length = std::min(total_length, window_size);
+    }
+
+    if (model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+      kv_cache_length = std::min(total_length, window_size);
+    }
+  }
+
+  position_inputs_->Update(next_tokens, position_length,
                            static_cast<int>(new_length));
-  if (kv_cache_) kv_cache_->Update(beam_indices, total_length);
+  if (kv_cache_) kv_cache_->Update(beam_indices, kv_cache_length);
   logits_.Update(next_tokens, new_length);
 }
 
