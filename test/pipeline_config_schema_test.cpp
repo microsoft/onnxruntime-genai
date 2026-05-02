@@ -29,8 +29,8 @@ TEST(PipelinePresets, AutoRegressiveDecoder) {
   EXPECT_EQ(config.flow[0].run, "decoder");
   EXPECT_EQ(config.flow[0].when, "always");
 
-  EXPECT_EQ(config.state.kv_cache.format, "auto");
-  EXPECT_EQ(config.state.position_ids.strategy, "auto");
+  EXPECT_EQ(config.state.kv_cache.format.value_or(""), "auto");
+  EXPECT_EQ(config.state.position_ids.strategy.value_or(""), "auto");
 }
 
 TEST(PipelinePresets, VisionLanguage) {
@@ -136,8 +136,32 @@ TEST(PipelinePresets, OverrideStateFields) {
   overrides.state.position_ids.strategy = "mrope_3d";
 
   ApplyOverrides(base, overrides);
-  EXPECT_EQ(base.state.kv_cache.format, "windowed");
-  EXPECT_EQ(base.state.position_ids.strategy, "mrope_3d");
+  EXPECT_EQ(base.state.kv_cache.format.value_or(""), "windowed");
+  EXPECT_EQ(base.state.position_ids.strategy.value_or(""), "mrope_3d");
+}
+
+TEST(PipelinePresets, OverrideAutoValueApplies) {
+  // Regression test: explicitly setting "auto" should override a non-auto preset value
+  auto base = GetPreset("autoregressive-decoder");
+  base.state.kv_cache.format = "windowed";  // Simulate a preset with non-auto default
+
+  PipelineConfig overrides;
+  overrides.state.kv_cache.format = "auto";  // Explicitly set back to auto
+
+  ApplyOverrides(base, overrides);
+  EXPECT_EQ(base.state.kv_cache.format.value_or(""), "auto");
+}
+
+TEST(PipelinePresets, UnsetOverrideDoesNotClobber) {
+  // When an override field is not set (nullopt), the base value should be preserved
+  auto base = GetPreset("autoregressive-decoder");
+  base.state.kv_cache.format = "windowed";
+
+  PipelineConfig overrides;
+  // overrides.state.kv_cache.format is nullopt (not set)
+
+  ApplyOverrides(base, overrides);
+  EXPECT_EQ(base.state.kv_cache.format.value_or(""), "windowed");  // Preserved
 }
 
 // ============================================================================
@@ -273,7 +297,7 @@ TEST(V1Translator, QwenVLGetsSpecialPositionStrategy) {
   v1.model.embedding.filename = "embed.onnx";
   auto pipeline = TranslateV1Config(v1);
 
-  EXPECT_EQ(pipeline.state.position_ids.strategy, "mrope_3d");
+  EXPECT_EQ(pipeline.state.position_ids.strategy.value_or(""), "mrope_3d");
 }
 
 TEST(V1Translator, WhisperTranslatesToEncoderDecoder) {

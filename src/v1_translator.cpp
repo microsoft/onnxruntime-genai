@@ -54,15 +54,18 @@ PipelineConfig TranslateV1Config(const Config& v1) {
     }
 
     // VLM-specific: propagate vision I/O name overrides via dataflow
-    // (dataflow wires use tensor names from the v1 config)
-    if (!config.dataflow.empty()) {
-      const auto& vision_outputs = v1.model.vision.outputs;
-      if (!vision_outputs.image_features.empty()) {
-        config.dataflow[0].from_output = vision_outputs.image_features;
-      }
-      const auto& embed_inputs = v1.model.embedding.inputs;
-      if (!embed_inputs.image_features.empty()) {
-        config.dataflow[0].to_input = embed_inputs.image_features;
+    // Find the vision→embedding wire by session names (not hardcoded index)
+    const auto& vision_outputs = v1.model.vision.outputs;
+    const auto& embed_inputs = v1.model.embedding.inputs;
+    for (auto& wire : config.dataflow) {
+      if (wire.from_session == "vision" && wire.to_session == "embedding") {
+        if (!vision_outputs.image_features.empty()) {
+          wire.from_output = vision_outputs.image_features;
+        }
+        if (!embed_inputs.image_features.empty()) {
+          wire.to_input = embed_inputs.image_features;
+        }
+        break;
       }
     }
 

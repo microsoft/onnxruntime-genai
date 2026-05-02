@@ -55,7 +55,7 @@ struct PipelineConfig {
   // State configuration controls how KV cache and position IDs are managed.
   struct StateConfig {
     struct KVCache {
-      std::string format{"auto"};  // "auto", "default", "cross", "windowed"
+      std::optional<std::string> format;  // "auto", "default", "cross", "windowed"; nullopt = use preset default
       std::optional<std::string> past_key_pattern;
       std::optional<std::string> present_key_pattern;
       std::optional<std::string> past_value_pattern;
@@ -63,7 +63,7 @@ struct PipelineConfig {
     } kv_cache;
 
     struct PositionIds {
-      std::string strategy{"auto"};  // "auto", "default", "mrope_3d"
+      std::optional<std::string> strategy;  // "auto", "default", "mrope_3d"; nullopt = use preset default
     } position_ids;
   } state;
 

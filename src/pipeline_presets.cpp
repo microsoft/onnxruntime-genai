@@ -150,8 +150,8 @@ void ApplyOverrides(PipelineConfig& base, const PipelineConfig& overrides) {
     base.dataflow = overrides.dataflow;
   }
 
-  // State: override individual fields if set
-  if (overrides.state.kv_cache.format != "auto") {
+  // State: override individual fields only when explicitly set (has_value)
+  if (overrides.state.kv_cache.format.has_value()) {
     base.state.kv_cache.format = overrides.state.kv_cache.format;
   }
   if (overrides.state.kv_cache.past_key_pattern.has_value()) {
@@ -166,7 +166,7 @@ void ApplyOverrides(PipelineConfig& base, const PipelineConfig& overrides) {
   if (overrides.state.kv_cache.present_value_pattern.has_value()) {
     base.state.kv_cache.present_value_pattern = overrides.state.kv_cache.present_value_pattern;
   }
-  if (overrides.state.position_ids.strategy != "auto") {
+  if (overrides.state.position_ids.strategy.has_value()) {
     base.state.position_ids.strategy = overrides.state.position_ids.strategy;
   }
 }
