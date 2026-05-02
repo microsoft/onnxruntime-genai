@@ -83,6 +83,8 @@ struct Config {
 
   fs::path config_path;  // Path of the config directory
 
+  int version{1};  // Config schema version (1 = legacy string dispatch, 2 = pipeline-as-config)
+
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
     std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU

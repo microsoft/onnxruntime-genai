@@ -1494,8 +1494,12 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
-  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
-    // No top-level scalar values currently supported
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "version") {
+      config_.version = static_cast<int>(JSON::Get<double>(value));
+      return;
+    }
+    // Ignore unknown top-level scalars for forward compatibility
   }
 
   Element& OnObject(std::string_view name) override {
