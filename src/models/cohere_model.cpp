@@ -219,16 +219,21 @@ static std::string StripAsciiWhitespace(const std::string& s) {
 // to terminate each chunk with sentence-final punctuation even when the audio
 // continues mid-thought, so naive concatenation produces seams like
 //     "...payment related scams. In the UK come from..."
-// To avoid this we strip trailing whitespace + punctuation + special tokens
+// This is how the original PyTorch model works as well and how it was trained.
+// However, to avoid this and minimize the impact we apply the following heuristic
+// Strip trailing whitespace + punctuation + special tokens
 // from each non-final chunk before committing. Punctuation set is
-// multilingual (ASCII + Spanish + smart-quotes + ellipsis/em-dash).
+// multilingual (ASCII + smart-quotes + ellipsis/em-dash).
 //
-// Special tokens for this tokenizer are the first 16 added_tokens (IDs 0..15
-// are contiguous), so we treat token id < 16 as "always strip".
+// IDs 0..15 are this tokenizer's structural/control tokens (BOS/EOS/pad,
+// <|startoftranscript|>, <|pnc|>/<|nopnc|>, <|itn|>/<|noitn|>, timestamp,
+// diarize, spkchange, audioseparator). IDs 16+ are categorical tags (emotion,
+// language, etc.) which the model wouldn't normally emit mid-decode anyway.
+// We treat id < 16 as "always strip" at chunk seams.
 
 namespace {
 
-constexpr int32_t kSpecialTokenIdMax = 16;  // IDs 0..15 are added_tokens (special).
+constexpr int32_t kSpecialTokenIdMax = 16;  // IDs 0..15 are structural/control tokens; see comment above.
 
 // All UTF-8 punctuation/symbol byte sequences we treat as "trailing junk" at
 // chunk boundaries. Multilingual: ASCII sentence-end + Spanish inverted marks
@@ -366,10 +371,9 @@ void CohereState::CommitChunkText(const std::vector<int32_t>& chunk_tokens,
 
 
 DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
-  size_t n = std::min(streamed_tokens_count_, committed_tokens_.size());
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   return cpu->WrapMemory<int32_t>(
-      std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), n));
+      std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), streamed_tokens_count_));
 }
 
 DeviceSpan<float> CohereState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
