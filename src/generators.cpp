@@ -622,10 +622,8 @@ void Generator::GenerateNextToken() {
 
   // Cohere: advance the user-visible stream by one committed token per call.
   // If no unstreamed committed token is available, run subsequent chunks
-  // end-to-end (decode until EOS, strip trailing boundary tokens, append
-  // to the committed buffer) until a token becomes available or all chunks
-  // are exhausted. The multi-chunk decoding is hidden from the caller; only
-  // committed tokens are exposed via GetSequence().
+  // end-to-end until a token becomes available or all chunks
+  // are exhausted.
   if (is_cohere_model_) {
     auto* cs = static_cast<CohereState*>(state_.get());
     if (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {

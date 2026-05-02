@@ -48,8 +48,6 @@ struct CohereState : State {
 
   // Multi-chunk support
   bool HasMoreChunks() const { return current_chunk_ + 1 < total_chunks_; }
-  int CurrentChunk() const { return current_chunk_; }
-  int TotalChunks() const { return total_chunks_; }
   bool AdvanceToNextChunk();  // Returns true if advanced, false if no more chunks
   const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
   void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
@@ -57,10 +55,7 @@ struct CohereState : State {
   // ----- Streaming (committed) state, all internal -----
   // The Generator uses these to expose an incremental token stream through
   // the standard API (GetSequence + GenerateNextToken). Chunks are emitted by
-  // the processor without audio overlap; the only cleanup performed at chunk
-  // boundaries is stripping trailing whitespace/punctuation/special tokens
-  // from each non-final chunk so seams like "...scams. " + "In the UK..."
-  // don't surface awkward dot-then-capital fragments.
+  // the processor without audio overlap
   void CommitChunkText(const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
   size_t StreamedTokensCount() const { return streamed_tokens_count_; }
   void AdvanceStreamedTokensCount() { ++streamed_tokens_count_; }
@@ -84,8 +79,8 @@ struct CohereState : State {
   // Multi-chunk state
   int current_chunk_{0};
   int total_chunks_{1};
-  std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // Remaining chunk mel tensors
-  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // Remaining chunk mel_length tensors
+  std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // All chunk mel tensors (indexed by current_chunk_)
+  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // All chunk mel_length tensors (indexed by current_chunk_)
   std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
 
   // Streaming state

@@ -142,7 +142,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
-    float norm_eps{};  // Per-feature normalize epsilon (Cohere Transcribe)
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -153,9 +153,9 @@ struct Config {
     int max_symbols_per_step{};
 
     // Cohere Transcribe chunking parameters
-    float max_audio_clip_s{};        // Maximum audio chunk length in seconds
-    float boundary_chunk_s{};        // Energy-search window at chunk tail for boundary detection (seconds)
-    int min_energy_window_samples{}; // Energy frame size and stride (samples) for boundary search
+    float max_audio_clip_s{};
+    float boundary_chunk_s{};
+    int min_energy_window_samples{};
 
     struct Encoder {
       std::string filename;
@@ -167,7 +167,7 @@ struct Config {
       int num_hidden_layers{};
       int num_key_value_heads{};
       int head_size{};
-      int audio_stride{};  // Raw audio samples per encoder output frame (0 = disabled, e.g. 1280 for Cohere Transcribe)
+      int audio_stride{};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};

@@ -18,13 +18,13 @@ import onnxruntime_genai as og
 # (e.g. "twenty twenty four", "five dollars", "three p m"). Swap to "<|noitn|>"
 # to get written/numeric form instead ("2024", "$5", "3 PM"), which is usually
 # what end users want.
-# <|pnc|> enables Punctuation aNd Capitalization (sentence-case + commas,
+# <|pnc|> enables Punctuation and Capitalization (sentence-case + commas,
 # periods, etc). Swap to "<|nopnc|>" for lowercase, punctuation-free output.
 # Additionally, swap <|en|> for a different language (e.g. <|es|> for Spanish)
 # if the audio is not English.
 # Other tags should largely remain as it is.
 PROMPT_TOKENS = [
-    "<|startofcontext|>", "<|startoftranscript|>", "<|en|>", "<|en|>", "<|pnc|>", "<|itn|>",
+    "<|startofcontext|>", "<|startoftranscript|>", "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>",
 ]
 
 def run(args):
