@@ -53,6 +53,7 @@ struct PipelineConfigState : State {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+  void Finalize(int current_length) override;
   void RewindTo(size_t index) override;
 
   OrtValue* GetInput(const char* name) override;

@@ -216,23 +216,23 @@ DeviceSpan<float> PipelineConfigState::Run(
     DeviceSpan<int32_t> next_indices) {
   // Multi-session pipeline execution
   if (is_prompt_) {
-    for (const auto& step : model_.flow_interpreter_->prompt_steps()) {
+    for (const auto& step : model_.flow_interpreter_->init_steps()) {
       RunFlowStep(step, total_length, next_tokens, next_indices);
     }
   }
 
-  for (const auto& step : model_.flow_interpreter_->always_steps()) {
+  for (const auto& step : model_.flow_interpreter_->step_steps()) {
     RunFlowStep(step, total_length, next_tokens, next_indices);
   }
 
   if (is_prompt_) {
     is_prompt_ = false;
-    // Clear prompt-only intermediates from both maps
-    const auto& prompt_sessions = model_.flow_interpreter_->prompt_only_sessions();
+    // Clear init-only intermediates from both maps
+    const auto& init_sessions = model_.flow_interpreter_->init_only_sessions();
     for (auto it = intermediates_.begin(); it != intermediates_.end();) {
       auto dot = it->first.find('.');
       if (dot != std::string::npos &&
-          prompt_sessions.count(it->first.substr(0, dot))) {
+          init_sessions.count(it->first.substr(0, dot))) {
         intermediate_owned_.erase(it->first);
         it = intermediates_.erase(it);
       } else {
@@ -243,6 +243,16 @@ DeviceSpan<float> PipelineConfigState::Run(
 
   // Logits were populated by DecoderOnly_State::Run inside RunFlowStep("decoder")
   return last_logits_;
+}
+
+void PipelineConfigState::Finalize(int current_length) {
+  // Run final-phase steps (e.g., TTS vocoder, diffusion VAE decode).
+  // These execute once after the generation loop completes.
+  DeviceSpan<int32_t> empty_tokens;
+  for (const auto& step : model_.flow_interpreter_->final_steps()) {
+    RunFlowStep(step, current_length, empty_tokens, {});
+  }
+  decoder_state_->Finalize(current_length);
 }
 
 void PipelineConfigState::RewindTo(size_t index) {

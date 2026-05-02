@@ -21,7 +21,7 @@ PipelineConfig MakeAutoRegressiveDecoder() {
   // Run decoder every step
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
   });
 
   // Default KV cache + position ID state
@@ -48,19 +48,19 @@ PipelineConfig MakeVisionLanguage() {
       .role = "decoder",
   };
 
-  // Flow: vision runs once on prompt, embedding on prompt, decoder always
+  // Flow: vision runs once on init, embedding on init, decoder every step
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "vision",
-      .when = "prompt",
+      .when = "init",
       .loop = "per_image",
   });
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "embedding",
-      .when = "prompt",
+      .when = "init",
   });
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
   });
 
   // Wire vision output → embedding input
@@ -97,14 +97,14 @@ PipelineConfig MakeEncoderDecoder() {
       .role = "decoder",
   };
 
-  // Encoder runs once on prompt, decoder runs every step
+  // Encoder runs once on init, decoder runs every step
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "encoder",
-      .when = "once",
+      .when = "init",
   });
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
   });
 
   // Wire encoder output → decoder cross-attention input
@@ -168,6 +168,11 @@ void ApplyOverrides(PipelineConfig& base, const PipelineConfig& overrides) {
   }
   if (overrides.state.position_ids.strategy.has_value()) {
     base.state.position_ids.strategy = overrides.state.position_ids.strategy;
+  }
+
+  // Generation loop: override if explicitly set
+  if (overrides.generation_loop.has_value()) {
+    base.generation_loop = overrides.generation_loop;
   }
 }
 

@@ -27,7 +27,7 @@ TEST(PipelinePresets, AutoRegressiveDecoder) {
 
   ASSERT_EQ(config.flow.size(), 1u);
   EXPECT_EQ(config.flow[0].run, "decoder");
-  EXPECT_EQ(config.flow[0].when, "always");
+  EXPECT_EQ(config.flow[0].when, "step");
 
   EXPECT_EQ(config.state.kv_cache.format.value_or(""), "auto");
   EXPECT_EQ(config.state.position_ids.strategy.value_or(""), "auto");
@@ -46,12 +46,12 @@ TEST(PipelinePresets, VisionLanguage) {
 
   ASSERT_EQ(config.flow.size(), 3u);
   EXPECT_EQ(config.flow[0].run, "vision");
-  EXPECT_EQ(config.flow[0].when, "prompt");
+  EXPECT_EQ(config.flow[0].when, "init");
   EXPECT_EQ(config.flow[0].loop, "per_image");
   EXPECT_EQ(config.flow[1].run, "embedding");
-  EXPECT_EQ(config.flow[1].when, "prompt");
+  EXPECT_EQ(config.flow[1].when, "init");
   EXPECT_EQ(config.flow[2].run, "decoder");
-  EXPECT_EQ(config.flow[2].when, "always");
+  EXPECT_EQ(config.flow[2].when, "step");
 
   ASSERT_GE(config.dataflow.size(), 2u);
   EXPECT_EQ(config.dataflow[0].from_session, "vision");
@@ -68,9 +68,9 @@ TEST(PipelinePresets, EncoderDecoder) {
 
   ASSERT_EQ(config.flow.size(), 2u);
   EXPECT_EQ(config.flow[0].run, "encoder");
-  EXPECT_EQ(config.flow[0].when, "once");
+  EXPECT_EQ(config.flow[0].when, "init");
   EXPECT_EQ(config.flow[1].run, "decoder");
-  EXPECT_EQ(config.flow[1].when, "always");
+  EXPECT_EQ(config.flow[1].when, "step");
 
   ASSERT_EQ(config.dataflow.size(), 1u);
   EXPECT_EQ(config.dataflow[0].from_session, "encoder");
@@ -106,7 +106,7 @@ TEST(PipelinePresets, OverrideFlowReplacesEntirely) {
   PipelineConfig overrides;
   overrides.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
   });
 
   ApplyOverrides(base, overrides);
@@ -197,7 +197,7 @@ TEST(PipelineValidation, InvalidLoopValueThrows) {
   config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
       .loop = "invalid_loop",
   });
 
@@ -261,7 +261,7 @@ TEST(V1Translator, LLMTranslatesToAutoRegressiveDecoder) {
   ASSERT_GE(pipeline.flow.size(), 1u);
   bool has_decoder_flow = false;
   for (const auto& step : pipeline.flow) {
-    if (step.run == "decoder" && step.when == "always") {
+    if (step.run == "decoder" && step.when == "step") {
       has_decoder_flow = true;
     }
   }
@@ -355,7 +355,7 @@ TEST(V1Translator, MarianSSRUTranslatesToEncoderDecoder) {
   // Should have encoder→decoder flow
   ASSERT_GE(pipeline.flow.size(), 2u);
   EXPECT_EQ(pipeline.flow[0].run, "encoder");
-  EXPECT_EQ(pipeline.flow[0].when, "once");
+  EXPECT_EQ(pipeline.flow[0].when, "init");
 }
 
 TEST(V1Translator, AllLLMTypesTranslateComprehensive) {
@@ -394,11 +394,11 @@ TEST(PipelineEdgeCases, ComplexMultiSessionDataflow) {
   config.sessions["embedding"] = PipelineConfig::Session{.file = "embed.onnx", .role = "embedding"};
   config.sessions["decoder"] = PipelineConfig::Session{.file = "decoder.onnx", .role = "decoder"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "preprocessor", .when = "once"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "vision", .when = "prompt", .loop = "per_image"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "projector", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "embedding", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "preprocessor", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "vision", .when = "init", .loop = "per_image"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "projector", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "embedding", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "step"});
 
   // Chain wiring: each session feeds the next
   config.dataflow.push_back(PipelineConfig::DataflowWire{
@@ -426,46 +426,46 @@ TEST(PipelineEdgeCases, StandaloneSessionNoDataflow) {
   config.sessions["standalone"] = PipelineConfig::Session{.file = "standalone.onnx", .role = "custom"};
   config.sessions["decoder"] = PipelineConfig::Session{.file = "decoder.onnx", .role = "decoder"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "standalone", .when = "once"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "standalone", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "step"});
   // No dataflow wires — standalone session has its own inputs/outputs
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
   EXPECT_TRUE(config.dataflow.empty());
 }
 
-TEST(PipelineEdgeCases, FlowWithOnlyOnceSteps) {
-  // All flow steps are 'once' — no 'always' or 'prompt' steps
+TEST(PipelineEdgeCases, FlowWithOnlyInitSteps) {
+  // All flow steps are 'init' — no 'step' or 'final' steps
   PipelineConfig config;
   config.sessions["init_a"] = PipelineConfig::Session{.file = "a.onnx"};
   config.sessions["init_b"] = PipelineConfig::Session{.file = "b.onnx"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "init_a", .when = "once"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "init_b", .when = "once"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "init_a", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "init_b", .when = "init"});
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
 }
 
-TEST(PipelineEdgeCases, FlowWithOnlyPromptSteps) {
-  // All flow steps are 'prompt' — no 'always' or 'once' steps
+TEST(PipelineEdgeCases, FlowWithOnlyInitSteps2) {
+  // All flow steps are 'init' — using different sessions
   PipelineConfig config;
   config.sessions["encoder"] = PipelineConfig::Session{.file = "enc.onnx"};
   config.sessions["projector"] = PipelineConfig::Session{.file = "proj.onnx"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "encoder", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "projector", .when = "prompt"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "encoder", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "projector", .when = "init"});
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
 }
 
-TEST(PipelineEdgeCases, FlowWithOnlyAlwaysSteps) {
+TEST(PipelineEdgeCases, FlowWithOnlyStepSteps) {
   // Multiple sessions all running every step
   PipelineConfig config;
   config.sessions["decoder_a"] = PipelineConfig::Session{.file = "a.onnx"};
   config.sessions["decoder_b"] = PipelineConfig::Session{.file = "b.onnx"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder_a", .when = "always"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder_b", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder_a", .when = "step"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder_b", .when = "step"});
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
 }
@@ -516,7 +516,7 @@ TEST(PipelineEdgeCases, LargeFlowManySessions) {
     };
     config.flow.push_back(PipelineConfig::FlowStep{
         .run = name,
-        .when = i == 9 ? "always" : "prompt",
+        .when = i == 9 ? "step" : "init",
     });
     // Wire each session to the next
     if (i > 0) {
@@ -544,10 +544,10 @@ TEST(PipelineEdgeCases, DiamondDataflowTopology) {
   config.sessions["c"] = PipelineConfig::Session{.file = "c.onnx"};
   config.sessions["d"] = PipelineConfig::Session{.file = "d.onnx", .role = "decoder"};
 
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "a", .when = "once"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "b", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "c", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "d", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "a", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "b", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "c", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "d", .when = "step"});
 
   config.dataflow.push_back(PipelineConfig::DataflowWire{
       .from_session = "a", .from_output = "out1",
@@ -584,7 +584,7 @@ TEST(PipelineEdgeCases, SessionWithEmptyFile) {
   // (runtime will fail when loading, but schema validation shouldn't reject it)
   PipelineConfig config;
   config.sessions["decoder"] = PipelineConfig::Session{.file = "", .role = "decoder"};
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "step"});
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
 }
@@ -593,8 +593,8 @@ TEST(PipelineEdgeCases, DuplicateSessionInFlow) {
   // Same session referenced multiple times in flow (valid — runs multiple times)
   PipelineConfig config;
   config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "prompt"});
-  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "step"});
 
   EXPECT_NO_THROW(ValidatePipelineConfig(config));
 }
@@ -605,7 +605,7 @@ TEST(PipelineEdgeCases, EmptyLoopStringIsValid) {
   config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
   config.flow.push_back(PipelineConfig::FlowStep{
       .run = "decoder",
-      .when = "always",
+      .when = "step",
       .loop = "",
   });
 
@@ -667,6 +667,197 @@ TEST(V1Translator, FaraGetsSpecialPositionStrategy) {
   auto pipeline = TranslateV1Config(v1);
 
   EXPECT_EQ(pipeline.state.position_ids.strategy.value_or(""), "mrope_3d");
+}
+
+// ============================================================================
+// Init/Step/Final vocabulary and normalization tests
+// ============================================================================
+
+TEST(PipelineValidation, InitStepFinalVocabulary) {
+  // Valid: init, step, final
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx", .role = "decoder"};
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "step"}};
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+
+  config.sessions["vision"] = PipelineConfig::Session{.file = "vision.onnx", .role = "vision"};
+  config.flow = {PipelineConfig::FlowStep{.run = "vision", .when = "init"},
+                 PipelineConfig::FlowStep{.run = "decoder", .when = "step"}};
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+
+  config.sessions["vocoder"] = PipelineConfig::Session{.file = "vocoder.onnx", .role = "vocoder"};
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "step"},
+                 PipelineConfig::FlowStep{.run = "vocoder", .when = "final"}};
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+}
+
+TEST(PipelineValidation, BackwardCompatAliases) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx", .role = "decoder"};
+
+  // "always" → "step"
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "always"}};
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "step");
+
+  // "prompt" → "init"
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "prompt"}};
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+
+  // "once" → "init"
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "once"}};
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+}
+
+TEST(PipelineValidation, GenerationLoopValues) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx", .role = "decoder"};
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "step"}};
+
+  config.generation_loop = "autoregressive";
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+
+  config.generation_loop = "single_pass";
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+
+  config.generation_loop = "denoising";
+  EXPECT_THROW(ValidatePipelineConfig(config), std::runtime_error);
+
+  config.generation_loop = "unknown_loop";
+  EXPECT_THROW(ValidatePipelineConfig(config), std::runtime_error);
+}
+
+TEST(PipelineValidation, InvalidWhenValueThrowsNewVocab) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx", .role = "decoder"};
+  config.flow = {PipelineConfig::FlowStep{.run = "decoder", .when = "invalid_when"}};
+  EXPECT_THROW(ValidatePipelineConfig(config), std::runtime_error);
+}
+
+TEST(PipelineValidation, DefaultWhenIsStep) {
+  // Default-constructed FlowStep should have when == "step"
+  PipelineConfig::FlowStep step;
+  step.run = "decoder";
+  EXPECT_EQ(step.when, "step");
+}
+
+TEST(PipelinePresets, ExtendsWithOverride) {
+  auto base = GetPreset("autoregressive-decoder");
+  PipelineConfig overrides;
+  overrides.sessions["decoder"] = PipelineConfig::Session{.file = "custom.onnx", .role = "decoder"};
+  ApplyOverrides(base, overrides);
+  EXPECT_EQ(base.sessions.at("decoder").file, "custom.onnx");
+}
+
+TEST(PipelineValidation, DefaultGenerationLoop) {
+  // Default-constructed PipelineConfig has no generation_loop set (nullopt).
+  // Validation resolves to "autoregressive" via value_or().
+  PipelineConfig config;
+  EXPECT_FALSE(config.generation_loop.has_value());
+  EXPECT_EQ(config.generation_loop.value_or("autoregressive"), "autoregressive");
+}
+
+// ============================================================================
+// Alias normalization tests
+// ============================================================================
+
+TEST(PipelineNormalization, PromptNormalizesToInit) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "prompt"});
+
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+}
+
+TEST(PipelineNormalization, OnceNormalizesToInit) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "once"});
+
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+}
+
+TEST(PipelineNormalization, AlwaysNormalizesToStep) {
+  PipelineConfig config;
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "model.onnx"};
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});
+
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "step");
+}
+
+TEST(PipelineNormalization, NativeValuesUnchanged) {
+  PipelineConfig config;
+  config.sessions["a"] = PipelineConfig::Session{.file = "a.onnx"};
+  config.sessions["b"] = PipelineConfig::Session{.file = "b.onnx"};
+  config.sessions["c"] = PipelineConfig::Session{.file = "c.onnx"};
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "a", .when = "init"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "b", .when = "step"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "c", .when = "final"});
+
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+  EXPECT_EQ(config.flow[1].when, "step");
+  EXPECT_EQ(config.flow[2].when, "final");
+}
+
+TEST(PipelineNormalization, MixedAliasesAndNative) {
+  // A config mixing old aliases and new native values
+  PipelineConfig config;
+  config.sessions["vision"] = PipelineConfig::Session{.file = "v.onnx"};
+  config.sessions["embed"] = PipelineConfig::Session{.file = "e.onnx"};
+  config.sessions["decoder"] = PipelineConfig::Session{.file = "d.onnx"};
+  config.sessions["cleanup"] = PipelineConfig::Session{.file = "c.onnx"};
+
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "vision", .when = "prompt"});   // alias → init
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "embed", .when = "init"});      // native
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "decoder", .when = "always"});  // alias → step
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "cleanup", .when = "final"});   // native
+
+  NormalizePipelineConfig(config);
+  EXPECT_EQ(config.flow[0].when, "init");
+  EXPECT_EQ(config.flow[1].when, "init");
+  EXPECT_EQ(config.flow[2].when, "step");
+  EXPECT_EQ(config.flow[3].when, "final");
+}
+
+TEST(PipelineNormalization, NormalizedConfigPassesValidation) {
+  // End-to-end: config with aliases → normalize → validate
+  PipelineConfig config;
+  config.sessions["enc"] = PipelineConfig::Session{.file = "enc.onnx"};
+  config.sessions["dec"] = PipelineConfig::Session{.file = "dec.onnx"};
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "enc", .when = "once"});
+  config.flow.push_back(PipelineConfig::FlowStep{.run = "dec", .when = "always"});
+
+  NormalizePipelineConfig(config);
+  EXPECT_NO_THROW(ValidatePipelineConfig(config));
+}
+
+TEST(PipelinePresets, OverrideGenerationLoop) {
+  auto base = GetPreset("autoregressive-decoder");
+  // Preset has no explicit generation_loop (nullopt → defaults to "autoregressive")
+  EXPECT_EQ(base.generation_loop.value_or("autoregressive"), "autoregressive");
+
+  PipelineConfig overrides;
+  overrides.generation_loop = "single_pass";
+
+  ApplyOverrides(base, overrides);
+  EXPECT_EQ(base.generation_loop.value(), "single_pass");
+}
+
+TEST(PipelinePresets, DefaultGenerationLoopDoesNotOverride) {
+  auto base = GetPreset("autoregressive-decoder");
+  base.generation_loop = "denoising";  // Simulate a preset with non-default
+
+  PipelineConfig overrides;
+  // overrides.generation_loop is nullopt — should not clobber
+
+  ApplyOverrides(base, overrides);
+  EXPECT_EQ(base.generation_loop.value(), "denoising");  // Preserved
 }
 
 }  // namespace Generators::test

@@ -23,9 +23,9 @@ TEST(FlowInterpreter, DecoderOnlyIsNotMultiSession) {
   FlowInterpreter interpreter(config);
 
   EXPECT_FALSE(interpreter.IsMultiSession());
-  EXPECT_TRUE(interpreter.prompt_steps().empty());
-  ASSERT_EQ(interpreter.always_steps().size(), 1u);
-  EXPECT_EQ(interpreter.always_steps()[0].run, "decoder");
+  EXPECT_TRUE(interpreter.init_steps().empty());
+  ASSERT_EQ(interpreter.step_steps().size(), 1u);
+  EXPECT_EQ(interpreter.step_steps()[0].run, "decoder");
 }
 
 TEST(FlowInterpreter, VLMIsMultiSession) {
@@ -35,26 +35,26 @@ TEST(FlowInterpreter, VLMIsMultiSession) {
   EXPECT_TRUE(interpreter.IsMultiSession());
 }
 
-TEST(FlowInterpreter, VLMPromptStepsPartitioned) {
+TEST(FlowInterpreter, VLMInitStepsPartitioned) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Vision runs on prompt only, embedding runs on prompt only
-  ASSERT_EQ(interpreter.prompt_steps().size(), 2u);
-  EXPECT_EQ(interpreter.prompt_steps()[0].run, "vision");
-  EXPECT_EQ(interpreter.prompt_steps()[0].when, "prompt");
-  EXPECT_EQ(interpreter.prompt_steps()[1].run, "embedding");
-  EXPECT_EQ(interpreter.prompt_steps()[1].when, "prompt");
+  // Vision runs on init only, embedding runs on init only
+  ASSERT_EQ(interpreter.init_steps().size(), 2u);
+  EXPECT_EQ(interpreter.init_steps()[0].run, "vision");
+  EXPECT_EQ(interpreter.init_steps()[0].when, "init");
+  EXPECT_EQ(interpreter.init_steps()[1].run, "embedding");
+  EXPECT_EQ(interpreter.init_steps()[1].when, "init");
 }
 
-TEST(FlowInterpreter, VLMAlwaysStepsPartitioned) {
+TEST(FlowInterpreter, VLMStepStepsPartitioned) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Decoder runs always
-  ASSERT_EQ(interpreter.always_steps().size(), 1u);
-  EXPECT_EQ(interpreter.always_steps()[0].run, "decoder");
-  EXPECT_EQ(interpreter.always_steps()[0].when, "always");
+  // Decoder runs every step
+  ASSERT_EQ(interpreter.step_steps().size(), 1u);
+  EXPECT_EQ(interpreter.step_steps()[0].run, "decoder");
+  EXPECT_EQ(interpreter.step_steps()[0].when, "step");
 }
 
 TEST(FlowInterpreter, EncoderDecoderPartitioning) {
@@ -63,14 +63,14 @@ TEST(FlowInterpreter, EncoderDecoderPartitioning) {
 
   EXPECT_TRUE(interpreter.IsMultiSession());
 
-  // Encoder runs once (goes to prompt_steps)
-  ASSERT_EQ(interpreter.prompt_steps().size(), 1u);
-  EXPECT_EQ(interpreter.prompt_steps()[0].run, "encoder");
-  EXPECT_EQ(interpreter.prompt_steps()[0].when, "once");
+  // Encoder runs once (goes to init_steps)
+  ASSERT_EQ(interpreter.init_steps().size(), 1u);
+  EXPECT_EQ(interpreter.init_steps()[0].run, "encoder");
+  EXPECT_EQ(interpreter.init_steps()[0].when, "init");
 
-  // Decoder runs always
-  ASSERT_EQ(interpreter.always_steps().size(), 1u);
-  EXPECT_EQ(interpreter.always_steps()[0].run, "decoder");
+  // Decoder runs every step
+  ASSERT_EQ(interpreter.step_steps().size(), 1u);
+  EXPECT_EQ(interpreter.step_steps()[0].run, "decoder");
 }
 
 // ============================================================================
@@ -164,11 +164,11 @@ TEST(FlowInterpreter, PromptOnlySessionsIdentified) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Vision and embedding are prompt-only (not in always_steps)
-  const auto& prompt_only = interpreter.prompt_only_sessions();
-  EXPECT_TRUE(prompt_only.count("vision"));
-  EXPECT_TRUE(prompt_only.count("embedding"));
-  EXPECT_FALSE(prompt_only.count("decoder"));
+  // Vision and embedding are init-only (not in step_steps)
+  const auto& init_only = interpreter.init_only_sessions();
+  EXPECT_TRUE(init_only.count("vision"));
+  EXPECT_TRUE(init_only.count("embedding"));
+  EXPECT_FALSE(init_only.count("decoder"));
 }
 
 // ============================================================================
@@ -181,30 +181,30 @@ TEST(FlowInterpreter, CustomFlowWithMixedWhenValues) {
   config.sessions["projector"] = {.file = "proj.onnx", .role = "embedding"};
   config.sessions["decoder"] = {.file = "model.onnx", .role = "decoder"};
 
-  config.flow.push_back({.run = "encoder", .when = "once"});
-  config.flow.push_back({.run = "projector", .when = "prompt"});
-  config.flow.push_back({.run = "decoder", .when = "always"});
+  config.flow.push_back({.run = "encoder", .when = "init"});
+  config.flow.push_back({.run = "projector", .when = "init"});
+  config.flow.push_back({.run = "decoder", .when = "step"});
 
   FlowInterpreter interpreter(config);
 
   EXPECT_TRUE(interpreter.IsMultiSession());
 
-  // "once" and "prompt" go to prompt_steps
-  ASSERT_EQ(interpreter.prompt_steps().size(), 2u);
-  EXPECT_EQ(interpreter.prompt_steps()[0].run, "encoder");
-  EXPECT_EQ(interpreter.prompt_steps()[1].run, "projector");
+  // "init" goes to init_steps
+  ASSERT_EQ(interpreter.init_steps().size(), 2u);
+  EXPECT_EQ(interpreter.init_steps()[0].run, "encoder");
+  EXPECT_EQ(interpreter.init_steps()[1].run, "projector");
 
-  // "always" goes to always_steps
-  ASSERT_EQ(interpreter.always_steps().size(), 1u);
-  EXPECT_EQ(interpreter.always_steps()[0].run, "decoder");
+  // "step" goes to step_steps
+  ASSERT_EQ(interpreter.step_steps().size(), 1u);
+  EXPECT_EQ(interpreter.step_steps()[0].run, "decoder");
 }
 
 TEST(FlowInterpreter, DataflowAccessors) {
   PipelineConfig config;
   config.sessions["a"] = {.file = "a.onnx", .role = "encoder"};
   config.sessions["b"] = {.file = "b.onnx", .role = "decoder"};
-  config.flow.push_back({.run = "a", .when = "once"});
-  config.flow.push_back({.run = "b", .when = "always"});
+  config.flow.push_back({.run = "a", .when = "init"});
+  config.flow.push_back({.run = "b", .when = "step"});
   config.dataflow.push_back({
       .from_session = "a",
       .from_output = "hidden",

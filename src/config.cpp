@@ -1620,6 +1620,10 @@ struct Pipeline_V2_Element : JSON::Element {
       config_.extends = std::string(JSON::Get<std::string_view>(value));
       return;
     }
+    if (name == "generation_loop") {
+      config_.generation_loop = std::string(JSON::Get<std::string_view>(value));
+      return;
+    }
     throw JSON::unknown_value_error{};
   }
   Element& OnObject(std::string_view name) override {
@@ -1728,6 +1732,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
       pipeline_config = std::move(preset);
       ApplyOverrides(pipeline_config, user_overrides);
     }
+    NormalizePipelineConfig(pipeline_config);
     ValidatePipelineConfig(pipeline_config);
 
     // Sync v2 pipeline decoder session file to model.decoder.filename

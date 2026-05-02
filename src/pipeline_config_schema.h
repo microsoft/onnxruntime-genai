@@ -12,7 +12,7 @@
 //     "pipeline": {
 //       "extends": "autoregressive-decoder",
 //       "sessions": { "decoder": { "file": "model.onnx" } },
-//       "flow": [ { "run": "decoder", "when": "always" } ],
+//       "flow": [ { "run": "decoder", "when": "step" } ],
 //       "state": { "kv_cache": { "format": "auto" } }
 //     },
 //     "model": { ... },
@@ -38,7 +38,7 @@ struct PipelineConfig {
   // A flow step describes when to run a session during generation.
   struct FlowStep {
     std::string run;    // Session name (key into sessions map)
-    std::string when{"always"};  // "always" = every step, "prompt" = first step only, "once" = before generation
+    std::string when{"step"};  // "init", "step", "final"; aliases: "prompt"→"init", "always"→"step", "once"→"init"
     std::string loop;   // "" = run once, "per_image" = loop over images, "batched" = batch all inputs
   };
 
@@ -71,12 +71,18 @@ struct PipelineConfig {
   std::map<std::string, Session> sessions;
   std::vector<FlowStep> flow;
   std::vector<DataflowWire> dataflow;
+  std::optional<std::string> generation_loop;  // "autoregressive", "single_pass", "denoising"; nullopt = use preset default
 };
+
+// Normalize backward-compat aliases in a PipelineConfig:
+// "prompt"→"init", "always"→"step", "once"→"init"
+void NormalizePipelineConfig(PipelineConfig& config);
 
 // Validate a PipelineConfig for internal consistency:
 // - All flow steps reference existing sessions
 // - All dataflow wires reference existing sessions
 // - Required sessions present based on flow
+// - Valid generation_loop value
 // Throws std::runtime_error with descriptive message on failure.
 void ValidatePipelineConfig(const PipelineConfig& config);
 

@@ -25,8 +25,9 @@ struct FlowInterpreter {
   explicit FlowInterpreter(const PipelineConfig& pipeline_config);
 
   // Partitioned flow steps.  Populated at construction from pipeline_config.flow[].
-  const std::vector<PipelineConfig::FlowStep>& prompt_steps() const { return prompt_steps_; }
-  const std::vector<PipelineConfig::FlowStep>& always_steps() const { return always_steps_; }
+  const std::vector<PipelineConfig::FlowStep>& init_steps() const { return init_steps_; }
+  const std::vector<PipelineConfig::FlowStep>& step_steps() const { return step_steps_; }
+  const std::vector<PipelineConfig::FlowStep>& final_steps() const { return final_steps_; }
 
   // Returns true when the pipeline has more than just a decoder session.
   bool IsMultiSession() const { return is_multi_session_; }
@@ -41,15 +42,16 @@ struct FlowInterpreter {
   // Access the dataflow wires for inspection/debugging.
   const std::vector<PipelineConfig::DataflowWire>& dataflow() const { return dataflow_; }
 
-  // Access prompt-only session names (sessions that only run during prompt phase).
-  const std::set<std::string>& prompt_only_sessions() const { return prompt_only_sessions_; }
+  // Access init-only session names (sessions that only run during init phase).
+  const std::set<std::string>& init_only_sessions() const { return init_only_sessions_; }
 
  private:
-  std::vector<PipelineConfig::FlowStep> prompt_steps_;
-  std::vector<PipelineConfig::FlowStep> always_steps_;
+  std::vector<PipelineConfig::FlowStep> init_steps_;
+  std::vector<PipelineConfig::FlowStep> step_steps_;
+  std::vector<PipelineConfig::FlowStep> final_steps_;
   std::vector<PipelineConfig::DataflowWire> dataflow_;
   bool is_multi_session_{false};
-  std::set<std::string> prompt_only_sessions_;
+  std::set<std::string> init_only_sessions_;
 };
 
 }  // namespace Generators

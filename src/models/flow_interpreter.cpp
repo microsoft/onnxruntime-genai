@@ -11,24 +11,28 @@ FlowInterpreter::FlowInterpreter(const PipelineConfig& pipeline_config)
     : dataflow_{pipeline_config.dataflow} {
   // Partition flow steps by execution phase
   for (const auto& step : pipeline_config.flow) {
-    if (step.when == "prompt" || step.when == "once") {
-      prompt_steps_.push_back(step);
-    }
-    if (step.when == "always") {
-      always_steps_.push_back(step);
+    if (step.when == "init") {
+      init_steps_.push_back(step);
+    } else if (step.when == "step") {
+      step_steps_.push_back(step);
+    } else if (step.when == "final") {
+      final_steps_.push_back(step);
     }
   }
 
   is_multi_session_ = pipeline_config.sessions.size() > 1;
 
-  // Identify prompt-only sessions (sessions that never appear in always_steps)
-  std::set<std::string> always_session_names;
-  for (const auto& step : always_steps_) {
-    always_session_names.insert(step.run);
+  // Identify init-only sessions (sessions that never appear in step_steps or final_steps)
+  std::set<std::string> non_init_session_names;
+  for (const auto& step : step_steps_) {
+    non_init_session_names.insert(step.run);
   }
-  for (const auto& step : prompt_steps_) {
-    if (always_session_names.find(step.run) == always_session_names.end()) {
-      prompt_only_sessions_.insert(step.run);
+  for (const auto& step : final_steps_) {
+    non_init_session_names.insert(step.run);
+  }
+  for (const auto& step : init_steps_) {
+    if (non_init_session_names.find(step.run) == non_init_session_names.end()) {
+      init_only_sessions_.insert(step.run);
     }
   }
 }
