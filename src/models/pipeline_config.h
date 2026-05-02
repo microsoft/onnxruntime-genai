@@ -74,15 +74,18 @@ struct PipelineConfigState : State {
   std::unique_ptr<DecoderOnly_State> decoder_state_;
 
   // Per-session extra inputs for non-decoder sessions.
+  // Stores owned copies of input name strings to avoid dangling pointers.
   struct NonDecoderSessionIO {
-    std::vector<const char*> input_names;
+    std::vector<std::string> input_name_strings;  // Owned name storage
     std::vector<OrtValue*> inputs;
   };
   std::map<std::string, NonDecoderSessionIO> non_decoder_io_;
 
-  // Intermediate tensor store for wiring between sessions.
-  // Key: "session_name.tensor_name"
-  std::map<std::string, std::unique_ptr<OrtValue>> intermediate_store_;
+  // Intermediate tensor storage (per-State, not per-Model).
+  // Owns OrtValue outputs from non-decoder sessions.
+  std::map<std::string, std::unique_ptr<OrtValue>> intermediate_owned_;
+  // Non-owning view for fast lookup by FlowInterpreter::GetWiredInputs.
+  std::map<std::string, OrtValue*> intermediates_;
 
   // Persistent storage for wired input names to avoid dangling c_str() pointers.
   std::vector<std::string> wired_decoder_input_names_;

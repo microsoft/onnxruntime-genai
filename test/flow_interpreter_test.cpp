@@ -9,6 +9,7 @@
 #include "models/flow_interpreter.h"
 
 #include <gtest/gtest.h>
+#include <map>
 #include <string>
 
 namespace Generators::test {
@@ -73,76 +74,38 @@ TEST(FlowInterpreter, EncoderDecoderPartitioning) {
 }
 
 // ============================================================================
-// FlowInterpreter — intermediate tensor storage
+// FlowInterpreter — dataflow wiring (stateless — intermediates passed in)
 // ============================================================================
 
-TEST(FlowInterpreter, StoreAndRetrieveIntermediate) {
+TEST(FlowInterpreter, StoreAndRetrieveViaMap) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Create a dummy OrtValue pointer (we just need address tracking)
+  // Intermediates are now owned by the State, not the interpreter.
+  // Tests pass an external map to GetWiredInputs.
+  std::map<std::string, OrtValue*> intermediates;
   int dummy_value = 42;
   auto* fake_ort_value = reinterpret_cast<OrtValue*>(&dummy_value);
 
-  interpreter.StoreIntermediate("vision", "image_features", fake_ort_value);
+  intermediates["vision.image_features"] = fake_ort_value;
 
-  EXPECT_EQ(interpreter.GetIntermediate("vision", "image_features"),
-            fake_ort_value);
-  EXPECT_EQ(interpreter.GetIntermediate("vision", "nonexistent"), nullptr);
-  EXPECT_EQ(interpreter.GetIntermediate("other", "image_features"), nullptr);
+  auto wired = interpreter.GetWiredInputs("embedding", intermediates);
+  ASSERT_GE(wired.size(), 1u);
+  EXPECT_EQ(wired[0].first, "image_features");
+  EXPECT_EQ(wired[0].second, fake_ort_value);
 }
-
-TEST(FlowInterpreter, ClearAllRemovesEverything) {
-  auto config = GetPreset("vision-language");
-  FlowInterpreter interpreter(config);
-
-  int dummy1 = 1, dummy2 = 2;
-  interpreter.StoreIntermediate("vision", "image_features",
-                                reinterpret_cast<OrtValue*>(&dummy1));
-  interpreter.StoreIntermediate("embedding", "inputs_embeds",
-                                reinterpret_cast<OrtValue*>(&dummy2));
-
-  interpreter.ClearAll();
-
-  EXPECT_EQ(interpreter.GetIntermediate("vision", "image_features"), nullptr);
-  EXPECT_EQ(interpreter.GetIntermediate("embedding", "inputs_embeds"), nullptr);
-}
-
-TEST(FlowInterpreter, ClearPromptIntermediatesSelectiveClean) {
-  auto config = GetPreset("vision-language");
-  FlowInterpreter interpreter(config);
-
-  int dummy_vision = 1, dummy_decoder = 2;
-  interpreter.StoreIntermediate("vision", "image_features",
-                                reinterpret_cast<OrtValue*>(&dummy_vision));
-  interpreter.StoreIntermediate("decoder", "some_output",
-                                reinterpret_cast<OrtValue*>(&dummy_decoder));
-
-  // Vision is prompt-only (appears in prompt_steps but not always_steps),
-  // so its intermediates should be cleared.  Decoder is always-run, so
-  // its intermediates should survive.
-  interpreter.ClearPromptIntermediates();
-
-  EXPECT_EQ(interpreter.GetIntermediate("vision", "image_features"), nullptr);
-  EXPECT_EQ(interpreter.GetIntermediate("decoder", "some_output"),
-            reinterpret_cast<OrtValue*>(&dummy_decoder));
-}
-
-// ============================================================================
-// FlowInterpreter — dataflow wiring
-// ============================================================================
 
 TEST(FlowInterpreter, GetWiredInputsFromDataflow) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Store a vision output
+  std::map<std::string, OrtValue*> intermediates;
   int dummy = 42;
   auto* fake_value = reinterpret_cast<OrtValue*>(&dummy);
-  interpreter.StoreIntermediate("vision", "image_features", fake_value);
+  intermediates["vision.image_features"] = fake_value;
 
   // The VLM preset has a wire: vision.image_features -> embedding.image_features
-  auto wired = interpreter.GetWiredInputs("embedding");
+  auto wired = interpreter.GetWiredInputs("embedding", intermediates);
   ASSERT_GE(wired.size(), 1u);
 
   bool found = false;
@@ -158,13 +121,13 @@ TEST(FlowInterpreter, GetWiredInputsForDecoderFromEmbedding) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // Store an embedding output
+  std::map<std::string, OrtValue*> intermediates;
   int dummy = 99;
   auto* fake_value = reinterpret_cast<OrtValue*>(&dummy);
-  interpreter.StoreIntermediate("embedding", "inputs_embeds", fake_value);
+  intermediates["embedding.inputs_embeds"] = fake_value;
 
   // The VLM preset has a wire: embedding.inputs_embeds -> decoder.inputs_embeds
-  auto wired = interpreter.GetWiredInputs("decoder");
+  auto wired = interpreter.GetWiredInputs("decoder", intermediates);
   ASSERT_GE(wired.size(), 1u);
 
   bool found = false;
@@ -180,8 +143,8 @@ TEST(FlowInterpreter, GetWiredInputsReturnsEmptyWhenNoIntermediates) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
-  // No intermediates stored yet — wired inputs should be empty
-  auto wired = interpreter.GetWiredInputs("embedding");
+  std::map<std::string, OrtValue*> intermediates;  // empty
+  auto wired = interpreter.GetWiredInputs("embedding", intermediates);
   EXPECT_TRUE(wired.empty());
 }
 
@@ -189,9 +152,23 @@ TEST(FlowInterpreter, GetWiredInputsForSessionWithNoWires) {
   auto config = GetPreset("vision-language");
   FlowInterpreter interpreter(config);
 
+  std::map<std::string, OrtValue*> intermediates;
+  intermediates["something.tensor"] = reinterpret_cast<OrtValue*>(0x1234);
+
   // Vision has no incoming wires in the VLM preset
-  auto wired = interpreter.GetWiredInputs("vision");
+  auto wired = interpreter.GetWiredInputs("vision", intermediates);
   EXPECT_TRUE(wired.empty());
+}
+
+TEST(FlowInterpreter, PromptOnlySessionsIdentified) {
+  auto config = GetPreset("vision-language");
+  FlowInterpreter interpreter(config);
+
+  // Vision and embedding are prompt-only (not in always_steps)
+  const auto& prompt_only = interpreter.prompt_only_sessions();
+  EXPECT_TRUE(prompt_only.count("vision"));
+  EXPECT_TRUE(prompt_only.count("embedding"));
+  EXPECT_FALSE(prompt_only.count("decoder"));
 }
 
 // ============================================================================

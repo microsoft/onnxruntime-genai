@@ -17,12 +17,8 @@ FlowInterpreter::FlowInterpreter(const PipelineConfig& pipeline_config)
     if (step.when == "always") {
       always_steps_.push_back(step);
     }
-    // Note: "prompt" steps go into prompt_steps_ only.
-    // "always" steps go into always_steps_ only — they run on both prompt and decode.
-    // "once" steps go into prompt_steps_ only — they run once before generation.
   }
 
-  // Determine if this is a multi-session pipeline
   is_multi_session_ = pipeline_config.sessions.size() > 1;
 
   // Identify prompt-only sessions (sessions that never appear in always_steps)
@@ -37,50 +33,20 @@ FlowInterpreter::FlowInterpreter(const PipelineConfig& pipeline_config)
   }
 }
 
-void FlowInterpreter::StoreIntermediate(const std::string& session_name,
-                                         const std::string& tensor_name,
-                                         OrtValue* value) {
-  intermediates_[session_name + "." + tensor_name] = value;
-}
-
-OrtValue* FlowInterpreter::GetIntermediate(const std::string& session_name,
-                                            const std::string& tensor_name) const {
-  auto key = session_name + "." + tensor_name;
-  auto it = intermediates_.find(key);
-  return it != intermediates_.end() ? it->second : nullptr;
-}
-
 std::vector<std::pair<std::string, OrtValue*>> FlowInterpreter::GetWiredInputs(
-    const std::string& session_name) const {
+    const std::string& session_name,
+    const std::map<std::string, OrtValue*>& intermediates) const {
   std::vector<std::pair<std::string, OrtValue*>> result;
   for (const auto& wire : dataflow_) {
     if (wire.to_session == session_name) {
-      auto* value = GetIntermediate(wire.from_session, wire.from_output);
-      if (value) {
-        result.emplace_back(wire.to_input, value);
+      auto key = wire.from_session + "." + wire.from_output;
+      auto it = intermediates.find(key);
+      if (it != intermediates.end() && it->second) {
+        result.emplace_back(wire.to_input, it->second);
       }
     }
   }
   return result;
-}
-
-void FlowInterpreter::ClearPromptIntermediates() {
-  for (auto it = intermediates_.begin(); it != intermediates_.end();) {
-    // Extract session name from key "session.tensor"
-    auto dot = it->first.find('.');
-    if (dot != std::string::npos) {
-      auto session_name = it->first.substr(0, dot);
-      if (prompt_only_sessions_.count(session_name)) {
-        it = intermediates_.erase(it);
-        continue;
-      }
-    }
-    ++it;
-  }
-}
-
-void FlowInterpreter::ClearAll() {
-  intermediates_.clear();
 }
 
 }  // namespace Generators

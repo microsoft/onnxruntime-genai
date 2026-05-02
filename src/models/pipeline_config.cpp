@@ -73,14 +73,14 @@ void PipelineConfigState::SetExtraInputs(
   // Route extra inputs to the decoder state
   decoder_state_->SetExtraInputs(extra_inputs);
 
-  // Route extra inputs to non-decoder sessions
+  // Route extra inputs to non-decoder sessions (store owned copies)
   for (const auto& [name, session] : model_.extra_sessions_) {
     auto& io = non_decoder_io_[name];
     auto session_input_names = session->GetInputNames();
     for (const auto& extra : extra_inputs) {
       for (const auto& session_input : session_input_names) {
         if (extra.name == session_input) {
-          io.input_names.push_back(extra.name.c_str());
+          io.input_name_strings.push_back(extra.name);
           io.inputs.push_back(extra.tensor->ort_tensor_.get());
         }
       }
@@ -105,13 +105,14 @@ void PipelineConfigState::RunNonDecoderSession(
 
   auto io_it = non_decoder_io_.find(session_name);
   if (io_it != non_decoder_io_.end()) {
-    for (size_t i = 0; i < io_it->second.input_names.size(); ++i) {
-      input_name_strings.push_back(io_it->second.input_names[i]);
+    for (size_t i = 0; i < io_it->second.input_name_strings.size(); ++i) {
+      input_name_strings.push_back(io_it->second.input_name_strings[i]);
       input_values.push_back(io_it->second.inputs[i]);
     }
   }
 
-  auto wired_inputs = model_.flow_interpreter_->GetWiredInputs(session_name);
+  auto wired_inputs = model_.flow_interpreter_->GetWiredInputs(
+      session_name, intermediates_);
   for (auto& [input_name, value] : wired_inputs) {
     input_name_strings.push_back(input_name);
     input_values.push_back(value);
@@ -138,13 +139,12 @@ void PipelineConfigState::RunNonDecoderSession(
               output_name_ptrs.data(), output_values.data(),
               output_name_ptrs.size());
 
-  // Store outputs as intermediates for downstream sessions.
+  // Store outputs as intermediates (owned by this State, not Model).
   for (size_t i = 0; i < output_name_strings.size(); ++i) {
     if (output_values[i]) {
       auto key = session_name + "." + output_name_strings[i];
-      model_.flow_interpreter_->StoreIntermediate(
-          session_name, output_name_strings[i], output_values[i]);
-      intermediate_store_[key] =
+      intermediates_[key] = output_values[i];
+      intermediate_owned_[key] =
           std::unique_ptr<OrtValue>(output_values[i]);
     }
   }
@@ -158,7 +158,8 @@ void PipelineConfigState::RunFlowStep(
   if (step.run == "decoder") {
     // Wire any intermediate inputs (e.g. inputs_embeds from embedding session)
     // into the decoder state's input bindings before running.
-    auto wired = model_.flow_interpreter_->GetWiredInputs("decoder");
+    auto wired = model_.flow_interpreter_->GetWiredInputs(
+        "decoder", intermediates_);
     for (const auto& [input_name, value] : wired) {
       bool found = false;
       for (size_t i = 0; i < decoder_state_->input_names_.size(); ++i) {
@@ -203,13 +204,14 @@ DeviceSpan<float> PipelineConfigState::Run(
 
   if (is_prompt_) {
     is_prompt_ = false;
-    model_.flow_interpreter_->ClearPromptIntermediates();
+    // Clear prompt-only intermediates from both maps
     const auto& prompt_sessions = model_.flow_interpreter_->prompt_only_sessions();
-    for (auto it = intermediate_store_.begin(); it != intermediate_store_.end();) {
+    for (auto it = intermediates_.begin(); it != intermediates_.end();) {
       auto dot = it->first.find('.');
       if (dot != std::string::npos &&
           prompt_sessions.count(it->first.substr(0, dot))) {
-        it = intermediate_store_.erase(it);
+        intermediate_owned_.erase(it->first);
+        it = intermediates_.erase(it);
       } else {
         ++it;
       }
@@ -225,24 +227,21 @@ void PipelineConfigState::RewindTo(size_t index) {
 }
 
 OrtValue* PipelineConfigState::GetInput(const char* name) {
-  // Check non-decoder I/O stores
   for (const auto& [session_name, io] : non_decoder_io_) {
-    for (size_t i = 0; i < io.input_names.size(); ++i) {
-      if (std::strcmp(io.input_names[i], name) == 0) {
+    for (size_t i = 0; i < io.input_name_strings.size(); ++i) {
+      if (io.input_name_strings[i] == name) {
         return io.inputs[i];
       }
     }
   }
-  // Check decoder state
   return decoder_state_->GetInput(name);
 }
 
 OrtValue* PipelineConfigState::GetOutput(const char* name) {
-  // Check intermediate store for non-decoder outputs
-  for (const auto& [key, value] : intermediate_store_) {
+  for (const auto& [key, value] : intermediates_) {
     auto dot = key.find('.');
     if (dot != std::string::npos && key.substr(dot + 1) == name) {
-      return value.get();
+      return value;
     }
   }
   return decoder_state_->GetOutput(name);
