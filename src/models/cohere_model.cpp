@@ -225,11 +225,18 @@ static std::string StripAsciiWhitespace(const std::string& s) {
 // from each non-final chunk before committing. Punctuation set is
 // multilingual (ASCII + smart-quotes + ellipsis/em-dash).
 //
-// IDs 0..15 are this tokenizer's structural/control tokens (BOS/EOS/pad,
+// IDs 0..15 are this tokenizer's structural/control tokens plus single-byte
+// fallback tokens. In practice the model emits id=11 (\v) and id=13 (\r) at
+// the start of every non-first chunk, and they make the streaming
+// detokenizer collapse the leading space of the next real token (so
+// "...scams" + "<\v><\r> In the UK..." renders as "scamsIn the UK"). The
+// remaining ids in this range are control tokens (BOS/EOS/pad,
 // <|startoftranscript|>, <|pnc|>/<|nopnc|>, <|itn|>/<|noitn|>, timestamp,
-// diarize, spkchange, audioseparator). IDs 16+ are categorical tags (emotion,
-// language, etc.) which the model wouldn't normally emit mid-decode anyway.
-// We treat id < 16 as "always strip" at chunk seams.
+// diarize, spkchange, audioseparator) which would render as literal
+// "<|...|>" markup if streamed. IDs 16+ are categorical tags (emotion,
+// language, etc.) which the model wouldn't normally emit mid-decode.
+// We treat id < 16 as "always strip" at chunk seams (both leading and
+// trailing) to keep the streamed text clean.
 
 namespace {
 
