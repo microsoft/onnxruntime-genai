@@ -30,6 +30,16 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
+
+  // ComputeMelFromPCM produces float32 mel tensors. If the encoder expects a
+  // different dtype (e.g. float16/bfloat16), the runtime will fail with an
+  // opaque type-mismatch error; surface it here with a clear message instead.
+  if (audio_features_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error(
+        "CohereProcessor: encoder input '" + config.model.encoder.inputs.audio_features +
+        "' must be float32; got ONNX type " + std::to_string(static_cast<int>(audio_features_type_)) +
+        ". Cohere mel computation only supports float32 audio features.");
+  }
 }
 
 // Decode audio to PCM via OrtxDecodeAudio in extensions
@@ -171,6 +181,9 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
 
   // Split waveform at energy boundaries
   auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
+  if (chunk_ranges.empty()) {
+    throw std::runtime_error("CohereProcessor: no audio chunks produced (empty waveform or invalid chunking config).");
+  }
 
   // Compute mel for first chunk
   {
@@ -214,8 +227,12 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   if (!payload.prompt.empty()) {
     const char* prompt_cstr = payload.prompt.c_str();
     input_ids = tokenizer.EncodeBatch(std::span<const char*>(&prompt_cstr, 1));
-  } else {
+  } else if (!payload.prompts.empty()) {
     input_ids = tokenizer.EncodeBatch(payload.prompts);
+  } else {
+    throw std::runtime_error(
+        "CohereProcessor: a non-empty prompt is required for Cohere Transcribe "
+        "(neither payload.prompt nor payload.prompts was provided).");
   }
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), input_ids);
 

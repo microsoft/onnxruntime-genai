@@ -193,8 +193,13 @@ bool CohereState::AdvanceToNextChunk() {
 
   encoder_state_->SetChunkAudioFeatures(next_mel, next_mel_length);
 
-  encoder_state_->outputs_.clear();
-  encoder_state_->output_names_.clear();
+  // Only clear encoder outputs when the encoder emits cross-KV cache outputs
+  // that need to be rebuilt for the new chunk. In the hidden-states path, the
+  // decoder depends on encoder hidden_states remaining registered as an output.
+  if (encoder_state_->HasCrossKVCacheOutputs()) {
+    encoder_state_->outputs_.clear();
+    encoder_state_->output_names_.clear();
+  }
 
   RebuildDecoderForCurrentChunk();
 
