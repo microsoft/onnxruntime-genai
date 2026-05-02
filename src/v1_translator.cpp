@@ -78,7 +78,7 @@ PipelineConfig TranslateV1Config(const Config& v1) {
     PropagateKVCachePatterns(config, v1);
 
     // Position strategy for Qwen2.5-VL family (3D mRoPE)
-    if (ModelType::IsQwen25VL(type)) {
+    if (ModelType::IsQwenVLFamily(type)) {
       config.state.position_ids.strategy = "mrope_3d";
     }
 
