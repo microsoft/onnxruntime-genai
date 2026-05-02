@@ -1,0 +1,83 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+// Pipeline-as-Config v2 schema definitions.
+//
+// These structs represent the v2 config format where pipeline behavior
+// is declared in config JSON rather than hardcoded per model_type.
+// A v2 genai_config.json looks like:
+//
+//   {
+//     "version": 2,
+//     "pipeline": {
+//       "extends": "autoregressive-decoder",
+//       "sessions": { "decoder": { "file": "model.onnx" } },
+//       "flow": [ { "run": "decoder", "when": "always" } ],
+//       "state": { "kv_cache": { "format": "auto" } }
+//     },
+//     "model": { ... },
+//     "search": { ... }
+//   }
+
+#pragma once
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace Generators {
+
+struct PipelineConfig {
+  // A session corresponds to one ONNX model file.
+  struct Session {
+    std::string file;   // Filename relative to config directory
+    std::string role;   // Semantic role: "decoder", "encoder", "vision", "embedding", "speech"
+    // Per-session ORT options (optional; inherits global defaults if absent)
+  };
+
+  // A flow step describes when to run a session during generation.
+  struct FlowStep {
+    std::string run;    // Session name (key into sessions map)
+    std::string when{"always"};  // "always" = every step, "prompt" = first step only, "once" = before generation
+    std::string loop;   // "" = run once, "per_image" = loop over images, "batched" = batch all inputs
+  };
+
+  // A dataflow wire connects an output tensor from one session to an
+  // input tensor of another session.  Uses structured fields (not dot
+  // notation) to avoid ambiguity with tensor names that contain dots.
+  struct DataflowWire {
+    std::string from_session;  // Source session name
+    std::string from_output;   // Output tensor name in source session
+    std::string to_session;    // Destination session name
+    std::string to_input;      // Input tensor name in destination session
+  };
+
+  // State configuration controls how KV cache and position IDs are managed.
+  struct StateConfig {
+    struct KVCache {
+      std::string format{"auto"};  // "auto", "default", "cross", "windowed"
+      std::optional<std::string> past_key_pattern;
+      std::optional<std::string> present_key_pattern;
+      std::optional<std::string> past_value_pattern;
+      std::optional<std::string> present_value_pattern;
+    } kv_cache;
+
+    struct PositionIds {
+      std::string strategy{"auto"};  // "auto", "default", "mrope_3d"
+    } position_ids;
+  } state;
+
+  std::optional<std::string> extends;  // Preset name to inherit from
+  std::map<std::string, Session> sessions;
+  std::vector<FlowStep> flow;
+  std::vector<DataflowWire> dataflow;
+};
+
+// Validate a PipelineConfig for internal consistency:
+// - All flow steps reference existing sessions
+// - All dataflow wires reference existing sessions
+// - Required sessions present based on flow
+// Throws std::runtime_error with descriptive message on failure.
+void ValidatePipelineConfig(const PipelineConfig& config);
+
+}  // namespace Generators
