@@ -9,6 +9,26 @@
 
 namespace Generators {
 
+namespace {
+// Propagate KV cache name patterns from v1 decoder inputs/outputs to pipeline state.
+void PropagateKVCachePatterns(PipelineConfig& config, const Config& v1) {
+  const auto& inputs = v1.model.decoder.inputs;
+  const auto& outputs = v1.model.decoder.outputs;
+  if (!inputs.past_key_names.empty()) {
+    config.state.kv_cache.past_key_pattern = inputs.past_key_names;
+  }
+  if (!inputs.past_value_names.empty()) {
+    config.state.kv_cache.past_value_pattern = inputs.past_value_names;
+  }
+  if (!outputs.present_key_names.empty()) {
+    config.state.kv_cache.present_key_pattern = outputs.present_key_names;
+  }
+  if (!outputs.present_value_names.empty()) {
+    config.state.kv_cache.present_value_pattern = outputs.present_value_names;
+  }
+}
+}  // namespace
+
 PipelineConfig TranslateV1Config(const Config& v1) {
   const auto& type = v1.model.type;
 
@@ -23,21 +43,7 @@ PipelineConfig TranslateV1Config(const Config& v1) {
       config.sessions["decoder"].file = v1.model.decoder.filename;
     }
 
-    // Propagate KV cache name patterns from v1 decoder inputs/outputs
-    const auto& inputs = v1.model.decoder.inputs;
-    const auto& outputs = v1.model.decoder.outputs;
-    if (!inputs.past_key_names.empty()) {
-      config.state.kv_cache.past_key_pattern = inputs.past_key_names;
-    }
-    if (!inputs.past_value_names.empty()) {
-      config.state.kv_cache.past_value_pattern = inputs.past_value_names;
-    }
-    if (!outputs.present_key_names.empty()) {
-      config.state.kv_cache.present_key_pattern = outputs.present_key_names;
-    }
-    if (!outputs.present_value_names.empty()) {
-      config.state.kv_cache.present_value_pattern = outputs.present_value_names;
-    }
+    PropagateKVCachePatterns(config, v1);
 
   } else if (ModelType::IsVLM(type) || ModelType::IsMMM(type)) {
     // Vision-language model: vision + embedding + decoder sessions
@@ -69,21 +75,7 @@ PipelineConfig TranslateV1Config(const Config& v1) {
       }
     }
 
-    // Propagate KV cache patterns from decoder
-    const auto& inputs = v1.model.decoder.inputs;
-    const auto& outputs = v1.model.decoder.outputs;
-    if (!inputs.past_key_names.empty()) {
-      config.state.kv_cache.past_key_pattern = inputs.past_key_names;
-    }
-    if (!inputs.past_value_names.empty()) {
-      config.state.kv_cache.past_value_pattern = inputs.past_value_names;
-    }
-    if (!outputs.present_key_names.empty()) {
-      config.state.kv_cache.present_key_pattern = outputs.present_key_names;
-    }
-    if (!outputs.present_value_names.empty()) {
-      config.state.kv_cache.present_value_pattern = outputs.present_value_names;
-    }
+    PropagateKVCachePatterns(config, v1);
 
     // Position strategy for Qwen2.5-VL family (3D mRoPE)
     if (ModelType::IsQwen25VL(type)) {

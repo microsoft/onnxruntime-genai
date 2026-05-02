@@ -331,4 +331,54 @@ TEST(V1Translator, UnknownTypeStillTranslates) {
   EXPECT_TRUE(pipeline.sessions.count("decoder"));
 }
 
+TEST(V1Translator, Phi4MMTranslatesToVisionLanguage) {
+  auto v1 = MakeMinimalV1Config("phi4mm");
+  v1.model.vision.filename = "vision.onnx";
+  v1.model.embedding.filename = "embed.onnx";
+  auto pipeline = TranslateV1Config(v1);
+
+  ASSERT_TRUE(pipeline.sessions.count("vision"));
+  ASSERT_TRUE(pipeline.sessions.count("embedding"));
+  ASSERT_TRUE(pipeline.sessions.count("decoder"));
+  EXPECT_EQ(pipeline.sessions.at("vision").file, "vision.onnx");
+}
+
+TEST(V1Translator, MarianSSRUTranslatesToEncoderDecoder) {
+  auto v1 = MakeMinimalV1Config("marian-ssru");
+  v1.model.encoder.filename = "encoder.onnx";
+  auto pipeline = TranslateV1Config(v1);
+
+  ASSERT_TRUE(pipeline.sessions.count("encoder"));
+  ASSERT_TRUE(pipeline.sessions.count("decoder"));
+  EXPECT_EQ(pipeline.sessions.at("encoder").file, "encoder.onnx");
+
+  // Should have encoder→decoder flow
+  ASSERT_GE(pipeline.flow.size(), 2u);
+  EXPECT_EQ(pipeline.flow[0].run, "encoder");
+  EXPECT_EQ(pipeline.flow[0].when, "once");
+}
+
+TEST(V1Translator, AllLLMTypesTranslateComprehensive) {
+  // All 21 LLM types from model_type.h should translate without throwing
+  for (const auto& type : {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2",
+                            "gemma3_text", "gpt2", "gptoss", "granite", "internlm2",
+                            "llama", "mistral", "nemotron", "olmo", "phi", "phimoe",
+                            "phi3", "phi3small", "qwen2", "qwen3", "smollm3"}) {
+    auto v1 = MakeMinimalV1Config(type);
+    EXPECT_NO_THROW(TranslateV1Config(v1)) << "Failed for type: " << type;
+    auto pipeline = TranslateV1Config(v1);
+    EXPECT_TRUE(pipeline.sessions.count("decoder")) << "No decoder for type: " << type;
+  }
+}
+
+TEST(V1Translator, AllVLMTypesTranslate) {
+  for (const auto& type : {"fara", "gemma3", "phi3v", "qwen2_5_vl"}) {
+    auto v1 = MakeMinimalV1Config(type);
+    EXPECT_NO_THROW(TranslateV1Config(v1)) << "Failed for type: " << type;
+    auto pipeline = TranslateV1Config(v1);
+    EXPECT_TRUE(pipeline.sessions.count("vision")) << "No vision for type: " << type;
+    EXPECT_TRUE(pipeline.sessions.count("embedding")) << "No embedding for type: " << type;
+  }
+}
+
 }  // namespace Generators::test
