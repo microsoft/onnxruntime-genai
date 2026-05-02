@@ -233,7 +233,19 @@ DeviceSpan<float> PipelineConfigState::Run(
 
   if (is_prompt_) {
     is_prompt_ = false;
+    // Clear prompt-only intermediates from both FlowInterpreter (non-owning)
+    // and intermediate_store_ (owning unique_ptrs)
     model_.flow_interpreter_->ClearPromptIntermediates();
+    const auto& prompt_sessions = model_.flow_interpreter_->prompt_only_sessions();
+    for (auto it = intermediate_store_.begin(); it != intermediate_store_.end();) {
+      auto dot = it->first.find('.');
+      if (dot != std::string::npos &&
+          prompt_sessions.count(it->first.substr(0, dot))) {
+        it = intermediate_store_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   return logits_.Get();
