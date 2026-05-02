@@ -238,12 +238,17 @@ OrtValue* PipelineConfigState::GetInput(const char* name) {
 }
 
 OrtValue* PipelineConfigState::GetOutput(const char* name) {
+  // Search intermediates by tensor name (suffix after "session.").
+  // If multiple sessions produce the same tensor name, the last-stored
+  // one wins (which is the most-downstream session in flow order).
+  OrtValue* result = nullptr;
   for (const auto& [key, value] : intermediates_) {
     auto dot = key.find('.');
     if (dot != std::string::npos && key.substr(dot + 1) == name) {
-      return value;
+      result = value;
     }
   }
+  if (result) return result;
   return decoder_state_->GetOutput(name);
 }
 
