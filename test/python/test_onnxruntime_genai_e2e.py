@@ -110,7 +110,7 @@ def run_cohere_transcribe():
 
         command = [
             sys.executable,
-            os.path.join(cwd, "..", "..", "examples", "python", "cohere_transcribe_chunked.py"),
+            os.path.join(cwd, "..", "..", "examples", "python", "cohere_transcribe.py"),
             "-m",
             ci_model,
             "-e",

@@ -331,13 +331,6 @@ void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tok
   }
   if (!changed) return;
 
-  // Strip leading ASCII whitespace before encoding to avoid the SentencePiece
-  // double-boundary artifact.
-  size_t lead = 0;
-  while (lead < text.size() && std::isspace(static_cast<unsigned char>(text[lead]))) ++lead;
-  if (lead > 0) text.erase(0, lead);
-  if (text.empty()) return;
-
   std::vector<int32_t> repl = tokenizer.Encode(text.c_str());
   if (repl.empty()) return;
   tokens.erase(tokens.begin() + first);

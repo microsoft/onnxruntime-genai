@@ -4,7 +4,7 @@ Audio chunking is handled internally by CohereProcessor + Generator.
 The user just provides the full audio file, no manual splitting needed.
 
 Usage:
-  python cohere_transcribe_chunked.py -m /path/to/model -a audio.wav [-e cuda]
+  python cohere_transcribe.py -m /path/to/model -a audio.wav [-e cuda]
 """
 
 import argparse
@@ -14,17 +14,18 @@ import time
 import onnxruntime_genai as og
 
 
-# <|noitn|> disables Inverse Text Normalization: numbers, dates, currency and
-# similar entities stay in spoken form (e.g. "twenty twenty four", "five
-# dollars", "three p m"). Swap to "<|itn|>" to get written/numeric form
-# instead ("2024", "$5", "3 PM"), which is usually what end users want.
-# Additionally, swap <|en|> for a different language (e.g. <|es|> for Spanish) 
+# <|itn|> keeps numbers, dates, currency and similar entities in spoken form
+# (e.g. "twenty twenty four", "five dollars", "three p m"). Swap to "<|noitn|>"
+# to get written/numeric form instead ("2024", "$5", "3 PM"), which is usually
+# what end users want.
+# <|pnc|> enables Punctuation aNd Capitalization (sentence-case + commas,
+# periods, etc). Swap to "<|nopnc|>" for lowercase, punctuation-free output.
+# Additionally, swap <|en|> for a different language (e.g. <|es|> for Spanish)
 # if the audio is not English.
+# Other tags should largely remain as it is.
 PROMPT_TOKENS = [
-    "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>",
-    "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
+    "<|startofcontext|>", "<|startoftranscript|>", "<|en|>", "<|en|>", "<|pnc|>", "<|itn|>",
 ]
-
 
 def run(args):
     print(f"Loading model from {args.model_path} ({args.execution_provider}) ...")
