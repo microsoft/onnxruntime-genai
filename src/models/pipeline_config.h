@@ -87,8 +87,13 @@ struct PipelineConfigState : State {
   // Non-owning view for fast lookup by FlowInterpreter::GetWiredInputs.
   std::map<std::string, OrtValue*> intermediates_;
 
-  // Persistent storage for wired input names to avoid dangling c_str() pointers.
-  std::vector<std::string> wired_decoder_input_names_;
+  // Maps output tensor name → OrtValue*, updated at store time so that
+  // the last-executed session's output wins (flow order, not map order).
+  std::map<std::string, OrtValue*> output_by_tensor_name_;
+
+  // Persistent storage for wired input names.  Uses deque (not vector)
+  // so that push_back never invalidates existing c_str() pointers.
+  std::deque<std::string> wired_decoder_input_names_;
 
   // Logits from the last decoder run, saved by RunFlowStep("decoder").
   DeviceSpan<float> last_logits_;

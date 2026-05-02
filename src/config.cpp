@@ -1729,6 +1729,14 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
       ApplyOverrides(pipeline_config, user_overrides);
     }
     ValidatePipelineConfig(pipeline_config);
+
+    // Sync v2 pipeline decoder session file to model.decoder.filename
+    // so that DecoderOnly_Model's constructor loads the correct session.
+    auto decoder_it = pipeline_config.sessions.find("decoder");
+    if (decoder_it != pipeline_config.sessions.end() &&
+        !decoder_it->second.file.empty()) {
+      model.decoder.filename = decoder_it->second.file;
+    }
   } else {
     // Auto-translate v1 config so pipeline_config is always populated
     pipeline_config = TranslateV1Config(*this);

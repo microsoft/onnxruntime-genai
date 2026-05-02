@@ -16,6 +16,10 @@ PipelineConfigModel::PipelineConfigModel(
   // DecoderOnly_Model already loaded session_decoder_ and registered it
   // with session_info_.  Now load any additional sessions for multi-session
   // pipelines (vision, embedding, encoder, etc.).
+  //
+  // Note: For v2 configs, the v1 translator or preset resolution already
+  // syncs pipeline_config.sessions["decoder"].file to model.decoder.filename
+  // so that DecoderOnly_Model's constructor loads the correct session.
   const auto& pipeline_config = config_->pipeline_config;
 
   for (const auto& [name, session_config] : pipeline_config.sessions) {
@@ -140,12 +144,15 @@ void PipelineConfigState::RunNonDecoderSession(
               output_name_ptrs.size());
 
   // Store outputs as intermediates (owned by this State, not Model).
+  // Also update output_by_tensor_name_ so GetOutput returns the last-
+  // executed session's output (flow order, not map order).
   for (size_t i = 0; i < output_name_strings.size(); ++i) {
     if (output_values[i]) {
       auto key = session_name + "." + output_name_strings[i];
       intermediates_[key] = output_values[i];
       intermediate_owned_[key] =
           std::unique_ptr<OrtValue>(output_values[i]);
+      output_by_tensor_name_[output_name_strings[i]] = output_values[i];
     }
   }
 }
@@ -158,11 +165,15 @@ void PipelineConfigState::RunFlowStep(
   if (step.run == "decoder") {
     // Wire any intermediate inputs (e.g. inputs_embeds from embedding session)
     // into the decoder state's input bindings before running.
+    // Save original size so we can restore after the run — this prevents
+    // dangling pointers when prompt intermediates are freed later.
+    const size_t original_input_count = decoder_state_->input_names_.size();
+
     auto wired = model_.flow_interpreter_->GetWiredInputs(
         "decoder", intermediates_);
     for (const auto& [input_name, value] : wired) {
       bool found = false;
-      for (size_t i = 0; i < decoder_state_->input_names_.size(); ++i) {
+      for (size_t i = 0; i < original_input_count; ++i) {
         if (std::strcmp(decoder_state_->input_names_[i],
                         input_name.c_str()) == 0) {
           decoder_state_->inputs_[i] = value;
@@ -182,10 +193,22 @@ void PipelineConfigState::RunFlowStep(
     // KV cache, position inputs, logits, sliding window, chunking,
     // graph capture, run options.
     last_logits_ = decoder_state_->Run(total_length, next_tokens, next_indices);
+
+    // Restore decoder input bindings to original size so that
+    // prompt-only intermediate pointers don't persist.
+    decoder_state_->input_names_.resize(original_input_count);
+    decoder_state_->inputs_.resize(original_input_count);
     return;
   }
 
-  RunNonDecoderSession(step.run);
+  // Handle non-decoder step.loop if specified
+  if (!step.loop.empty() && step.loop == "per_image") {
+    // TODO: Implement per-image looping for vision sessions.
+    // For now, run the session once (single-image support).
+    RunNonDecoderSession(step.run);
+  } else {
+    RunNonDecoderSession(step.run);
+  }
 }
 
 DeviceSpan<float> PipelineConfigState::Run(
@@ -238,17 +261,9 @@ OrtValue* PipelineConfigState::GetInput(const char* name) {
 }
 
 OrtValue* PipelineConfigState::GetOutput(const char* name) {
-  // Search intermediates by tensor name (suffix after "session.").
-  // If multiple sessions produce the same tensor name, the last-stored
-  // one wins (which is the most-downstream session in flow order).
-  OrtValue* result = nullptr;
-  for (const auto& [key, value] : intermediates_) {
-    auto dot = key.find('.');
-    if (dot != std::string::npos && key.substr(dot + 1) == name) {
-      result = value;
-    }
-  }
-  if (result) return result;
+  // Return the last-executed session's output for this tensor name.
+  auto it = output_by_tensor_name_.find(name);
+  if (it != output_by_tensor_name_.end()) return it->second;
   return decoder_state_->GetOutput(name);
 }
 

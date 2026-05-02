@@ -27,8 +27,8 @@ struct Config;  // Forward declaration
 // are populated from the v1 Config's decoder/vision/embedding/speech
 // sub-structures.
 //
-// Throws std::runtime_error if the model_type is not supported for
-// translation (e.g. unknown or highly custom model types).
+// Unknown model types fall back to the "autoregressive-decoder" preset,
+// since the majority of models are decoder-only LLMs.
 PipelineConfig TranslateV1Config(const Config& v1_config);
 
 }  // namespace Generators
