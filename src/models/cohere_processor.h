@@ -7,8 +7,13 @@
 
 namespace Generators {
 
+// Forward decl — silero_vad.h includes model.h which includes this header,
+// so we can't include silero_vad.h directly without a circular include.
+struct SileroVad;
+
 struct CohereProcessor : Processor {
   CohereProcessor(Config& config, const SessionInfo& session_info);
+  ~CohereProcessor();  // Defined in .cpp where SileroVad is complete.
 
   CohereProcessor() = delete;
   CohereProcessor(const CohereProcessor&) = delete;
@@ -16,14 +21,28 @@ struct CohereProcessor : Processor {
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
+  // Optional dependency injection: allows the processor to construct a SileroVad
+  // (which needs a non-const Model&) once the owning MultiModalProcessor has the
+  // model reference. If the model's genai_config.json has a non-empty `model.vad`
+  // section, VAD-based chunking replaces the energy-based splitter.
+  void SetModel(Model& model);
+
  private:
-  // Split waveform into non-overlapping chunks of length `max_audio_clip_s_`,
-  // refining each chunk's tail by searching for the lowest-energy point inside
-  // the last `boundary_chunk_s_` of the chunk. This places splits at quiet
-  // points (between words/sentences) so the model rarely chops mid-word.
+  // Energy-based chunking (default when VAD is not configured).
   // Mirrors `split_audio_chunks_energy` / `_find_split_point_energy` in
   // CohereLabs/cohere-transcribe-03-2026 (modeling_cohere_asr.py).
   std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
+      const float* samples, size_t num_samples, int sample_rate) const;
+
+  // Silero-VAD-based chunking (used when SetModel is called and config has VAD section).
+  // Runs the Silero VAD over the full waveform in non-overlapping windows, then
+  // converts per-frame speech probabilities into chunks. Each chunk is a list
+  // of speech sub-regions (start,end) in sample units; the caller concatenates
+  // the sub-regions into a single contiguous buffer, dropping the silence
+  // between them. This prevents the model from hallucinating across long
+  // intra-chunk silences when short utterances are merged to satisfy
+  // min_speech_ms.
+  std::vector<std::vector<std::pair<size_t, size_t>>> SplitWaveformByVad(
       const float* samples, size_t num_samples, int sample_rate) const;
 
   // Compute mel + normalize directly from PCM float32 samples. Returns OrtValue [1, num_mels, num_frames].
@@ -36,10 +55,21 @@ struct CohereProcessor : Processor {
   nemo_mel::NemoMelConfig mel_cfg_{};
   float norm_eps_{};
 
-  // Chunking parameters (from genai_config.json model section)
+  // Energy-based chunking parameters (from genai_config.json model section)
   float max_audio_clip_s_{};
   float boundary_chunk_s_{};
   int min_energy_window_samples_{};
+
+  // VAD-based chunking parameters (from genai_config.json model section).
+  // Populated in SetModel from model.cohere_vad_* fields.
+  int   vad_min_silence_ms_{100};
+  int   vad_min_speech_ms_{250};
+  float vad_max_speech_s_{30.0f};
+  int   vad_speech_pad_ms_{30};
+
+  // VAD instance — created lazily in SetModel when the config opts in.
+  // Mutable because Process() is const but SileroVad mutates internal state.
+  mutable std::unique_ptr<SileroVad> vad_;
 };
 
 }  // namespace Generators

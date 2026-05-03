@@ -209,14 +209,6 @@ bool CohereState::AdvanceToNextChunk() {
   return true;
 }
 
-static std::string StripAsciiWhitespace(const std::string& s) {
-  // Mirrors Python str.strip(): strips ASCII whitespace (space, \t, \n, \r, \v, \f).
-  static const char* ws = " \t\n\r\v\f";
-  const size_t start = s.find_first_not_of(ws);
-  if (start == std::string::npos) return {};
-  const size_t end = s.find_last_not_of(ws);
-  return s.substr(start, end - start + 1);
-}
 
 // --- Boundary cleanup at chunk seams ----------------------------------------
 //
@@ -247,111 +239,30 @@ namespace {
 
 constexpr int32_t kSpecialTokenIdMax = 16;  // IDs 0..15 are structural/control tokens; see comment above.
 
-// All UTF-8 punctuation/symbol byte sequences we treat as "trailing junk" at
-// chunk boundaries. Multilingual: ASCII sentence-end + Spanish inverted marks
-// + smart quotes + ellipsis/dashes + CJK punctuation.
-const std::vector<std::string>& BoundaryPunctSequences() {
-  static const std::vector<std::string> kSeqs = {
-      // ASCII
-      ".", ",", "!", "?", ";", ":", "-", "\"", "'",
-      // Multilingual
-      "\xC2\xBF",        // ¿
-      "\xC2\xA1",        // ¡
-      "\xC2\xAB",        // «
-      "\xC2\xBB",        // »
-      // Smart quotes
-      "\xE2\x80\x9C",    // “
-      "\xE2\x80\x9D",    // ”
-      "\xE2\x80\x98",    // ‘
-      "\xE2\x80\x99",    // ’
-      "\xE2\x80\x9E",    // „
-      // Ellipsis & dashes
-      "\xE2\x80\xA6",    // …
-      "\xE2\x80\x94",    // —
-      "\xE2\x80\x93",    // –
-  };
-  return kSeqs;
-}
-
-// Returns true if `s`, after ASCII whitespace strip, consists entirely of
-// punctuation sequences from BoundaryPunctSequences(). An empty string also
-// returns true (pure whitespace token).
-bool IsPunctOrEmpty(const std::string& s) {
-  std::string t = StripAsciiWhitespace(s);
-  if (t.empty()) return true;
-  const auto& seqs = BoundaryPunctSequences();
-  size_t i = 0;
-  while (i < t.size()) {
-    bool matched = false;
-    for (const auto& seq : seqs) {
-      if (t.compare(i, seq.size(), seq) == 0) {
-        i += seq.size();
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) return false;
-  }
-  return true;
-}
-
 // Single-token decode helper. Returns the textual rendering of one token.
 std::string DecodeOne(const Tokenizer& tokenizer, int32_t token_id) {
   return tokenizer.Decode(std::span<const int32_t>(&token_id, 1));
 }
 
-// Drop trailing tokens that are special, whitespace-only, or pure punctuation.
-// Operates in place.
-void StripTrailingBoundaryTokens(std::vector<int32_t>& tokens, const Tokenizer& tokenizer) {
-  while (!tokens.empty()) {
-    int32_t id = tokens.back();
-    if (id >= 0 && id < kSpecialTokenIdMax) {
-      tokens.pop_back();
-      continue;
-    }
-    std::string s = DecodeOne(tokenizer, id);
-    if (IsPunctOrEmpty(s)) {
-      tokens.pop_back();
-      continue;
-    }
-    break;
-  }
-}
-
-// Lowercase the first ASCII uppercase letter of a SINGLE token's decoded text.
-// Touches only the first non-special token, never re-encodes the rest of the
-// chunk, so no whitespace tokens or word-boundary markers are introduced at
-// the seam.
-void LowercaseFirstChunkToken(std::vector<int32_t>& tokens, const Tokenizer& tokenizer) {
-  // Find first non-special token.
+// Returns true if a space token must be inserted before `tokens` so that, when
+// concatenated with the previously-committed text, the seam reads with a
+// single space between words. We make this decision by decoding the first
+// non-special token of the chunk and checking whether its rendered text
+// already begins with whitespace. If it does, the streamer will already emit
+// the gap and we must NOT add another space (else double space). If it does
+// not (e.g. control tokens were emitted at chunk start that swallow the
+// leading space, or the first real token is something like "19"), we need
+// to add one.
+bool DoINeedToAddSpace(const std::vector<int32_t>& tokens, const Tokenizer& tokenizer) {
   size_t first = 0;
   while (first < tokens.size() && tokens[first] >= 0 && tokens[first] < kSpecialTokenIdMax) {
     ++first;
   }
-  if (first >= tokens.size()) return;
-
-  std::string text = DecodeOne(tokenizer, tokens[first]);
-  // Lowercase the first ASCII uppercase letter, but only if it appears before
-  // any non-ASCII byte. This keeps the function safe for non-Latin scripts
-  // (CJK, Arabic, etc.0 - no-op) and avoids mis-lowercasing a later ASCII
-  // letter when the leading character is a non-ASCII capital like Ñ/É/Ü.
-  bool changed = false;
-  for (size_t i = 0; i < text.size(); ++i) {
-    unsigned char c = static_cast<unsigned char>(text[i]);
-    if (c >= 0x80) break;            // hit non-ASCII byte: bail out
-    if (c >= 'A' && c <= 'Z') {
-      text[i] = static_cast<char>(c + ('a' - 'A'));
-      changed = true;
-      break;
-    }
-    if (std::isalnum(c)) break;
-  }
-  if (!changed) return;
-
-  std::vector<int32_t> repl = tokenizer.Encode(text.c_str());
-  if (repl.empty()) return;
-  tokens.erase(tokens.begin() + first);
-  tokens.insert(tokens.begin() + first, repl.begin(), repl.end());
+  if (first >= tokens.size()) return false;
+  std::string s = DecodeOne(tokenizer, tokens[first]);
+  if (s.empty()) return true;
+  unsigned char c0 = static_cast<unsigned char>(s[0]);
+  return !(c0 == ' ' || c0 == '\t' || c0 == '\n' || c0 == '\r');
 }
 
 }  // namespace
@@ -362,22 +273,25 @@ void CohereState::CommitChunkText(const std::vector<int32_t>& chunk_tokens,
 
   std::vector<int32_t> cleaned(chunk_tokens);
 
-  // For non-first chunks, lowercase the first letter so the seam with the
-  // previous (trailing-punct-stripped) chunk reads as one continuing sentence.
+  // For non-first chunks: first drop any leading special/control tokens
+  // (id < 16). The model regularly emits id=11 (\v) and id=13 (\r) at chunk
+  // start; if left in, the byte-level detokenizer renders them literally and
+  // \r in particular overwrites the previous chunk's tail in any terminal.
+  // After stripping, decide whether the first real token will already render
+  // with a leading space; if not, insert a single space token so the seam
+  // reads as ". This" instead of ".This".
   if (!committed_tokens_.empty()) {
-    LowercaseFirstChunkToken(cleaned, tokenizer);
+    size_t first = 0;
+    while (first < cleaned.size() && cleaned[first] >= 0 && cleaned[first] < kSpecialTokenIdMax) {
+      ++first;
+    }
+    cleaned.erase(cleaned.begin(), cleaned.begin() + first);
+    if (DoINeedToAddSpace(cleaned, tokenizer)) {
+      std::vector<int32_t> space_tokens = tokenizer.Encode(" ");
+      cleaned.insert(cleaned.begin(), space_tokens.begin(), space_tokens.end());
+    }
   }
 
-  if (is_final) {
-    // Final chunk: commit everything as-is. (Trailing punctuation here is
-    // legitimate end-of-utterance content and should be preserved.)
-    committed_tokens_.insert(committed_tokens_.end(), cleaned.begin(), cleaned.end());
-    return;
-  }
-
-  // Non-final chunk: strip trailing whitespace/punctuation/special tokens so
-  // the seam with the next chunk reads naturally when streamed token-by-token.
-  StripTrailingBoundaryTokens(cleaned, tokenizer);
   committed_tokens_.insert(committed_tokens_.end(), cleaned.begin(), cleaned.end());
 }
 

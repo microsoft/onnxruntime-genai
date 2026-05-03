@@ -157,6 +157,13 @@ struct Config {
     float boundary_chunk_s{};
     int min_energy_window_samples{};
 
+    // Cohere Transcribe Silero-VAD-based chunking (used when model.vad.filename is set).
+    // Mirrors silero-vad's get_speech_timestamps post-processing semantics.
+    int   cohere_vad_min_silence_ms{100};   // gap < this is merged into surrounding speech
+    int   cohere_vad_min_speech_ms{250};    // chunks shorter than this are merged with the next chunk
+    float cohere_vad_max_speech_s{30.0f};   // long regions are force-split at this length
+    int   cohere_vad_speech_pad_ms{30};     // pad each kept region by this much on both sides
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;

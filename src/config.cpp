@@ -1138,6 +1138,14 @@ struct Model_Element : JSON::Element {
       v_.boundary_chunk_s = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "min_energy_window_samples") {
       v_.min_energy_window_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_min_silence_ms") {
+      v_.cohere_vad_min_silence_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_min_speech_ms") {
+      v_.cohere_vad_min_speech_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_max_speech_s") {
+      v_.cohere_vad_max_speech_s = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_speech_pad_ms") {
+      v_.cohere_vad_speech_pad_ms = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

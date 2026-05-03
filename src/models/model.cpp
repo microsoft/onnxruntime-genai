@@ -797,7 +797,10 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
 }
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
+  // SileroVad construction (used by some processors, e.g. CohereProcessor) requires
+  // a non-const Model. The Model is logically const for the duration of multimodal
+  // processing — only internal session bookkeeping mutates.
+  return std::make_shared<MultiModalProcessor>(*config_, session_info_, const_cast<Model&>(*this));
 }
 
 bool Model::IsPruned() const {
@@ -915,7 +918,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   return expanded;
 }
 
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
+MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info, Model& model)
     : tokenizer_{std::make_shared<Tokenizer>(config)},
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
@@ -930,6 +933,10 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);
+    // Inject Model into processors that need it (e.g. CohereProcessor for SileroVad).
+    if (auto* cp = dynamic_cast<CohereProcessor*>(processor_.get())) {
+      cp->SetModel(model);
+    }
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }

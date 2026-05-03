@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "cohere_processor.h"
+#include "silero_vad.h"
 #include "speech_features.hpp"
 #include "c_api_utils.hpp"
 
@@ -41,6 +42,11 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
         ". Cohere mel computation only supports float32 audio features.");
   }
 }
+
+// Out-of-line dtor: SileroVad is forward-declared in the header, so the
+// implicit dtor would fail to instantiate unique_ptr<SileroVad>'s deleter
+// in any TU that doesn't include silero_vad.h.
+CohereProcessor::~CohereProcessor() = default;
 
 // Decode audio to PCM via OrtxDecodeAudio in extensions
 static std::pair<const float*, size_t> GetDecodedPCM(
@@ -129,6 +135,165 @@ std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
   return chunks;
 }
 
+void CohereProcessor::SetModel(Model& model) {
+  // Pick up Silero-VAD-specific knobs from genai_config (with sensible defaults
+  // already set at construction time).
+  vad_min_silence_ms_ = model.config_->model.cohere_vad_min_silence_ms;
+  vad_min_speech_ms_  = model.config_->model.cohere_vad_min_speech_ms;
+  vad_max_speech_s_   = model.config_->model.cohere_vad_max_speech_s;
+  vad_speech_pad_ms_  = model.config_->model.cohere_vad_speech_pad_ms;
+
+  // Only enable VAD if the user provided a Silero ONNX path in genai_config.
+  if (model.config_->model.vad.filename.empty()) {
+    return;
+  }
+  vad_ = CreateSileroVad(model);
+}
+
+// Replicates silero-vad's get_speech_timestamps post-processing in C++:
+//   1. Score full audio in non-overlapping windows (window_size depends on SR).
+//   2. Convert to binary speech mask using vad_->GetThreshold().
+//   3. Merge speech regions separated by silence shorter than min_silence_ms.
+//   4. Drop regions shorter than min_speech_ms.
+//   5. Pad each region by speech_pad_ms on both sides (clamped to file bounds).
+//   6. Force-split regions longer than max_speech_s.
+//
+// Returns a list of (start, end) sample ranges. Empty if no speech detected.
+std::vector<std::vector<std::pair<size_t, size_t>>> CohereProcessor::SplitWaveformByVad(
+    const float* samples, size_t num_samples, int sample_rate) const {
+  if (!vad_) return {};
+
+  const size_t window = static_cast<size_t>(vad_->GetWindowSize());
+  const float threshold = vad_->GetThreshold();
+
+  // Score every window. Tail samples shorter than `window` are zero-padded.
+  std::vector<uint8_t> is_speech;
+  is_speech.reserve((num_samples + window - 1) / window);
+  for (size_t off = 0; off + window <= num_samples; off += window) {
+    float p = vad_->ProcessWindow(samples + off, window);
+    is_speech.push_back(p >= threshold ? 1u : 0u);
+  }
+  size_t processed = (num_samples / window) * window;
+  if (processed < num_samples) {
+    std::vector<float> padded(window, 0.0f);
+    std::memcpy(padded.data(), samples + processed, (num_samples - processed) * sizeof(float));
+    float p = vad_->ProcessWindow(padded.data(), window);
+    is_speech.push_back(p >= threshold ? 1u : 0u);
+  }
+
+  // Step 1: collect raw [start_frame, end_frame) speech regions.
+  std::vector<std::pair<size_t, size_t>> regions;
+  for (size_t i = 0; i < is_speech.size();) {
+    if (!is_speech[i]) { ++i; continue; }
+    size_t s = i;
+    while (i < is_speech.size() && is_speech[i]) ++i;
+    regions.push_back({s, i});
+  }
+  if (regions.empty()) return {};
+
+  // Step 2: merge regions whose gap is shorter than min_silence_ms. These are
+  // very short pauses inside a single utterance; we keep them as one region.
+  const size_t samples_per_ms = static_cast<size_t>(sample_rate) / 1000;
+  const size_t min_silence_frames =
+      std::max<size_t>(1, (static_cast<size_t>(vad_min_silence_ms_) * samples_per_ms) / window);
+  std::vector<std::pair<size_t, size_t>> merged;
+  merged.reserve(regions.size());
+  merged.push_back(regions.front());
+  for (size_t k = 1; k < regions.size(); ++k) {
+    auto& last = merged.back();
+    if (regions[k].first - last.second < min_silence_frames) {
+      last.second = regions[k].second;
+    } else {
+      merged.push_back(regions[k]);
+    }
+  }
+
+  // Step 3: group regions into chunks so each chunk has at least
+  // `min_speech_ms` of *speech*. Unlike before, we do NOT bridge the silence
+  // between regions — each chunk keeps its sub-regions as a list, and the
+  // silence between them is dropped at PCM concat time. This avoids the
+  // model hallucinating to fill long intra-chunk silences.
+  const size_t min_speech_frames =
+      std::max<size_t>(1, (static_cast<size_t>(vad_min_speech_ms_) * samples_per_ms) / window);
+
+  auto speech_frames_in_chunk = [](const std::vector<std::pair<size_t, size_t>>& chunk) {
+    size_t total = 0;
+    for (auto& r : chunk) total += r.second - r.first;
+    return total;
+  };
+
+  std::vector<std::vector<std::pair<size_t, size_t>>> grouped;  // chunks of frame ranges
+  for (auto& r : merged) {
+    if (!grouped.empty() && speech_frames_in_chunk(grouped.back()) < min_speech_frames) {
+      grouped.back().push_back(r);
+    } else {
+      grouped.push_back({r});
+    }
+  }
+  // Tail-fixup: if last chunk still has too little speech, fold into prior.
+  if (grouped.size() >= 2 && speech_frames_in_chunk(grouped.back()) < min_speech_frames) {
+    auto tail = std::move(grouped.back());
+    grouped.pop_back();
+    for (auto& r : tail) grouped.back().push_back(r);
+  }
+  if (grouped.empty()) return {};
+
+  // Step 4: convert each sub-region from frame to sample space, apply
+  // speech_pad_ms padding, clamp to file. Then enforce max_speech_s on the
+  // total speech duration of a chunk (force-split inside the sub-region list
+  // if needed).
+  const size_t pad_samples = static_cast<size_t>(vad_speech_pad_ms_) * samples_per_ms;
+  const size_t max_speech_samples =
+      static_cast<size_t>(vad_max_speech_s_ * static_cast<float>(sample_rate));
+
+  std::vector<std::vector<std::pair<size_t, size_t>>> out;
+  out.reserve(grouped.size());
+  for (auto& chunk_frames : grouped) {
+    std::vector<std::pair<size_t, size_t>> chunk_samples;
+    chunk_samples.reserve(chunk_frames.size());
+    for (auto& r : chunk_frames) {
+      size_t s = r.first * window;
+      size_t e = std::min(num_samples, r.second * window);
+      s = (s > pad_samples) ? s - pad_samples : 0;
+      e = std::min(num_samples, e + pad_samples);
+      // Avoid overlap: clamp s to the end of the previous sub-region.
+      if (!chunk_samples.empty() && s < chunk_samples.back().second) {
+        s = chunk_samples.back().second;
+      }
+      if (e > s) chunk_samples.push_back({s, e});
+    }
+    // Enforce max_speech_samples by splitting the sub-region list when the
+    // accumulated speech duration would exceed the cap.
+    std::vector<std::pair<size_t, size_t>> current;
+    size_t current_len = 0;
+    for (auto& r : chunk_samples) {
+      size_t len = r.second - r.first;
+      if (current_len + len > max_speech_samples && !current.empty()) {
+        out.push_back(std::move(current));
+        current.clear();
+        current_len = 0;
+      }
+      // If a single sub-region is itself longer than the cap, split it.
+      size_t s = r.first;
+      while (r.second - s > max_speech_samples) {
+        if (!current.empty()) {
+          out.push_back(std::move(current));
+          current.clear();
+          current_len = 0;
+        }
+        out.push_back({{s, s + max_speech_samples}});
+        s += max_speech_samples;
+      }
+      if (r.second > s) {
+        current.push_back({s, r.second});
+        current_len += r.second - s;
+      }
+    }
+    if (!current.empty()) out.push_back(std::move(current));
+  }
+  return out;
+}
+
 // Compute mel + normalize from PCM float32.
 std::pair<std::unique_ptr<OrtValue>, int64_t> CohereProcessor::ComputeMelFromPCM(
     const float* samples, size_t num_samples) const {
@@ -179,16 +344,41 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   int sample_rate = 0;
   auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
 
-  // Split waveform at energy boundaries
-  auto chunk_ranges = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
+  // Split waveform: VAD-based when configured, else energy-based.
+  // VAD returns chunks as lists of speech sub-regions (silence between them is
+  // dropped). Energy-based returns single-region chunks; we wrap each in a
+  // 1-element list so the downstream code path is unified.
+  std::vector<std::vector<std::pair<size_t, size_t>>> chunk_ranges;
+  if (vad_) {
+    chunk_ranges = SplitWaveformByVad(pcm_data, num_samples, sample_rate);
+  } else {
+    auto energy_chunks = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
+    chunk_ranges.reserve(energy_chunks.size());
+    for (auto& r : energy_chunks) chunk_ranges.push_back({r});
+  }
   if (chunk_ranges.empty()) {
     throw std::runtime_error("CohereProcessor: no audio chunks produced (empty waveform or invalid chunking config).");
   }
 
+  // Helper: concatenate the speech-only samples for a chunk into a single
+  // contiguous buffer (no silence between sub-regions).
+  auto build_chunk_pcm = [pcm_data](const std::vector<std::pair<size_t, size_t>>& subs) {
+    size_t total = 0;
+    for (auto& r : subs) total += r.second - r.first;
+    std::vector<float> buf(total);
+    size_t off = 0;
+    for (auto& r : subs) {
+      size_t n = r.second - r.first;
+      std::memcpy(buf.data() + off, pcm_data + r.first, n * sizeof(float));
+      off += n;
+    }
+    return buf;
+  };
+
   // Compute mel for first chunk
   {
-    auto [start, end] = chunk_ranges[0];
-    auto [mel_tensor, mel_frames] = ComputeMelFromPCM(pcm_data + start, end - start);
+    auto chunk_pcm = build_chunk_pcm(chunk_ranges[0]);
+    auto [mel_tensor, mel_frames] = ComputeMelFromPCM(chunk_pcm.data(), chunk_pcm.size());
 
     named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
                            std::make_shared<Tensor>(std::move(mel_tensor)));
@@ -201,8 +391,8 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
 
   // Compute mel for remaining chunks
   for (size_t i = 1; i < chunk_ranges.size(); ++i) {
-    auto [start, end] = chunk_ranges[i];
-    auto [mel_tensor, mel_frames] = ComputeMelFromPCM(pcm_data + start, end - start);
+    auto chunk_pcm = build_chunk_pcm(chunk_ranges[i]);
+    auto [mel_tensor, mel_frames] = ComputeMelFromPCM(chunk_pcm.data(), chunk_pcm.size());
 
     named_tensors->emplace("cohere_chunk_" + std::to_string(i),
                            std::make_shared<Tensor>(std::move(mel_tensor)));
