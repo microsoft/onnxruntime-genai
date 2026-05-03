@@ -44,6 +44,7 @@ from builders import (
     Qwen25VLTextModel,
     Qwen35TextModel,
     QwenModel,
+    SeedOssModel,
     SmolLM3Model,
     WhisperModel,
 )
@@ -243,6 +244,8 @@ def create_model(
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "SeedOssForCausalLM":
+        onnx_model = SeedOssModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
