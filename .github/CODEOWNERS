@@ -1,4 +1,3 @@
 /benchmark/ @microsoft/onnxruntime-genai-approvers
 /examples/ @microsoft/onnxruntime-genai-approvers
 /src/ @microsoft/onnxruntime-genai-approvers
-/src/python/py/models/ @kunal-vaishnavi
