@@ -289,6 +289,13 @@ DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
       std::span<int32_t>(const_cast<int32_t*>(committed_tokens_.data()), streamed_tokens_count_));
 }
 
+Tokenizer& CohereState::GetOrCreateTokenizer() {
+  if (!tokenizer_) {
+    tokenizer_ = model_.CreateTokenizer();
+  }
+  return *tokenizer_;
+}
+
 DeviceSpan<float> CohereState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (encoder_state_->IsFirstRun()) {
     encoder_state_->Run(current_length, next_tokens, next_indices);
