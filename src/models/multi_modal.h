@@ -145,10 +145,11 @@ struct DecoderState : State {
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  std::unique_ptr<PositionInputs> position_inputs_;  // Model input
-  DefaultKeyValueCache kv_cache_{*this};             // Model input
-  std::unique_ptr<RecurrentState> recurrent_state_;  // Model input (for hybrid models)
-  Logits logits_{*this};                             // Model output
+  std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
+  std::unique_ptr<PositionInputs> position_inputs_;     // Model input
+  DefaultKeyValueCache kv_cache_{*this};                // Model input
+  std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
+  Logits logits_{*this};                                // Model output
 };
 
 struct MultiModalPipelineState : State {
