@@ -30,11 +30,6 @@ def _onnxruntime_dependency() -> str:
 
     if package_name == "onnxruntime-genai":
         dependency = "onnxruntime"
-
-        import platform
-        # win arm64 whls are only available in onnxruntime-qnn
-        if platform.machine() == "ARM64" and sys.platform.startswith("win"):
-            dependency = "onnxruntime-qnn"
     elif package_name == "onnxruntime-genai-cuda":
         dependency = "onnxruntime-gpu"
     elif package_name == "onnxruntime-genai-trt-rtx":
