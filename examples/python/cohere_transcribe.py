@@ -1,5 +1,4 @@
 """
-Cohere Transcribe — C++ integrated chunking test.
 Audio chunking is handled internally by CohereProcessor + Generator.
 The user just provides the full audio file, no manual splitting needed.
 
@@ -21,7 +20,7 @@ import onnxruntime_genai as og
 # <|pnc|> enables Punctuation and Capitalization (sentence-case + commas,
 # periods, etc). Swap to "<|nopnc|>" for lowercase, punctuation-free output.
 # Additionally, swap <|en|> for a different language (e.g. <|es|> for Spanish)
-# if the audio is not English.
+# if the audio is not English. The model requires, by design, two same language tags.
 # Other tags should largely remain as it is.
 PROMPT_TOKENS = [
     "<|startofcontext|>", "<|startoftranscript|>", "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>",
@@ -66,12 +65,12 @@ def run(args):
         seq = generator.get_sequence(0)
         text = tokenizer.decode(list(seq))
         all_texts.append(text.strip())
-        print()  # newline after streaming
+        print()
 
     elapsed = time.time() - t0
 
     print("\n" + "=" * 60)
-    print("TRANSCRIPTION (C++ chunking):")
+    print("TRANSCRIPTION:")
     print("=" * 60)
     for text in all_texts:
         print(text)
@@ -88,6 +87,7 @@ def run(args):
         if total_dur > 0:
             print(f"Audio: {total_dur:.1f}s | RTFx: {total_dur / elapsed:.1f}")
     except Exception:
+        # RTFx is informational only; ignore failures (non-WAV input, missing wave module, etc.).
         pass
 
 

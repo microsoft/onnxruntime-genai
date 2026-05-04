@@ -244,27 +244,11 @@ namespace {
 // at chunk seams before deciding whether to add a connecting space.
 constexpr int32_t kSpecialTokenIdMax = 16;
 
-// Single-token decode helper. Returns the textual rendering of one token.
-std::string DecodeOne(const Tokenizer& tokenizer, int32_t token_id) {
-  return tokenizer.Decode(std::span<const int32_t>(&token_id, 1));
-}
-
-// Returns true if a space token must be inserted before `tokens` so that, when
-// concatenated with the previously-committed text, the seam reads with a
-// single space between words. We make this decision by decoding the first
-// non-special token of the chunk and checking whether its rendered text
-// already begins with whitespace. If it does, the streamer will already emit
-// the gap and we must NOT add another space (else double space). If it does
-// not (e.g. control tokens were emitted at chunk start that swallow the
-// leading space, or the first real token is something like "19"), we need
-// to add one.
-bool DoINeedToAddSpace(const std::vector<int32_t>& tokens, const Tokenizer& tokenizer) {
-  size_t first = 0;
-  while (first < tokens.size() && tokens[first] >= 0 && tokens[first] < kSpecialTokenIdMax) {
-    ++first;
-  }
-  if (first >= tokens.size()) return false;
-  std::string s = DecodeOne(tokenizer, tokens[first]);
+// Returns true if the rendered text of `token_id` does not begin with
+// whitespace, i.e. a connecting space must be injected before it at a
+// chunk seam to avoid "scamsIn" / "thisInto" artifacts.
+bool TokenLacksLeadingSpace(int32_t token_id, const Tokenizer& tokenizer) {
+  std::string s = tokenizer.Decode(std::span<const int32_t>(&token_id, 1));
   if (s.empty()) return true;
   unsigned char c0 = static_cast<unsigned char>(s[0]);
   return !(c0 == ' ' || c0 == '\t' || c0 == '\n' || c0 == '\r');
@@ -273,31 +257,29 @@ bool DoINeedToAddSpace(const std::vector<int32_t>& tokens, const Tokenizer& toke
 }  // namespace
 
 void CohereState::CommitChunkText(const std::vector<int32_t>& chunk_tokens,
-                                  bool is_final, const Tokenizer& tokenizer) {
+                                  bool /*is_final*/, const Tokenizer& tokenizer) {
   if (chunk_tokens.empty()) return;
 
-  std::vector<int32_t> cleaned(chunk_tokens);
+  const bool is_seam = !committed_tokens_.empty();
+  size_t i = 0;
 
-  // For non-first chunks: first drop any leading special/control tokens
+  // For non-first chunks: skip leading C0 control byte-fallback tokens
   // (id < 16). The model regularly emits id=11 (\v) and id=13 (\r) at chunk
   // start; if left in, the byte-level detokenizer renders them literally and
   // \r in particular overwrites the previous chunk's tail in any terminal.
-  // After stripping, decide whether the first real token will already render
-  // with a leading space; if not, insert a single space token so the seam
-  // reads as ". This" instead of ".This".
-  if (!committed_tokens_.empty()) {
-    size_t first = 0;
-    while (first < cleaned.size() && cleaned[first] >= 0 && cleaned[first] < kSpecialTokenIdMax) {
-      ++first;
+  // Then, if the first real token does not carry its own leading space,
+  // inject one so the seam reads ". This" instead of ".This".
+  if (is_seam) {
+    while (i < chunk_tokens.size() && chunk_tokens[i] >= 0 && chunk_tokens[i] < kSpecialTokenIdMax) {
+      ++i;
     }
-    cleaned.erase(cleaned.begin(), cleaned.begin() + first);
-    if (DoINeedToAddSpace(cleaned, tokenizer)) {
+    if (i < chunk_tokens.size() && TokenLacksLeadingSpace(chunk_tokens[i], tokenizer)) {
       std::vector<int32_t> space_tokens = tokenizer.Encode(" ");
-      cleaned.insert(cleaned.begin(), space_tokens.begin(), space_tokens.end());
+      committed_tokens_.insert(committed_tokens_.end(), space_tokens.begin(), space_tokens.end());
     }
   }
 
-  committed_tokens_.insert(committed_tokens_.end(), cleaned.begin(), cleaned.end());
+  committed_tokens_.insert(committed_tokens_.end(), chunk_tokens.begin() + i, chunk_tokens.end());
 }
 
 
