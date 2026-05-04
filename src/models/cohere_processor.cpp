@@ -16,10 +16,7 @@
 namespace Generators {
 
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
-    : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
-      max_audio_clip_s_{config.model.max_audio_clip_s},
-      boundary_chunk_s_{config.model.boundary_chunk_s},
-      min_energy_window_samples_{config.model.min_energy_window_samples} {
+    : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
   mel_cfg_.num_mels    = config.model.num_mels;
   mel_cfg_.fft_size    = config.model.fft_size;
   mel_cfg_.hop_length  = config.model.hop_length;
@@ -82,58 +79,8 @@ static std::pair<const float*, size_t> GetDecodedPCM(
   return {static_cast<const float*>(pcm_data), num_samples};
 }
 
-// Waveform splitting with ENERGY-BASED non-overlapping boundaries.
-//
-// The model is trained with long utterances and energy-based non-overlapping
-// chunking. We mirror that: each chunk is up to `max_audio_clip_s_` long and
-// adjacent chunks share NO audio. To avoid splitting mid-word, the actual
-// split point inside each chunk's tail `boundary_chunk_s_` window is moved to
-// the local energy minimum (a quiet point, typically between words).
-std::vector<std::pair<size_t, size_t>> CohereProcessor::SplitWaveformIntoChunks(
-    const float* samples, size_t num_samples, int sample_rate) const {
-  const size_t chunk_size = static_cast<size_t>(max_audio_clip_s_ * sample_rate);
-  const size_t boundary_window = static_cast<size_t>(boundary_chunk_s_ * sample_rate);
-  // Energy-search frame: serves as both the analysis window size AND the stride,
-  // matching HF `_find_split_point_energy`'s `min_energy_window_samples`.
-  const size_t min_chunk_samples = static_cast<size_t>(min_energy_window_samples_);
-
-  auto find_quietest_split = [&](size_t lo, size_t hi) -> size_t {
-    // Search frames in [lo, hi); return the start sample of the lowest-energy frame.
-    if (hi <= lo + min_chunk_samples) return hi;
-    size_t best = lo;
-    double best_energy = std::numeric_limits<double>::infinity();
-    for (size_t f = lo; f + min_chunk_samples <= hi; f += min_chunk_samples) {
-      double e = 0.0;
-      for (size_t i = 0; i < min_chunk_samples; ++i) {
-        float v = samples[f + i];
-        e += static_cast<double>(v) * v;
-      }
-      if (e < best_energy) {
-        best_energy = e;
-        best = f;
-      }
-    }
-    return best;
-  };
-
-  std::vector<std::pair<size_t, size_t>> chunks;
-  size_t start = 0;
-  while (start < num_samples) {
-    size_t tentative_end = std::min(start + chunk_size, num_samples);
-    if (tentative_end == num_samples) {
-      chunks.push_back({start, tentative_end});
-      break;
-    }
-    size_t window_lo = (tentative_end > boundary_window) ? tentative_end - boundary_window : start;
-    if (window_lo < start + min_chunk_samples) window_lo = start + min_chunk_samples;
-    size_t end = (window_lo + min_chunk_samples <= tentative_end)
-                     ? find_quietest_split(window_lo, tentative_end)
-                     : tentative_end;
-    chunks.push_back({start, end});
-    start = end;
-  }
-  return chunks;
-}
+// Waveform splitting with Silero VAD. See SplitWaveformByVad for the full
+// post-processing logic (mirrors silero-vad's get_speech_timestamps in C++).
 
 void CohereProcessor::SetModel(Model& model) {
   // Pick up Silero-VAD-specific knobs from genai_config (with sensible defaults
@@ -344,17 +291,15 @@ std::unique_ptr<NamedTensors> CohereProcessor::Process(const Tokenizer& tokenize
   int sample_rate = 0;
   auto [pcm_data, num_samples] = GetDecodedPCM(audios->audios_.get(), 0, mel_cfg_.sample_rate, decode_result, sample_rate);
 
-  // Split waveform: VAD-based when configured, else energy-based.
-  // VAD returns chunks as lists of speech sub-regions (silence between them is
-  // dropped). Energy-based returns single-region chunks; we wrap each in a
-  // 1-element list so the downstream code path is unified.
+  // Split waveform: VAD-based when configured, else pass the whole audio as a
+  // single chunk. Cohere's training enforced a 30s max-utterance limit, so for
+  // long-form audio the user MUST enable VAD via `model.vad.filename`. With no
+  // VAD configured, we trust the caller to feed audio that fits the model.
   std::vector<std::vector<std::pair<size_t, size_t>>> chunk_ranges;
   if (vad_) {
     chunk_ranges = SplitWaveformByVad(pcm_data, num_samples, sample_rate);
   } else {
-    auto energy_chunks = SplitWaveformIntoChunks(pcm_data, num_samples, sample_rate);
-    chunk_ranges.reserve(energy_chunks.size());
-    for (auto& r : energy_chunks) chunk_ranges.push_back({r});
+    chunk_ranges.push_back({{0, num_samples}});
   }
   if (chunk_ranges.empty()) {
     throw std::runtime_error("CohereProcessor: no audio chunks produced (empty waveform or invalid chunking config).");

@@ -28,12 +28,6 @@ struct CohereProcessor : Processor {
   void SetModel(Model& model);
 
  private:
-  // Energy-based chunking (default when VAD is not configured).
-  // Mirrors `split_audio_chunks_energy` / `_find_split_point_energy` in
-  // CohereLabs/cohere-transcribe-03-2026 (modeling_cohere_asr.py).
-  std::vector<std::pair<size_t, size_t>> SplitWaveformIntoChunks(
-      const float* samples, size_t num_samples, int sample_rate) const;
-
   // Silero-VAD-based chunking (used when SetModel is called and config has VAD section).
   // Runs the Silero VAD over the full waveform in non-overlapping windows, then
   // converts per-frame speech probabilities into chunks. Each chunk is a list
@@ -55,17 +49,12 @@ struct CohereProcessor : Processor {
   nemo_mel::NemoMelConfig mel_cfg_{};
   float norm_eps_{};
 
-  // Energy-based chunking parameters (from genai_config.json model section)
-  float max_audio_clip_s_{};
-  float boundary_chunk_s_{};
-  int min_energy_window_samples_{};
-
   // VAD-based chunking parameters (from genai_config.json model section).
   // Populated in SetModel from model.cohere_vad_* fields.
-  int   vad_min_silence_ms_{100};
-  int   vad_min_speech_ms_{250};
-  float vad_max_speech_s_{30.0f};
-  int   vad_speech_pad_ms_{30};
+  int   vad_min_silence_ms_{};
+  int   vad_min_speech_ms_{};
+  float vad_max_speech_s_{};
+  int   vad_speech_pad_ms_{};
 
   // VAD instance — created lazily in SetModel when the config opts in.
   // Mutable because Process() is const but SileroVad mutates internal state.

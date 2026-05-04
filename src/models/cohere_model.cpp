@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <iostream>
 #include <map>
 
 namespace Generators {
@@ -212,32 +214,35 @@ bool CohereState::AdvanceToNextChunk() {
 
 // --- Boundary cleanup at chunk seams ----------------------------------------
 //
-// Chunks are emitted by the processor without audio overlap. The model tends
-// to terminate each chunk with sentence-final punctuation even when the audio
-// continues mid-thought, so naive concatenation produces seams like
-//     "...payment related scams. In the UK come from..."
-// This is how the original PyTorch model works as well and how it was trained.
-// However, to avoid this and minimize the impact we apply the following heuristic
-// Strip trailing whitespace + punctuation + special tokens
-// from each non-final chunk before committing. Punctuation set is
-// multilingual (ASCII + smart-quotes + ellipsis/em-dash).
+// When we concatenate the token streams of two consecutive audio chunks the
+// junction can render badly because the model treats every chunk start as a
+// fresh sequence. Two empirically-observed problems:
 //
-// IDs 0..15 are this tokenizer's structural/control tokens plus single-byte
-// fallback tokens. In practice the model emits id=11 (\v) and id=13 (\r) at
-// the start of every non-first chunk, and they make the streaming
-// detokenizer collapse the leading space of the next real token (so
-// "...scams" + "<\v><\r> In the UK..." renders as "scamsIn the UK"). The
-// remaining ids in this range are control tokens (BOS/EOS/pad,
-// <|startoftranscript|>, <|pnc|>/<|nopnc|>, <|itn|>/<|noitn|>, timestamp,
-// diarize, spkchange, audioseparator) which would render as literal
-// "<|...|>" markup if streamed. IDs 16+ are categorical tags (emotion,
-// language, etc.) which the model wouldn't normally emit mid-decode.
-// We treat id < 16 as "always strip" at chunk seams (both leading and
-// trailing) to keep the streamed text clean.
+//  1) The model emits byte-fallback tokens for C0 control bytes at the very
+//     start of every non-first chunk. We have observed token id=11 (byte
+//     \v, 0x0B) and id=13 (byte \r, 0x0D) being emitted as the first two
+//     tokens of chunk 2..N. The byte-level streaming detokenizer either
+//     swallows the next real token's leading space (giving "scamsIn")
+//     or, in the case of \r, overwrites the previous chunk's tail when
+//     printed to a terminal.
+//
+//  2) Once those leading control bytes are removed, the next "real" token
+//     may or may not carry its own leading space depending on what the
+//     model decided the chunk should start with. We need to inspect it and
+//     inject a single space iff it doesn't already begin with whitespace.
+//
+// IDs 0..15 are byte-fallback tokens for the C0 control byte range
+// (0x00..0x0F: NUL, \t, \n, \v, \f, \r, ...). They never carry semantic
+// content; stripping them at the chunk seam is always safe. IDs 16..255
+// are byte-fallback for the rest of the byte range (printable ASCII,
+// high bytes) which can appear as legitimate content, so we must NOT
+// strip those. IDs 256+ are real BPE subword tokens (e.g. id=5467 = " Come").
 
 namespace {
 
-constexpr int32_t kSpecialTokenIdMax = 16;  // IDs 0..15 are structural/control tokens; see comment above.
+// Tokens with id < this are byte-fallback for C0 control bytes; strip them
+// at chunk seams before deciding whether to add a connecting space.
+constexpr int32_t kSpecialTokenIdMax = 16;
 
 // Single-token decode helper. Returns the textual rendering of one token.
 std::string DecodeOne(const Tokenizer& tokenizer, int32_t token_id) {

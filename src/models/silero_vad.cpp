@@ -11,9 +11,6 @@
 
 namespace Generators {
 
-/// Internal State for SileroVad — uses State::Run for proper EP/run-options support.
-/// Defined here (not in the header) so silero_vad.h can be included without the
-/// complete `State` type.
 struct SileroVadState : State {
   SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
                  float* input_data, int64_t input_size,

@@ -1132,12 +1132,6 @@ struct Model_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "max_audio_clip_s") {
-      v_.max_audio_clip_s = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "boundary_chunk_s") {
-      v_.boundary_chunk_s = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "min_energy_window_samples") {
-      v_.min_energy_window_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "cohere_vad_min_silence_ms") {
       v_.cohere_vad_min_silence_ms = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "cohere_vad_min_speech_ms") {

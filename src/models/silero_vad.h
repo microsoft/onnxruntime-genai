@@ -14,8 +14,6 @@
 
 namespace Generators {
 
-// Full definition of SileroVadState lives in silero_vad.cpp (it's an internal
-// helper, no caller needs the layout).
 struct SileroVadState;
 
 /// Wraps the Silero VAD ONNX model for streaming voice activity detection.
