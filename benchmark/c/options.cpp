@@ -85,8 +85,8 @@ std::string ReadFileContent(std::string_view file_path) {
 }
 
 void ValidateExecutionProvider(const std::string& provider) {
-  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx") {
-    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx");
+  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx" && provider != "webgpu") {
+    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx, webgpu");
   }
 }
 

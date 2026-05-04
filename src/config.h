@@ -301,6 +301,7 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      std::optional<int> kv_cache_head_size;  // Compressed KV cache head size (e.g., TurboQuant)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
