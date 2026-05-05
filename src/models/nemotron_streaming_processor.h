@@ -33,6 +33,12 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   std::vector<float> mel_pre_encode_cache_;
   int cache_pos_{0};
 
+  // Tracks whether the next chunk we emit is the very first one. NeMo's
+  // CacheAwareStreamingAudioBuffer feeds a shorter mel tensor on the first
+  // step (just chunk_mel_frames, no pre-encode cache prepended), and the full
+  // chunk_mel_frames + pre_encode_cache_size on every subsequent step.
+  bool is_first_chunk_{true};
+
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
 
