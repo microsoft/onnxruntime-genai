@@ -110,6 +110,17 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
+
+  // Disable memory pattern for the decoder session. With CUDA EP, ORT inserts
+  // InsertedPrecisionFreeCast nodes (FP16→FP32). Memory pattern pre-allocates
+  // these nodes' output buffers based on the first run's shape. In multimodal
+  // pipelines, inputs_embeds shape changes between prefill (seq_len=N) and
+  // generation (seq_len=1), causing a shape mismatch crash. Disabling memory
+  // pattern allows ORT to re-allocate buffers for each run.
+  // Disable memory pattern for dynamic shapes in multimodal decoder
+  session_options_->DisableMemPattern();
+  // Also add session config entry to ensure mem pattern is disabled
+  session_options_->AddConfigEntry("session.disable_mem_pattern", "1");
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*decoder_session_);
@@ -624,7 +635,7 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
                                                            model_.config_->model.embedding.inputs.audio_features,
                                                            -1, 0);
     audio_features_->Add();
-    // Pre-allocate an empty tensor since there's no speech session to provide one via ReuseFeaturesBuffer
+    // Pre-allocate an empty tensor since there's no speech session to provide one via ReuseFeaturesBuffer.
     audio_features_->AllocateEmptyFeatures();
   }
 }
@@ -773,11 +784,13 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
     if (vision_state_) {
-      embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
+      if (num_image_tokens_ > 0) {
+        embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
+      } else {
+        embedding_state_->image_features_->AllocateEmptyFeatures();
+      }
     }
     if (speech_state_ && num_audio_tokens_ > 0) {
-      // Reshape speech output from 3D [B, T, hidden] to 2D [B*T, hidden]
-      // to match embedding model's expected 2D audio_features input rank.
       auto& speech_shape = speech_state_->audio_features_->GetShape();
       if (speech_shape.size() == 3) {
         speech_state_->audio_features_->ReshapeFeatures(
@@ -785,21 +798,25 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       }
       embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
     } else if (embedding_state_->audio_features_) {
-      // No audio: provide empty 2D tensor [0, hidden_size] for the embedding model
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
+    // Clear the embedding output so ORT allocates a fresh buffer with the
+    // correct shape for this run's sequence length.
+    embedding_state_->inputs_embeds_.ClearOutput();
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
-    if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
-    if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
+    if (vision_state_) vision_state_.reset();
+    if (speech_state_) speech_state_.reset();
 
     return logits;
   }
 
+  // Clear embedding output before each generation step
+  embedding_state_->inputs_embeds_.ClearOutput();
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);

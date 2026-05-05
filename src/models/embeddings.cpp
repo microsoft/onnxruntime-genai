@@ -65,4 +65,38 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   state_.outputs_[index_] = other.state_.inputs_[other.index_];
 }
 
+void Embeddings::CopyOutputToInput(Embeddings& destination) const {
+  if (mode_ != Embeddings::Mode::Output || destination.mode_ != Embeddings::Mode::Input) {
+    throw std::runtime_error("CopyOutputToInput: source must be Output mode, destination must be Input mode.");
+  }
+
+  // The output OrtValue* was set by ORT after session Run
+  auto* output_value = state_.outputs_[index_];
+  if (!output_value) {
+    throw std::runtime_error("CopyOutputToInput: embedding output is null (session may not have run).");
+  }
+
+  auto output_info = output_value->GetTensorTypeAndShapeInfo();
+  auto shape = output_info->GetShape();
+
+  // Resize destination if needed
+  if (shape.size() >= 2 && destination.shape_[1] != shape[1]) {
+    destination.shape_[1] = shape[1];
+    destination.embeddings_ = OrtValue::CreateTensor(destination.model_.p_device_->GetAllocator(), destination.shape_, destination.type_);
+    destination.state_.inputs_[destination.index_] = destination.embeddings_.get();
+  }
+
+  // Determine source device from the OrtValue's memory info.
+  // The embedding session may run on CPU even if the model's p_device_ is CUDA.
+  const auto& mem_info = output_value->GetTensorMemoryInfo();
+  auto src_device_type = mem_info.GetDeviceType();
+  auto* src_device = src_device_type == OrtMemoryInfoDeviceType_GPU
+                         ? model_.p_device_
+                         : GetDeviceInterface(DeviceType::CPU);
+
+  auto src_span = ByteWrapTensor(*src_device, *output_value);
+  auto dst_span = ByteWrapTensor(*destination.model_.p_device_, *destination.embeddings_);
+  dst_span.CopyFrom(src_span);
+}
+
 }  // namespace Generators

@@ -23,6 +23,17 @@ struct Embeddings {
 
   void ReuseEmbeddingsBuffer(const Embeddings& other);
 
+  // Copy the output of this Embeddings to the input of another.
+  void CopyOutputToInput(Embeddings& destination) const;
+
+  // Clear the output slot so ORT allocates fresh on next Run.
+  // Prevents stale OrtValues from persisting across runs.
+  void ClearOutput() {
+    if (mode_ == Embeddings::Mode::Output) {
+      state_.outputs_[index_] = nullptr;
+    }
+  }
+
   OrtValue* Get() { return embeddings_.get(); }
 
   auto& GetShape() const { return shape_; }

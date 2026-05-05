@@ -4,8 +4,9 @@
 
 namespace Generators {
 
-DefaultInputIDs::DefaultInputIDs(State& state)
-    : state_{state} {
+DefaultInputIDs::DefaultInputIDs(State& state, DeviceInterface* device_override)
+    : state_{state},
+      p_device_{device_override ? device_override : model_.p_device_inputs_} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.params_->BatchBeamSize(), 0};
   type_ = model_.session_info_.GetInputDataType(name_);
@@ -29,8 +30,8 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
-  value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
-  cast_value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  value_ = std::make_unique<Tensor>(p_device_, Ort::TypeToTensorType<int32_t>);
+  cast_value_ = std::make_unique<Tensor>(p_device_, Ort::TypeToTensorType<int64_t>);
 }
 
 void DefaultInputIDs::Add() {
@@ -96,7 +97,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   if (type_ == Ort::TypeToTensorType<int64_t>) {
     if (!cast_value_->ort_tensor_ || static_cast<size_t>(cast_value_->GetShape()[1]) != sequence_length)
       cast_value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
-    Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *model_.p_device_inputs_, type_);
+    Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *p_device_, type_);
     state_.inputs_[input_index_] = cast_value_->GetOrtTensor();
   }
 

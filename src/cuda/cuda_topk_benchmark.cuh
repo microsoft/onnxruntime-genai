@@ -79,6 +79,8 @@ static const char* TopkAlgoToString(TopkAlgo algo) {
       best_algo = algo_enum;                                                            \
     }                                                                                   \
   } catch (const Generators::CudaError& e) {                                            \
+    /* Clear the sticky CUDA error state so subsequent kernels can still run. */         \
+    cudaGetLastError();                                                                 \
     std::cerr << "Benchmarking failed for " << TopkAlgoToString(algo_enum)              \
               << " kernel with k=" << k << ", batch_size=" << batch_size                \
               << ", vocab_size=" << vocab_size << ". Error: " << e.what() << std::endl; \
