@@ -8,7 +8,7 @@
 namespace Generators {
 
 struct Mistral3ImageProcessor : Processor {
-  Mistral3ImageProcessor(Config& config, const SessionInfo& session_info);
+  Mistral3ImageProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 

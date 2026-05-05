@@ -165,7 +165,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
 }  // namespace
 
-QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
+QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info, Model& /*model*/)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
       patch_size_{config.model.vision.patch_size} {

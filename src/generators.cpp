@@ -579,7 +579,7 @@ bool Generator::IsDone() {
     // committed token has been yielded by GenerateNextToken. The user never
     // observes the underlying multi-chunk decoding.
     auto* cs = static_cast<CohereState*>(state_.get());
-    return cs->FullyDone() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
+    return cs->AllChunksProcessed() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
   }
 
   if (computed_logits_) {
@@ -621,16 +621,12 @@ void Generator::GenerateNextToken() {
   }
 
   // Cohere: advance the user-visible stream by one committed token per call.
-  // If no unstreamed committed token is available, run subsequent chunks
-  // end-to-end until a token becomes available or all chunks
-  // are exhausted.
+  // If no unstreamed committed token is available, decode the next chunk
+  // end-to-end until one becomes available or all chunks are exhausted.
   if (is_cohere_model_) {
     auto* cs = static_cast<CohereState*>(state_.get());
-    if (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
-      auto tokenizer = state_->model_.CreateTokenizer();
-      while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
-        RunCohereChunkUntilEOS(*tokenizer);
-      }
+    while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->AllChunksProcessed()) {
+      RunCohereChunkUntilEOS(cs->GetOrCreateTokenizer());
     }
     if (cs->StreamedTokensCount() < cs->CommittedTokens().size()) {
       cs->AdvanceStreamedTokensCount();
@@ -765,12 +761,7 @@ void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
   cs->CommitChunkText(chunk_tokens, /*is_final=*/!more, tokenizer);
 
   if (!more) {
-    cs->MarkFullyDone();
-    state_->Finalize(search_->GetSequenceLength());
-    if (guidance_logits_processor_) {
-      guidance_logits_processor_->Reset();
-      last_action_ = Action::standard;
-    }
+    cs->MarkAllChunksProcessed();
   } else {
     // Reset decoder for the next chunk and re-feed the prompt.
     cs->AdvanceToNextChunk();

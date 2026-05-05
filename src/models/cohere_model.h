@@ -60,10 +60,14 @@ struct CohereState : State {
   size_t StreamedTokensCount() const { return streamed_tokens_count_; }
   void AdvanceStreamedTokensCount() { ++streamed_tokens_count_; }
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
-  bool FullyDone() const { return fully_done_; }
-  void MarkFullyDone() { fully_done_ = true; }
+  bool AllChunksProcessed() const { return all_chunks_processed_; }
+  void MarkAllChunksProcessed() { all_chunks_processed_ = true; }
   // Wrap committed_tokens_[0:streamed_tokens_count_] as a CPU-backed DeviceSpan.
   DeviceSpan<int32_t> GetCommittedSpan() const;
+
+  // Lazily create and cache the model's tokenizer. Used by the generator loop
+  // to avoid recreating it on every chunk boundary.
+  Tokenizer& GetOrCreateTokenizer();
 
  private:
   const WhisperModel& model_;
@@ -86,7 +90,8 @@ struct CohereState : State {
   // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
   size_t streamed_tokens_count_{0};        // # of committed tokens already yielded by GenerateNextToken
-  bool fully_done_{false};                 // True once the last chunk has been committed
+  bool all_chunks_processed_{false};       // True once the last chunk has been decoded and committed
+  std::shared_ptr<Tokenizer> tokenizer_;   // Lazily created on first GetOrCreateTokenizer call.
 };
 
 // Cohere model — inherits WhisperModel, overrides CreateState.

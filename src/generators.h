@@ -148,8 +148,9 @@ struct Generator : LeakChecked<Generator> {
   void SampleNextToken();
 
   // Cohere-only: run the inner search loop until the current chunk hits EOS,
-  // then strip trailing boundary tokens and commit the chunk's tokens to
-  // the streamable buffer. Advances to the next chunk if more remain.
+  // then commit the chunk's tokens to the streamable buffer (applying the
+  // seam fix-up: strip leading control-byte tokens, inject a connecting
+  // space if needed). Advances to the next chunk if more remain.
   void RunCohereChunkUntilEOS(const Tokenizer& tokenizer);
 };
 

@@ -101,7 +101,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
 
 }  // namespace
 
-PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info)
+PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info, Model& /*model*/)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
       audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
