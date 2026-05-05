@@ -648,6 +648,8 @@ struct VisionInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "pixel_values") {
       v_.pixel_values = JSON::Get<std::string_view>(value);
+    } else if (name == "pixel_position_ids") {
+      v_.pixel_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "image_grid_thw") {
@@ -1096,6 +1098,10 @@ struct Model_Element : JSON::Element {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "image_token_id") {
       v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "audio_token_id") {
+      v_.audio_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "boa_token_id") {
+      v_.boa_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "video_token_id") {
       v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "vision_start_token_id") {
