@@ -23,6 +23,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
 #include "../ryzenai/interface.h"
@@ -839,8 +840,24 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (ModelType::IsMMM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
+  if (ModelType::IsMMM(config->model.type)) {
+    // Auto-detect speech support: require both the speech ONNX model filename
+    // and the preprocessing config to be present. If only one is set, throw
+    // a clear error so misconfigurations don't silently disable audio.
+    bool has_speech_model = !config->model.speech.filename.empty();
+    bool has_speech_config = !config->model.speech.config_filename.empty();
+    if (has_speech_model && !has_speech_config) {
+      throw std::runtime_error(
+          "speech.filename is set but speech.config_filename is missing. "
+          "Both are required for audio support.");
+    }
+    if (!has_speech_model && has_speech_config) {
+      throw std::runtime_error(
+          "speech.config_filename is set but speech.filename is missing. "
+          "Both are required for audio support.");
+    }
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+  }
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 
@@ -926,6 +943,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"cohere_transcribe", Processor::Create<CohereProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
+          {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
+          {"mistral3", Processor::Create<Mistral3ImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
