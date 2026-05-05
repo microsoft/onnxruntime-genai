@@ -51,8 +51,8 @@ static std::pair<const float*, size_t> GetDecodedPCM(
     ort_extensions::OrtxObjectPtr<OrtxTensorResult>& decode_result_holder,
     int& out_sample_rate) {
   OrtxTensorResult* decode_result = nullptr;
-  // Pass target_sample_rate so ortx resamples on decode.
-  CheckResult(OrtxDecodeAudio(raw_audios, index, target_sample_rate, &decode_result));
+  // Pass target_sample_rate so ortx resamples on decode. stereo_to_mono=1 to downmix.
+  CheckResult(OrtxDecodeAudio(raw_audios, index, target_sample_rate, /*stereo_to_mono=*/1, &decode_result));
   decode_result_holder.reset(decode_result);
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
