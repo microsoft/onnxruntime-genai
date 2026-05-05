@@ -36,16 +36,10 @@ struct CohereProcessor : Processor {
 
   ONNXTensorElementDataType audio_features_type_;
 
-  // Mel + normalize config — populated from genai_config.json (model.* fields)
-  // at construction time.
   nemo_mel::NemoMelConfig mel_cfg_{};
   float norm_eps_{};
 
-  // VAD-based chunking parameters (from genai_config.json model section).
-  int   vad_min_silence_ms_{};
-  int   vad_min_speech_ms_{};
-  float vad_max_speech_s_{};
-  int   vad_speech_pad_ms_{};
+  const Config* config_{};
 
   // VAD instance — created in the constructor when the config opts in.
   // Mutable because Process() is const but SileroVad mutates internal state.
