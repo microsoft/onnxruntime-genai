@@ -32,9 +32,11 @@ void CohereEncoderState::UpdateForCurrentAudio() {
     int T_enc = (T_mel - 1) / 8 + 1;
     num_frames_ = T_enc * 2;
   } else {
-    throw std::runtime_error("Cohere Transcribe requires audio_stride > 0 in config. "
-                             "Got audio_stride=" + std::to_string(audio_stride) +
-                             " with input rank=" + std::to_string(shape.size()));
+    throw std::runtime_error(
+        "Cohere Transcribe requires audio_stride > 0 in config. "
+        "Got audio_stride=" +
+        std::to_string(audio_stride) +
+        " with input rank=" + std::to_string(shape.size()));
   }
 
   if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
@@ -211,7 +213,6 @@ bool CohereState::AdvanceToNextChunk() {
   return true;
 }
 
-
 // --- Boundary cleanup at chunk seams ----------------------------------------
 //
 // When we concatenate the token streams of two consecutive audio chunks the
@@ -281,7 +282,6 @@ void CohereState::CommitChunkText(const std::vector<int32_t>& chunk_tokens,
 
   committed_tokens_.insert(committed_tokens_.end(), chunk_tokens.begin() + i, chunk_tokens.end());
 }
-
 
 DeviceSpan<int32_t> CohereState::GetCommittedSpan() const {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);

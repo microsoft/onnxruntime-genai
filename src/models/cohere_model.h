@@ -84,8 +84,8 @@ struct CohereState : State {
   int current_chunk_{0};
   int total_chunks_{1};
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // All chunk mel tensors (indexed by current_chunk_)
-  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;   // All chunk mel_length tensors (indexed by current_chunk_)
-  std::vector<int32_t> prompt_tokens_;                       // Saved prompt tokens for re-feeding
+  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;  // All chunk mel_length tensors (indexed by current_chunk_)
+  std::vector<int32_t> prompt_tokens_;                      // Saved prompt tokens for re-feeding
 
   // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence

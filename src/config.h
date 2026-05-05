@@ -155,10 +155,10 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
-    int   cohere_vad_min_silence_ms{};
-    int   cohere_vad_min_speech_ms{};
+    int cohere_vad_min_silence_ms{};
+    int cohere_vad_min_speech_ms{};
     float cohere_vad_max_speech_s{};
-    int   cohere_vad_speech_pad_ms{};
+    int cohere_vad_speech_pad_ms{};
 
     struct Encoder {
       std::string filename;

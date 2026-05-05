@@ -18,13 +18,13 @@ namespace Generators {
 CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info, Model& model)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)},
       config_{&config} {
-  mel_cfg_.num_mels    = config.model.num_mels;
-  mel_cfg_.fft_size    = config.model.fft_size;
-  mel_cfg_.hop_length  = config.model.hop_length;
-  mel_cfg_.win_length  = config.model.win_length;
+  mel_cfg_.num_mels = config.model.num_mels;
+  mel_cfg_.fft_size = config.model.fft_size;
+  mel_cfg_.hop_length = config.model.hop_length;
+  mel_cfg_.win_length = config.model.win_length;
   mel_cfg_.sample_rate = config.model.sample_rate;
-  mel_cfg_.preemph     = config.model.preemph;
-  mel_cfg_.log_eps     = config.model.log_eps;
+  mel_cfg_.preemph = config.model.preemph;
+  mel_cfg_.log_eps = config.model.log_eps;
   norm_eps_ = config.model.norm_eps;
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
@@ -106,7 +106,10 @@ std::vector<std::vector<std::pair<size_t, size_t>>> CohereProcessor::SplitWavefo
   // Step 1: collect raw [start_frame, end_frame) speech regions.
   std::vector<std::pair<size_t, size_t>> regions;
   for (size_t i = 0; i < is_speech.size();) {
-    if (!is_speech[i]) { ++i; continue; }
+    if (!is_speech[i]) {
+      ++i;
+      continue;
+    }
     size_t s = i;
     while (i < is_speech.size() && is_speech[i]) ++i;
     regions.push_back({s, i});

@@ -70,4 +70,3 @@ struct SileroVad {
 std::unique_ptr<SileroVad> CreateSileroVad(Model& model);
 
 }  // namespace Generators
-

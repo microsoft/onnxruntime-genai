@@ -1622,7 +1622,10 @@ static std::vector<std::string> NormalizeWords(const std::string& s) {
   std::string w;
   for (char c : norm) {
     if (c == ' ') {
-      if (!w.empty()) { words.push_back(w); w.clear(); }
+      if (!w.empty()) {
+        words.push_back(w);
+        w.clear();
+      }
     } else {
       w.push_back(c);
     }
