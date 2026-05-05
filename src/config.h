@@ -40,6 +40,7 @@ struct Config {
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view PixelPositionIdsName = "pixel_position_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
 
@@ -127,8 +128,10 @@ struct Config {
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
 
-    // Qwen2.5-VL specific token IDs
+    // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
     int image_token_id{};
+    int audio_token_id{};
+    int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
 
@@ -237,6 +240,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
