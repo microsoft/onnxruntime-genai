@@ -10,7 +10,7 @@
 namespace Generators {
 
 struct QwenImageProcessor : Processor {
-  QwenImageProcessor(Config& config, const SessionInfo& session_info);
+  QwenImageProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 

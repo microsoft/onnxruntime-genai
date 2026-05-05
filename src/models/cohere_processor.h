@@ -7,13 +7,11 @@
 
 namespace Generators {
 
-// Forward decl — silero_vad.h includes model.h which includes this header,
-// so we can't include silero_vad.h directly without a circular include.
 struct SileroVad;
 
 struct CohereProcessor : Processor {
-  CohereProcessor(Config& config, const SessionInfo& session_info);
-  ~CohereProcessor();  // Defined in .cpp where SileroVad is complete.
+  CohereProcessor(Config& config, const SessionInfo& session_info, Model& model);
+  ~CohereProcessor();
 
   CohereProcessor() = delete;
   CohereProcessor(const CohereProcessor&) = delete;
@@ -21,14 +19,8 @@ struct CohereProcessor : Processor {
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
-  // Optional dependency injection: allows the processor to construct a SileroVad
-  // (which needs a non-const Model&) once the owning MultiModalProcessor has the
-  // model reference. If the model's genai_config.json has a non-empty `model.vad`
-  // section, VAD-based chunking replaces the energy-based splitter.
-  void SetModel(Model& model);
-
  private:
-  // Silero-VAD-based chunking (used when SetModel is called and config has VAD section).
+  // Silero-VAD-based chunking (used when config has VAD section).
   // Runs the Silero VAD over the full waveform in non-overlapping windows, then
   // converts per-frame speech probabilities into chunks. Each chunk is a list
   // of speech sub-regions (start,end) in sample units; the caller concatenates
@@ -50,13 +42,12 @@ struct CohereProcessor : Processor {
   float norm_eps_{};
 
   // VAD-based chunking parameters (from genai_config.json model section).
-  // Populated in SetModel from model.cohere_vad_* fields.
   int   vad_min_silence_ms_{};
   int   vad_min_speech_ms_{};
   float vad_max_speech_s_{};
   int   vad_speech_pad_ms_{};
 
-  // VAD instance — created lazily in SetModel when the config opts in.
+  // VAD instance — created in the constructor when the config opts in.
   // Mutable because Process() is const but SileroVad mutates internal state.
   mutable std::unique_ptr<SileroVad> vad_;
 };

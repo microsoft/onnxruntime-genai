@@ -579,7 +579,7 @@ bool Generator::IsDone() {
     // committed token has been yielded by GenerateNextToken. The user never
     // observes the underlying multi-chunk decoding.
     auto* cs = static_cast<CohereState*>(state_.get());
-    return cs->FullyDone() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
+    return cs->AllChunksProcessed() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
   }
 
   if (computed_logits_) {
@@ -625,7 +625,7 @@ void Generator::GenerateNextToken() {
   // end-to-end until one becomes available or all chunks are exhausted.
   if (is_cohere_model_) {
     auto* cs = static_cast<CohereState*>(state_.get());
-    while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->FullyDone()) {
+    while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->AllChunksProcessed()) {
       RunCohereChunkUntilEOS(cs->GetOrCreateTokenizer());
     }
     if (cs->StreamedTokensCount() < cs->CommittedTokens().size()) {
@@ -761,7 +761,7 @@ void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
   cs->CommitChunkText(chunk_tokens, /*is_final=*/!more, tokenizer);
 
   if (!more) {
-    cs->MarkFullyDone();
+    cs->MarkAllChunksProcessed();
   } else {
     // Reset decoder for the next chunk and re-feed the prompt.
     cs->AdvanceToNextChunk();

@@ -932,11 +932,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
-    // Inject Model into processors that need it (e.g. CohereProcessor for SileroVad).
-    if (auto* cp = dynamic_cast<CohereProcessor*>(processor_.get())) {
-      cp->SetModel(model);
-    }
+    processor_ = processor->second(config, session_info, model);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }

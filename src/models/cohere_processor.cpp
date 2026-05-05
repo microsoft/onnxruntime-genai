@@ -15,7 +15,7 @@
 
 namespace Generators {
 
-CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info)
+CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info, Model& model)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
   mel_cfg_.num_mels    = config.model.num_mels;
   mel_cfg_.fft_size    = config.model.fft_size;
@@ -37,6 +37,17 @@ CohereProcessor::CohereProcessor(Config& config, const SessionInfo& session_info
         "CohereProcessor: encoder input '" + config.model.encoder.inputs.audio_features +
         "' must be float32; got ONNX type " + std::to_string(static_cast<int>(audio_features_type_)) +
         ". Cohere mel computation only supports float32 audio features.");
+  }
+
+  // Silero-VAD-specific knobs from genai_config.
+  vad_min_silence_ms_ = config.model.cohere_vad_min_silence_ms;
+  vad_min_speech_ms_  = config.model.cohere_vad_min_speech_ms;
+  vad_max_speech_s_   = config.model.cohere_vad_max_speech_s;
+  vad_speech_pad_ms_  = config.model.cohere_vad_speech_pad_ms;
+
+  // Only enable VAD if the user provided a Silero ONNX path in genai_config.
+  if (!config.model.vad.filename.empty()) {
+    vad_ = CreateSileroVad(model);
   }
 }
 
@@ -81,21 +92,6 @@ static std::pair<const float*, size_t> GetDecodedPCM(
 
 // Waveform splitting with Silero VAD. See SplitWaveformByVad for the full
 // post-processing logic (mirrors silero-vad's get_speech_timestamps in C++).
-
-void CohereProcessor::SetModel(Model& model) {
-  // Pick up Silero-VAD-specific knobs from genai_config (with sensible defaults
-  // already set at construction time).
-  vad_min_silence_ms_ = model.config_->model.cohere_vad_min_silence_ms;
-  vad_min_speech_ms_  = model.config_->model.cohere_vad_min_speech_ms;
-  vad_max_speech_s_   = model.config_->model.cohere_vad_max_speech_s;
-  vad_speech_pad_ms_  = model.config_->model.cohere_vad_speech_pad_ms;
-
-  // Only enable VAD if the user provided a Silero ONNX path in genai_config.
-  if (model.config_->model.vad.filename.empty()) {
-    return;
-  }
-  vad_ = CreateSileroVad(model);
-}
 
 // Replicates silero-vad's get_speech_timestamps post-processing in C++:
 //   1. Score full audio in non-overlapping windows (window_size depends on SR).

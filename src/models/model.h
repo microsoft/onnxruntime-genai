@@ -119,7 +119,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   std::shared_ptr<Processor> processor_;
 
  private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
+  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&, Model&)>> processor_factory_;
 };
 
 struct SessionInfo {

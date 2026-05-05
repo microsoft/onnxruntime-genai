@@ -84,7 +84,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
 
 }  // namespace
 
-PhiImageProcessor::PhiImageProcessor(Config& config, const SessionInfo& session_info)
+PhiImageProcessor::PhiImageProcessor(Config& config, const SessionInfo& session_info, Model& /*model*/)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
   auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
