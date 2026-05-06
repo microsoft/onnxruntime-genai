@@ -42,7 +42,6 @@ def zeros_init(name, shape, dtype=np.float16):
 
 def create_decoder(output_dir):
     """Create and optimize a GQA decoder model with input_ids."""
-    dtype = np.float16
     onnx_dtype = TensorProto.FLOAT16
     ms = "com.microsoft"
     nodes, inits = [], []
