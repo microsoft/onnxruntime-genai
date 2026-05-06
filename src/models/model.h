@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 #include "model_type.h"
+#include "model_package.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
 #include "utils.h"
@@ -191,10 +192,36 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool disable_graph_capture = false,
                                       const std::string& component_name = "");
 
+  /// W6 (v4 model package): for the file `filename` belonging to the
+  /// component `component_name`, find its variant.json `shared_files`
+  /// map, resolve each entry to an on-disk shared-blob, read it into
+  /// memory, and register it with `session_options` via
+  /// `AddExternalInitializersFromFilesInMemory`. The buffers are owned
+  /// by the Model and live for its lifetime — ORT only needs them for
+  /// the duration of session creation, but keeping them around is the
+  /// simplest correct lifetime.
+  ///
+  /// No-op for flat-dir Configs, empty/unknown `component_name`, files
+  /// not present in the variant manifest, or files with no `shared_files`.
+  void ApplyPackageExternalInitializers(const std::string& component_name,
+                                        const std::string& filename,
+                                        OrtSessionOptions& session_options);
+
  protected:
   void CreateSessionOptions();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+
+ private:
+  // Per-component lazy-parsed VariantManifest. Keyed by component name
+  // (matches `Config::component_instances`). Populated on first call to
+  // `ApplyPackageExternalInitializers`.
+  mutable std::unordered_map<std::string, VariantManifest> variant_manifests_;
+  // Backing storage for shared-blob bytes registered via
+  // `AddExternalInitializersFromFilesInMemory`. Each inner vector is one
+  // blob; the pointers passed to ORT alias into this storage and stay
+  // valid for the Model's lifetime.
+  mutable std::vector<std::vector<char>> external_initializer_buffers_;
 };
 
 }  // namespace Generators

@@ -12,7 +12,14 @@ namespace Generators {
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
+    OrtSessionOptions* stage_so = GetSessionOptions(model.model_id);
+    // v4 package: register external initializers from the file entry's
+    // `shared_files` map (no-op in flat-dir mode). Must run before
+    // CreateSession because ORT consumes the registration during session
+    // construction.
+    ApplyPackageExternalInitializers(config_->model.decoder.component, model.filename, *stage_so);
+    sessions_.emplace_back(CreateSession(ort_env, model.filename, stage_so,
+                                         config_->model.decoder.component));
   }
 
   for (auto& session : sessions_) {

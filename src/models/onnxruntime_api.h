@@ -637,6 +637,11 @@ struct OrtSessionOptions {
   OrtSessionOptions& AddConfigEntry(const char* config_key, const char* config_value);                                                          ///< Wraps OrtApi::AddSessionConfigEntry
   OrtSessionOptions& AddInitializer(const char* name, const OrtValue& ort_val);                                                                 ///< Wraps OrtApi::AddInitializer
   OrtSessionOptions& AddExternalInitializers(const std::vector<std::string>& names, const std::vector<std::unique_ptr<OrtValue>>& ort_values);  ///< Wraps OrtApi::AddExternalInitializers
+  /// Wraps OrtApi::AddExternalInitializersFromFilesInMemory. The buffer pointers passed in must remain
+  /// valid until the OrtSession is created — ORT copies/uses them only during session creation.
+  OrtSessionOptions& AddExternalInitializersFromFilesInMemory(const std::vector<std::basic_string<ORTCHAR_T>>& names,
+                                                              const std::vector<char*>& buffers,
+                                                              const std::vector<size_t>& lengths);
 
   OrtSessionOptions& AppendExecutionProvider_CUDA(const OrtCUDAProviderOptions& provider_options);               ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA
   OrtSessionOptions& AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options);          ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA_V2

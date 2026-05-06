@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
+#include <fstream>
 #include <random>
 #include <set>
 #include <string>
@@ -782,6 +783,70 @@ fs::path Model::AssetFolder(const std::string& component_name) const {
     }
   }
   return config_->config_path;
+}
+
+void Model::ApplyPackageExternalInitializers(const std::string& component_name,
+                                             const std::string& filename,
+                                             OrtSessionOptions& session_options) {
+  if (component_name.empty() || !config_->model_package) return;
+  auto cit = config_->component_instances.find(component_name);
+  if (cit == config_->component_instances.end() || !cit->second) return;
+
+  auto mit = variant_manifests_.find(component_name);
+  if (mit == variant_manifests_.end()) {
+    // Lazy parse + cache. ParseVariantManifest throws on missing/malformed
+    // variant.json, which is correct: any v4 package reaching this point
+    // is required by the spec to have a valid variant.json for each
+    // selected component.
+    VariantManifest manifest = ParseVariantManifest(cit->second->VariantFolderPath());
+    mit = variant_manifests_.emplace(component_name, std::move(manifest)).first;
+  }
+
+  const VariantFile* file_entry = nullptr;
+  for (const auto& fe : mit->second.files) {
+    if (fe.filename == filename) {
+      file_entry = &fe;
+      break;
+    }
+  }
+  if (!file_entry || file_entry->shared_files.empty()) return;
+
+  std::vector<std::basic_string<ORTCHAR_T>> names;
+  std::vector<char*> buffers;
+  std::vector<size_t> lengths;
+  names.reserve(file_entry->shared_files.size());
+  buffers.reserve(file_entry->shared_files.size());
+  lengths.reserve(file_entry->shared_files.size());
+
+  for (const auto& [graph_filename, checksum] : file_entry->shared_files) {
+    fs::path resolved = cit->second->ResolveSharedWeight(checksum);
+
+    std::ifstream f(resolved.c_str(), std::ios::binary | std::ios::ate);
+    if (!f) {
+      throw std::runtime_error("model package: cannot open shared-weight blob: " + resolved.string());
+    }
+    const std::streamsize size = f.tellg();
+    f.seekg(0);
+    if (size < 0) {
+      throw std::runtime_error("model package: cannot stat shared-weight blob: " + resolved.string());
+    }
+    auto& buf = external_initializer_buffers_.emplace_back(static_cast<size_t>(size));
+    if (size > 0 && !f.read(buf.data(), size)) {
+      throw std::runtime_error("model package: cannot read shared-weight blob: " + resolved.string());
+    }
+
+#ifdef _WIN32
+    // ORTCHAR_T is wchar_t on Windows; widen the UTF-8 graph filename via fs::path.
+    fs::path graph_path(graph_filename);
+    names.emplace_back(graph_path.c_str());
+#else
+    names.push_back(graph_filename);
+#endif
+    buffers.push_back(buf.data());
+    lengths.push_back(static_cast<size_t>(size));
+  }
+
+  session_options.AddExternalInitializersFromFilesInMemory(names, buffers, lengths);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
