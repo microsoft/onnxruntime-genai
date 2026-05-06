@@ -3,7 +3,11 @@
 
 #include <cmath>
 #include <charconv>
+#include <cstdio>
+#include <limits>
+#include <list>
 #include <sstream>
+#include <type_traits>
 
 namespace JSON {
 static constexpr const char* value_names[] = {"string", "number", "bool", "null"};
@@ -80,7 +84,7 @@ bool JSON::Skip(char c) {
 template <size_t TCount>
 bool JSON::Skip(const char (&sz)[TCount]) {
   size_t const count = TCount - 1;  // Remove the null terminator from the string literal
-  if (current_ + count >= end_ || std::strncmp(current_, sz, count) != 0) {
+  if (current_ + count > end_ || std::strncmp(current_, sz, count) != 0) {
     return false;
   }
 
@@ -280,6 +284,226 @@ std::string JSON::Parse_String() {
     string.push_back(c);
   }
   return string;
+}
+
+// ---------------------------------------------------------------------------
+// JSON DOM (Document) — built on top of the streaming Parse() above.
+// ---------------------------------------------------------------------------
+namespace {
+
+Document FromValue(Value v) {
+  if (auto* sv = std::get_if<std::string_view>(&v)) {
+    return Document(std::string(*sv));
+  }
+  if (auto* d = std::get_if<double>(&v)) {
+    return Document(*d);
+  }
+  if (auto* b = std::get_if<bool>(&v)) {
+    return Document(*b);
+  }
+  return Document(nullptr);
+}
+
+// Builder used for any nested Object / Array. The streaming parser hands us
+// reference-stable Element pointers to drive each nested level; we own the
+// per-level builders in std::list so emplace_back doesn't invalidate the
+// references we've already returned to the parser.
+struct DocumentBuilder : Element {
+  Document& target_;
+  std::list<DocumentBuilder> children_;
+
+  explicit DocumentBuilder(Document& t) : target_(t) {}
+
+  Document& InsertChild(std::string_view name) {
+    if (auto* obj = std::get_if<Object>(&target_.value)) {
+      // operator[] default-constructs a Document if the key is absent,
+      // which is what the caller will fill in next. If the key is already
+      // present (parser saw a duplicate key), the new value wins — same
+      // behaviour as the streaming Element parser.
+      return (*obj)[std::string(name)];
+    }
+    if (auto* arr = std::get_if<Array>(&target_.value)) {
+      arr->emplace_back();
+      return arr->back();
+    }
+    // Should not happen — parser only nests inside containers — but if it
+    // does, just clobber the slot.
+    return target_;
+  }
+
+  void OnValue(std::string_view name, Value v) override {
+    InsertChild(name) = FromValue(v);
+  }
+
+  Element& OnObject(std::string_view name) override {
+    Document& slot = InsertChild(name);
+    slot = Document(Object{});
+    children_.emplace_back(slot);
+    return children_.back();
+  }
+
+  Element& OnArray(std::string_view name) override {
+    Document& slot = InsertChild(name);
+    slot = Document(Array{});
+    children_.emplace_back(slot);
+    return children_.back();
+  }
+};
+
+// Top-level builder. The streaming parser invokes one of OnValue / OnObject /
+// OnArray with an empty name to seed the root value.
+struct RootDocumentBuilder : Element {
+  Document& root_;
+  std::list<DocumentBuilder> children_;
+
+  explicit RootDocumentBuilder(Document& root) : root_(root) {}
+
+  void OnValue(std::string_view, Value v) override {
+    root_ = FromValue(v);
+  }
+
+  Element& OnObject(std::string_view) override {
+    root_ = Document(Object{});
+    children_.emplace_back(root_);
+    return children_.back();
+  }
+
+  Element& OnArray(std::string_view) override {
+    root_ = Document(Array{});
+    children_.emplace_back(root_);
+    return children_.back();
+  }
+};
+
+void EscapeString(const std::string& s, std::ostringstream& oss) {
+  oss << '"';
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        oss << "\\\"";
+        break;
+      case '\\':
+        oss << "\\\\";
+        break;
+      case '\b':
+        oss << "\\b";
+        break;
+      case '\f':
+        oss << "\\f";
+        break;
+      case '\n':
+        oss << "\\n";
+        break;
+      case '\r':
+        oss << "\\r";
+        break;
+      case '\t':
+        oss << "\\t";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+          oss << buf;
+        } else {
+          oss << c;
+        }
+    }
+  }
+  oss << '"';
+}
+
+void SerializeImpl(const Document& doc, std::ostringstream& oss) {
+  std::visit(
+      [&](auto&& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, std::nullptr_t>) {
+          oss << "null";
+        } else if constexpr (std::is_same_v<T, bool>) {
+          oss << (v ? "true" : "false");
+        } else if constexpr (std::is_same_v<T, double>) {
+          // Emit integral values without a decimal point so a base config
+          // round-trips byte-for-byte through a no-op merge in the common
+          // case (e.g. token ids, head_size, hidden_size).
+          if (std::isfinite(v) && v == static_cast<double>(static_cast<long long>(v)) &&
+              v >= static_cast<double>(std::numeric_limits<long long>::min()) &&
+              v <= static_cast<double>(std::numeric_limits<long long>::max())) {
+            oss << static_cast<long long>(v);
+          } else {
+            // Use enough precision to round-trip a double exactly.
+            std::ostringstream tmp;
+            tmp.precision(17);
+            tmp << v;
+            oss << tmp.str();
+          }
+        } else if constexpr (std::is_same_v<T, std::string>) {
+          EscapeString(v, oss);
+        } else if constexpr (std::is_same_v<T, Array>) {
+          oss << '[';
+          bool first = true;
+          for (const auto& e : v) {
+            if (!first) oss << ',';
+            first = false;
+            SerializeImpl(e, oss);
+          }
+          oss << ']';
+        } else if constexpr (std::is_same_v<T, Object>) {
+          oss << '{';
+          bool first = true;
+          for (const auto& [k, val] : v) {
+            if (!first) oss << ',';
+            first = false;
+            EscapeString(k, oss);
+            oss << ':';
+            SerializeImpl(val, oss);
+          }
+          oss << '}';
+        }
+      },
+      doc.value);
+}
+
+}  // namespace
+
+Document ParseDocument(std::string_view text) {
+  Document root;
+  RootDocumentBuilder builder(root);
+  Parse(builder, text);
+  return root;
+}
+
+std::string SerializeDocument(const Document& doc) {
+  std::ostringstream oss;
+  SerializeImpl(doc, oss);
+  return oss.str();
+}
+
+void MergePatch(Document& target, const Document& patch) {
+  // RFC 7386: if the patch is not an object, the target is replaced wholesale.
+  if (!patch.IsObject()) {
+    target = patch;
+    return;
+  }
+  // If the target is anything other than an object, RFC 7386 says treat it as
+  // an empty object before applying the patch.
+  if (!target.IsObject()) {
+    target = Document(Object{});
+  }
+  Object& target_obj = target.AsObject();
+  const Object& patch_obj = patch.AsObject();
+  for (const auto& [key, patch_val] : patch_obj) {
+    if (patch_val.IsNull()) {
+      target_obj.erase(key);
+    } else {
+      auto it = target_obj.find(key);
+      if (it == target_obj.end()) {
+        // Insert a deep copy.
+        target_obj.emplace(key, patch_val);
+      } else {
+        MergePatch(it->second, patch_val);
+      }
+    }
+  }
 }
 
 }  // namespace JSON
