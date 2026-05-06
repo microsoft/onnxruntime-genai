@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
+
 namespace Generators::test {
 
 namespace {
@@ -57,6 +60,44 @@ TEST(JsonDomTest, IntegralDoublesEmittedWithoutDecimal) {
   // ids / hidden_size etc. round-trip byte-stable through a no-op merge.
   JSON::Document d(static_cast<double>(199999));
   EXPECT_EQ(JSON::SerializeDocument(d), "199999");
+}
+
+TEST(JsonDomTest, OutOfLongLongRangeIntegralUsesScientific) {
+  // 1e19 is integral but overflows long long. The serializer must NOT take
+  // the integer fast path here — that would invoke UB via static_cast<long
+  // long>(v) on an out-of-range double. Falls through to the precision-17
+  // path; result is finite, parseable, and round-trips back to a finite
+  // number through ParseDocument.
+  JSON::Document d(1e19);
+  const std::string serialized = JSON::SerializeDocument(d);
+  // We don't pin the exact textual form (precision-17 may emit either
+  // 1e+19 or 10000000000000000000), but it must be valid JSON that
+  // re-parses to a finite double.
+  const auto reparsed = JSON::ParseDocument(serialized);
+  ASSERT_TRUE(reparsed.IsNumber());
+  EXPECT_TRUE(std::isfinite(reparsed.AsNumber()));
+}
+
+TEST(JsonDomTest, SerializeRejectsNonFiniteNumbers) {
+  // JSON has no nan/inf. The serializer must throw rather than emit a token
+  // that is not valid JSON.
+  EXPECT_THROW(JSON::SerializeDocument(JSON::Document(
+                   std::numeric_limits<double>::infinity())),
+               std::exception);
+  EXPECT_THROW(JSON::SerializeDocument(JSON::Document(
+                   -std::numeric_limits<double>::infinity())),
+               std::exception);
+  EXPECT_THROW(JSON::SerializeDocument(JSON::Document(
+                   std::numeric_limits<double>::quiet_NaN())),
+               std::exception);
+}
+
+TEST(JsonDomTest, ParseRejectsNumberOverflow) {
+  // 1e500 overflows double. Both parser branches (from_chars and the
+  // strtod fallback) must surface this as a hard parse error rather than
+  // producing ±Inf and admitting it into the DOM.
+  EXPECT_THROW(JSON::ParseDocument("1e500"), std::exception);
+  EXPECT_THROW(JSON::ParseDocument("-1e500"), std::exception);
 }
 
 // ---------------------------------------------------------------------------
