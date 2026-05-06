@@ -381,39 +381,25 @@ ParsedManifest ParseManifestJson(const std::string& json_text,
   ParsedManifest result;
   if (auto comps_it = root.find("components"); comps_it != root.end()) {
     if (!comps_it->second.IsArray()) {
-      throw std::runtime_error("manifest.json: 'components' must be an array (" + origin.string() + ")");
+      throw std::runtime_error("manifest.json: 'components' must be an array of strings (" + origin.string() + ")");
     }
     std::vector<std::string> names;
     std::unordered_set<std::string> seen;
     names.reserve(comps_it->second.AsArray().size());
     for (const auto& comp : comps_it->second.AsArray()) {
-      // Spec form: array of component-name strings.
-      // Tolerated form: array of objects with a string `name` field
-      // (some producers ship this richer shape; extra fields like
-      // `metadata`, `description`, `version` are ignored — the on-disk
-      // layout is conventional).
-      std::string name;
-      if (comp.IsString()) {
-        name = comp.AsString();
-      } else if (comp.IsObject()) {
-        const auto& obj = comp.AsObject();
-        auto name_it = obj.find("name");
-        if (name_it == obj.end() || !name_it->second.IsString()) {
-          throw std::runtime_error(
-              "manifest.json: object-form 'components' entries require a string 'name' (" +
-              origin.string() + ")");
-        }
-        name = name_it->second.AsString();
-      } else {
+      if (!comp.IsString()) {
         throw std::runtime_error(
-            "manifest.json: 'components' entries must be strings or objects with a 'name' field (" +
+            "manifest.json: 'components' entries must be strings (e.g. \"decoder\"). "
+            "Object-form entries (e.g. {\"name\":\"decoder\"}) are not supported — "
+            "the on-disk layout is conventional, no per-component metadata path is needed (" +
             origin.string() + ")");
       }
+      const std::string& name = comp.AsString();
       ValidatePathFragment(name, "component name");
       if (!seen.insert(name).second) {
         throw std::runtime_error("manifest.json: duplicate component name '" + name + "'");
       }
-      names.push_back(std::move(name));
+      names.push_back(name);
     }
     result.components = std::move(names);
   }
