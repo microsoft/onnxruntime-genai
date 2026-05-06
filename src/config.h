@@ -467,4 +467,18 @@ void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_v
 void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name);
 void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name);
 
+// Returns the effective layer-2 session_options view for a non-decoder
+// component, falling back to the decoder's session_options when the component
+// has no explicit override. Replaces the inline ternary
+//   model.<component>.session_options.has_value()
+//       ? model.<component>.session_options.value()
+//       : model.decoder.session_options
+// that previously appeared in marian / whisper / multi_modal session-creation
+// paths. Behavior is identical to the inlined form; isolating it here gives v4
+// model-package mode a single seam where the layer-1 (variant.json) baseline
+// will eventually be merged in front of the layer-2 (genai_config) view.
+const Config::SessionOptions& EffectiveSessionOptions(
+    const Config& config,
+    const std::optional<Config::SessionOptions>& component_session_options);
+
 }  // namespace Generators

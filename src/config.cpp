@@ -1567,6 +1567,13 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
+const Config::SessionOptions& EffectiveSessionOptions(
+    const Config& config,
+    const std::optional<Config::SessionOptions>& component_session_options) {
+  return component_session_options.has_value() ? component_session_options.value()
+                                               : config.model.decoder.session_options;
+}
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path}, shared_assets_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
