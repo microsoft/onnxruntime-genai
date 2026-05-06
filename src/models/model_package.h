@@ -77,6 +77,14 @@ struct ComponentInstance {
   // GenAI consumer parses this and pulls out `genai_config_overlay`.
   virtual std::string ConsumerMetadata() const = 0;
 
+  // Canonical ORT EP name (e.g. "CUDAExecutionProvider") of the variant
+  // selected for this component. The string mirrors the spec's `ep` field
+  // in `ep_compatibility[]`. Used by W5b to plumb the package's chosen EP
+  // through the session-creation pipeline. Empty string is reserved for
+  // future "no EP captured" cases — `SelectComponent` populates this from
+  // the priority entry that matched the chosen variant.
+  virtual std::string SelectedEp() const = 0;
+
   // Resolve a shared-weight checksum (as referenced by a file's
   // `shared_files` map) to its absolute path on disk. Throws on missing,
   // path-unsafe, zero-blob, or multi-blob checksum directories — the

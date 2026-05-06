@@ -740,6 +740,19 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
+  // Package mode (v4): the captured EP from variant selection lives on
+  // the per-component ComponentInstance. Inject it at the front of the
+  // decoder's `providers` list (and ensure a matching ProviderOptions
+  // entry) before CreateSessionOptionsFromConfig walks the dispatch
+  // table. Empty `decoder.component`, missing instance, or
+  // CPU/unrecognised EP -> no-op (the implicit-CPU path still runs).
+  if (config_->model_package && !config_->model.decoder.component.empty()) {
+    auto it = config_->component_instances.find(config_->model.decoder.component);
+    if (it != config_->component_instances.end() && it->second) {
+      EnsurePackageProvider(config_->model.decoder.session_options, it->second->SelectedEp());
+    }
+  }
+
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {

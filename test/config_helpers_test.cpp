@@ -15,6 +15,7 @@
 
 #include "generators.h"
 #include "config.h"
+#include "models/session_options.h"
 
 #include "test_utils.h"
 
@@ -75,6 +76,114 @@ TEST(EffectiveSessionOptionsTest, FallbackPicksUpLiveDecoderState) {
   config.model.decoder.session_options.log_id = "decoder-after-call";
   ASSERT_TRUE(result.log_id.has_value());
   EXPECT_EQ(result.log_id.value(), "decoder-after-call");
+}
+
+// --- EnsurePackageProvider ------------------------------------------------
+
+TEST(EnsurePackageProviderTest, MapsCanonicalEpToInternalTag) {
+  EXPECT_EQ(EpNameToProviderTag("CUDAExecutionProvider"), "cuda");
+  EXPECT_EQ(EpNameToProviderTag("DmlExecutionProvider"), "DML");
+  EXPECT_EQ(EpNameToProviderTag("NvTensorRtRtxExecutionProvider"), "NvTensorRtRtx");
+  EXPECT_EQ(EpNameToProviderTag("OpenVINOExecutionProvider"), "OpenVINO");
+  EXPECT_EQ(EpNameToProviderTag("QNNExecutionProvider"), "QNN");
+  EXPECT_EQ(EpNameToProviderTag("RyzenAIExecutionProvider"), "RyzenAI");
+  EXPECT_EQ(EpNameToProviderTag("VitisAIExecutionProvider"), "VitisAI");
+  EXPECT_EQ(EpNameToProviderTag("WebGpuExecutionProvider"), "WebGPU");
+}
+
+TEST(EnsurePackageProviderTest, CpuAndUnknownAreEmptyTag) {
+  // CPU is the implicit fallback path and never appears in `providers`.
+  EXPECT_EQ(EpNameToProviderTag("CPUExecutionProvider"), "");
+  // Unrecognised EPs surface as empty so callers no-op rather than
+  // injecting a tag the dispatch table can't honour.
+  EXPECT_EQ(EpNameToProviderTag("MadeUpExecutionProvider"), "");
+  EXPECT_EQ(EpNameToProviderTag(""), "");
+}
+
+TEST(EnsurePackageProviderTest, InsertsEpAtFrontOfEmptyProviderList) {
+  Config::SessionOptions so;
+
+  EnsurePackageProvider(so, "CUDAExecutionProvider");
+
+  ASSERT_EQ(so.providers.size(), 1u);
+  EXPECT_EQ(so.providers.front(), "cuda");
+  ASSERT_EQ(so.provider_options.size(), 1u);
+  EXPECT_EQ(so.provider_options.front().name, "cuda");
+}
+
+TEST(EnsurePackageProviderTest, RotatesEpToFrontWhenAlreadyPresent) {
+  // User-overlay added "DML" before us; package mode says "cuda" wins.
+  // The package EP must rotate to the front; user's "DML" entry stays in
+  // the list at a later position so layer-2 SO/PO overrides for it
+  // remain visible (W5b semantics).
+  Config::SessionOptions so;
+  so.providers = {"DML", "cuda"};
+  Config::ProviderOptions dml;
+  dml.name = "DML";
+  Config::ProviderOptions cuda;
+  cuda.name = "cuda";
+  so.provider_options = {dml, cuda};
+
+  EnsurePackageProvider(so, "CUDAExecutionProvider");
+
+  ASSERT_EQ(so.providers.size(), 2u);
+  EXPECT_EQ(so.providers[0], "cuda");
+  EXPECT_EQ(so.providers[1], "DML");
+  // ProviderOptions must NOT be duplicated — the existing "cuda" entry is reused.
+  EXPECT_EQ(so.provider_options.size(), 2u);
+}
+
+TEST(EnsurePackageProviderTest, IsIdempotent) {
+  Config::SessionOptions so;
+
+  EnsurePackageProvider(so, "DmlExecutionProvider");
+  EnsurePackageProvider(so, "DmlExecutionProvider");
+
+  ASSERT_EQ(so.providers.size(), 1u);
+  EXPECT_EQ(so.providers.front(), "DML");
+  ASSERT_EQ(so.provider_options.size(), 1u);
+  EXPECT_EQ(so.provider_options.front().name, "DML");
+}
+
+TEST(EnsurePackageProviderTest, CpuIsNoOp) {
+  Config::SessionOptions so;
+  so.providers = {"cuda"};
+  Config::ProviderOptions cuda;
+  cuda.name = "cuda";
+  so.provider_options = {cuda};
+
+  EnsurePackageProvider(so, "CPUExecutionProvider");
+
+  // CPU is the implicit fallback; it must not push itself into providers
+  // and must not disturb existing entries.
+  ASSERT_EQ(so.providers.size(), 1u);
+  EXPECT_EQ(so.providers.front(), "cuda");
+  EXPECT_EQ(so.provider_options.size(), 1u);
+}
+
+TEST(EnsurePackageProviderTest, UnknownEpIsNoOp) {
+  Config::SessionOptions so;
+
+  EnsurePackageProvider(so, "MadeUpExecutionProvider");
+
+  EXPECT_TRUE(so.providers.empty());
+  EXPECT_TRUE(so.provider_options.empty());
+}
+
+TEST(EnsurePackageProviderTest, AddsMissingProviderOptionsForExistingProviderEntry) {
+  // User-supplied genai_config carries `providers: ["cuda"]` but no matching
+  // `provider_options[].name == "cuda"` entry. SetProviderSessionOptions
+  // would throw "Provider options not found" in that state. Helper must
+  // backfill an empty entry so package mode stays robust against partial
+  // overlays.
+  Config::SessionOptions so;
+  so.providers = {"cuda"};
+
+  EnsurePackageProvider(so, "CUDAExecutionProvider");
+
+  ASSERT_EQ(so.provider_options.size(), 1u);
+  EXPECT_EQ(so.provider_options.front().name, "cuda");
+  EXPECT_TRUE(so.provider_options.front().options.empty());
 }
 
 }  // namespace Generators::test

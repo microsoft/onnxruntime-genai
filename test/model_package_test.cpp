@@ -404,11 +404,13 @@ TEST(ModelPackageContextTest, SelectComponentPicksMatchingVariant) {
   ASSERT_NE(cuda, nullptr);
   EXPECT_EQ(cuda->VariantFolderPath().string(),
             (dir.path() / "decoder" / "cuda").string());
+  EXPECT_EQ(cuda->SelectedEp(), "CUDAExecutionProvider");
 
   auto cpu = ctx->SelectComponent(0, OnePriority("CPUExecutionProvider"));
   ASSERT_NE(cpu, nullptr);
   EXPECT_EQ(cpu->VariantFolderPath().string(),
             (dir.path() / "decoder" / "cpu").string());
+  EXPECT_EQ(cpu->SelectedEp(), "CPUExecutionProvider");
 }
 
 TEST(ModelPackageContextTest, SelectComponentRespectsEpPriorityOrder) {

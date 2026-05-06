@@ -406,10 +406,12 @@ struct StubComponentInstance : ComponentInstance {
   fs::path variant_folder;
   std::size_t file_count = 0;
   std::string consumer_metadata_blob;
+  std::string selected_ep;
 
   fs::path VariantFolderPath() const override { return variant_folder; }
   std::size_t FileCount() const override { return file_count; }
   std::string ConsumerMetadata() const override { return consumer_metadata_blob; }
+  std::string SelectedEp() const override { return selected_ep; }
 
   fs::path ResolveSharedWeight(std::string_view checksum) const override {
     ValidatePathFragment(checksum, "shared-weight checksum");
@@ -534,6 +536,7 @@ struct StubModelPackageContext : ModelPackageContext {
     inst->variant_folder = chosen.folder;
     inst->file_count = chosen.file_count;
     inst->consumer_metadata_blob = chosen.consumer_metadata;
+    inst->selected_ep = priority[best_priority].ep_name;
     return inst;
   }
 
