@@ -5,6 +5,7 @@
 #include "model_package.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -348,37 +349,71 @@ ParsedManifest ParseManifestJson(const std::string& json_text,
   const auto& root = doc.AsObject();
 
   // Reject schema versions we don't recognize. Absent is fine — older
-  // packages simply omit the field.
+  // packages simply omit the field. The spec defines `schema_version` as a
+  // string, but historic producers wrote a number; we coerce numbers into
+  // their canonical decimal-string form so both spellings are accepted.
   if (auto sv_it = root.find("schema_version"); sv_it != root.end()) {
-    if (!sv_it->second.IsNumber()) {
-      throw std::runtime_error("manifest.json: 'schema_version' must be a number (" + origin.string() + ")");
-    }
-    const double sv = sv_it->second.AsNumber();
-    if (sv != 1.0) {
+    std::string sv_str;
+    if (sv_it->second.IsString()) {
+      sv_str = sv_it->second.AsString();
+    } else if (sv_it->second.IsNumber()) {
+      const double n = sv_it->second.AsNumber();
+      // 1 / 1.0 both mean schema v1. Reject anything that isn't an integer
+      // value to keep the recognised set tight.
+      if (std::floor(n) != n || n < 0) {
+        throw std::runtime_error(
+            "manifest.json: unsupported schema_version " + std::to_string(n) +
+            " (this build supports \"1\")");
+      }
+      sv_str = std::to_string(static_cast<long long>(n));
+    } else {
       throw std::runtime_error(
-          "manifest.json: unsupported schema_version " + std::to_string(sv) +
-          " (this build supports 1)");
+          "manifest.json: 'schema_version' must be a string (" + origin.string() + ")");
+    }
+    // Tolerate "1" and "1.0" — both refer to the v1 format.
+    if (sv_str != "1" && sv_str != "1.0") {
+      throw std::runtime_error(
+          "manifest.json: unsupported schema_version \"" + sv_str +
+          "\" (this build supports \"1\")");
     }
   }
 
   ParsedManifest result;
   if (auto comps_it = root.find("components"); comps_it != root.end()) {
     if (!comps_it->second.IsArray()) {
-      throw std::runtime_error("manifest.json: 'components' must be an array of strings (" + origin.string() + ")");
+      throw std::runtime_error("manifest.json: 'components' must be an array (" + origin.string() + ")");
     }
     std::vector<std::string> names;
     std::unordered_set<std::string> seen;
     names.reserve(comps_it->second.AsArray().size());
     for (const auto& comp : comps_it->second.AsArray()) {
-      if (!comp.IsString()) {
-        throw std::runtime_error("manifest.json: 'components' must be an array of STRINGS (" + origin.string() + ")");
+      // Spec form: array of component-name strings.
+      // Tolerated form: array of objects with a string `name` field
+      // (some producers ship this richer shape; extra fields like
+      // `metadata`, `description`, `version` are ignored — the on-disk
+      // layout is conventional).
+      std::string name;
+      if (comp.IsString()) {
+        name = comp.AsString();
+      } else if (comp.IsObject()) {
+        const auto& obj = comp.AsObject();
+        auto name_it = obj.find("name");
+        if (name_it == obj.end() || !name_it->second.IsString()) {
+          throw std::runtime_error(
+              "manifest.json: object-form 'components' entries require a string 'name' (" +
+              origin.string() + ")");
+        }
+        name = name_it->second.AsString();
+      } else {
+        throw std::runtime_error(
+            "manifest.json: 'components' entries must be strings or objects with a 'name' field (" +
+            origin.string() + ")");
       }
-      const std::string& name = comp.AsString();
       ValidatePathFragment(name, "component name");
       if (!seen.insert(name).second) {
         throw std::runtime_error("manifest.json: duplicate component name '" + name + "'");
       }
-      names.push_back(name);
+      names.push_back(std::move(name));
     }
     result.components = std::move(names);
   }

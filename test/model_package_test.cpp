@@ -202,18 +202,71 @@ TEST(ModelPackageContextTest, ManifestNonObjectRootThrows) {
   EXPECT_THROW(ModelPackageContext::Open(dir.fs_path()), std::exception);
 }
 
-TEST(ModelPackageContextTest, ManifestRejectsLegacyObjectArrayShape) {
-  // The OLD (pre-spec-update) manifest shape used objects with a `name` key.
-  // The new spec uses a string array; the legacy shape must be rejected so
-  // misordered packages don't silently load.
+TEST(ModelPackageContextTest, ManifestAcceptsObjectFormComponents) {
+  // Spec form is `["decoder"]`, but a number of producer toolchains emit
+  // the richer `[{"name":"decoder", "metadata":"decoder/metadata.json"}]`
+  // shape. We tolerate it: only the `name` is consumed; extra fields like
+  // `metadata` are ignored because the on-disk layout is conventional.
   TempDir dir;
-  WriteFile(dir.path() / "manifest.json", R"({"components":[{"name":"decoder"}]})");
+  WriteFile(dir.path() / "manifest.json", R"({
+    "components": [
+      {"name": "decoder", "metadata": "decoder/metadata.json", "description": "ignored"}
+    ]
+  })");
+  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+    "variants": {"cpu": {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]}}
+  })");
+  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json",
+            R"({"files":[{"filename":"m.onnx"}]})");
+
+  auto ctx = ModelPackageContext::Open(dir.fs_path());
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_EQ(ctx->NumComponents(), 1u);
+  EXPECT_EQ(ctx->ComponentName(0), "decoder");
+}
+
+TEST(ModelPackageContextTest, ManifestObjectFormComponentMissingNameThrows) {
+  // Tolerance only goes so far: an object-form entry without a `name`
+  // string is unrecoverable.
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json",
+            R"({"components":[{"metadata":"decoder/metadata.json"}]})");
   EXPECT_THROW(ModelPackageContext::Open(dir.fs_path()), std::exception);
 }
 
 TEST(ModelPackageContextTest, ManifestUnsupportedSchemaVersionThrows) {
   TempDir dir;
   WriteFile(dir.path() / "manifest.json", R"({"schema_version": 99, "components":["x"]})");
+  EXPECT_THROW(ModelPackageContext::Open(dir.fs_path()), std::exception);
+}
+
+TEST(ModelPackageContextTest, ManifestAcceptsStringSchemaVersion) {
+  // Spec calls for a string `schema_version`; "1" and "1.0" both name v1.
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({"schema_version":"1.0","components":["decoder"]})");
+  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+    "variants": {"cpu": {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]}}
+  })");
+  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json",
+            R"({"files":[{"filename":"m.onnx"}]})");
+  EXPECT_NE(ModelPackageContext::Open(dir.fs_path()), nullptr);
+}
+
+TEST(ModelPackageContextTest, ManifestAcceptsNumberSchemaVersion) {
+  // Numeric `1` is coerced to "1" so historic producers still load.
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({"schema_version":1,"components":["decoder"]})");
+  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+    "variants": {"cpu": {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]}}
+  })");
+  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json",
+            R"({"files":[{"filename":"m.onnx"}]})");
+  EXPECT_NE(ModelPackageContext::Open(dir.fs_path()), nullptr);
+}
+
+TEST(ModelPackageContextTest, ManifestRejectsUnsupportedSchemaVersionString) {
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({"schema_version":"2","components":["decoder"]})");
   EXPECT_THROW(ModelPackageContext::Open(dir.fs_path()), std::exception);
 }
 
