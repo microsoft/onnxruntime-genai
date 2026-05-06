@@ -232,6 +232,13 @@ double JSON::Parse_Number() {
     throw std::runtime_error("Expecting number");
   }
   current_ = end;
+  // strtod returns ±HUGE_VAL on overflow without otherwise signalling failure;
+  // surface that as a parse error rather than admitting Inf into the DOM
+  // (the serializer rejects non-finite doubles, so this would otherwise be
+  // a deferred crash on a later round-trip).
+  if (!std::isfinite(value)) {
+    throw std::runtime_error("Number out of range");
+  }
 #endif
   return value;
 }
@@ -422,12 +429,25 @@ void SerializeImpl(const Document& doc, std::ostringstream& oss) {
         } else if constexpr (std::is_same_v<T, bool>) {
           oss << (v ? "true" : "false");
         } else if constexpr (std::is_same_v<T, double>) {
+          // JSON has no representation for non-finite numbers (RFC 8259 §6
+          // restricts the grammar to the finite reals). Refuse to emit them
+          // rather than producing nan/inf token soup.
+          if (!std::isfinite(v)) {
+            throw std::runtime_error("JSON serialize: non-finite number");
+          }
           // Emit integral values without a decimal point so a base config
           // round-trips byte-for-byte through a no-op merge in the common
-          // case (e.g. token ids, head_size, hidden_size).
-          if (std::isfinite(v) && v == static_cast<double>(static_cast<long long>(v)) &&
-              v >= static_cast<double>(std::numeric_limits<long long>::min()) &&
-              v <= static_cast<double>(std::numeric_limits<long long>::max())) {
+          // case (e.g. token ids, head_size, hidden_size). Bounds-check
+          // before the cast — converting an out-of-range double to long long
+          // is undefined behavior — and then use modf to test integrality
+          // without going through the cast at all. The upper bound uses a
+          // strict `<` because static_cast<double>(LLONG_MAX) rounds up to
+          // 2^63 (LLONG_MAX = 2^63-1 is not exactly representable as
+          // double); admitting v = 2^63 would still overflow the cast.
+          double integral_part = 0.0;
+          if (v >= static_cast<double>(std::numeric_limits<long long>::min()) &&
+              v < static_cast<double>(std::numeric_limits<long long>::max()) &&
+              std::modf(v, &integral_part) == 0.0) {
             oss << static_cast<long long>(v);
           } else {
             // Use enough precision to round-trip a double exactly.
