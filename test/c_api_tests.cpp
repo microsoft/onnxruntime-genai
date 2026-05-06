@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -1591,4 +1593,121 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   auto mel3 = processor->Process(silence.data(), silence.size());
   ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
+}
+
+// ----- Cohere Transcribe tests -----
+// These exercise the chunked encoder + cross-cache decoder pipeline. They are
+// gated on the model being present locally (CI provides it via TEST_MODEL_SRC_DIR).
+
+#ifndef COHERE_TRANSCRIBE_PATH
+#define COHERE_TRANSCRIBE_PATH MODEL_PATH "cohere-transcribe"
+#endif
+
+#ifndef COHERE_TRANSCRIBE_AUDIO
+#define COHERE_TRANSCRIBE_AUDIO MODEL_PATH "audios/jfk.flac"
+#endif
+
+// Lowercase, strip punctuation, collapse whitespace -> word vector.
+static std::vector<std::string> NormalizeWords(const std::string& s) {
+  std::string norm;
+  norm.reserve(s.size());
+  for (char c : s) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    if (std::isalnum(uc))
+      norm.push_back(static_cast<char>(std::tolower(uc)));
+    else
+      norm.push_back(' ');
+  }
+  std::vector<std::string> words;
+  std::string w;
+  for (char c : norm) {
+    if (c == ' ') {
+      if (!w.empty()) {
+        words.push_back(w);
+        w.clear();
+      }
+    } else {
+      w.push_back(c);
+    }
+  }
+  if (!w.empty()) words.push_back(w);
+  return words;
+}
+
+// Word-level Levenshtein / reference word count.
+static double ComputeWER(const std::string& reference, const std::string& hypothesis) {
+  auto ref = NormalizeWords(reference);
+  auto hyp = NormalizeWords(hypothesis);
+  if (ref.empty()) return hyp.empty() ? 0.0 : 1.0;
+  std::vector<std::vector<size_t>> dp(ref.size() + 1, std::vector<size_t>(hyp.size() + 1, 0));
+  for (size_t i = 0; i <= ref.size(); ++i) dp[i][0] = i;
+  for (size_t j = 0; j <= hyp.size(); ++j) dp[0][j] = j;
+  for (size_t i = 1; i <= ref.size(); ++i) {
+    for (size_t j = 1; j <= hyp.size(); ++j) {
+      size_t cost = (ref[i - 1] == hyp[j - 1]) ? 0 : 1;
+      dp[i][j] = std::min({dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost});
+    }
+  }
+  return static_cast<double>(dp[ref.size()][hyp.size()]) / static_cast<double>(ref.size());
+}
+
+// Test creating a Model + MultiModalProcessor for cohere_transcribe.
+TEST(CAPITests, CohereTranscribeCreate) {
+  if (!std::filesystem::exists(COHERE_TRANSCRIBE_PATH))
+    GTEST_SKIP() << "Cohere Transcribe model not found at " << COHERE_TRANSCRIBE_PATH;
+
+  auto model = OgaModel::Create(COHERE_TRANSCRIBE_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  ASSERT_NE(model, nullptr);
+  ASSERT_NE(processor, nullptr);
+  ASSERT_NE(tokenizer, nullptr);
+}
+
+// End-to-end transcription on CPU: load audio, process to mel chunks, run the
+// generator until done, decode tokens. Produces non-empty output.
+TEST(CAPITests, CohereTranscribeE2E) {
+  if (!std::filesystem::exists(COHERE_TRANSCRIBE_PATH))
+    GTEST_SKIP() << "Cohere Transcribe model not found at " << COHERE_TRANSCRIBE_PATH;
+  if (!std::filesystem::exists(COHERE_TRANSCRIBE_AUDIO))
+    GTEST_SKIP() << "Test audio not found at " << COHERE_TRANSCRIBE_AUDIO;
+
+  auto model = OgaModel::Create(COHERE_TRANSCRIBE_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* audio_paths[] = {COHERE_TRANSCRIBE_AUDIO};
+  auto audios = OgaAudios::Load(std::vector<const char*>{audio_paths[0]});
+  ASSERT_NE(audios, nullptr);
+
+  // Cohere Transcribe expects the special-token control prompt up front.
+  const char* prompt =
+      "<|startofcontext|><|startoftranscript|><|emo:undefined|>"
+      "<|en|><|en|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>";
+
+  auto inputs = processor->ProcessAudios(prompt, audios.get());
+  ASSERT_NE(inputs, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*inputs);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  size_t seq_len = generator->GetSequenceCount(0);
+  ASSERT_GT(seq_len, 0u);
+  const int32_t* seq = generator->GetSequenceData(0);
+  auto text = tokenizer->Decode(seq, seq_len);
+  // Sanity: the model produced some characters beyond the control prompt.
+  ASSERT_GT(std::strlen(text), 0u);
+
+  // Reference transcript for jfk.flac. Require WER < 10%.
+  const std::string reference =
+      "And so my fellow Americans ask not what your country can do for you "
+      "ask what you can do for your country";
+  double wer = ComputeWER(reference, std::string(text));
+  EXPECT_LT(wer, 0.10) << "Cohere Transcribe WER too high: " << wer
+                       << "\nHypothesis: " << text;
 }

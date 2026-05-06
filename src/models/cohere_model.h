@@ -1,0 +1,98 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+#pragma once
+#include "whisper.h"
+
+namespace Generators {
+
+struct CohereEncoderState : State {
+  CohereEncoderState(const WhisperModel& model, const GeneratorParams& params);
+  CohereEncoderState(const CohereEncoderState&) = delete;
+  CohereEncoderState& operator=(const CohereEncoderState&) = delete;
+
+  void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+
+  int GetNumFrames() { return num_frames_; }
+  bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
+  OrtValue* GetHiddenStates() { return hidden_states_.get(); }
+
+  // Re-initialize encoder with new audio features for next chunk
+  void SetChunkAudioFeatures(std::shared_ptr<Tensor> audio_features, std::shared_ptr<Tensor> mel_length);
+
+ private:
+  const WhisperModel& model_;
+
+  // Update num_frames_ and (re)create hidden_states_ output to match audio_features_'s shape/type.
+  void UpdateForCurrentAudio();
+
+  // Expand `source` to the encoder device (and tile by num_beams), store into
+  // `storage`, then register it under `name` in input_names_/inputs_ — adding
+  // a new slot if `name` isn't bound yet, or replacing the existing pointer.
+  void SetOrReplaceInput(const char* name,
+                         std::unique_ptr<OrtValue>& source,
+                         std::unique_ptr<OrtValue>& storage);
+
+  std::unique_ptr<OrtValue> audio_features_;
+  std::unique_ptr<OrtValue> hidden_states_;
+  std::unique_ptr<OrtValue> mel_length_;
+  int num_frames_{0};
+};
+
+struct CohereState : State {
+  CohereState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths);
+  CohereState(const CohereState&) = delete;
+  CohereState& operator=(const CohereState&) = delete;
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  OrtValue* GetInput(const char* name) override;
+  OrtValue* GetOutput(const char* name) override;
+
+  // Multi-chunk support
+  bool HasMoreChunks() const { return current_chunk_ + 1 < total_chunks_; }
+  bool AdvanceToNextChunk();  // Returns true if advanced, false if no more chunks
+
+  void CommitChunkText(const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
+  size_t StreamedTokensCount() const { return streamed_tokens_count_; }
+  void AdvanceStreamedTokensCount() { ++streamed_tokens_count_; }
+  const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
+  bool AllChunksProcessed() const { return all_chunks_processed_; }
+  void MarkAllChunksProcessed() { all_chunks_processed_ = true; }
+  DeviceSpan<int32_t> GetCommittedSpan() const;
+
+  // Lazily create and cache the model's tokenizer.
+  Tokenizer& GetOrCreateTokenizer();
+
+ private:
+  const WhisperModel& model_;
+
+  // (Re)create decoder_state_ for the current encoder num_frames and wire it
+  // to the encoder via either cross-KV cache or encoder_hidden_states.
+  void RebuildDecoderForCurrentChunk();
+
+  std::unique_ptr<CohereEncoderState> encoder_state_;
+  std::unique_ptr<CrossCache> cross_cache_;
+  std::unique_ptr<WhisperDecoderState> decoder_state_;
+
+  // Multi-chunk state
+  int current_chunk_{0};
+  int total_chunks_{1};
+  std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // All chunk mel tensors (indexed by current_chunk_)
+  std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;  // All chunk mel_length tensors (indexed by current_chunk_)
+
+  // Streaming state
+  std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
+  size_t streamed_tokens_count_{0};        // # of committed tokens already yielded by GenerateNextToken
+  bool all_chunks_processed_{false};       // True once the last chunk has been decoded and committed
+  std::shared_ptr<Tokenizer> tokenizer_;   // Lazily created on first GetOrCreateTokenizer call.
+};
+
+struct CohereModel : WhisperModel {
+  using WhisperModel::WhisperModel;
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
+};
+
+}  // namespace Generators

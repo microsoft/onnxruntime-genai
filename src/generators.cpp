@@ -6,6 +6,7 @@
 #include "generators.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/cohere_model.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -369,6 +370,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
+  is_cohere_model_ = model.config_->model.type == "cohere_transcribe";
+
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
 }
@@ -500,6 +503,11 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     set_extra_inputs_ = false;
   }
 
+  // Cache prompt tokens on device for Cohere chunk re-feeding (and for prompt-length tracking).
+  if (is_cohere_model_ && input_ids.size() > 0) {
+    cohere_prompt_device_ = AllocateInputIdsOnDevice(cpu_span<const int32_t>(input_ids.data(), input_ids.size()));
+  }
+
   // Append tokens and run ComputeLogits after setting all other possible inputs
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
@@ -566,6 +574,14 @@ bool Generator::IsDone() {
     return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
   }
 
+  if (is_cohere_model_) {
+    // Cohere is only "done" once every chunk has been processed AND every
+    // committed token has been yielded by GenerateNextToken. The user never
+    // observes the underlying multi-chunk decoding.
+    auto* cs = static_cast<CohereState*>(state_.get());
+    return cs->AllChunksProcessed() && cs->StreamedTokensCount() >= cs->CommittedTokens().size();
+  }
+
   if (computed_logits_) {
     return false;
   }
@@ -604,6 +620,20 @@ void Generator::GenerateNextToken() {
     return;
   }
 
+  // Cohere: advance the user-visible stream by one committed token per call.
+  // If no unstreamed committed token is available, decode the next chunk
+  // end-to-end until one becomes available or all chunks are exhausted.
+  if (is_cohere_model_) {
+    auto* cs = static_cast<CohereState*>(state_.get());
+    while (cs->StreamedTokensCount() >= cs->CommittedTokens().size() && !cs->AllChunksProcessed()) {
+      RunCohereChunkUntilEOS(cs->GetOrCreateTokenizer());
+    }
+    if (cs->StreamedTokensCount() < cs->CommittedTokens().size()) {
+      cs->AdvanceStreamedTokensCount();
+    }
+    return;
+  }
+
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
@@ -615,6 +645,10 @@ void Generator::GenerateNextToken() {
     AppendTokens(current_seq);
   }
 
+  SampleNextToken();
+}
+
+void Generator::SampleNextToken() {
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
@@ -686,7 +720,58 @@ DeviceSpan<float> Generator::GetLogits() {
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
+  if (is_cohere_model_) {
+    // Return only the committed tokens that have already been yielded to
+    // the caller via GenerateNextToken. The underlying search sequence holds
+    // raw per-chunk decoder output (with prompt prefix and pre-cleanup
+    // boundary tokens), which is not what the user should observe.
+    return static_cast<CohereState*>(state_.get())->GetCommittedSpan();
+  }
   return search_->GetSequence(index);
+}
+
+void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
+  auto* cs = static_cast<CohereState*>(state_.get());
+  // Step the search until the model produces EOS for this chunk.
+  while (!search_->IsDone()) {
+    SampleNextToken();
+  }
+
+  // Extract this chunk's generated tokens (skip prompt at start, conditionally skip EOS at end).
+  std::vector<int32_t> chunk_tokens;
+  {
+    auto seq = search_->GetSequence(0);
+    auto seq_cpu = seq.CopyDeviceToCpu();
+    size_t prompt_len = cohere_prompt_device_.size();
+    size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
+    if (seq_len > prompt_len) {
+      size_t end = seq_len;
+      // Only strip the last token if it is actually an EOS token, this is needed for intermediate chunks
+      // When max_length is hit, the last token is a real word
+      if (end > prompt_len && contains(state_->params_->config.model.eos_token_id, seq_cpu[end - 1])) {
+        --end;
+      }
+      if (end > prompt_len) {
+        chunk_tokens.assign(seq_cpu.data() + prompt_len, seq_cpu.data() + end);
+      }
+    }
+  }
+
+  bool more = cs->HasMoreChunks();
+  cs->CommitChunkText(chunk_tokens, /*is_final=*/!more, tokenizer);
+
+  if (!more) {
+    cs->MarkAllChunksProcessed();
+  } else {
+    // Reset decoder for the next chunk and re-feed the prompt.
+    cs->AdvanceToNextChunk();
+    search_->RewindTo(0);
+    if (!cohere_prompt_device_.empty()) {
+      search_->AppendTokens(cohere_prompt_device_);
+      set_extra_inputs_ = false;
+      ComputeLogits(cohere_prompt_device_);
+    }
+  }
 }
 
 }  // namespace Generators

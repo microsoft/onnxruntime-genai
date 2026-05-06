@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#pragma once
 #include "audio_features.h"
 #include "model.h"
 #include "input_ids.h"
@@ -58,6 +59,7 @@ struct WhisperDecoderState : State {
  private:
   // clang-format off
   friend struct WhisperState;
+  friend struct CohereState;
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool first_update);
 

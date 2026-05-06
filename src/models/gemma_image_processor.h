@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct GemmaImageProcessor : Processor {
-  GemmaImageProcessor(Config& config, const SessionInfo& session_info);
+  GemmaImageProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 

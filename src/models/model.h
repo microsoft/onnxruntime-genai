@@ -9,6 +9,7 @@
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
+#include "cohere_processor.h"
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
 #include "gemma4_multimodal_processor.h"
@@ -52,6 +53,8 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
+
+  bool IsFirstRun() const { return first_run_; }
 
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false);
@@ -108,7 +111,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 };
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
-  MultiModalProcessor(Config& config, const SessionInfo& session_info);
+  MultiModalProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
   std::unique_ptr<NamedTensors> Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const;
@@ -117,7 +120,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   std::shared_ptr<Processor> processor_;
 
  private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
+  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&, Model&)>> processor_factory_;
 };
 
 struct SessionInfo {

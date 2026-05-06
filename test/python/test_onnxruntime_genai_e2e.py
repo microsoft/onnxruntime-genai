@@ -83,6 +83,87 @@ def run_whisper():
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def _run_cohere_transcribe_case(audio_filename, expected_transcription, max_wer):
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    ci_data_path = get_ci_data_path()
+    if not os.path.exists(ci_data_path):
+        return
+
+    audio_path = os.path.join(cwd, "..", "test_models", "audios", audio_filename)
+    if not os.path.exists(audio_path):
+        log.info(f"Test audio not found at {audio_path}, skipping Cohere Transcribe E2E test.")
+        return
+
+    for execution_provider in ["cuda", "cpu"]:
+        ci_model = os.path.join(ci_data_path, "onnx", f"cohere-transcribe-{execution_provider}")
+        if not os.path.exists(ci_model):
+            continue
+        if execution_provider == "cuda" and not og.is_cuda_available():
+            continue
+
+        command = [
+            sys.executable,
+            os.path.join(cwd, "..", "..", "examples", "python", "cohere_transcribe.py"),
+            "-m",
+            ci_model,
+            "-e",
+            execution_provider,
+            "-a",
+            audio_path,
+            "--expected_transcription",
+            expected_transcription,
+            "--max_wer",
+            str(max_wer),
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
+def run_cohere_transcribe():
+    log.debug("Running Cohere Transcribe Python E2E Test (short audio, single chunk)")
+    _run_cohere_transcribe_case(
+        audio_filename="jfk.flac",
+        expected_transcription=(
+            "And so my fellow Americans ask not what your country can do for you "
+            "ask what you can do for your country"
+        ),
+        max_wer=0.10,
+    )
+
+
+def run_cohere_transcribe_long():
+    # 120s clip from TED-LIUM long-form (Bill Gates 2010). Exceeds the model's
+    # 30s VAD chunk window, so this exercises the multi-chunk code path across >4 chunks.
+    log.debug("Running Cohere Transcribe Python E2E Test (long audio, multi-chunk)")
+    _run_cohere_transcribe_case(
+        audio_filename="tedlium_long_120s.flac",
+        expected_transcription=(
+            "I'm going to talk today about energy and climate. And that might seem a bit "
+            "surprising because my full time work at the foundation is mostly about "
+            "vaccines and seeds, about the things that we need to invent and deliver to "
+            "help the poorest two billion live better lives. But energy and climate are "
+            "extremely important to these people. In fact, more important than to anyone "
+            "else on the planet. The climate getting worse means that many years their "
+            "crops won't grow. There'll be too much rain, not enough rain. Things will "
+            "change in ways that their fragile environment simply can't support. And that "
+            "leads to starvation, it leads to uncertainty, it leads to unrest. The climate changes "
+            "will be terrible for them. Also, the price of energy is very important to them. In "
+            "fact, if you could pick just one thing to lower the price of, to reduce "
+            "poverty, by far you would pick energy. Now, the price of energy has come "
+            "down over time. Really, advanced civilization is based on advances in in"
+            "energy. The coal revolution fueled the industrial revolution, and even in "
+            "the 1900s, we've seen a very rapid decline in the price of electricity. "
+            "That's why we have refrigerators, air conditioning. We can make modern "
+            "materials and do so many things. And so we're in a wonderful situation with "
+            "electricity in the rich world. But as we make it cheaper, and let's say, "
+            "let's go for making it twice as cheap. We need to meet a new constraint, and "
+            "that constraint has to do with CO2. CO2 is warming the planet, and the "
+            "equation on CO2 is actually a very straightforward one. If you sum up the "
+            "CO2."
+        ),
+        max_wer=0.10,
+    )
+
+
 def run_tool_calling():
     log.debug("Running tool calling Python E2E Tests")
 
@@ -223,6 +304,10 @@ if __name__ == "__main__":
 
     # Run Nemotron Speech E2E tests
     run_nemotron_speech()
+
+    # Run Cohere Transcribe E2E tests
+    run_cohere_transcribe()
+    run_cohere_transcribe_long()
 
     # Run tool calling E2E tests
     run_tool_calling()

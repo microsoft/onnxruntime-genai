@@ -123,6 +123,8 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+  DeviceSpan<int32_t> cohere_prompt_device_;
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
@@ -133,6 +135,7 @@ struct Generator : LeakChecked<Generator> {
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   bool is_nemotron_speech_model_{};
+  bool is_cohere_model_{};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy,
                               kTopK,
@@ -141,6 +144,14 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+
+  void SampleNextToken();
+
+  // Cohere-only: run the inner search loop until the current chunk hits EOS,
+  // then commit the chunk's tokens to the streamable buffer (applying the
+  // seam fix-up: strip leading control-byte tokens, inject a connecting
+  // space if needed). Advances to the next chunk if more remain.
+  void RunCohereChunkUntilEOS(const Tokenizer& tokenizer);
 };
 
 struct OrtGlobals {

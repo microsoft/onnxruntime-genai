@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct PhiImageProcessor : Processor {
-  PhiImageProcessor(Config& config, const SessionInfo& session_info);
+  PhiImageProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   PhiImageProcessor() = delete;
   PhiImageProcessor(const PhiImageProcessor&) = delete;

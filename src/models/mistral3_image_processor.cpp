@@ -207,7 +207,7 @@ ProcessPixtralPrompt(const Tokenizer& tokenizer, const std::string& prompt,
 }
 }  // namespace
 
-Mistral3ImageProcessor::Mistral3ImageProcessor(Config& config, const SessionInfo& session_info)
+Mistral3ImageProcessor::Mistral3ImageProcessor(Config& config, const SessionInfo& session_info, Model& /*model*/)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       patch_size_{config.model.vision.patch_size},
       spatial_merge_size_{config.model.vision.spatial_merge_size} {

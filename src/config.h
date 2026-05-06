@@ -145,6 +145,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -153,6 +154,11 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    int cohere_vad_min_silence_ms{};
+    int cohere_vad_min_speech_ms{};
+    float cohere_vad_max_speech_s{};
+    int cohere_vad_speech_pad_ms{};
 
     struct Encoder {
       std::string filename;
@@ -164,6 +170,7 @@ struct Config {
       int num_hidden_layers{};
       int num_key_value_heads{};
       int head_size{};
+      int audio_stride{};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};

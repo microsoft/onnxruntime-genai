@@ -67,22 +67,6 @@ struct SileroVad {
   std::vector<float> input_data_;
 };
 
-/// Internal State for SileroVad — uses State::Run for proper EP/run-options support.
-struct SileroVadState : State {
-  SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
-                 float* input_data, int64_t input_size,
-                 float* state_data, int64_t* sample_rate);
-
-  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
-                        DeviceSpan<int32_t> next_indices = {}) override;
-
- private:
-  OrtSession& vad_session_;
-  std::unique_ptr<OrtValue> input_tensor_;
-  std::unique_ptr<OrtValue> state_tensor_;
-  std::unique_ptr<OrtValue> sr_tensor_;
-};
-
 std::unique_ptr<SileroVad> CreateSileroVad(Model& model);
 
 }  // namespace Generators

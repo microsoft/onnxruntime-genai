@@ -16,6 +16,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "cohere_model.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "marian.h"
@@ -797,7 +798,7 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
 }
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
+  return std::make_shared<MultiModalProcessor>(*config_, session_info_, const_cast<Model&>(*this));
 }
 
 bool Model::IsPruned() const {
@@ -827,8 +828,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
-  if (ModelType::IsALM(config->model.type))
+  if (ModelType::IsALM(config->model.type)) {
+    if (config->model.type == "cohere_transcribe")
+      return std::make_shared<CohereModel>(std::move(config), ort_env);
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsPipe(config->model.type))
@@ -928,11 +932,12 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   return expanded;
 }
 
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
+MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info, Model& model)
     : tokenizer_{std::make_shared<Tokenizer>(config)},
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"cohere_transcribe", Processor::Create<CohereProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
@@ -943,7 +948,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
+    processor_ = processor->second(config, session_info, model);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }

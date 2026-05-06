@@ -543,6 +543,8 @@ struct Encoder_Element : JSON::Element {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "audio_stride") {
+      v_.audio_stride = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1118,6 +1120,8 @@ struct Model_Element : JSON::Element {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
       v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "left_context") {
@@ -1134,6 +1138,14 @@ struct Model_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_min_silence_ms") {
+      v_.cohere_vad_min_silence_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_min_speech_ms") {
+      v_.cohere_vad_min_speech_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_max_speech_s") {
+      v_.cohere_vad_max_speech_s = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "cohere_vad_speech_pad_ms") {
+      v_.cohere_vad_speech_pad_ms = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

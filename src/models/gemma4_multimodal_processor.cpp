@@ -165,7 +165,7 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
 
 }  // namespace
 
-Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
+Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info, Model& /*model*/)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {

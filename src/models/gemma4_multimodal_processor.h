@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct Gemma4MultiModalProcessor : Processor {
-  Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info);
+  Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 

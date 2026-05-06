@@ -65,8 +65,8 @@ struct Processor {
   Processor& operator=(const Processor&) = delete;
 
   template <typename ProcessorType>
-  static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info) {
-    return std::make_shared<ProcessorType>(config, session_info);
+  static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info, Model& model) {
+    return std::make_shared<ProcessorType>(config, session_info, model);
   }
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;

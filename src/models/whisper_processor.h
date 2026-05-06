@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct WhisperProcessor : Processor {
-  WhisperProcessor(Config& config, const SessionInfo& session_info);
+  WhisperProcessor(Config& config, const SessionInfo& session_info, Model& model);
 
   WhisperProcessor() = delete;
   WhisperProcessor(const WhisperProcessor&) = delete;
