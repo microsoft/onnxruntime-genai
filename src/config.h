@@ -3,9 +3,15 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include <memory>
+#include <string>
+#include <unordered_map>
+
 namespace Generators {
 
 struct RuntimeSettings;
+struct ModelPackageContext;
+struct ComponentInstance;
 
 struct Config {
   Config() = default;
@@ -163,6 +169,7 @@ struct Config {
 
     struct Encoder {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -199,6 +206,7 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -215,6 +223,7 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -260,6 +269,7 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -304,6 +314,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -431,6 +442,23 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+
+  // ----------------------------------------------------------------------
+  // v4 model-package mode (declarative). Empty in flat-dir mode.
+  //
+  // `model_package` is the package context. Per-component selected variants
+  // live in `component_instances`, keyed by package component name (later
+  // looked up via `model.<role>.component`).
+  //
+  // Both fields hold `shared_ptr` so that `Config` remains copyable: the C
+  // API path (`OgaCreateModelFromConfig`) clones the user-mutable config
+  // into a model-owned copy, and the package state is read-only after
+  // `Open` so sharing is safe. Declaration order is intentional —
+  // `component_instances` is destroyed before `model_package`, but the
+  // shared_ptrs decouple lifetime so reordering is also safe.
+  // ----------------------------------------------------------------------
+  std::shared_ptr<ModelPackageContext> model_package;
+  std::unordered_map<std::string, std::shared_ptr<ComponentInstance>> component_instances;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);

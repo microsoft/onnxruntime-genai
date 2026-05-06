@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include "generators.h"
+#include "models/model_package.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
@@ -11,6 +12,7 @@
 #include <limits>
 #include <cmath>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace Generators {
 
@@ -533,6 +535,8 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -582,6 +586,8 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -757,6 +763,8 @@ struct Vision_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -858,6 +866,8 @@ struct Speech_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -1043,6 +1053,8 @@ struct Embedding_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1527,6 +1539,38 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
+namespace {
+
+// Parse a JSON config text (and optional overlay) into Config via the
+// streaming Element interface. Same diagnostic semantics as ParseConfig
+// (file-based) but with a caller-supplied source label for error context.
+void ParseConfigFromText(std::string_view config_text,
+                         std::string_view source_label,
+                         std::string_view json_overlay,
+                         Config& config) {
+  Root_Element root{config};
+  RootObject_Element root_object{root};
+  try {
+    JSON::Parse(root_object, config_text);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing " << source_label << ": " << message.what();
+    throw std::runtime_error(oss.str());
+  }
+
+  if (!json_overlay.empty()) {
+    try {
+      JSON::Parse(root_object, json_overlay);
+    } catch (const std::exception& message) {
+      std::ostringstream oss;
+      oss << "Error encountered while parsing config overlay: " << message.what();
+      throw std::runtime_error(oss.str());
+    }
+  }
+}
+
+}  // namespace
+
 void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
   std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -1540,25 +1584,10 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
     throw std::runtime_error("Error reading " + filename.string());
   }
 
-  Root_Element root{config};
-  RootObject_Element root_object{root};
-  try {
-    JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
-  } catch (const std::exception& message) {
-    std::ostringstream oss;
-    oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
-    throw std::runtime_error(oss.str());
-  }
-
-  if (!json_overlay.empty()) {
-    try {
-      JSON::Parse(root_object, json_overlay);
-    } catch (const std::exception& message) {
-      std::ostringstream oss;
-      oss << "Error encountered while parsing config overlay: " << message.what();
-      throw std::runtime_error(oss.str());
-    }
-  }
+  std::ostringstream label;
+  label << "'" << filename.string() << "'";
+  ParseConfigFromText(std::string_view(buffer.data(), buffer.size()),
+                      label.str(), json_overlay, config);
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
@@ -1574,8 +1603,219 @@ const Config::SessionOptions& EffectiveSessionOptions(
                                                : config.model.decoder.session_options;
 }
 
+namespace {
+
+// Read an entire file as binary into a string.
+std::string ReadFileBinary(const fs::path& filename) {
+  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
+  if (!file.is_open())
+    throw std::runtime_error("Error opening " + filename.string());
+  std::streamsize const size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  std::string buffer(static_cast<size_t>(size), '\0');
+  if (size > 0 && !file.read(buffer.data(), size))
+    throw std::runtime_error("Error reading " + filename.string());
+  return buffer;
+}
+
+// EP defaulting algorithm (spec Appendix A): intersect the per-component
+// `EpsCompatibleWith()` sets and require exactly one survivor.
+//
+// The intersection order follows the FIRST component's first-seen order, so
+// diagnostic output (and any future tie-break) is deterministic.
+//
+// Returns a `ModelPackageSelectionOptions` carrying the single resolved EP as
+// the sole priority entry. Throws on empty intersection (no EP can load every
+// component) or multi-EP intersection (ambiguous; explicit selection is not
+// yet plumbed through `Config::Config` — that's W8). The diagnostic for the
+// multi-EP case lists the candidates so the producer/operator knows the
+// options.
+ModelPackageSelectionOptions ComputeEpDefaulting(const ModelPackageContext& ctx) {
+  const std::size_t n = ctx.NumComponents();
+  if (n == 0)
+    throw std::runtime_error("v4 model package: no components declared");
+
+  // Start with the first component's EP list (preserve order).
+  std::vector<std::string> intersection = ctx.EpsCompatibleWith(0);
+
+  for (std::size_t cix = 1; cix < n; ++cix) {
+    auto eps = ctx.EpsCompatibleWith(cix);
+    std::unordered_set<std::string> as_set(eps.begin(), eps.end());
+    std::vector<std::string> next;
+    next.reserve(intersection.size());
+    for (const auto& ep : intersection) {
+      if (as_set.count(ep) != 0) next.push_back(ep);
+    }
+    intersection = std::move(next);
+    if (intersection.empty()) break;
+  }
+
+  if (intersection.empty()) {
+    std::ostringstream oss;
+    oss << "v4 model package: no execution provider is supported by every component (";
+    for (std::size_t cix = 0; cix < n; ++cix) {
+      if (cix > 0) oss << "; ";
+      oss << ctx.ComponentName(cix) << "=[";
+      auto eps = ctx.EpsCompatibleWith(cix);
+      for (std::size_t i = 0; i < eps.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << eps[i];
+      }
+      oss << "]";
+    }
+    oss << "). Re-package or pick per-component EPs (not yet supported).";
+    throw std::runtime_error(oss.str());
+  }
+
+  if (intersection.size() > 1) {
+    std::ostringstream oss;
+    oss << "v4 model package: multiple execution providers are compatible with every component (";
+    for (std::size_t i = 0; i < intersection.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << intersection[i];
+    }
+    oss << "). Explicit EP selection is not yet supported by this build (planned for the public-API";
+    oss << " 'ep' argument). Re-package with a single EP per package, or wait for explicit selection.";
+    throw std::runtime_error(oss.str());
+  }
+
+  ModelPackageSelectionOptions options;
+  options.ep_priority.push_back(EpSelection{intersection[0], std::nullopt});
+  return options;
+}
+
+// Walk every `model.<role>.component` field on the merged Config and assert
+// that any non-empty value names a component that the package actually
+// produced. Throw with the offending role/value pair if not. This catches
+// producer typos at Config-load time rather than at session-build time.
+void ValidateRoleComponentReferences(const Config& config) {
+  struct Ref { std::string_view role; const std::string& component; };
+  const Ref refs[] = {
+      {"encoder", config.model.encoder.component},
+      {"decoder", config.model.decoder.component},
+      {"vision", config.model.vision.component},
+      {"speech", config.model.speech.component},
+      {"embedding", config.model.embedding.component},
+  };
+  for (const auto& r : refs) {
+    if (r.component.empty()) continue;
+    if (config.component_instances.count(r.component) != 0) continue;
+    std::ostringstream oss;
+    oss << "v4 model package: model." << r.role << ".component references unknown component '"
+        << r.component << "'. Known components: [";
+    bool first = true;
+    for (const auto& kv : config.component_instances) {
+      if (!first) oss << ", ";
+      oss << kv.first;
+      first = false;
+    }
+    oss << "].";
+    throw std::runtime_error(oss.str());
+  }
+}
+
+// W3: load Config from a v4 model package.
+//
+// 1. Set shared_assets_path to <pkg>/configs/.
+// 2. EP defaulting -> ModelPackageSelectionOptions (single-EP for now).
+// 3. Read <pkg>/configs/genai_config.json as the base DOM.
+// 4. For each component (in manifest order): SelectComponent, pull
+//    consumer_metadata, extract `genai_config_overlay`, RFC-7386 merge into
+//    the base. Stash the ComponentInstance for later role lookup.
+// 5. Serialize the merged DOM and run it through the same strict streaming
+//    parser the flat-dir path uses, applying the caller json_overlay last
+//    (layer-2 channel: OgaConfigOverlay / RuntimeSettings::GenerateConfigOverlay).
+//
+// Caveat (intentional): once the merged DOM is round-tripped through
+// SerializeDocument/Parse, the strict-parser unknown-key error no longer
+// points at the overlaying component. The diagnostic wraps the parse error
+// with "merged package genai_config" context so the user knows where to look.
+void LoadFromPackage(Config& config,
+                     std::shared_ptr<ModelPackageContext> ctx,
+                     std::string_view json_overlay) {
+  const fs::path shared = ctx->SharedAssetsPath();
+  config.shared_assets_path = shared;
+
+  // EP defaulting first — needed before SelectComponent.
+  ModelPackageSelectionOptions options = ComputeEpDefaulting(*ctx);
+  const std::string& selected_ep = options.ep_priority.front().ep_name;
+
+  // Load base genai_config.json.
+  const fs::path base_path = shared / std::string("genai_config.json");
+  if (!base_path.exists()) {
+    throw std::runtime_error("v4 model package missing configs/genai_config.json at " +
+                             base_path.string());
+  }
+  std::string base_text = ReadFileBinary(base_path);
+  JSON::Document merged;
+  try {
+    merged = JSON::ParseDocument(base_text);
+  } catch (const std::exception& e) {
+    throw std::runtime_error("v4 model package: failed to parse " + base_path.string() + ": " +
+                             e.what());
+  }
+  if (!merged.IsObject()) {
+    throw std::runtime_error("v4 model package: " + base_path.string() +
+                             " must be a JSON object at the top level");
+  }
+
+  // Per-component overlay merge (manifest declaration order).
+  std::unordered_map<std::string, std::shared_ptr<ComponentInstance>> instances;
+  const std::size_t n = ctx->NumComponents();
+  for (std::size_t cix = 0; cix < n; ++cix) {
+    const std::string cname = ctx->ComponentName(cix);
+    auto cinst_unique = ctx->SelectComponent(cix, options);
+    if (!cinst_unique) {
+      // Defensive: defaulting picked an EP that intersects every component's
+      // compatibility set, so SelectComponent should always succeed here.
+      throw std::runtime_error("v4 model package: SelectComponent returned no variant for component '" +
+                               cname + "' under EP '" + selected_ep + "'");
+    }
+    std::shared_ptr<ComponentInstance> cinst(std::move(cinst_unique));
+    const std::string blob = cinst->ConsumerMetadata();
+    if (!blob.empty()) {
+      JSON::Document cm;
+      try {
+        cm = JSON::ParseDocument(blob);
+      } catch (const std::exception& e) {
+        throw std::runtime_error("v4 model package: component '" + cname +
+                                 "' consumer_metadata is not valid JSON: " + e.what());
+      }
+      if (cm.IsObject()) {
+        const auto& obj = cm.AsObject();
+        auto it = obj.find("genai_config_overlay");
+        if (it != obj.end()) {
+          if (!it->second.IsObject()) {
+            throw std::runtime_error("v4 model package: component '" + cname +
+                                     "' consumer_metadata.genai_config_overlay must be a JSON object");
+          }
+          JSON::MergePatch(merged, it->second);
+        }
+      }
+    }
+    instances.emplace(cname, std::move(cinst));
+  }
+
+  // Round-trip merged DOM through the strict streaming parser, applying the
+  // caller overlay last. Wrap parse errors with a clear "merged package config"
+  // label so authors know where to look.
+  std::string merged_text = JSON::SerializeDocument(merged);
+  ParseConfigFromText(merged_text, "merged v4 package genai_config", json_overlay, config);
+
+  config.component_instances = std::move(instances);
+  config.model_package = std::move(ctx);
+
+  ValidateRoleComponentReferences(config);
+}
+
+}  // namespace
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path}, shared_assets_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+  if (auto ctx_unique = ModelPackageContext::Open(path)) {
+    LoadFromPackage(*this, std::shared_ptr<ModelPackageContext>(std::move(ctx_unique)), json_overlay);
+  } else {
+    ParseConfig(path / "genai_config.json", json_overlay, *this);
+  }
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
