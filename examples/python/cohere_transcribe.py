@@ -90,11 +90,48 @@ def run(args):
         # RTFx is informational only; ignore failures (non-WAV input, missing wave module, etc.).
         pass
 
+    # Optional WER check used by the E2E harness.
+    if args.expected_transcription is not None:
+        wer = _compute_wer(args.expected_transcription, all_texts[0])
+        print(f"WER: {wer:.4f} (max allowed: {args.max_wer})")
+        if wer > args.max_wer:
+            raise SystemExit(
+                f"WER {wer:.4f} exceeds threshold {args.max_wer}\n"
+                f"  expected: {args.expected_transcription}\n"
+                f"  got:      {all_texts[0]}"
+            )
+
+
+def _normalize(text):
+    import re
+    return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split()
+
+
+def _compute_wer(reference, hypothesis):
+    ref = _normalize(reference)
+    hyp = _normalize(hypothesis)
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    # Standard Levenshtein word-distance / len(ref).
+    n, m = len(ref), len(hyp)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
+            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+    return dp[n][m] / n
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cohere Transcribe — C++ integrated chunking")
     parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to ONNX model directory")
     parser.add_argument("-a", "--audio", type=str, required=True, help="Path to audio file(s), comma separated")
     parser.add_argument("-e", "--execution_provider", type=str, default="cpu", choices=["cpu", "cuda"], help="Execution provider")
+    parser.add_argument("--expected_transcription", type=str, default=None, help="Reference transcript for WER validation")
+    parser.add_argument("--max_wer", type=float, default=0.10, help="Maximum acceptable WER when --expected_transcription is provided")
     args = parser.parse_args()
     run(args)
