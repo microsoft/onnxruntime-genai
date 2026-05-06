@@ -486,6 +486,12 @@ TEST(ModelPackageContextTest, SelectComponentDeviceAwareMatch) {
   ASSERT_NE(npu, nullptr);
   EXPECT_EQ(npu->VariantFolderPath().string(),
             (dir.path() / "decoder" / "openvino-npu").string());
+
+  // Device-less OpenVINO request must not silently pick a device-pinned
+  // variant — selecting an NPU build for a caller who didn't ask for NPU
+  // would be unsafe.
+  auto bare = ctx->SelectComponent(0, OnePriority("OpenVINOExecutionProvider"));
+  EXPECT_EQ(bare, nullptr);
 }
 
 TEST(ModelPackageContextTest, SelectComponentTieBreaksByMetadataOrder) {

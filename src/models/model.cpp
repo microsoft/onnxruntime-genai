@@ -866,6 +866,14 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   // folder in flat-dir mode (or empty/unknown component).
   const fs::path asset_folder = AssetFolder(component_name);
 
+  // v4 package: register external initializers from the file entry's
+  // `shared_files` map before ORT consumes session_options. No-op in
+  // flat-dir, for empty/unknown component, files not in the variant
+  // manifest, or files with no shared_files.
+  if (session_options != nullptr) {
+    ApplyPackageExternalInitializers(component_name, model_filename, *session_options);
+  }
+
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory

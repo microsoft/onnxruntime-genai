@@ -508,11 +508,14 @@ struct StubModelPackageContext : ModelPackageContext {
       for (const auto& compat : variant.ep_compatibility) {
         for (std::size_t pi = 0; pi < priority.size(); ++pi) {
           if (priority[pi].ep_name != compat.ep) continue;
-          // If the package pins a device for this entry, the caller's
-          // device must match (or be unset, which is treated as "any").
-          if (compat.device.has_value() && priority[pi].device.has_value() &&
-              *compat.device != *priority[pi].device) {
-            continue;
+          // If the package pins a device for this entry, the caller must
+          // request the same device. An unpinned caller does NOT match a
+          // device-pinned compat entry — selecting an NPU-only variant
+          // when the caller didn't ask for NPU would be unsafe.
+          if (compat.device.has_value()) {
+            if (!priority[pi].device.has_value() || *compat.device != *priority[pi].device) {
+              continue;
+            }
           }
           if (pi < variant_priority) {
             variant_priority = pi;

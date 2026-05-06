@@ -1851,10 +1851,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay, std::string_
   } else {
     if (!user_ep.empty()) {
       throw std::runtime_error(
-          "The 'ep' argument is only supported for v4 model packages "
-          "(directories containing manifest.json). For flat-directory "
-          "models, set providers via OgaConfigClearProviders / "
-          "OgaConfigAppendProvider on the genai_config.json provider list.");
+          "The 'ep' argument is only supported for v4 model packages. "
+          "For flat-directory models, set providers via "
+          "OgaConfigClearProviders / OgaConfigAppendProvider on the "
+          "genai_config.json provider list.");
     }
     ParseConfig(path / "genai_config.json", json_overlay, *this);
   }
