@@ -320,11 +320,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
                                           : std::vector<int64_t>{actual_patches, patch_dim};
 
-      // Respect the model's pixel_values type (float, fp16, or bf16)
-      auto trimmed_pv = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
-      const size_t elem_size = (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 4 : 2;  // float=4, fp16/bf16=2
-      // For 3D with batch > 1, copy each batch slice separately (padded stride differs from trimmed stride).
-      // Use raw byte pointers since the type may be float, fp16, or bf16.
+      // The image processor returns float32 data and the vision encoder ONNX model
+      // accepts float32 input (casting to fp16 internally). Use float32 strides.
+      constexpr size_t elem_size = sizeof(float);
+      auto trimmed_pv = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
       auto* dst = static_cast<uint8_t*>(trimmed_pv->GetTensorMutableRawData());
       const auto* src = reinterpret_cast<const uint8_t*>(pv_data);
       const size_t src_stride = static_cast<size_t>(num_padded_patches * patch_dim) * elem_size;
@@ -336,7 +335,9 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                              std::make_shared<Tensor>(std::move(trimmed_pv)));
     } else {
-      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
+      // Image processor returns float32; the vision encoder ONNX model
+      // accepts float32 and casts to model dtype internally.
+      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, allocator);
     }
 
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
