@@ -73,7 +73,8 @@ class GraniteMoeHybridModel(GraniteModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # GraniteMoeHybrid's always-on dense MLP uses shared_intermediate_size,
         # not the MoE intermediate_size. Set before super().__init__ so that
-        # self.intermediate_size (base.py:64) gets the correct value for ONNX shapes.
+        # the base model initialization picks up the shared value from
+        # config.intermediate_size when setting self.intermediate_size for ONNX shapes.
         self._mlp_intermediate_size = config.shared_intermediate_size
         config.intermediate_size = config.shared_intermediate_size
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
