@@ -15,6 +15,21 @@ CohereEncoderState::CohereEncoderState(const WhisperModel& model, const Generato
     : State{params, model},
       model_{model} {}
 
+void CohereEncoderState::SetOrReplaceInput(const char* name,
+                                           std::unique_ptr<OrtValue>& source,
+                                           std::unique_ptr<OrtValue>& storage) {
+  // Move to encoder device.
+  storage = model_.ExpandInputs(source, params_->search.num_beams);
+  for (size_t i = 0; i < input_names_.size(); ++i) {
+    if (std::strcmp(input_names_[i], name) == 0) {
+      inputs_[i] = storage.get();
+      return;
+    }
+  }
+  input_names_.push_back(name);
+  inputs_.push_back(storage.get());
+}
+
 // Update num_frames_ and (re)create hidden_states_ output for the current
 // audio_features_ tensor. Returns the input slot index of the audio features.
 void CohereEncoderState::UpdateForCurrentAudio() {
@@ -22,12 +37,16 @@ void CohereEncoderState::UpdateForCurrentAudio() {
   auto shape = shape_info->GetShape();
   int audio_stride = model_.config_->model.encoder.audio_stride;
 
+  // Encoder downsamples its time axis to T_enc frames. We store num_frames_ = 2*T_enc
+  // so that num_frames_/2 = T_enc matches Whisper's "frames per 2 samples" convention,
+  // letting CrossCache and WhisperDecoderState reuse Whisper's sizing logic unchanged.
+  // This approach enables Cohere and other future models to reuse the same decoder and cross-attention cache logic as Whisper.
   if (audio_stride > 0 && shape.size() == 2) {
-    // Raw audio input [batch, samples]
+    // Raw audio [batch, samples]: encoder strides by audio_stride (+1 for the trailing partial frame).
     int T_enc = static_cast<int>(shape[1]) / audio_stride + 1;
-    num_frames_ = T_enc * 2;  // *2 so GetNumFrames()/2 == T_enc for CrossCache
+    num_frames_ = T_enc * 2;
   } else if (audio_stride > 0 && shape.size() == 3) {
-    // Mel input [batch, n_mels, T_mel]
+    // Mel input [batch, n_mels, T_mel]: encoder downsamples mel time axis by 8.
     int T_mel = static_cast<int>(shape[2]);
     int T_enc = (T_mel - 1) / 8 + 1;
     num_frames_ = T_enc * 2;
@@ -39,6 +58,8 @@ void CohereEncoderState::UpdateForCurrentAudio() {
         " with input rank=" + std::to_string(shape.size()));
   }
 
+  // Pre-allocate hidden states output if the model has it. Models that emit
+  // cross-KV cache outputs instead don't expose hidden_states; skip in that case.
   if (model_.session_info_.HasOutput(model_.config_->model.encoder.outputs.hidden_states)) {
     auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
     hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape,
@@ -48,33 +69,18 @@ void CohereEncoderState::UpdateForCurrentAudio() {
 
 void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   const std::string& audio_name = model_.config_->model.encoder.inputs.audio_features;
-
-  // Add audio features (CPU -> encoder device).
   for (const auto& [name, value] : extra_inputs) {
     if (name == audio_name) {
-      audio_features_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
-      break;
+      SetOrReplaceInput(audio_name.c_str(), value->ort_tensor_, audio_features_);
+    } else if (name == "mel_length") {
+      SetOrReplaceInput("mel_length", value->ort_tensor_, mel_length_);
     }
   }
   if (audio_features_ == nullptr) {
     throw std::runtime_error("audio_features must be provided via SetInputs");
   }
 
-  input_names_.push_back(audio_name.c_str());
-  inputs_.push_back(audio_features_.get());
-
   UpdateForCurrentAudio();
-
-  // Add mel_length input if provided. Route through ExpandInputs so it ends
-  // up on the same device as the encoder (CUDA copies CPU->device here).
-  for (const auto& [name, value] : extra_inputs) {
-    if (name == "mel_length") {
-      mel_length_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
-      input_names_.push_back("mel_length");
-      inputs_.push_back(mel_length_.get());
-      break;
-    }
-  }
 
   // Add encoder hidden states output if the model has it
   if (hidden_states_) {
@@ -84,28 +90,13 @@ void CohereEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inp
 }
 
 void CohereEncoderState::SetChunkAudioFeatures(std::shared_ptr<Tensor> audio_features_tensor, std::shared_ptr<Tensor> mel_length_tensor) {
-  // Replace audio features input. Copy CPU -> encoder device via ExpandInputs.
-  audio_features_ = model_.ExpandInputs(audio_features_tensor->ort_tensor_, params_->search.num_beams);
+  const std::string& audio_name = model_.config_->model.encoder.inputs.audio_features;
+  SetOrReplaceInput(audio_name.c_str(), audio_features_tensor->ort_tensor_, audio_features_);
 
   UpdateForCurrentAudio();
 
-  const std::string& audio_name = model_.config_->model.encoder.inputs.audio_features;
-  for (size_t i = 0; i < input_names_.size(); ++i) {
-    if (std::string(input_names_[i]) == audio_name) {
-      inputs_[i] = audio_features_.get();
-      break;
-    }
-  }
-
-  // Replace mel_length (CPU -> device)
   if (mel_length_tensor) {
-    mel_length_ = model_.ExpandInputs(mel_length_tensor->ort_tensor_, params_->search.num_beams);
-    for (size_t i = 0; i < input_names_.size(); ++i) {
-      if (std::string(input_names_[i]) == "mel_length") {
-        inputs_[i] = mel_length_.get();
-        break;
-      }
-    }
+    SetOrReplaceInput("mel_length", mel_length_tensor->ort_tensor_, mel_length_);
   }
 
   // Update hidden states output pointer if applicable
@@ -129,8 +120,6 @@ DeviceSpan<float> CohereEncoderState::Run(int current_length, DeviceSpan<int32_t
   State::Run(*model_.session_encoder_);
   return {};
 }
-
-// --- CohereState ---
 
 CohereState::CohereState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths)
     : State{params, model},
@@ -332,8 +321,6 @@ OrtValue* CohereState::GetOutput(const char* name) {
   }
   return State::GetOutput(name);
 }
-
-// --- CohereModel ---
 
 std::unique_ptr<State> CohereModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<CohereState>(*this, params, sequence_lengths);

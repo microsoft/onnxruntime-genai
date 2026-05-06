@@ -27,7 +27,14 @@ struct CohereEncoderState : State {
   // Update num_frames_ and (re)create hidden_states_ output to match audio_features_'s shape/type.
   void UpdateForCurrentAudio();
 
-  std::unique_ptr<OrtValue> audio_features_;  // device-resident mel for the current chunk
+  // Expand `source` to the encoder device (and tile by num_beams), store into
+  // `storage`, then register it under `name` in input_names_/inputs_ — adding
+  // a new slot if `name` isn't bound yet, or replacing the existing pointer.
+  void SetOrReplaceInput(const char* name,
+                         std::unique_ptr<OrtValue>& source,
+                         std::unique_ptr<OrtValue>& storage);
+
+  std::unique_ptr<OrtValue> audio_features_;
   std::unique_ptr<OrtValue> hidden_states_;
   std::unique_ptr<OrtValue> mel_length_;
   int num_frames_{0};
