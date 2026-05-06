@@ -1007,6 +1007,32 @@ class Qwen35TextModel(Model):
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
 
+        # Mixed-precision quantization for linear attention layers.
+        # Baseline: whole model INT4. Override linear attention layer nodes
+        # to INT8 for better accuracy with modest size increase.
+        #
+        # Linear attention recurrence accumulates errors across the full sequence,
+        # unlike softmax attention which normalizes per-step.
+        int8_nodes = {}
+        for i, lt in enumerate(self.layer_types):
+            if lt == "linear_attention":
+                # All linear attention projections: INT8
+                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                # MLP projections in linear attention layers: INT8
+                for proj in ("gate_proj", "up_proj", "down_proj"):
+                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
+
+        # These mixed INT8 overrides are for the weight-only/QOperator path.
+        # QDQ export must keep the explicit Q/DQ pattern requested by the EP.
+        if int8_nodes and not self.quant_attrs["use_qdq"]:
+            algo_config = self.quant_attrs["int4"].get("algo_config")
+            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
+                algo_config.customized_weight_config.update(int8_nodes)
+            else:
+                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
+                self.quant_attrs["int4"]["algo_config"] = algo_config
+
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
 

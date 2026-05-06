@@ -633,6 +633,10 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
 
   if (has_posid_input_) {
     ONNXTensorElementDataType posid_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    if (has_mask_input_ && posid_type != type_) {
+      throw std::runtime_error("position_ids & attention_mask must have the same data type");
+    }
+    type_ = posid_type;
 
     // Set up 3D position IDs shape: [3, batch_size, sequence_length]
     // The 3 dimensions represent temporal, height, and width for mrope
@@ -641,6 +645,7 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     position_ids_shape_[2] = 0;  // Will be set during first update
 
     position_ids_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
+    position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
   }
   if (has_mask_input_) {
     attention_mask_shape_[0] = state_.params_->search.batch_size;
@@ -867,6 +872,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  CreateNextPositionIDsTensor();
 
   // Expand rope_deltas_
   std::vector<int64_t> expanded_deltas;
@@ -895,36 +901,145 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
+  if (ShouldUseStaticMaskHandling()) {
+    InitializeStaticMask<T>(*attention_mask);
+    return;
+  }
+
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
   attention_mask_shape_[0] *= state_.params_->search.num_beams;
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
+template <typename T>
+void Qwen2VLPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
+  // Graph replay needs a stable mask buffer and shape after the prompt. Allocate
+  // max_length once, copy the prompt mask into the front, and update it in place
+  // during decode instead of rebinding a shorter [batch, total_length] tensor.
+  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  attention_mask_shape_[1] = state_.params_->search.max_length;
+  attention_mask_->CreateTensor(attention_mask_shape_, true);
+
+  auto output_span = attention_mask_->GetDeviceSpan<T>();
+  output_span.Zero();
+
+  auto input_span = WrapTensor<T>(*GetDeviceInterface(DeviceType::CPU), cpu_attention_mask);
+  auto input_shape = cpu_attention_mask.GetTensorTypeAndShapeInfo()->GetShape();
+  auto batch_size = input_shape[0];
+  auto prompt_length = input_shape[1];
+  auto num_beams = state_.params_->search.num_beams;
+  auto max_length = attention_mask_shape_[1];
+
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < num_beams; j++) {
+      auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, prompt_length);
+      auto input_subspan = input_span.subspan(i * prompt_length, prompt_length);
+      output_subspan.CopyFrom(input_subspan);
+    }
+  }
+
+  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+}
+
+void Qwen2VLPositionInputs::CreateNextPositionIDsTensor() {
+  if (!position_ids_next_) {
+    return;
+  }
+
+  // Decode position_ids are always [3, batch*beam, 1]. Pre-create that tensor
+  // so the first decode step can switch once, then reuse the same OrtValue.
+  std::array<int64_t, 3> next_shape{position_ids_shape_[0], position_ids_shape_[1], 1};
+  position_ids_next_->CreateTensor(next_shape, ShouldUseStaticPositionIDHandling());
+}
+
+template <typename T>
+void Qwen2VLPositionInputs::Update3DPositionIDsInPlace(int base_pos) {
+  int64_t batch_size = position_ids_shape_[1];  // This is already expanded (batch*beams)
+  int64_t seq_len = position_ids_shape_[2];     // This will be 1 for generation
+
+  auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
+  UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_}.template operator()<T>();
+
+  auto src_span = WrapTensor<T>(*GetDeviceInterface(DeviceType::CPU), *position_ids);
+  auto dst_span = position_ids_->GetDeviceSpan<T>();
+  dst_span.CopyFrom(src_span);
+}
+
 void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   // This is the generation step (decode)
   // base_pos is cache_position[0]
-  auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
   int64_t batch_size = position_ids_shape_[1];  // This is already expanded (batch*beams)
-  int64_t seq_len = position_ids_shape_[2];     // This will be 1 for generation
 
   if (rope_deltas_.size() != static_cast<size_t>(batch_size)) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
+  // After prefill, keep the decode position_ids shape and device pointer stable.
+  // TRT-RTX can then replay captured graphs across tokens instead of seeing a
+  // new input binding whenever total_length changes.
+  if (position_ids_shape_[2] == 1 && position_ids_next_) {
+    position_ids_ = std::move(position_ids_next_);
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  } else if (!position_ids_->ort_tensor_ ||
+             position_ids_->GetShape() != std::vector<int64_t>(position_ids_shape_.begin(), position_ids_shape_.end())) {
+    position_ids_->CreateTensor(position_ids_shape_, ShouldUseStaticPositionIDHandling() && position_ids_shape_[2] == 1);
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  }
 
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
-  state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  if (type_ == Ort::TypeToTensorType<int32_t>) {
+    Update3DPositionIDsInPlace<int32_t>(base_pos);
+  } else {
+    Update3DPositionIDsInPlace<int64_t>(base_pos);
+  }
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  if (ShouldUseStaticMaskHandling()) {
+    if (!model_.p_device_inputs_->UpdateAttentionMask(nullptr,
+                                                      attention_mask_->GetMutableRawData(),
+                                                      static_cast<int>(attention_mask_shape_[0]),
+                                                      new_length,
+                                                      total_length,
+                                                      state_.params_->search.max_length,
+                                                      true,
+                                                      type_)) {
+      auto attention_mask_span = attention_mask_->GetByteSpan();
+      GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(nullptr,
+                                                               attention_mask_span.CopyDeviceToCpu().data(),
+                                                               static_cast<int>(attention_mask_shape_[0]),
+                                                               new_length,
+                                                               total_length,
+                                                               state_.params_->search.max_length,
+                                                               true,
+                                                               type_);
+      attention_mask_span.CopyCpuToDevice();
+    }
+    return;
+  }
+
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
   DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
 
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+}
+
+bool Qwen2VLPositionInputs::ShouldUseStaticMaskHandling() const {
+  // TRT-RTX graph reuse has the same fixed-address/fixed-shape requirement as
+  // CUDA graph capture, even when graph capture is requested through shared
+  // past/present buffers rather than the generic CUDA EP path.
+  return state_.params_->use_graph_capture ||
+         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
+}
+
+bool Qwen2VLPositionInputs::ShouldUseStaticPositionIDHandling() const {
+  // Keep this predicate separate from mask handling in case a future model
+  // supports static masks but still needs dynamic mRoPE position IDs, or vice versa.
+  return state_.params_->use_graph_capture ||
+         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
@@ -942,8 +1057,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      if (!ShouldUseStaticMaskHandling()) {
+        attention_mask_shape_[1] = total_length;
+      }
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -959,6 +1076,31 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
+    if (ShouldUseStaticMaskHandling()) {
+      size_t max_len = static_cast<size_t>(state_.params_->search.max_length);
+      if (index > max_len) {
+        throw std::runtime_error("Qwen2VLPositionInputs::RewindTo: index exceeds max_length.");
+      }
+
+      size_t batch_beam_size = static_cast<size_t>(attention_mask_shape_[0]);
+      auto byte_span = attention_mask_->GetByteSpan();
+      auto cpu_data = byte_span.CpuSpan();
+      if (type_ == Ort::TypeToTensorType<int32_t>) {
+        auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
+        for (size_t i = 0; i < batch_beam_size; i++) {
+          std::fill_n(data + i * max_len, index, static_cast<int32_t>(1));
+          std::fill_n(data + i * max_len + index, max_len - index, static_cast<int32_t>(0));
+        }
+      } else {
+        auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
+        for (size_t i = 0; i < batch_beam_size; i++) {
+          std::fill_n(data + i * max_len, index, static_cast<int64_t>(1));
+          std::fill_n(data + i * max_len + index, max_len - index, static_cast<int64_t>(0));
+        }
+      }
+      byte_span.CopyCpuToDevice();
+      return;
+    }
     attention_mask_shape_[1] = static_cast<int64_t>(index);
   }
 }

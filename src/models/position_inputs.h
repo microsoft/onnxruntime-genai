@@ -139,10 +139,17 @@ struct Qwen2VLPositionInputs : PositionInputs {
   template <typename T>
   void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
   void Update3DPositionIDs(int base_pos);
+  void CreateNextPositionIDsTensor();
+  template <typename T>
+  void Update3DPositionIDsInPlace(int base_pos);
+  bool ShouldUseStaticPositionIDHandling() const;
 
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  void UpdateAttentionMask();
+  template <typename T>
+  void InitializeStaticMask(OrtValue& cpu_attention_mask);
+  void UpdateAttentionMask(int total_length, int new_length);
+  bool ShouldUseStaticMaskHandling() const;
 
   const Model& model_;
   State& state_;
@@ -157,6 +164,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
 
   std::array<int64_t, 3> position_ids_shape_{};  // {3, batch_size, sequence_length} for 3D positions
   std::unique_ptr<Tensor> position_ids_;
+  std::unique_ptr<Tensor> position_ids_next_;
 
   std::array<int64_t, 2> attention_mask_shape_{};  // {batch_size, sequence_length}
   std::unique_ptr<Tensor> attention_mask_;

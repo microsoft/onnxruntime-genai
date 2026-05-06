@@ -88,22 +88,42 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  pasts_.resize(num_layers * 2);
+  past_present_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+  if (g_log.enabled && past_present_share_buffer_) {
+    Log("info", "RecurrentState: using shared past/present buffers");
+  }
+
   presents_.reserve(num_layers * 2);
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
 
-  for (int i = 0; i < num_layers; ++i) {
-    pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
-    pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
+  if (past_present_share_buffer_) {
+    // Qwen3.5 linear-attention state is a compressed recurrent state, not a
+    // token-indexed KV cache. For graph replay, bind each state tensor as both
+    // past input and present output so ORT/TRT-RTX sees stable addresses.
+    // The EP/plugin kernels must read the previous contents before writing the
+    // updated state back to the same buffer.
+    for (int i = 0; i < num_layers; ++i) {
+      presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
+      presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
+    }
 
-    presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
-    presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
+    ZeroStates(presents_);
+  } else {
+    pasts_.resize(num_layers * 2);
+
+    for (int i = 0; i < num_layers; ++i) {
+      pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
+      pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
+
+      presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
+      presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
+    }
+
+    // Zero-initialize past and present states
+    ZeroStates(pasts_);
+    ZeroStates(presents_);
   }
-
-  // Zero-initialize past and present states
-  ZeroStates(pasts_);
-  ZeroStates(presents_);
 }
 
 void RecurrentState::Add() {
@@ -114,7 +134,10 @@ void RecurrentState::Add() {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    state_.inputs_.push_back(pasts_[i].get());
+    // In shared-buffer mode the same OrtValue is intentionally registered as
+    // input and output. Non-shared mode keeps the older ping-pong buffers.
+    auto* past = past_present_share_buffer_ ? presents_[i].get() : pasts_[i].get();
+    state_.inputs_.push_back(past);
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -136,6 +159,9 @@ void RecurrentState::Add() {
 
 void RecurrentState::Update() {
   if (layer_indices_.empty()) return;
+  // Shared mode updates state contents in place, so swapping would only change
+  // the captured input/output addresses and defeat graph reuse.
+  if (past_present_share_buffer_) return;
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
@@ -169,7 +195,12 @@ void RecurrentState::RewindTo(size_t index) {
     return;
   }
 
-  const int num_layers = static_cast<int>(layer_indices_.size());
+  if (past_present_share_buffer_) {
+    // Shared recurrent states keep stable input/output pointers for graph replay.
+    // Reset the state contents in place without rebinding.
+    ZeroStates(presents_);
+    return;
+  }
 
   // Zero existing buffers in-place instead of reallocating, to preserve
   // device pointers and avoid invalidating captured graphs.
@@ -177,6 +208,7 @@ void RecurrentState::RewindTo(size_t index) {
   ZeroStates(presents_);
 
   // Re-bind state pointers (swap may have changed which OrtValue is past vs present)
+  const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
     state_.inputs_[input_index_ + i] = pasts_[i].get();
     state_.outputs_[output_index_ + i] = presents_[i].get();
