@@ -321,7 +321,7 @@ TEST(ModelPackageContextTest, VariantOrderCanInvertFilesystemAlpha) {
       "alpha": {"ep_compatibility": [{"ep": "CPUExecutionProvider"}]}
     }
   })");
-  WriteFile(dir.path() / "decoder" / "zeta"  / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "zeta" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
   WriteFile(dir.path() / "decoder" / "alpha" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
 
   auto ctx = ModelPackageContext::Open(dir.fs_path());
@@ -539,7 +539,7 @@ TEST(ModelPackageContextTest, SelectComponentTieBreaksByMetadataOrder) {
     }
   })");
   WriteFile(dir.path() / "decoder" / "second" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
-  WriteFile(dir.path() / "decoder" / "first"  / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "first" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
 
   auto ctx = ModelPackageContext::Open(dir.fs_path());
   ASSERT_NE(ctx, nullptr);
@@ -799,7 +799,7 @@ TEST(ParseVariantManifestTest, ParsesSharedFilesMap) {
   const auto& sf = vm.files[0].shared_files;
   ASSERT_EQ(sf.size(), 2u);
   EXPECT_EQ(sf.at("m.onnx.data"), "abc123");
-  EXPECT_EQ(sf.at("extra.bin"),   "def456");
+  EXPECT_EQ(sf.at("extra.bin"), "def456");
 }
 
 TEST(ParseVariantManifestTest, RejectsMissingFiles) {

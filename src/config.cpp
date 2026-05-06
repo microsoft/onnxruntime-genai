@@ -1702,7 +1702,10 @@ ModelPackageSelectionOptions ComputeEpDefaulting(const ModelPackageContext& ctx,
 // produced. Throw with the offending role/value pair if not. This catches
 // producer typos at Config-load time rather than at session-build time.
 void ValidateRoleComponentReferences(const Config& config) {
-  struct Ref { std::string_view role; const std::string& component; };
+  struct Ref {
+    std::string_view role;
+    const std::string& component;
+  };
   const Ref refs[] = {
       {"encoder", config.model.encoder.component},
       {"decoder", config.model.decoder.component},

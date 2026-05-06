@@ -282,7 +282,7 @@ TEST(ConfigPackageTest, MultiEpIntersectionFailsWithDiagnostic) {
       "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
     }
   })");
-  WriteFile(dir.path() / "decoder" / "cpu"  / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
   WriteFile(dir.path() / "decoder" / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
   WriteFile(dir.path() / "embedding" / "metadata.json", R"({
     "variants": {
@@ -290,7 +290,7 @@ TEST(ConfigPackageTest, MultiEpIntersectionFailsWithDiagnostic) {
       "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
     }
   })");
-  WriteFile(dir.path() / "embedding" / "cpu"  / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
+  WriteFile(dir.path() / "embedding" / "cpu" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
   WriteFile(dir.path() / "embedding" / "cuda" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
 
   try {
@@ -407,7 +407,7 @@ TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {
         "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
       }
     })");
-    WriteFile(dir.path() / cname / "cpu"  / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+    WriteFile(dir.path() / cname / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
     WriteFile(dir.path() / cname / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
   }
 
@@ -435,9 +435,9 @@ TEST(ConfigPackageTest, UserEpThatNoComponentSupportsThrowsWithDiagnostic) {
     const std::string msg = e.what();
     EXPECT_NE(msg.find("CUDAExecutionProvider"), std::string::npos) << msg;
     EXPECT_NE(msg.find("CPUExecutionProvider"), std::string::npos) << msg
-        << " (compatible-EPs hint missing)";
+                                                                   << " (compatible-EPs hint missing)";
     EXPECT_NE(msg.find("decoder"), std::string::npos) << msg
-        << " (component name missing)";
+                                                      << " (component name missing)";
   }
 }
 

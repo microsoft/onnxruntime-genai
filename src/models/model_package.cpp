@@ -412,13 +412,13 @@ struct StubVariant {
   std::string name;
   fs::path folder;  // <package>/<component>/<variant>
   std::vector<EpCompatibilityEntry> ep_compatibility;
-  std::size_t file_count = 0;        // from variant.json `files[]`
-  std::string consumer_metadata;     // serialized JSON, "" if absent
+  std::size_t file_count = 0;     // from variant.json `files[]`
+  std::string consumer_metadata;  // serialized JSON, "" if absent
 };
 
 struct StubComponent {
   std::string name;
-  fs::path component_dir;            // <package>/<component>
+  fs::path component_dir;  // <package>/<component>
   std::vector<StubVariant> variants;
 };
 
