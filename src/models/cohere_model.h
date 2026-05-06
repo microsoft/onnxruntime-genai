@@ -5,8 +5,6 @@
 
 namespace Generators {
 
-// Cohere Transcribe encoder — standalone State, does NOT inherit AudioEncoderState.
-// Handles variable-length mel/raw audio with stride-based frame computation.
 struct CohereEncoderState : State {
   CohereEncoderState(const WhisperModel& model, const GeneratorParams& params);
   CohereEncoderState(const CohereEncoderState&) = delete;
@@ -35,7 +33,6 @@ struct CohereEncoderState : State {
   int num_frames_{0};
 };
 
-// Cohere orchestrator — standalone State, reuses WhisperDecoderState.
 struct CohereState : State {
   CohereState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths);
   CohereState(const CohereState&) = delete;
@@ -49,24 +46,16 @@ struct CohereState : State {
   // Multi-chunk support
   bool HasMoreChunks() const { return current_chunk_ + 1 < total_chunks_; }
   bool AdvanceToNextChunk();  // Returns true if advanced, false if no more chunks
-  const std::vector<int32_t>& GetPromptTokens() const { return prompt_tokens_; }
-  void SetPromptTokens(cpu_span<int32_t> tokens) { prompt_tokens_.assign(tokens.begin(), tokens.end()); }
 
-  // ----- Streaming (committed) state, all internal -----
-  // The Generator uses these to expose an incremental token stream through
-  // the standard API (GetSequence + GenerateNextToken). Chunks are emitted by
-  // the processor without audio overlap
   void CommitChunkText(const std::vector<int32_t>& chunk_tokens, bool is_final, const Tokenizer& tokenizer);
   size_t StreamedTokensCount() const { return streamed_tokens_count_; }
   void AdvanceStreamedTokensCount() { ++streamed_tokens_count_; }
   const std::vector<int32_t>& CommittedTokens() const { return committed_tokens_; }
   bool AllChunksProcessed() const { return all_chunks_processed_; }
   void MarkAllChunksProcessed() { all_chunks_processed_ = true; }
-  // Wrap committed_tokens_[0:streamed_tokens_count_] as a CPU-backed DeviceSpan.
   DeviceSpan<int32_t> GetCommittedSpan() const;
 
-  // Lazily create and cache the model's tokenizer. Used by the generator loop
-  // to avoid recreating it on every chunk boundary.
+  // Lazily create and cache the model's tokenizer.
   Tokenizer& GetOrCreateTokenizer();
 
  private:
@@ -85,7 +74,6 @@ struct CohereState : State {
   int total_chunks_{1};
   std::vector<std::shared_ptr<Tensor>> chunk_mels_;         // All chunk mel tensors (indexed by current_chunk_)
   std::vector<std::shared_ptr<Tensor>> chunk_mel_lengths_;  // All chunk mel_length tensors (indexed by current_chunk_)
-  std::vector<int32_t> prompt_tokens_;                      // Saved prompt tokens for re-feeding
 
   // Streaming state
   std::vector<int32_t> committed_tokens_;  // Token sequence visible via GetSequence
@@ -94,7 +82,6 @@ struct CohereState : State {
   std::shared_ptr<Tokenizer> tokenizer_;   // Lazily created on first GetOrCreateTokenizer call.
 };
 
-// Cohere model — inherits WhisperModel, overrides CreateState.
 struct CohereModel : WhisperModel {
   using WhisperModel::WhisperModel;
 

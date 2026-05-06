@@ -41,8 +41,6 @@ struct CohereProcessor : Processor {
 
   const Config* config_{};
 
-  // VAD instance — created in the constructor when the config opts in.
-  // Mutable because Process() is const but SileroVad mutates internal state.
   mutable std::unique_ptr<SileroVad> vad_;
 };
 

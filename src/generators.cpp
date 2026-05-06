@@ -503,9 +503,9 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     set_extra_inputs_ = false;
   }
 
-  // Save prompt tokens for Cohere chunk re-feeding
+  // Cache prompt tokens on device for Cohere chunk re-feeding (and for prompt-length tracking).
   if (is_cohere_model_ && input_ids.size() > 0) {
-    static_cast<CohereState*>(state_.get())->SetPromptTokens(input_ids);
+    cohere_prompt_device_ = AllocateInputIdsOnDevice(cpu_span<const int32_t>(input_ids.data(), input_ids.size()));
   }
 
   // Append tokens and run ComputeLogits after setting all other possible inputs
@@ -742,7 +742,7 @@ void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
   {
     auto seq = search_->GetSequence(0);
     auto seq_cpu = seq.CopyDeviceToCpu();
-    size_t prompt_len = cs->GetPromptTokens().size();
+    size_t prompt_len = cohere_prompt_device_.size();
     size_t seq_len = static_cast<size_t>(search_->GetSequenceLength());
     if (seq_len > prompt_len) {
       size_t end = seq_len;
@@ -766,13 +766,10 @@ void Generator::RunCohereChunkUntilEOS(const Tokenizer& tokenizer) {
     // Reset decoder for the next chunk and re-feed the prompt.
     cs->AdvanceToNextChunk();
     search_->RewindTo(0);
-    const auto& prompt_tokens = cs->GetPromptTokens();
-    if (!prompt_tokens.empty()) {
-      auto prompt_span = cpu_span<const int32_t>(prompt_tokens.data(), prompt_tokens.size());
-      auto prompt_device = AllocateInputIdsOnDevice(prompt_span);
-      search_->AppendTokens(prompt_device);
+    if (!cohere_prompt_device_.empty()) {
+      search_->AppendTokens(cohere_prompt_device_);
       set_extra_inputs_ = false;
-      ComputeLogits(prompt_device);
+      ComputeLogits(cohere_prompt_device_);
     }
   }
 }

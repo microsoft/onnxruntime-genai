@@ -798,9 +798,6 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
 }
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  // SileroVad construction (used by some processors, e.g. CohereProcessor) requires
-  // a non-const Model. The Model is logically const for the duration of multimodal
-  // processing — only internal session bookkeeping mutates.
   return std::make_shared<MultiModalProcessor>(*config_, session_info_, const_cast<Model&>(*this));
 }
 

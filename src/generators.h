@@ -123,6 +123,8 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+  DeviceSpan<int32_t> cohere_prompt_device_;
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
@@ -143,8 +145,6 @@ struct Generator : LeakChecked<Generator> {
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 
-  // Run one decode step: ensure logits, apply guidance/min-length/repetition
-  // penalty, log, then sample using the configured method.
   void SampleNextToken();
 
   // Cohere-only: run the inner search loop until the current chunk hits EOS,
