@@ -386,4 +386,86 @@ TEST(ConfigPackageTest, AllFiveRoleComponentFieldsAreParseable) {
   EXPECT_EQ(config.model.embedding.component, "embedding");
 }
 
+// ============================================================================
+// W8: public optional `ep` argument
+// ============================================================================
+
+TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {
+  // Two components that both ship CPU and CUDA variants. Defaulting would
+  // throw (multi-EP intersection), but a user-supplied `ep` resolves the
+  // ambiguity.
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({
+    "schema_version": 1,
+    "components": ["decoder", "embedding"]
+  })");
+  WriteFile(dir.path() / "configs" / "genai_config.json", kBaseGenaiConfig);
+  for (const auto& cname : {"decoder", "embedding"}) {
+    WriteFile(dir.path() / cname / "metadata.json", R"({
+      "variants": {
+        "cpu":  {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]},
+        "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
+      }
+    })");
+    WriteFile(dir.path() / cname / "cpu"  / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+    WriteFile(dir.path() / cname / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  }
+
+  // Without `ep`, defaulting throws on the multi-EP intersection.
+  EXPECT_THROW(Config(dir.fs_path(), ""), std::exception);
+
+  // With `ep="CPUExecutionProvider"`, the user's choice is captured and
+  // SelectComponent succeeds for every component.
+  EXPECT_NO_THROW(Config(dir.fs_path(), "", "CPUExecutionProvider"));
+
+  // With `ep="CUDAExecutionProvider"`, likewise the CUDA variants win.
+  EXPECT_NO_THROW(Config(dir.fs_path(), "", "CUDAExecutionProvider"));
+}
+
+TEST(ConfigPackageTest, UserEpThatNoComponentSupportsThrowsWithDiagnostic) {
+  // Single-component CPU-only package; user requests CUDA.
+  // SelectComponent finds no matching variant and the diagnostic must
+  // list the component's compatible EPs.
+  TempDir dir;
+  BuildSingleComponentPackage(dir.path());
+  try {
+    Config config{dir.fs_path(), "", "CUDAExecutionProvider"};
+    FAIL() << "Expected unsupported-EP throw";
+  } catch (const std::exception& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("CUDAExecutionProvider"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("CPUExecutionProvider"), std::string::npos) << msg
+        << " (compatible-EPs hint missing)";
+    EXPECT_NE(msg.find("decoder"), std::string::npos) << msg
+        << " (component name missing)";
+  }
+}
+
+TEST(ConfigPackageTest, EmptyUserEpFallsBackToDefaulting) {
+  // Empty ep should be equivalent to omitting it (defaulting runs).
+  TempDir dir;
+  BuildSingleComponentPackage(dir.path());
+  EXPECT_NO_THROW(Config(dir.fs_path(), "", ""));
+  EXPECT_NO_THROW(Config(dir.fs_path(), ""));
+}
+
+TEST(ConfigPackageTest, UserEpInFlatDirThrows) {
+  // Flat-dir mode (no manifest.json). A non-empty `ep` raises a clear error
+  // pointing at the OgaConfigClearProviders / OgaConfigAppendProvider channel.
+  TempDir dir;
+  WriteFile(dir.path() / "genai_config.json", kBaseGenaiConfig);
+
+  // Sanity: empty ep still loads.
+  EXPECT_NO_THROW(Config(dir.fs_path(), ""));
+
+  try {
+    Config config{dir.fs_path(), "", "CUDAExecutionProvider"};
+    FAIL() << "Expected flat-dir + ep throw";
+  } catch (const std::exception& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("v4 model package"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("OgaConfigAppendProvider"), std::string::npos) << msg;
+  }
+}
+
 }  // namespace Generators::test
