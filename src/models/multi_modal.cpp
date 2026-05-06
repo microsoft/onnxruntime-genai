@@ -96,21 +96,31 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options), *vision_session_options_, true, /*disable_graph_capture=*/true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options),
+                                   *vision_session_options_, true, /*disable_graph_capture=*/true,
+                                   config_->model.vision.component);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get(),
+                                    config_->model.vision.component);
   }
 
   if (speech) {
     speech_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options), *speech_session_options_, true, /*disable_graph_capture=*/true);
-    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options),
+                                   *speech_session_options_, true, /*disable_graph_capture=*/true,
+                                   config_->model.speech.component);
+    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get(),
+                                    config_->model.speech.component);
   }
 
   embedding_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options), *embedding_session_options_, true, /*disable_graph_capture=*/true);
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options),
+                                 *embedding_session_options_, true, /*disable_graph_capture=*/true,
+                                 config_->model.embedding.component);
 
-  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
-  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get(),
+                                     config_->model.embedding.component);
+  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(),
+                                   config_->model.decoder.component);
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
@@ -709,11 +719,15 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();
+    const auto lora_adapter = (model_.AssetFolder(model_.config_->model.vision.component) /
+                               fs::path(*model_.config_->model.vision.adapter_filename))
+                                  .string();
     adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
   } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename)).string();
+    const auto lora_adapter = (model_.AssetFolder(model_.config_->model.speech.component) /
+                               fs::path(*model_.config_->model.speech.adapter_filename))
+                                  .string();
     adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }

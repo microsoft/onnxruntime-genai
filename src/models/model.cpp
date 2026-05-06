@@ -601,7 +601,8 @@ Model::~Model() {
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           const std::string& component_name) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -667,8 +668,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     if (custom_library_path.is_relative()) {
       bool resolved = false;
 
-      // First try: resolve relative to GenAI model folder (most intuitive for users)
-      fs::path model_relative_path = config_->config_path / custom_library_path;
+      // First try: resolve relative to the role's asset folder (variant
+      // folder in v4-package mode, GenAI model folder in flat-dir mode).
+      fs::path model_relative_path = AssetFolder(component_name) / custom_library_path;
       if (fs::exists(model_relative_path)) {
         custom_library_file_prefix = model_relative_path.string();
         resolved = true;
@@ -753,18 +755,33 @@ void Model::CreateSessionOptions() {
     }
   }
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
+                                 /*disable_graph_capture=*/false, config_->model.decoder.component);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      // Pipeline sub-models live alongside the decoder under the
+      // decoder's variant folder in v4-package mode, so their custom-ops
+      // resolution should mirror the decoder's component.
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
+                                     /*disable_graph_capture=*/false, config_->model.decoder.component);
     }
   }
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
+}
+
+fs::path Model::AssetFolder(const std::string& component_name) const {
+  if (!component_name.empty() && config_->model_package) {
+    auto it = config_->component_instances.find(component_name);
+    if (it != config_->component_instances.end() && it->second) {
+      return it->second->VariantFolderPath();
+    }
+  }
+  return config_->config_path;
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -777,7 +794,13 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options,
+                                                 const std::string& component_name) {
+  // Per-role asset folder: variant folder in v4-package mode, model
+  // folder in flat-dir mode (or empty/unknown component).
+  const fs::path asset_folder = AssetFolder(component_name);
+
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -795,14 +818,14 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     // for the OrtSession through the ONNX Runtime API.
     // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
     DirGuard dir_guard;
-    dir_guard.ChangeTo(config_->config_path);
+    dir_guard.ChangeTo(asset_folder);
     auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
 
     return session;
   }
 
   // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  return OrtSession::Create(ort_env, (asset_folder / fs::path(model_filename)).c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

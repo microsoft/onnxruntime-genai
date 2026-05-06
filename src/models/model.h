@@ -157,7 +157,17 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+  // Returns the on-disk folder that holds the assets for a given role.
+  // In flat-dir mode (or when `component_name` is empty / not in the
+  // package's `component_instances` map), returns `config_->config_path`.
+  // In package mode with a known component name, returns the component's
+  // selected variant folder. This is the source of truth for resolving
+  // ONNX, LoRA-adapter, and custom-ops library paths under v4 packages.
+  std::filesystem::path AssetFolder(const std::string& component_name) const;
+
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                            OrtSessionOptions* session_options,
+                                            const std::string& component_name = "");
 
   bool IsPruned() const;
 
@@ -178,7 +188,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      const std::string& component_name = "");
 
  protected:
   void CreateSessionOptions();
