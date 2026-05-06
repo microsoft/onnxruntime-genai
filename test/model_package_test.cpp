@@ -270,6 +270,60 @@ TEST(ModelPackageContextTest, ManifestRejectsUnsupportedSchemaVersionString) {
   EXPECT_THROW(ModelPackageContext::Open(dir.fs_path()), std::exception);
 }
 
+TEST(ModelPackageContextTest, ManifestRealWorldProducerShape) {
+  // Locks in compatibility with the manifest shape currently produced by
+  // the Olive / Foundry-Local toolchain, against which the parser drift
+  // was first observed (phi-4-mini-reasoning.v4.ortpackage). Combines:
+  //   * string schema_version "1.0"
+  //   * object-form components with extra `metadata` / `description`
+  //   * extra top-level fields (package_name, package_version, configs_dir)
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({
+    "schema_version": "1.0",
+    "package_name": "phi-4-mini-reasoning",
+    "package_version": "1.0",
+    "description": "Phi-4-mini reasoning, single decoder component, multi-EP variants.",
+    "components": [
+      { "name": "decoder", "metadata": "decoder/metadata.json" }
+    ],
+    "configs_dir": "configs"
+  })");
+  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+    "schema_version": "1.0",
+    "component_name": "decoder",
+    "variants": {
+      "cpu":          {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]},
+      "cuda":         {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]},
+      "qnn-npu":      {"ep_compatibility":[{"ep":"QNNExecutionProvider",
+                                           "compatibility":["soc_model_60","soc_model_69"]}]},
+      "openvino-npu": {"ep_compatibility":[{"ep":"OpenVINOExecutionProvider","device":"NPU"}]}
+    }
+  })");
+  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json",
+            R"({"schema_version":"1.0","files":[{"filename":"model.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "cuda" / "variant.json",
+            R"({"schema_version":"1.0","files":[{"filename":"model.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "qnn-npu" / "variant.json",
+            R"({"schema_version":"1.0","files":[{"filename":"model.onnx"}]})");
+  WriteFile(dir.path() / "decoder" / "openvino-npu" / "variant.json",
+            R"({"schema_version":"1.0","files":[{"filename":"openvino_model_dy.onnx"}]})");
+
+  auto ctx = ModelPackageContext::Open(dir.fs_path());
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_EQ(ctx->NumComponents(), 1u);
+  EXPECT_EQ(ctx->ComponentName(0), "decoder");
+
+  // EP intersection has 4 entries, so plain defaulting would throw — but
+  // SelectComponent with an explicit priority resolves cleanly.
+  auto cpu = ctx->SelectComponent(0, OnePriority("CPUExecutionProvider"));
+  ASSERT_NE(cpu, nullptr);
+  EXPECT_EQ(cpu->SelectedEp(), "CPUExecutionProvider");
+
+  auto npu = ctx->SelectComponent(0, OnePriority("OpenVINOExecutionProvider", "NPU"));
+  ASSERT_NE(npu, nullptr);
+  EXPECT_EQ(npu->SelectedEp(), "OpenVINOExecutionProvider");
+}
+
 TEST(ModelPackageContextTest, ManifestRejectsDuplicateComponents) {
   TempDir dir;
   WriteFile(dir.path() / "manifest.json", R"({"components":["decoder","decoder"]})");
