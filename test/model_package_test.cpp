@@ -678,7 +678,7 @@ TEST(ModelPackageContextTest, ResolveSharedWeightRejectsPathTraversalChecksum) {
 }
 
 // ============================================================================
-// ParseVariantManifest helper (W6's pipeline runner uses this)
+// ParseVariantManifest helper (the pipeline runner uses this)
 // ============================================================================
 
 TEST(ParseVariantManifestTest, ParsesFilesArrayInOrder) {

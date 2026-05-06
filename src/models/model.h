@@ -192,7 +192,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool disable_graph_capture = false,
                                       const std::string& component_name = "");
 
-  /// W6 (v4 model package): for the file `filename` belonging to the
+  /// v4 model package: for the file `filename` belonging to the
   /// component `component_name`, find its variant.json `shared_files`
   /// map, resolve each entry to an on-disk shared-blob, read it into
   /// memory, and register it with `session_options` via

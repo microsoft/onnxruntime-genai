@@ -115,7 +115,7 @@ TEST(EnsurePackageProviderTest, RotatesEpToFrontWhenAlreadyPresent) {
   // User-overlay added "DML" before us; package mode says "cuda" wins.
   // The package EP must rotate to the front; user's "DML" entry stays in
   // the list at a later position so layer-2 SO/PO overrides for it
-  // remain visible (W5b semantics).
+  // remain visible (EnsurePackageProvider semantics).
   Config::SessionOptions so;
   so.providers = {"DML", "cuda"};
   Config::ProviderOptions dml;

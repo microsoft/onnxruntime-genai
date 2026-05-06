@@ -94,7 +94,7 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-  // W7 (v4 package): vision/speech/embedding are SECONDARY sessions —
+  // v4 package: vision/speech/embedding are SECONDARY sessions —
   // the decoder is the model's primary, and only it should set
   // `p_device_`. In flat-dir mode this is moot (all roles use the same
   // EP, falling back to decoder.session_options via

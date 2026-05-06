@@ -13,7 +13,7 @@
 //
 // The flat-dir path is exercised by `test/c_api_tests.cpp` and the existing
 // model tests; we add one regression case here to assert it still works after
-// the W3 split.
+// the package-load split.
 
 #include <gtest/gtest.h>
 
@@ -387,7 +387,7 @@ TEST(ConfigPackageTest, AllFiveRoleComponentFieldsAreParseable) {
 }
 
 // ============================================================================
-// W8: public optional `ep` argument
+// Public optional `ep` argument
 // ============================================================================
 
 TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {

@@ -1624,7 +1624,7 @@ std::string ReadFileBinary(const fs::path& filename) {
 // The intersection order follows the FIRST component's first-seen order, so
 // diagnostic output (and any future tie-break) is deterministic.
 //
-// `user_ep` is the public-API `ep` argument (W8). When non-empty, defaulting
+// `user_ep` is the public-API `ep` argument. When non-empty, defaulting
 // is bypassed and the user's EP becomes the sole captured priority entry —
 // per-component `SelectComponent` will then either find a matching variant
 // or throw a clear "no variant for component X under EP Y" diagnostic. We
@@ -1727,7 +1727,7 @@ void ValidateRoleComponentReferences(const Config& config) {
   }
 }
 
-// W3: load Config from a v4 model package.
+// Load Config from a v4 model package.
 //
 // 1. Set shared_assets_path to <pkg>/configs/.
 // 2. EP defaulting -> ModelPackageSelectionOptions (single-EP for now).

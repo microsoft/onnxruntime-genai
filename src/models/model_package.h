@@ -68,7 +68,7 @@ struct ComponentInstance {
   virtual fs::path VariantFolderPath() const = 0;
 
   // Number of files declared in the variant's `variant.json`. Single-file
-  // consumers expect 1; pipeline runners (W6) handle >= 1.
+  // consumers expect 1; pipeline runners handle >= 1.
   virtual std::size_t FileCount() const = 0;
 
   // Opaque consumer-metadata blob extracted verbatim from the selected
@@ -79,7 +79,7 @@ struct ComponentInstance {
 
   // Canonical ORT EP name (e.g. "CUDAExecutionProvider") of the variant
   // selected for this component. The string mirrors the spec's `ep` field
-  // in `ep_compatibility[]`. Used by W5b to plumb the package's chosen EP
+  // in `ep_compatibility[]`. Used to plumb the package's chosen EP
   // through the session-creation pipeline. Empty string is reserved for
   // future "no EP captured" cases — `SelectComponent` populates this from
   // the priority entry that matched the chosen variant.
@@ -144,7 +144,7 @@ struct ModelPackageContext {
   //
   // Returns `nullptr` if no variant of this component is compatible with
   // any of the requested EPs — this is a recoverable signal callers can
-  // use for diagnostic / fallback purposes (W3 EP defaulting). Throws on
+  // use for diagnostic / fallback purposes (EP defaulting). Throws on
   // malformed package content.
   virtual std::unique_ptr<ComponentInstance> SelectComponent(
       std::size_t cix, const ModelPackageSelectionOptions& options) const = 0;
@@ -157,7 +157,7 @@ struct ModelPackageContext {
 };
 
 // One entry of a variant's `variant.json` `files[]` array. Used by the
-// multi-file pipeline runner (W6). The session_options / provider_options
+// multi-file pipeline runner. The session_options / provider_options
 // values are kept as a `JSON::Object` (string-keyed map of typed
 // `JSON::Document`) so callers can preserve number/bool typing when
 // applying them through the SetProviderSessionOptions machinery.

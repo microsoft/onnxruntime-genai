@@ -14,7 +14,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
         }
 
-        // W8: explicit-EP overload. `ep` selects the execution provider for v4 model
+        // Explicit-EP overload. `ep` selects the execution provider for v4 model
         // packages, bypassing GenAI's compatibility-intersection defaulting. Pass null
         // or empty to fall back to defaulting. In flat-directory mode a non-empty `ep`
         // raises an error.

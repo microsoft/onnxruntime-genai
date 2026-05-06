@@ -48,7 +48,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 // never appears in `providers`), an unrecognised EP, or empty input.
 std::string EpNameToProviderTag(std::string_view canonical_ep_name);
 
-// W5a-soft: implicit-provider-add for v4 model packages.
+// Implicit-provider-add for v4 model packages.
 //
 // In package mode, `genai_config.json`'s `model.<role>.session_options`
 // block is reserved for layer-2 runtime overrides — the active EP is
