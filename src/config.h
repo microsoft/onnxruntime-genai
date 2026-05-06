@@ -430,6 +430,25 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
+// Layer-2 override channel (caller-driven).
+//
+// Applies a JSON document to an existing Config in place, using the same
+// JSON parser registered for genai_config.json. Any field that can be set via
+// genai_config.json can therefore also be overridden here. The JSON parser
+// merges objects key-wise (ProviderOptionsObject_Element matches by `name`),
+// so e.g. an overlay that adds a single WebGPU provider_option does NOT
+// replace pre-existing provider_options entries for other providers.
+//
+// Used by:
+//   * OgaConfigOverlay() — exposed to C# (Config.Overlay), Java
+//     (Config.overlay), Python (og.Config.overlay) and ObjC mirrors.
+//   * RuntimeSettings::GenerateConfigOverlay() — handle-driven runtime
+//     overrides (e.g. WebGPU dawnProcTable) merged at Model::Create.
+//
+// Empty `json` is not supported (the underlying streaming parser requires at
+// least one value); callers must guard against the empty case.
+//
+// The layer-2 contract is regression-tested in test/runtime_settings_test.cpp.
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
