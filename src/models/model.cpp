@@ -909,12 +909,13 @@ bool Model::IsPruned() const {
   return logits_shape[1] == 1;
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/,
+                                   std::string_view user_ep /*= {}*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay, user_ep);
   return CreateModel(ort_env, std::move(config));
 }
 

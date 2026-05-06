@@ -1624,16 +1624,29 @@ std::string ReadFileBinary(const fs::path& filename) {
 // The intersection order follows the FIRST component's first-seen order, so
 // diagnostic output (and any future tie-break) is deterministic.
 //
-// Returns a `ModelPackageSelectionOptions` carrying the single resolved EP as
-// the sole priority entry. Throws on empty intersection (no EP can load every
-// component) or multi-EP intersection (ambiguous; explicit selection is not
-// yet plumbed through `Config::Config` — that's W8). The diagnostic for the
-// multi-EP case lists the candidates so the producer/operator knows the
-// options.
-ModelPackageSelectionOptions ComputeEpDefaulting(const ModelPackageContext& ctx) {
+// `user_ep` is the public-API `ep` argument (W8). When non-empty, defaulting
+// is bypassed and the user's EP becomes the sole captured priority entry —
+// per-component `SelectComponent` will then either find a matching variant
+// or throw a clear "no variant for component X under EP Y" diagnostic. We
+// intentionally do NOT pre-validate `user_ep` against the global intersection;
+// the per-component error surfaces naturally and is more actionable.
+//
+// Returns a `ModelPackageSelectionOptions` carrying the resolved EP as the
+// sole priority entry. Throws on empty intersection (no EP can load every
+// component) or, in the no-user-ep case, multi-EP intersection (ambiguous —
+// the diagnostic now points at the public `ep` argument as the resolution
+// channel).
+ModelPackageSelectionOptions ComputeEpDefaulting(const ModelPackageContext& ctx,
+                                                 std::string_view user_ep) {
   const std::size_t n = ctx.NumComponents();
   if (n == 0)
     throw std::runtime_error("v4 model package: no components declared");
+
+  if (!user_ep.empty()) {
+    ModelPackageSelectionOptions options;
+    options.ep_priority.push_back(EpSelection{std::string(user_ep), std::nullopt});
+    return options;
+  }
 
   // Start with the first component's EP list (preserve order).
   std::vector<std::string> intersection = ctx.EpsCompatibleWith(0);
@@ -1674,8 +1687,8 @@ ModelPackageSelectionOptions ComputeEpDefaulting(const ModelPackageContext& ctx)
       if (i > 0) oss << ", ";
       oss << intersection[i];
     }
-    oss << "). Explicit EP selection is not yet supported by this build (planned for the public-API";
-    oss << " 'ep' argument). Re-package with a single EP per package, or wait for explicit selection.";
+    oss << "). Pass the `ep` argument to og.Model / og.Config (or"
+        << " OgaCreateModelWithEp / OgaCreateConfigWithEp in C) to choose one.";
     throw std::runtime_error(oss.str());
   }
 
@@ -1732,12 +1745,14 @@ void ValidateRoleComponentReferences(const Config& config) {
 // with "merged package genai_config" context so the user knows where to look.
 void LoadFromPackage(Config& config,
                      std::shared_ptr<ModelPackageContext> ctx,
-                     std::string_view json_overlay) {
+                     std::string_view json_overlay,
+                     std::string_view user_ep) {
   const fs::path shared = ctx->SharedAssetsPath();
   config.shared_assets_path = shared;
 
-  // EP defaulting first — needed before SelectComponent.
-  ModelPackageSelectionOptions options = ComputeEpDefaulting(*ctx);
+  // EP defaulting first — needed before SelectComponent. When `user_ep`
+  // is non-empty, defaulting is bypassed and the user's choice wins.
+  ModelPackageSelectionOptions options = ComputeEpDefaulting(*ctx, user_ep);
   const std::string& selected_ep = options.ep_priority.front().ep_name;
 
   // Load base genai_config.json.
@@ -1766,10 +1781,25 @@ void LoadFromPackage(Config& config,
     const std::string cname = ctx->ComponentName(cix);
     auto cinst_unique = ctx->SelectComponent(cix, options);
     if (!cinst_unique) {
-      // Defensive: defaulting picked an EP that intersects every component's
-      // compatibility set, so SelectComponent should always succeed here.
-      throw std::runtime_error("v4 model package: SelectComponent returned no variant for component '" +
-                               cname + "' under EP '" + selected_ep + "'");
+      // SelectComponent returns null when no variant of the component
+      // matches the captured EP. Under defaulting this is "defensive"
+      // (we picked an EP from the intersection so every component has a
+      // match). Under user-supplied `ep`, this is the natural failure
+      // path — list the component's compatible EPs so the user can fix
+      // the typo / re-package / pick a different ep.
+      std::ostringstream oss;
+      oss << "v4 model package: no variant of component '" << cname
+          << "' matches execution provider '" << selected_ep << "'.";
+      auto eps = ctx->EpsCompatibleWith(cix);
+      if (!eps.empty()) {
+        oss << " Compatible EPs for this component: [";
+        for (std::size_t i = 0; i < eps.size(); ++i) {
+          if (i > 0) oss << ", ";
+          oss << eps[i];
+        }
+        oss << "].";
+      }
+      throw std::runtime_error(oss.str());
     }
     std::shared_ptr<ComponentInstance> cinst(std::move(cinst_unique));
     const std::string blob = cinst->ConsumerMetadata();
@@ -1810,10 +1840,22 @@ void LoadFromPackage(Config& config,
 
 }  // namespace
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path}, shared_assets_path{path} {
+Config::Config(const fs::path& path, std::string_view json_overlay)
+    : Config(path, json_overlay, std::string_view{}) {}
+
+Config::Config(const fs::path& path, std::string_view json_overlay, std::string_view user_ep)
+    : config_path{path}, shared_assets_path{path} {
   if (auto ctx_unique = ModelPackageContext::Open(path)) {
-    LoadFromPackage(*this, std::shared_ptr<ModelPackageContext>(std::move(ctx_unique)), json_overlay);
+    LoadFromPackage(*this, std::shared_ptr<ModelPackageContext>(std::move(ctx_unique)),
+                    json_overlay, user_ep);
   } else {
+    if (!user_ep.empty()) {
+      throw std::runtime_error(
+          "The 'ep' argument is only supported for v4 model packages "
+          "(directories containing manifest.json). For flat-directory "
+          "models, set providers via OgaConfigClearProviders / "
+          "OgaConfigAppendProvider on the genai_config.json provider list.");
+    }
     ParseConfig(path / "genai_config.json", json_overlay, *this);
   }
 

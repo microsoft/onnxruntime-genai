@@ -16,6 +16,12 @@ struct ComponentInstance;
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay);
+  // W8: explicit-EP overload. `user_ep` is the public-facing optional `ep`
+  // argument from `og.Model(path[, ep])` / `og.Config(path[, ep])`. When
+  // empty the EP is defaulted from the package's per-component compatibility
+  // intersection. When non-empty in package mode, it bypasses defaulting and
+  // becomes the captured EP. In flat-dir mode, a non-empty `user_ep` raises.
+  Config(const fs::path& path, std::string_view json_overlay, std::string_view user_ep);
 
   struct Defaults {
     // Decoder names

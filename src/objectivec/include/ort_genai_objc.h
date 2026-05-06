@@ -64,7 +64,20 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
- * Clear the list of providers in the given config
+ * Creates a config from the given configuration directory with an explicit execution provider.
+ *
+ * The `ep` argument selects the execution provider for v4 model packages, bypassing GenAI's
+ * compatibility-intersection defaulting. Pass `nil` or an empty string to fall back to defaulting.
+ * In flat-directory (legacy) mode a non-empty `ep` raises an error.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @param ep The execution provider name (e.g. `@"CUDAExecutionProvider"`), or `nil` for defaulting.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                   ep:(nullable NSString*)ep
+                                error:(NSError**)error;
  *
  * @param error Optional error information set if an error occurs.
  */
@@ -119,6 +132,22 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (nullable instancetype)initWithPath:(NSString*)path
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Creates a model from the given configuration directory with an explicit execution provider.
+ *
+ * The `ep` argument selects the execution provider for v4 model packages, bypassing GenAI's
+ * compatibility-intersection defaulting. Pass `nil` or an empty string to fall back to defaulting.
+ * In flat-directory (legacy) mode a non-empty `ep` raises an error.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @param ep The execution provider name (e.g. `@"CUDAExecutionProvider"`), or `nil` for defaulting.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                   ep:(nullable NSString*)ep
+                                error:(NSError**)error;
 
 /**
  * Creates a model.
