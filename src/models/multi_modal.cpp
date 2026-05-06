@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include "session_options.h"
 #include <cstring>
 #include <numeric>
 
@@ -93,28 +94,56 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
+  // W7 (v4 package): vision/speech/embedding are SECONDARY sessions —
+  // the decoder is the model's primary, and only it should set
+  // `p_device_`. In flat-dir mode this is moot (all roles use the same
+  // EP, falling back to decoder.session_options via
+  // EffectiveSessionOptions), so the legacy `is_primary=true` is kept.
+  // In v4-package mode, each role's component can sit on a different EP
+  // captured by ComponentInstance::SelectedEp(); we ensure the role's
+  // own SessionOptions exists, inject the per-role EP at the front, and
+  // create the session as non-primary so its DeviceInterface doesn't
+  // clobber or conflict with the decoder's.
+  const bool package_mode = static_cast<bool>(config_->model_package);
+
+  auto inject_package_ep = [&](std::optional<Config::SessionOptions>& slot,
+                               const std::string& component_name) -> bool {
+    if (!package_mode || component_name.empty()) return false;
+    auto it = config_->component_instances.find(component_name);
+    if (it == config_->component_instances.end() || !it->second) return false;
+    if (!slot.has_value()) slot.emplace();
+    EnsurePackageProvider(*slot, it->second->SelectedEp());
+    return true;
+  };
+
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
+    const bool vision_packaged = inject_package_ep(config_->model.vision.session_options,
+                                                   config_->model.vision.component);
     vision_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options),
-                                   *vision_session_options_, true, /*disable_graph_capture=*/true,
+                                   *vision_session_options_, !vision_packaged, /*disable_graph_capture=*/true,
                                    config_->model.vision.component);
     vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get(),
                                     config_->model.vision.component);
   }
 
   if (speech) {
+    const bool speech_packaged = inject_package_ep(config_->model.speech.session_options,
+                                                   config_->model.speech.component);
     speech_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options),
-                                   *speech_session_options_, true, /*disable_graph_capture=*/true,
+                                   *speech_session_options_, !speech_packaged, /*disable_graph_capture=*/true,
                                    config_->model.speech.component);
     speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get(),
                                     config_->model.speech.component);
   }
 
+  const bool embedding_packaged = inject_package_ep(config_->model.embedding.session_options,
+                                                    config_->model.embedding.component);
   embedding_session_options_ = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options),
-                                 *embedding_session_options_, true, /*disable_graph_capture=*/true,
+                                 *embedding_session_options_, !embedding_packaged, /*disable_graph_capture=*/true,
                                  config_->model.embedding.component);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get(),
