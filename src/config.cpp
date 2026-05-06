@@ -1567,7 +1567,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
+Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path}, shared_assets_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {

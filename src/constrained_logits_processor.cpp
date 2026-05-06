@@ -51,7 +51,7 @@ void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
   };
 
   // Find the path to the tokenizer.json file
-  auto tokenizer_path = params_->config.config_path.string();
+  auto tokenizer_path = params_->config.shared_assets_path.string();
   fs::path tokenizer_path_fs(tokenizer_path);
   fs::path json_path(tokenizer_path_fs / kDefaultVocabFile);
 

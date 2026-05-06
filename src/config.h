@@ -82,7 +82,14 @@ struct Config {
     static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
-  fs::path config_path;  // Path of the config directory
+  fs::path config_path;  // Path of the config directory. In flat-dir mode this is also the model-asset root.
+  // Directory holding shared assets (tokenizer files, processor JSON, chat template) that are
+  // common across components. In flat-dir mode this equals config_path. In package mode (ORT v4)
+  // this is set to <pkg>/configs/ by the package loader. Runtime-resolved only; not parsed from
+  // genai_config.json. Per-component model assets (ONNX, LoRA, custom ops, external data) are
+  // intentionally NOT covered by this field — they are addressed per-component variant folder by
+  // later workstreams.
+  fs::path shared_assets_path;
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
