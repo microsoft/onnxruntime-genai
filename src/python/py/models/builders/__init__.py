@@ -13,6 +13,7 @@ from .gemma import Gemma2Model, Gemma3Model, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel
 from .internlm import InternLM2Model
+from .lfm2 import LFM2Model
 from .llama import LlamaModel
 from .mistral import (
     Ministral3ConditionalGenerationModel,
@@ -46,6 +47,7 @@ __all__ = [
     "GemmaModel",
     "GraniteModel",
     "InternLM2Model",
+    "LFM2Model",
     "LlamaModel",
     "Ministral3ConditionalGenerationModel",
     "Ministral3TextModel",

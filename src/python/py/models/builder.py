@@ -232,6 +232,10 @@ def create_model(
         from .builders.internlm import InternLM2Model
 
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2ForCausalLM":
+        from .builders.lfm2 import LFM2Model
+
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         from .builders.llama import LlamaModel
 
