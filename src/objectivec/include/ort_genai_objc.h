@@ -78,6 +78,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable instancetype)initWithPath:(NSString*)path
                                    ep:(nullable NSString*)ep
                                 error:(NSError**)error;
+
+/**
+ * Clear the list of providers in the given config.
  *
  * @param error Optional error information set if an error occurs.
  */
