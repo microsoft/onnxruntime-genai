@@ -4,7 +4,14 @@
 // Parakeet mel spectrogram — matches NeMo's AudioToMelSpectrogramPreprocessor
 // and librosa.filters.mel exactly (Slaney scale, symmetric Hann, center=True).
 //
-// This is a standalone implementation with no dependency on onnxruntime-extensions.
+// Implementation delegates the heavy lifting (Slaney mel filterbank,
+// pre-emphasis, real FFT / power spectrum) to onnxruntime-extensions
+// (nemo_mel::CreateMelFilterbank, nemo_mel::ApplyPreemphasis,
+// nemo_mel::ComputeSTFTFrame). The pipeline orchestration (symmetric Hann,
+// center-padded framing, frame-count truncation, log_zero_guard = 2^-24) is
+// kept here because the corresponding `nemo_mel::NemoComputeLogMelBatch`
+// helper uses a *periodic* Hann window, which would change the numerical
+// output relative to the NeMo/Parakeet reference.
 #pragma once
 
 #include <cstddef>

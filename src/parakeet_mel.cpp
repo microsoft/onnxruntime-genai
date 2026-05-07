@@ -1,18 +1,31 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Parakeet mel spectrogram — standalone C++ implementation matching
-// NeMo's AudioToMelSpectrogramPreprocessor + librosa.filters.mel exactly.
+// Parakeet mel spectrogram — pipeline matches NeMo's
+// AudioToMelSpectrogramPreprocessor + librosa.filters.mel exactly.
 //
-// No dependency on onnxruntime-extensions.
+// The heavy-lifting pieces (Slaney mel filterbank, pre-emphasis, real FFT /
+// power spectrum) are delegated to onnxruntime-extensions
+// (shared/api/nemo_mel_spectrogram.h, namespace nemo_mel). Only the bits that
+// are parakeet/NeMo-specific are kept here:
+//
+//   * Symmetric Hann window (torch.hann_window(N, periodic=False)).
+//     The batch helper in extensions (`NemoComputeLogMelBatch`) uses a
+//     *periodic* Hann window, so we can't reuse it directly without changing
+//     numerical output.
+//   * Center-padded STFT framing loop with the window centered inside an
+//     fft_size buffer (win_offset = (n_fft - win_length) / 2).
+//   * Truncation to `num_samples / hop_length` valid frames.
+//   * log_zero_guard = 2^-24 (NeMo default).
 
 #include "parakeet_mel.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <complex>
 #include <vector>
+
+#include "nemo_mel_spectrogram.h"  // onnxruntime-extensions: shared/api
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -20,10 +33,9 @@
 
 namespace parakeet_mel {
 
-// ─── Symmetric Hann window (periodic=False) ─────────────────────────────────
-// w[n] = 0.5 * (1 - cos(2*pi*n / (N-1)))  for n = 0..N-1
-// This matches torch.hann_window(N, periodic=False)
-
+// Symmetric Hann window: matches torch.hann_window(N, periodic=False).
+// Kept locally because nemo_mel::NemoComputeLogMelBatch uses the *periodic*
+// variant (sin(pi*n/N)^2), which produces different numerical output.
 static std::vector<float> SymmetricHannWindow(int length) {
   std::vector<float> window(length);
   if (length == 1) {
@@ -36,170 +48,45 @@ static std::vector<float> SymmetricHannWindow(int length) {
   return window;
 }
 
-// ─── Radix-2 Cooley-Tukey FFT ───────────────────────────────────────────────
-// In-place, decimation-in-time. N must be a power of 2.
-
-static void FFT(std::vector<std::complex<float>>& x) {
-  int N = static_cast<int>(x.size());
-  if (N <= 1) return;
-
-  // Bit-reversal permutation
-  for (int i = 1, j = 0; i < N; ++i) {
-    int bit = N >> 1;
-    for (; j & bit; bit >>= 1) {
-      j ^= bit;
-    }
-    j ^= bit;
-    if (i < j) std::swap(x[i], x[j]);
-  }
-
-  // Butterfly stages
-  for (int len = 2; len <= N; len <<= 1) {
-    float angle = -2.0f * static_cast<float>(M_PI) / len;
-    std::complex<float> wlen(std::cos(angle), std::sin(angle));
-    for (int i = 0; i < N; i += len) {
-      std::complex<float> w(1.0f, 0.0f);
-      for (int j = 0; j < len / 2; ++j) {
-        auto u = x[i + j];
-        auto v = x[i + j + len / 2] * w;
-        x[i + j] = u + v;
-        x[i + j + len / 2] = u - v;
-        w *= wlen;
-      }
-    }
-  }
-}
-
-// ─── Librosa-compatible mel filterbank (Slaney scale) ───────────────────────
-// Matches librosa.filters.mel(sr, n_fft, n_mels, fmin, fmax, htk=False, norm=None)
-//
-// Slaney mel scale:
-//   - Linear region (f < 1000 Hz): mel = 3 * f / 200
-//   - Log region (f >= 1000 Hz): mel = 15 + 27 * log(f / 1000) / log(6.4)
-
-static float HzToMelSlaney(float hz) {
-  const float f_sp = 200.0f / 3.0f;  // = 66.667 Hz per mel below 1000 Hz
-  float mel = hz / f_sp;
-
-  const float min_log_hz = 1000.0f;
-  const float min_log_mel = min_log_hz / f_sp;  // = 15.0
-  const float logstep = std::log(6.4f) / 27.0f;
-
-  if (hz >= min_log_hz) {
-    mel = min_log_mel + std::log(hz / min_log_hz) / logstep;
-  }
-  return mel;
-}
-
-static float MelToHzSlaney(float mel) {
-  const float f_sp = 200.0f / 3.0f;
-  float hz = mel * f_sp;
-
-  const float min_log_hz = 1000.0f;
-  const float min_log_mel = min_log_hz / f_sp;
-  const float logstep = std::log(6.4f) / 27.0f;
-
-  if (mel >= min_log_mel) {
-    hz = min_log_hz * std::exp(logstep * (mel - min_log_mel));
-  }
-  return hz;
-}
-
-// Build triangular mel filterbank [num_mels, num_fft_bins]
-// num_fft_bins = n_fft / 2 + 1
-// This matches librosa.filters.mel with htk=False, norm=None
-static std::vector<std::vector<float>> CreateMelFilterbank(int num_mels, int fft_size,
-                                                            int sample_rate,
-                                                            float fmin, float fmax) {
-  int num_bins = fft_size / 2 + 1;  // 257
-
-  // Create num_mels + 2 mel-spaced points between fmin and fmax
-  float mel_min = HzToMelSlaney(fmin);
-  float mel_max = HzToMelSlaney(fmax);
-
-  int num_points = num_mels + 2;
-  std::vector<float> mel_points(num_points);
-  for (int i = 0; i < num_points; ++i) {
-    mel_points[i] = mel_min + (mel_max - mel_min) * i / (num_points - 1);
-  }
-
-  // Convert mel points back to Hz
-  std::vector<float> hz_points(num_points);
-  for (int i = 0; i < num_points; ++i) {
-    hz_points[i] = MelToHzSlaney(mel_points[i]);
-  }
-
-  // Convert Hz points to FFT bin indices (fractional)
-  std::vector<float> fft_freqs(num_bins);
-  for (int i = 0; i < num_bins; ++i) {
-    fft_freqs[i] = static_cast<float>(sample_rate) * i / fft_size;
-  }
-
-  // Build triangular filters
-  std::vector<std::vector<float>> filters(num_mels, std::vector<float>(num_bins, 0.0f));
-
-  for (int m = 0; m < num_mels; ++m) {
-    float left = hz_points[m];
-    float center = hz_points[m + 1];
-    float right = hz_points[m + 2];
-
-    for (int k = 0; k < num_bins; ++k) {
-      float freq = fft_freqs[k];
-
-      if (freq >= left && freq <= center && center > left) {
-        filters[m][k] = (freq - left) / (center - left);
-      } else if (freq >= center && freq <= right && right > center) {
-        filters[m][k] = (right - freq) / (right - center);
-      }
-    }
-  }
-
-  return filters;
-}
-
-// ─── ComputeLogMel ──────────────────────────────────────────────────────────
-
 std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
                                   const ParakeetMelConfig& cfg, int& out_num_frames) {
   const int n_fft = cfg.fft_size;
   const int hop = cfg.hop_length;
   const int win_len = cfg.win_length;
   const int num_mels = cfg.num_mels;
-  const int num_bins = n_fft / 2 + 1;  // 257
+  const int num_bins = n_fft / 2 + 1;
   const float log_guard = std::pow(2.0f, -24.0f);  // NeMo default: 2^-24
 
-  // 1. Preemphasis: x[0] unchanged, x[n] = x[n] - preemph * x[n-1]
+  // 1. Pre-emphasis: y[n] = x[n] - preemph * x[n-1]
+  // Delegated to onnxruntime-extensions (nemo_mel::ApplyPreemphasis).
   std::vector<float> preemph_audio(num_samples);
   if (num_samples > 0) {
-    preemph_audio[0] = audio[0];
-    for (size_t i = 1; i < num_samples; ++i) {
-      preemph_audio[i] = audio[i] - cfg.preemph * audio[i - 1];
-    }
+    nemo_mel::ApplyPreemphasis(audio, num_samples, cfg.preemph,
+                               /*prev_sample=*/0.0f, preemph_audio.data());
   }
 
-  // 2. Center-pad: zero-pad n_fft/2 on each side (matches torch.stft center=True, pad_mode="constant")
-  int pad = n_fft / 2;  // 256
-  size_t padded_len = num_samples + 2 * pad;
+  // 2. Center-pad: zero-pad n_fft/2 on each side
+  //    (matches torch.stft center=True, pad_mode="constant").
+  const int pad = n_fft / 2;
+  const size_t padded_len = num_samples + 2 * static_cast<size_t>(pad);
   std::vector<float> padded(padded_len, 0.0f);
-  std::memcpy(padded.data() + pad, preemph_audio.data(), num_samples * sizeof(float));
-
-  // 3. Create symmetric Hann window, center-padded to n_fft
-  // torch.stft centers the window when win_length < n_fft:
-  //   pad_left = (n_fft - win_length) / 2
-  auto hann = SymmetricHannWindow(win_len);
-  std::vector<float> window(n_fft, 0.0f);
-  int win_offset = (n_fft - win_len) / 2;
-  for (int i = 0; i < win_len; ++i) {
-    window[win_offset + i] = hann[i];
+  if (num_samples > 0) {
+    std::memcpy(padded.data() + pad, preemph_audio.data(), num_samples * sizeof(float));
   }
 
-  // 4. Compute STFT frames
-  int num_stft_frames = static_cast<int>((padded_len - n_fft) / hop) + 1;
+  // 3. Symmetric Hann window, centered inside an fft_size buffer.
+  //    torch.stft centers the window when win_length < n_fft:
+  //      win_offset = (n_fft - win_length) / 2
+  //    We advance the frame pointer by win_offset and pass the unpadded
+  //    window of length win_len (matches the pattern used in extensions'
+  //    own NemoComputeLogMelBatch).
+  auto window = SymmetricHannWindow(win_len);
+  const int win_offset = (n_fft - win_len) / 2;
 
-  // Build mel filterbank once
-  auto mel_filters = CreateMelFilterbank(num_mels, n_fft, cfg.sample_rate, cfg.fmin, cfg.fmax);
-
-  // Output: [num_mels, num_valid_frames] where num_valid_frames = num_samples // hop_length
+  // 4. Frame layout & truncation.
+  const int num_stft_frames = padded_len >= static_cast<size_t>(n_fft)
+                                  ? static_cast<int>((padded_len - n_fft) / hop) + 1
+                                  : 0;
   int valid_frames = static_cast<int>(num_samples) / hop;
   if (valid_frames > num_stft_frames) valid_frames = num_stft_frames;
   out_num_frames = valid_frames;
@@ -209,35 +96,31 @@ std::vector<float> ComputeLogMel(const float* audio, size_t num_samples,
     return {};
   }
 
-  std::vector<float> result(num_mels * valid_frames, 0.0f);
+  // 5. Mel filterbank (Slaney scale, librosa-compatible).
+  //    Delegated to onnxruntime-extensions (nemo_mel::CreateMelFilterbank).
+  //    Note: extensions builds the filterbank with fmin=0, fmax=sample_rate/2.
+  //    Parakeet's default config has fmin=0 and fmax=sample_rate/2 (e.g.
+  //    fmax=8000 at sr=16000), so this is identical.
+  auto mel_filters =
+      nemo_mel::CreateMelFilterbank(num_mels, n_fft, cfg.sample_rate);
 
-  // FFT buffer (reused per frame)
-  std::vector<std::complex<float>> fft_buf(n_fft);
-  std::vector<float> power_spectrum(num_bins);
+  // 6. Per-frame STFT power spectrum + mel projection + log.
+  //    The real-FFT power spectrum is computed by extensions
+  //    (nemo_mel::ComputeSTFTFrame, backed by dlib::fftr).
+  std::vector<float> result(static_cast<size_t>(num_mels) * valid_frames, 0.0f);
+  std::vector<float> power_spectrum;
+  power_spectrum.reserve(num_bins);
 
   for (int frame = 0; frame < valid_frames; ++frame) {
-    // Window the frame
-    const float* frame_start = padded.data() + frame * hop;
-    for (int i = 0; i < n_fft; ++i) {
-      fft_buf[i] = std::complex<float>(frame_start[i] * window[i], 0.0f);
-    }
+    const float* frame_start = padded.data() + frame * hop + win_offset;
+    nemo_mel::ComputeSTFTFrame(frame_start, window.data(), win_len, n_fft,
+                               power_spectrum);
 
-    // FFT
-    FFT(fft_buf);
-
-    // Power spectrum: |FFT|^2 (magnitude squared)
-    // This matches: magnitude = sqrt(re^2 + im^2), then power = magnitude^2 = re^2 + im^2
-    for (int k = 0; k < num_bins; ++k) {
-      float re = fft_buf[k].real();
-      float im = fft_buf[k].imag();
-      power_spectrum[k] = re * re + im * im;
-    }
-
-    // Apply mel filterbank + log
     for (int m = 0; m < num_mels; ++m) {
+      const auto& filter = mel_filters[m];
       float mel_energy = 0.0f;
       for (int k = 0; k < num_bins; ++k) {
-        mel_energy += mel_filters[m][k] * power_spectrum[k];
+        mel_energy += filter[k] * power_spectrum[k];
       }
       result[m * valid_frames + frame] = std::log(mel_energy + log_guard);
     }
