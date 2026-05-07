@@ -8,6 +8,11 @@
 // it is now driven by State::SetExtraInputs / State::Run instead of an
 // external StreamingASR object, so it can be used through the standard
 // Generator / MultiModalProcessor public API.
+//
+// All mel-spectrogram extraction and per-feature normalization are delegated
+// to onnxruntime-extensions (nemo_mel::NemoStreamingMelExtractor and
+// ort_extensions::PerFeatureNormalize). No mel/FFT/normalization math is
+// implemented here.
 
 #include <algorithm>
 #include <array>
@@ -16,7 +21,10 @@
 #include <stdexcept>
 
 #include "../generators.h"
-#include "../parakeet_mel.h"
+#include "runner.hpp"             // onnxruntime-extensions: TensorPtr typedef
+#include "c_api_utils.hpp"        // onnxruntime-extensions: AttrDict / CppAllocator
+#include "speech_features.hpp"    // onnxruntime-extensions: PerFeatureNormalize
+#include "nemo_mel_spectrogram.h" // onnxruntime-extensions: NemoStreamingMelExtractor
 #include "parakeet.h"
 
 namespace Generators {
@@ -257,43 +265,47 @@ void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
   const float* window_audio = audio + win_left;
   size_t window_len = win_right - win_left;
 
-  parakeet_mel::ParakeetMelConfig mel_cfg;
+  // Mel extraction is delegated entirely to onnxruntime-extensions
+  // (nemo_mel::NemoStreamingMelExtractor). A fresh extractor is created per
+  // chunk window so each call starts with zeroed pre-emphasis / overlap
+  // state — equivalent to running a self-contained NeMo featurizer over the
+  // (left_ctx + chunk + right_ctx) buffer.
+  nemo_mel::NemoMelConfig mel_cfg{};
   mel_cfg.num_mels = cfg_.num_mels;
   mel_cfg.fft_size = cfg_.fft_size;
   mel_cfg.hop_length = cfg_.hop_length;
   mel_cfg.win_length = cfg_.win_length;
   mel_cfg.sample_rate = cfg_.sample_rate;
   mel_cfg.preemph = cfg_.preemph;
+  mel_cfg.log_eps = cfg_.log_eps;
 
-  int num_mel_frames = 0;
-  auto raw_mel = parakeet_mel::ComputeLogMel(window_audio, window_len, mel_cfg, num_mel_frames);
+  nemo_mel::NemoStreamingMelExtractor mel_extractor(mel_cfg);
+  auto [raw_mel, num_mel_frames] = mel_extractor.Process(window_audio, window_len);
   if (num_mel_frames <= 0) return;
 
-  // Per-feature normalization (Bessel's correction), matches NeMo normalize_batch.
+  // Per-feature normalization via ort_extensions::PerFeatureNormalize
+  // (NeMo `normalize_batch`-equivalent: per-mel-bin mean/std with N-1, eps=1e-5).
   const int num_mels = cfg_.num_mels;
-  std::vector<float> mel_normalized(static_cast<size_t>(num_mels) * num_mel_frames);
-  for (int m = 0; m < num_mels; ++m) {
-    const float* row = raw_mel.data() + static_cast<size_t>(m) * num_mel_frames;
-    double sum = 0.0;
-    for (int t = 0; t < num_mel_frames; ++t) sum += row[t];
-    float mean = static_cast<float>(sum / num_mel_frames);
-    double var_sum = 0.0;
-    for (int t = 0; t < num_mel_frames; ++t) {
-      double diff = row[t] - mean;
-      var_sum += diff * diff;
-    }
-    float std_val = (num_mel_frames > 1)
-                        ? std::sqrt(static_cast<float>(var_sum / (num_mel_frames - 1))) + 1e-5f
-                        : 1e-5f;
-    float* out_row = mel_normalized.data() + static_cast<size_t>(m) * num_mel_frames;
-    for (int t = 0; t < num_mel_frames; ++t) {
-      out_row[t] = (row[t] - mean) / std_val;
-    }
+  ort_extensions::PerFeatureNormalize norm_kernel;
+  ort_extensions::AttrDict norm_attrs{
+      {"eps", static_cast<double>(1e-5f)},
+      {"feature_first", int64_t{1}},
+  };
+  if (auto status = norm_kernel.Init(norm_attrs); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Init failed: ") + status.Message());
+  }
+
+  std::vector<int64_t> mel_shape{num_mels, static_cast<int64_t>(num_mel_frames)};
+  ortc::Tensor<float> norm_in(mel_shape, raw_mel.data());
+  ortc::Tensor<float> norm_out(&ort_extensions::CppAllocator::Instance());
+  if (auto status = norm_kernel.Compute(norm_in, norm_out); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Compute failed: ") + status.Message());
   }
 
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, num_mel_frames};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memcpy(processed_signal->GetTensorMutableData<float>(), mel_normalized.data(),
+  std::memcpy(processed_signal->GetTensorMutableData<float>(),
+              norm_out.Data(),
               static_cast<size_t>(num_mels) * num_mel_frames * sizeof(float));
 
   auto len_shape = std::array<int64_t, 1>{1};
