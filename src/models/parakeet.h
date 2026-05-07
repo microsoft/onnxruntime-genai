@@ -46,20 +46,12 @@ struct ParakeetConfig {
   int blank_id{};
 
   // Streaming chunk config
-  int sample_rate{16000};
-  int chunk_samples{12800};
-  int subsampling_factor{8};
-  int max_symbols_per_step{10};
-  int left_context_samples{143360};
-  int right_context_samples{25600};
-
-  // Mel spectrogram parameters
-  int num_mels{};
-  int fft_size{};
-  int hop_length{};
-  int win_length{};
-  float preemph{};
-  float log_eps{};
+  int sample_rate{};
+  int chunk_samples{};
+  int subsampling_factor{};
+  int max_symbols_per_step{};
+  int left_context_samples{};
+  int right_context_samples{};
 
   // TDT parameters
   std::vector<int> tdt_durations;

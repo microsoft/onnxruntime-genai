@@ -27,7 +27,7 @@ std::unique_ptr<NamedTensors> ParakeetProcessor::Process(const Tokenizer& /*toke
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
-  // ── Decode the audio file(s) to float32 mono PCM at the model's rate ──
+  // Decode the audio file(s) to float32 mono PCM at the model's rate ──
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
   CheckResult(OrtxDecodeAudio(audios->audios_.get(), 0,
                               static_cast<int64_t>(sample_rate_),
@@ -59,8 +59,9 @@ std::unique_ptr<NamedTensors> ParakeetProcessor::Process(const Tokenizer& /*toke
               static_cast<size_t>(num_samples) * sizeof(float));
   named_tensors->emplace("audio_pcm", std::make_shared<Tensor>(std::move(pcm_value)));
 
-  // ── Insert a single placeholder input id so the Generator has a sequence
-  //    to anchor on. The user is expected to slice tokens[1:] when decoding.
+  // Seed the Generator's sequence with the decoder SOS token. The TDT
+  // prediction network consumes this as its initial "previous token"
+  // input; the user is expected to slice tokens[1:] when decoding.
   auto ids_value = OrtValue::CreateTensor<int32_t>(allocator,
                                                     std::vector<int64_t>{1, 1});
   *ids_value->GetTensorMutableData<int32_t>() = decoder_start_token_id_;

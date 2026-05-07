@@ -6,8 +6,8 @@
 // chunked TDT decoding happen inside ParakeetState::SetExtraInputs (driven
 // by these tensors), so this processor's job is just to:
 //   * decode the audio file(s) to float32 mono PCM at the model's sample rate
-//   * package them as a NamedTensors map containing "audio_pcm" and a
-//     placeholder "input_ids" entry that holds the decoder start token.
+//   * package them as a NamedTensors map containing "audio_pcm" and an
+//     "input_ids" entry seeded with the decoder SOS token.
 
 #pragma once
 

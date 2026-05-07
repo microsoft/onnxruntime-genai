@@ -43,12 +43,6 @@ void ParakeetConfig::PopulateFromConfig(const Config& config) {
   decoder_lstm_dim = dec.hidden_size;
   decoder_lstm_layers = dec.num_hidden_layers;
 
-  num_mels = m.num_mels;
-  fft_size = m.fft_size;
-  hop_length = m.hop_length;
-  win_length = m.win_length;
-  preemph = m.preemph;
-  log_eps = m.log_eps;
   subsampling_factor = m.subsampling_factor;
   sample_rate = m.sample_rate;
   chunk_samples = m.chunk_samples;
@@ -198,19 +192,9 @@ void ParakeetState::StepDecoder(int32_t token_id) {
       dec_input_names, dec_inputs, 4,
       dec_output_names, 4);
 
-  auto dec_out_shape = dec_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
-  int64_t dec_dim = dec_out_shape[1];
-  int64_t dec_time = dec_out_shape[2];
-
-  auto frame_shape = std::array<int64_t, 3>{1, dec_dim, 1};
-  dec_.decoder_output = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  const float* src = dec_outputs[0]->GetTensorData<float>();
-  float* dst = dec_.decoder_output->GetTensorMutableData<float>();
-  int64_t t_last = dec_time - 1;
-  for (int64_t d = 0; d < dec_dim; ++d) {
-    dst[d] = src[d * dec_time + t_last];
-  }
-
+  // Decoder is run with target_length=1, so its output already has shape
+  // [1, dec_dim, 1] — exactly what the joiner expects. Just take ownership.
+  dec_.decoder_output = std::move(dec_outputs[0]);
   dec_.state_h = std::move(dec_outputs[2]);
   dec_.state_c = std::move(dec_outputs[3]);
   dec_.last_token = token_id;
@@ -242,7 +226,8 @@ void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
                                   size_t chunk_start, size_t chunk_end, bool is_last) {
   auto& allocator = model_.allocator_cpu_;
 
-  const int hop = cfg_.hop_length;
+  const auto& m = model_.config_->model;
+  const int hop = m.hop_length;
   const int sub = cfg_.subsampling_factor;
   const int encoder_frame_samples = hop * sub;
 
@@ -271,13 +256,13 @@ void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
   // state — equivalent to running a self-contained NeMo featurizer over the
   // (left_ctx + chunk + right_ctx) buffer.
   nemo_mel::NemoMelConfig mel_cfg{};
-  mel_cfg.num_mels = cfg_.num_mels;
-  mel_cfg.fft_size = cfg_.fft_size;
-  mel_cfg.hop_length = cfg_.hop_length;
-  mel_cfg.win_length = cfg_.win_length;
+  mel_cfg.num_mels = m.num_mels;
+  mel_cfg.fft_size = m.fft_size;
+  mel_cfg.hop_length = m.hop_length;
+  mel_cfg.win_length = m.win_length;
   mel_cfg.sample_rate = cfg_.sample_rate;
-  mel_cfg.preemph = cfg_.preemph;
-  mel_cfg.log_eps = cfg_.log_eps;
+  mel_cfg.preemph = m.preemph;
+  mel_cfg.log_eps = m.log_eps;
 
   nemo_mel::NemoStreamingMelExtractor mel_extractor(mel_cfg);
   auto [raw_mel, num_mel_frames] = mel_extractor.Process(window_audio, window_len);
@@ -285,7 +270,7 @@ void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
 
   // Per-feature normalization via ort_extensions::PerFeatureNormalize
   // (NeMo `normalize_batch`-equivalent: per-mel-bin mean/std with N-1, eps=1e-5).
-  const int num_mels = cfg_.num_mels;
+  const int num_mels = m.num_mels;
   ort_extensions::PerFeatureNormalize norm_kernel;
   ort_extensions::AttrDict norm_attrs{
       {"eps", static_cast<double>(1e-5f)},
