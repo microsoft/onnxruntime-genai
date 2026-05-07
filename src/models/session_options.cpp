@@ -12,6 +12,7 @@
 #include "../openvino/session_options.h"
 #include "../qnn/session_options.h"
 #include "../ryzenai/session_options.h"
+#include "../migraphx/session_options.h"
 #include "../vitisai/session_options.h"
 #include "../webgpu/session_options.h"
 
@@ -153,6 +154,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       {"OpenVINO", OpenVINOExecutionProvider::AppendExecutionProvider},
       {"RyzenAI", RyzenAIExecutionProvider::AppendExecutionProvider},
       {"QNN", QNNExecutionProvider::AppendExecutionProvider},
+      {"MIGraphX", MIGraphXExecutionProvider::AppendExecutionProvider},
       {"VitisAI", VitisAIExecutionProvider::AppendExecutionProvider},
       {"WebGPU", WebGPUExecutionProvider::AppendExecutionProvider},
   };
