@@ -33,8 +33,8 @@ namespace {
 
 constexpr const char* kTinyGpt2RelativePath = "hf-internal-testing/tiny-random-gpt2-fp32";
 
-std::filesystem::path TinyGpt2Path() {
-  return std::filesystem::path(MODEL_PATH) / kTinyGpt2RelativePath;
+fs::path TinyGpt2Path() {
+  return fs::path((std::filesystem::path(MODEL_PATH) / kTinyGpt2RelativePath).string());
 }
 
 }  // namespace
