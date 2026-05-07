@@ -876,7 +876,7 @@ struct SpeechOutputs_Element : JSON::Element {
 };
 
 struct Speech_Element : JSON::Element {
-  Speech_Element(Config::Model::Speech& v, Config::Model& model) : v_{v}, model_{model} {}
+  explicit Speech_Element(Config::Model::Speech& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
@@ -885,52 +885,12 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else if (name == "num_mels") {
-      model_.num_mels = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "fft_size") {
-      model_.fft_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "hop_length") {
-      model_.hop_length = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "win_length") {
-      model_.win_length = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "preemph") {
-      model_.preemph = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "log_eps") {
-      model_.log_eps = static_cast<float>(JSON::Get<double>(value));
-    } else if (name == "subsampling_factor") {
-      model_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "left_context") {
-      model_.left_context = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "conv_context") {
-      model_.conv_context = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "pre_encode_cache_size") {
-      model_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "sample_rate") {
-      model_.sample_rate = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "chunk_samples") {
-      model_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "blank_id") {
-      model_.blank_id = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "max_symbols_per_step") {
-      model_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "left_context_samples") {
-      model_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "right_context_samples") {
-      model_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "tdt_num_extra_outputs") {
-      model_.tdt_num_extra_outputs = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "enc_in_length") {
-      model_.enc_in_length = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_length") {
-      model_.enc_out_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
   Element& OnArray(std::string_view name) override {
-    if (name == "tdt_durations")
-      return tdt_durations_;
     throw JSON::unknown_value_error{};
   }
 
@@ -956,12 +916,10 @@ struct Speech_Element : JSON::Element {
 
  private:
   Config::Model::Speech& v_;
-  Config::Model& model_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   SpeechInputs_Element inputs_{v_.inputs};
   SpeechOutputs_Element outputs_{v_.outputs};
-  Int_Array_Element tdt_durations_{model_.tdt_durations};
 };
 
 struct JoinerInputs_Element : JSON::Element {
@@ -1175,6 +1133,44 @@ struct Model_Element : JSON::Element {
       v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "vision_start_token_id") {
       v_.vision_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_mels") {
+      v_.num_mels = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "fft_size") {
+      v_.fft_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "hop_length") {
+      v_.hop_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "win_length") {
+      v_.win_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "preemph") {
+      v_.preemph = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "log_eps") {
+      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "subsampling_factor") {
+      v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context") {
+      v_.left_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv_context") {
+      v_.conv_context = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "pre_encode_cache_size") {
+      v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sample_rate") {
+      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "chunk_samples") {
+      v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "blank_id") {
+      v_.blank_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_symbols_per_step") {
+      v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_samples") {
+      v_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "right_context_samples") {
+      v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tdt_num_extra_outputs") {
+      v_.tdt_num_extra_outputs = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "enc_in_length") {
+      v_.enc_in_length = JSON::Get<std::string_view>(value);
+    } else if (name == "enc_out_length") {
+      v_.enc_out_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1183,6 +1179,8 @@ struct Model_Element : JSON::Element {
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
       return eos_token_id_;
+    if (name == "tdt_durations")
+      return tdt_durations_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1216,9 +1214,10 @@ struct Model_Element : JSON::Element {
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
+  Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
-  Speech_Element speech_{v_.speech, v_};
+  Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
 };
