@@ -833,7 +833,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
-    return std::make_shared<ParakeetModel>(std::move(config), ort_env);
+    return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -940,7 +940,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
-          {"parakeet_tdt", Processor::Create<ParakeetProcessor>},
+          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},

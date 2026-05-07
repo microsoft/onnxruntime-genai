@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// ParakeetProcessor — feeds raw PCM samples decoded from the user-provided
+// ParakeetTdtProcessor — feeds raw PCM samples decoded from the user-provided
 // Audios object into the Generator pipeline. The actual mel spectrogram and
-// chunked TDT decoding happen inside ParakeetState::SetExtraInputs (driven
+// chunked TDT decoding happen inside ParakeetTdtState::SetExtraInputs (driven
 // by these tensors), so this processor's job is just to:
 //   * decode the audio file(s) to float32 mono PCM at the model's sample rate
 //   * package them as a NamedTensors map containing "audio_pcm" and an
@@ -17,12 +17,12 @@
 
 namespace Generators {
 
-struct ParakeetProcessor : Processor {
-  ParakeetProcessor(Config& config, const SessionInfo& session_info);
+struct ParakeetTdtProcessor : Processor {
+  ParakeetTdtProcessor(Config& config, const SessionInfo& session_info);
 
-  ParakeetProcessor() = delete;
-  ParakeetProcessor(const ParakeetProcessor&) = delete;
-  ParakeetProcessor& operator=(const ParakeetProcessor&) = delete;
+  ParakeetTdtProcessor() = delete;
+  ParakeetTdtProcessor(const ParakeetTdtProcessor&) = delete;
+  ParakeetTdtProcessor& operator=(const ParakeetTdtProcessor&) = delete;
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer,
                                         const Payload& payload) const override;

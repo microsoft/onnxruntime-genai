@@ -7,20 +7,20 @@
 
 namespace Generators {
 
-ParakeetProcessor::ParakeetProcessor(Config& config, const SessionInfo& /*session_info*/) {
+ParakeetTdtProcessor::ParakeetTdtProcessor(Config& config, const SessionInfo& /*session_info*/) {
   sample_rate_ = config.model.sample_rate;
   decoder_start_token_id_ = static_cast<int32_t>(config.model.decoder_start_token_id);
 }
 
-std::unique_ptr<NamedTensors> ParakeetProcessor::Process(const Tokenizer& /*tokenizer*/,
+std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*tokenizer*/,
                                                           const Payload& payload) const {
   const auto* audios = payload.audios;
   if (!audios || !audios->audios_) {
-    throw std::runtime_error("ParakeetProcessor::Process: no audio provided.");
+    throw std::runtime_error("ParakeetTdtProcessor::Process: no audio provided.");
   }
   if (audios->num_audios_ != 1) {
     throw std::runtime_error(
-        "ParakeetProcessor currently supports a single audio clip per call. Got: " +
+        "ParakeetTdtProcessor currently supports a single audio clip per call. Got: " +
         std::to_string(audios->num_audios_));
   }
 

@@ -4,7 +4,7 @@
 // Parakeet TDT speech recognition model — Whisper-style integration.
 //
 // The chunked encoder + TDT decoder pipeline is preserved verbatim from the
-// original ParakeetStreamingASR implementation; the only difference is that
+// original ParakeetTdtStreamingASR implementation; the only difference is that
 // it is now driven by State::SetExtraInputs / State::Run instead of an
 // external StreamingASR object, so it can be used through the standard
 // Generator / MultiModalProcessor public API.
@@ -29,9 +29,9 @@
 
 namespace Generators {
 
-// ─── ParakeetConfig ─────────────────────────────────────────────────────────
+// ─── ParakeetTdtConfig ─────────────────────────────────────────────────────────
 
-void ParakeetConfig::PopulateFromConfig(const Config& config) {
+void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
   const auto& dec = config.model.decoder;
   const auto& m = config.model;
@@ -75,9 +75,9 @@ void ParakeetConfig::PopulateFromConfig(const Config& config) {
   dec_out_lstm_cell_state = dec.outputs.lstm_cell_state;
 }
 
-// ─── ParakeetModel ──────────────────────────────────────────────────────────
+// ─── ParakeetTdtModel ──────────────────────────────────────────────────────────
 
-ParakeetModel::ParakeetModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   parakeet_config_.PopulateFromConfig(*config_);
 
@@ -130,14 +130,14 @@ ParakeetModel::ParakeetModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
 }
 
-std::unique_ptr<State> ParakeetModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
+std::unique_ptr<State> ParakeetTdtModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
                                                    const GeneratorParams& params) const {
-  return std::make_unique<ParakeetState>(*this, params);
+  return std::make_unique<ParakeetTdtState>(*this, params);
 }
 
-// ─── ParakeetState ──────────────────────────────────────────────────────────
+// ─── ParakeetTdtState ──────────────────────────────────────────────────────────
 
-ParakeetState::ParakeetState(const ParakeetModel& model, const GeneratorParams& params)
+ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       cfg_{model.parakeet_config_} {
@@ -149,7 +149,7 @@ ParakeetState::ParakeetState(const ParakeetModel& model, const GeneratorParams& 
   logits_buffer_.assign(static_cast<size_t>(logits_size_), 0.0f);
 }
 
-void ParakeetState::InitializeDecoderState() {
+void ParakeetTdtState::InitializeDecoderState() {
   auto& allocator = model_.allocator_cpu_;
 
   auto state_shape = std::array<int64_t, 3>{cfg_.decoder_lstm_layers, 1, cfg_.decoder_lstm_dim};
@@ -165,7 +165,7 @@ void ParakeetState::InitializeDecoderState() {
   dec_.last_token = cfg_.blank_id;
 }
 
-void ParakeetState::StepDecoder(int32_t token_id) {
+void ParakeetTdtState::StepDecoder(int32_t token_id) {
   auto& allocator = model_.allocator_cpu_;
   auto run_options = OrtRunOptions::Create();
 
@@ -200,7 +200,7 @@ void ParakeetState::StepDecoder(int32_t token_id) {
   dec_.last_token = token_id;
 }
 
-void ParakeetState::TranscribeAll(const float* audio, size_t num_samples) {
+void ParakeetTdtState::TranscribeAll(const float* audio, size_t num_samples) {
   if (num_samples == 0) return;
 
   InitializeDecoderState();
@@ -222,7 +222,7 @@ void ParakeetState::TranscribeAll(const float* audio, size_t num_samples) {
   }
 }
 
-void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
+void ParakeetTdtState::ProcessChunk(const float* audio, size_t total_audio,
                                   size_t chunk_start, size_t chunk_end, bool is_last) {
   auto& allocator = model_.allocator_cpu_;
 
@@ -330,7 +330,7 @@ void ParakeetState::ProcessChunk(const float* audio, size_t total_audio,
   RunTDTDecoder(encoded, decode_start, decode_end);
 }
 
-void ParakeetState::RunTDTDecoder(OrtValue* encoder_output,
+void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
                                    int64_t start_frame,
                                    int64_t end_frame) {
   auto& allocator = model_.allocator_cpu_;
@@ -416,10 +416,10 @@ void ParakeetState::RunTDTDecoder(OrtValue* encoder_output,
   }
 }
 
-void ParakeetState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   if (decoded_) return;
 
-  // Locate the raw PCM tensor produced by ParakeetProcessor.
+  // Locate the raw PCM tensor produced by ParakeetTdtProcessor.
   const Tensor* pcm_tensor = nullptr;
   for (const auto& ei : extra_inputs) {
     if (ei.name == "audio_pcm" || ei.name == cfg_.enc_in_audio) {
@@ -428,7 +428,7 @@ void ParakeetState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) 
     }
   }
   if (!pcm_tensor) {
-    throw std::runtime_error("ParakeetState::SetExtraInputs: 'audio_pcm' input is missing.");
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: 'audio_pcm' input is missing.");
   }
 
   auto info = pcm_tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
@@ -442,7 +442,7 @@ void ParakeetState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) 
   decoded_ = true;
 }
 
-DeviceSpan<float> ParakeetState::Run(int total_length,
+DeviceSpan<float> ParakeetTdtState::Run(int total_length,
                                       DeviceSpan<int32_t>& /*next_tokens*/,
                                       DeviceSpan<int32_t> /*next_indices*/) {
   // total_length = current sequence length AFTER the just-appended tokens.

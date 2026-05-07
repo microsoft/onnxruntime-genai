@@ -32,7 +32,7 @@
 
 namespace Generators {
 
-struct ParakeetConfig {
+struct ParakeetTdtConfig {
   // Encoder dimensions
   int hidden_dim{};
   int num_encoder_layers{};
@@ -81,8 +81,8 @@ struct ParakeetConfig {
   void PopulateFromConfig(const Config& config);
 };
 
-struct ParakeetModel : Model {
-  ParakeetModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+struct ParakeetTdtModel : Model {
+  ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
@@ -95,20 +95,20 @@ struct ParakeetModel : Model {
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
   std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
-  ParakeetConfig parakeet_config_;
+  ParakeetTdtConfig parakeet_config_;
 };
 
 // State holding the chunked TDT decoding pipeline.
 //
 // On the first call to SetExtraInputs() (which receives the raw PCM tensor
-// produced by ParakeetProcessor) the entire utterance is transcribed in
+// produced by ParakeetTdtProcessor) the entire utterance is transcribed in
 // one shot internally — chunk by chunk — and the resulting token ids are
 // stored in `decoded_tokens_`. Each subsequent State::Run() returns a
 // one-hot logits row that selects the next pre-computed token; once the
 // list is exhausted the eos token id is emitted so that the search loop
 // terminates.
-struct ParakeetState : State {
-  ParakeetState(const ParakeetModel& model, const GeneratorParams& params);
+struct ParakeetTdtState : State {
+  ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
@@ -134,8 +134,8 @@ struct ParakeetState : State {
   void InitializeDecoderState();
   void StepDecoder(int32_t token_id);
 
-  const ParakeetModel& model_;
-  ParakeetConfig cfg_;
+  const ParakeetTdtModel& model_;
+  ParakeetTdtConfig cfg_;
 
   DecState dec_;
   bool decoded_{false};
