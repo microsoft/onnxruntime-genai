@@ -47,6 +47,12 @@ struct ModelType {
     return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
   }
 
+  inline static bool IsStreamingASR(const std::string& model_type) {
+    // Streaming ASR model (cache-aware encoder + RNNT/TDT decoder)
+    static constexpr std::array<std::string_view, 1> StreamingASR = {"parakeet_tdt"};
+    return std::find(StreamingASR.begin(), StreamingASR.end(), model_type) != StreamingASR.end();
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};

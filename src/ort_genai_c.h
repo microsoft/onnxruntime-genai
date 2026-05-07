@@ -79,6 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaStreamingASR OgaStreamingASR;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 //! @}
@@ -1146,6 +1147,39 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
  *
  */
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
+/**
+ * \brief Creates a StreamingASR instance for real-time streaming speech recognition.
+ * \param[in] model The model to use for streaming ASR (must be parakeet_tdt type).
+ * \param[out] out Pointer to store the created StreamingASR instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStreamingASR(OgaModel* model, OgaStreamingASR** out);
+
+/**
+ * \brief Transcribe an audio chunk. Returns newly transcribed text.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRTranscribeChunk(OgaStreamingASR* asr, const float* audio_data, size_t num_samples, const char** text);
+
+/**
+ * \brief Get the full transcript accumulated so far.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRGetTranscript(const OgaStreamingASR* asr, const char** text);
+
+/**
+ * \brief Reset streaming state for a new utterance.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRReset(OgaStreamingASR* asr);
+
+/**
+ * \brief Flush remaining buffered audio. Call after the last TranscribeChunk.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingASRFlush(OgaStreamingASR* asr, const char** text);
+
+/**
+ * \brief Destroy a StreamingASR instance.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingASR(OgaStreamingASR* asr);
 
 /**
  * \brief Creates a StreamingProcessor for mel spectrogram extraction from raw audio.

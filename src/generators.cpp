@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "streaming_asr.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "sequences.h"
