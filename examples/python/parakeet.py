@@ -40,13 +40,6 @@ def run(args: argparse.Namespace) -> None:
     inputs = processor("", audios=audios)
 
     params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        num_beams=1,
-        num_return_sequences=1,
-        max_length=4096,
-        batch_size=1,
-    )
 
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)

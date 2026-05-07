@@ -28,8 +28,8 @@ struct ParakeetProcessor : Processor {
                                         const Payload& payload) const override;
 
  private:
-  int sample_rate_{16000};
-  int32_t decoder_start_token_id_{0};
+  int sample_rate_;
+  int32_t decoder_start_token_id_;
 };
 
 }  // namespace Generators

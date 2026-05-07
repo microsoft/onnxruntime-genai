@@ -356,8 +356,6 @@ struct Config {
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string target_length;    // "target_length"
-        std::string states_1;         // "states.1"
-        std::string states_2;         // "onnx::Slice_3"
       } inputs;
 
       struct Outputs {
@@ -375,8 +373,6 @@ struct Config {
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra outputs
         std::string prednet_lengths;    // "prednet_lengths"
-        std::string states_1;           // "states"
-        std::string states_2;           // "162"
       } outputs;
 
       struct PipelineModel {

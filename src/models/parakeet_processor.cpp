@@ -8,21 +8,8 @@
 namespace Generators {
 
 ParakeetProcessor::ParakeetProcessor(Config& config, const SessionInfo& /*session_info*/) {
-  sample_rate_ = config.model.sample_rate > 0 ? config.model.sample_rate : 16000;
-
-  // Decoder start token id: prefer the explicit config field; otherwise fall
-  // back to a low non-eos id (0) so the search doesn't terminate immediately.
-  if (config.model.decoder_start_token_id != 0) {
-    decoder_start_token_id_ = static_cast<int32_t>(config.model.decoder_start_token_id);
-  } else {
-    decoder_start_token_id_ = 0;
-  }
-
-  // Map the standard "audio_pcm" / "input_ids" graph names to themselves so
-  // SetInputs can route them through extra_inputs unchanged.
-  config.AddMapping("audio_pcm", "audio_pcm");
-  config.AddMapping(std::string(Config::Defaults::InputIdsName),
-                    std::string(Config::Defaults::InputIdsName));
+  sample_rate_ = config.model.sample_rate;
+  decoder_start_token_id_ = static_cast<int32_t>(config.model.decoder_start_token_id);
 }
 
 std::unique_ptr<NamedTensors> ParakeetProcessor::Process(const Tokenizer& /*tokenizer*/,

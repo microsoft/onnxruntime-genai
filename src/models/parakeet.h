@@ -74,12 +74,12 @@ struct ParakeetConfig {
   // Decoder (prediction network) I/O names
   std::string dec_in_targets;
   std::string dec_in_target_length;
-  std::string dec_in_states_1;   // h_in
-  std::string dec_in_states_2;   // c_in
+  std::string dec_in_lstm_hidden_state;
+  std::string dec_in_lstm_cell_state;
   std::string dec_out_outputs;   // decoder_output
   std::string dec_out_prednet_lengths;
-  std::string dec_out_states_1;  // h_out
-  std::string dec_out_states_2;  // c_out
+  std::string dec_out_lstm_hidden_state;
+  std::string dec_out_lstm_cell_state;
 
   // Joiner I/O names
   std::string join_in_encoder;

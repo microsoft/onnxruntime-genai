@@ -73,12 +73,12 @@ void ParakeetConfig::PopulateFromConfig(const Config& config) {
 
   dec_in_targets = dec.inputs.targets;
   dec_in_target_length = dec.inputs.target_length;
-  dec_in_states_1 = dec.inputs.states_1;
-  dec_in_states_2 = dec.inputs.states_2;
+  dec_in_lstm_hidden_state = dec.inputs.lstm_hidden_state;
+  dec_in_lstm_cell_state = dec.inputs.lstm_cell_state;
   dec_out_outputs = dec.outputs.outputs;
   dec_out_prednet_lengths = dec.outputs.prednet_lengths;
-  dec_out_states_1 = dec.outputs.states_1;
-  dec_out_states_2 = dec.outputs.states_2;
+  dec_out_lstm_hidden_state = dec.outputs.lstm_hidden_state;
+  dec_out_lstm_cell_state = dec.outputs.lstm_cell_state;
 }
 
 // ─── ParakeetModel ──────────────────────────────────────────────────────────
@@ -185,13 +185,13 @@ void ParakeetState::StepDecoder(int32_t token_id) {
 
   const char* dec_input_names[] = {
       cfg_.dec_in_targets.c_str(), cfg_.dec_in_target_length.c_str(),
-      cfg_.dec_in_states_1.c_str(), cfg_.dec_in_states_2.c_str()};
+      cfg_.dec_in_lstm_hidden_state.c_str(), cfg_.dec_in_lstm_cell_state.c_str()};
   OrtValue* dec_inputs[] = {targets.get(), target_length.get(),
                             dec_.state_h.get(), dec_.state_c.get()};
 
   const char* dec_output_names[] = {
       cfg_.dec_out_outputs.c_str(), cfg_.dec_out_prednet_lengths.c_str(),
-      cfg_.dec_out_states_1.c_str(), cfg_.dec_out_states_2.c_str()};
+      cfg_.dec_out_lstm_hidden_state.c_str(), cfg_.dec_out_lstm_cell_state.c_str()};
 
   auto dec_outputs = model_.session_decoder_->Run(
       run_options.get(),

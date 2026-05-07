@@ -342,10 +342,6 @@ struct DecoderInputs_Element : JSON::Element {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
     } else if (name == "target_length") {
       v_.target_length = JSON::Get<std::string_view>(value);
-    } else if (name == "states_1") {
-      v_.states_1 = JSON::Get<std::string_view>(value);
-    } else if (name == "states_2") {
-      v_.states_2 = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -381,10 +377,6 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
     } else if (name == "prednet_lengths") {
       v_.prednet_lengths = JSON::Get<std::string_view>(value);
-    } else if (name == "states_1") {
-      v_.states_1 = JSON::Get<std::string_view>(value);
-    } else if (name == "states_2") {
-      v_.states_2 = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
