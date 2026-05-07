@@ -16,7 +16,8 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
-#include "parakeet_speech.h"
+#include "parakeet.h"
+#include "parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -832,7 +833,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingASR(config->model.type))
-    return std::make_shared<ParakeetSpeechModel>(std::move(config), ort_env);
+    return std::make_shared<ParakeetModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -939,6 +940,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"parakeet_tdt", Processor::Create<ParakeetProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},

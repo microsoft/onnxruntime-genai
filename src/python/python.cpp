@@ -677,27 +677,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           pybind11::arg("key"),
           "Get a processor option value by key.");
 
-  pybind11::class_<OgaStreamingASR>(m, "StreamingASR")
-      .def(pybind11::init([](OgaModel& model) { return OgaStreamingASR::Create(model); }),
-           "Create a StreamingASR instance for real-time streaming speech recognition.\n"
-           "The model must be of type 'parakeet_tdt'.")
-      .def("transcribe_chunk", [](OgaStreamingASR& asr, pybind11::array_t<float> audio_chunk) -> std::string {
-        auto buf = audio_chunk.request();
-        auto result = asr.TranscribeChunk(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
-        return std::string(result.p_);
-      }, pybind11::arg("audio_chunk"),
-         "Feed a chunk of float32 PCM audio (mono, 16kHz) and get newly transcribed text.")
-      .def("flush", [](OgaStreamingASR& asr) -> std::string {
-        auto result = asr.Flush();
-        return std::string(result.p_);
-      }, "Flush remaining buffered audio. Call after the last transcribe_chunk.")
-      .def("get_transcript", [](const OgaStreamingASR& asr) -> std::string {
-        auto result = asr.GetTranscript();
-        return std::string(result.p_);
-      }, "Get the full transcript accumulated so far.")
-      .def("reset", [](OgaStreamingASR& asr) { asr.Reset(); },
-           "Reset streaming state for a new utterance.");
-
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
 
