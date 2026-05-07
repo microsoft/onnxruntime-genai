@@ -163,6 +163,12 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
+  # Auto-export non-templated, non-inline symbols on Windows so unit_tests
+  # (which link against onnxruntime-genai.dll) can resolve internal C++
+  # helpers like Generators::Config, JSON::ParseDocument, etc. This does
+  # not affect the public C API surface — OGA_* entry points retain their
+  # explicit __declspec(dllexport) and are unchanged.
+  set_target_properties(onnxruntime-genai PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 else()
   add_library(onnxruntime-genai SHARED ${generator_srcs})
 endif()
