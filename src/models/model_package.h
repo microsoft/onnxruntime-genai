@@ -5,12 +5,12 @@
 
 #include "../filesystem.h"
 #include "../json.h"
+#include "../span.h"
 
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <vector>

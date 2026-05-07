@@ -164,7 +164,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   // In package mode with a known component name, returns the component's
   // selected variant folder. This is the source of truth for resolving
   // ONNX, LoRA-adapter, and custom-ops library paths under v4 packages.
-  std::filesystem::path AssetFolder(const std::string& component_name) const;
+  fs::path AssetFolder(const std::string& component_name) const;
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
                                             OrtSessionOptions* session_options,

@@ -71,8 +71,8 @@ class path {
     return join(path);
   }
 
-  path operator/(const path& path) {
-    return join(path.path_);
+  path operator/(const path& other) const {
+    return join(other.path_);
   }
 
 #ifdef _WIN32
