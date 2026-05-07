@@ -305,6 +305,13 @@ struct MetadataRoot_Element : JSON::Element {
   VariantsObject_Element variants_;
 
   JSON::Element& OnObject(std::string_view name) override {
+    // The streaming parser seeds the root by calling OnObject with an empty
+    // name when the document's top-level value is an object (see json.cpp
+    // Parse_Value); subsequent keys inside that object then arrive as named
+    // OnObject / OnValue calls on the element we return here.
+    if (name.empty()) {
+      return *this;
+    }
     if (name == "variants") {
       variants_.out = out;
       return variants_;
