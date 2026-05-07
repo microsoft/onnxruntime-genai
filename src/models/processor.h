@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include "image_processor.h"
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
@@ -63,6 +66,7 @@ struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;
   Processor& operator=(const Processor&) = delete;
+  virtual ~Processor() = default;
 
   template <typename ProcessorType>
   static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info) {
@@ -70,6 +74,11 @@ struct Processor {
   }
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+
+  // Optional: processors may override token-id-to-string detokenization for models whose
+  // tokenizer can't be loaded by the standard ortx Tokenizer (e.g. tokens.txt-only models).
+  // Returning std::nullopt falls back to MultiModalProcessor::tokenizer_->Decode.
+  virtual std::optional<std::string> Decode(std::span<const int32_t> /*tokens*/) const { return std::nullopt; }
 };
 
 }  // namespace Generators

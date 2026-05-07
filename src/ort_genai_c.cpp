@@ -692,7 +692,18 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* tokenizer, c
 
 OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* processor, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
-  *out_string = AllocOgaString(processor->tokenizer_->Decode({tokens, token_count}));
+  std::span<const int32_t> ids{tokens, token_count};
+  // Prefer processor-specific detokenization (used by models with a tokens.txt instead of a HF tokenizer.json).
+  if (processor->processor_) {
+    auto maybe = processor->processor_->Decode(ids);
+    if (maybe.has_value()) {
+      *out_string = AllocOgaString(*maybe);
+      return nullptr;
+    }
+  }
+  if (!processor->tokenizer_)
+    throw std::runtime_error("OgaProcessorDecode: no tokenizer or processor-specific Decode available.");
+  *out_string = AllocOgaString(processor->tokenizer_->Decode(ids));
   return nullptr;
   OGA_CATCH
 }
