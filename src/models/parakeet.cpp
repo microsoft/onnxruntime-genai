@@ -49,7 +49,6 @@ void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
   right_context_samples = m.right_context_samples;
 
   tdt_durations = m.tdt_durations;
-  tdt_num_extra_outputs = m.tdt_num_extra_outputs;
 
   vocab_size = m.vocab_size;
 
@@ -132,7 +131,7 @@ ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 }
 
 std::unique_ptr<State> ParakeetTdtModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
-                                                   const GeneratorParams& params) const {
+                                                     const GeneratorParams& params) const {
   return std::make_unique<ParakeetTdtState>(*this, params);
 }
 
@@ -237,7 +236,7 @@ void ParakeetTdtState::TranscribeAll() {
 }
 
 void ParakeetTdtState::ProcessChunk(size_t total_audio,
-                                  size_t chunk_start, size_t chunk_end, bool is_last) {
+                                    size_t chunk_start, size_t chunk_end, bool is_last) {
   auto& allocator = model_.allocator_cpu_;
 
   const auto& m = model_.config_->model;
@@ -308,8 +307,8 @@ void ParakeetTdtState::ProcessChunk(size_t total_audio,
 }
 
 void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
-                                   int64_t start_frame,
-                                   int64_t end_frame) {
+                                     int64_t start_frame,
+                                     int64_t end_frame) {
   auto& allocator = model_.allocator_cpu_;
   auto run_options = OrtRunOptions::Create();
 
@@ -320,7 +319,7 @@ void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
   const int64_t enc_time = enc_shape[2];
   const float* enc_data = encoder_output->GetTensorData<float>();
 
-  const int num_durations = cfg_.tdt_num_extra_outputs;
+  const int num_durations = static_cast<int>(cfg_.tdt_durations.size());
   const int vocab_size = cfg_.vocab_size;
   const int blank_id = cfg_.blank_id;
   const int max_sym = cfg_.max_symbols_per_step;
@@ -441,8 +440,8 @@ void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_input
 }
 
 DeviceSpan<float> ParakeetTdtState::Run(int total_length,
-                                      DeviceSpan<int32_t>& /*next_tokens*/,
-                                      DeviceSpan<int32_t> /*next_indices*/) {
+                                        DeviceSpan<int32_t>& /*next_tokens*/,
+                                        DeviceSpan<int32_t> /*next_indices*/) {
   // total_length = current sequence length AFTER the just-appended tokens.
   // The processor inserts a single placeholder token at index 0 (decoder_start),
   // so the next emitted token corresponds to index (total_length - 1).

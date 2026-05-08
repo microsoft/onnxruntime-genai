@@ -1137,6 +1137,8 @@ struct Model_Element : JSON::Element {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
       v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "left_context") {
@@ -1157,8 +1159,6 @@ struct Model_Element : JSON::Element {
       v_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "right_context_samples") {
       v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "tdt_num_extra_outputs") {
-      v_.tdt_num_extra_outputs = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

@@ -145,6 +145,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -155,10 +156,9 @@ struct Config {
     int max_symbols_per_step{};
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
-    int left_context_samples{};        // Left context in PCM samples (e.g., 143360 for 9.0s)
-    int right_context_samples{};       // Right context in PCM samples (e.g., 25600 for 1.6s)
-    std::vector<int> tdt_durations;    // e.g., {0, 1, 2, 3, 4}
-    int tdt_num_extra_outputs{};       // Number of duration logit outputs (e.g., 5)
+    int left_context_samples{};      // Left context in PCM samples (e.g., 143360 for 9.0s)
+    int right_context_samples{};     // Right context in PCM samples (e.g., 25600 for 1.6s)
+    std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
     struct Encoder {
       std::string filename;
@@ -353,7 +353,7 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra inputs
-        std::string targets_length;    // "targets_length"
+        std::string targets_length;  // "targets_length"
       } inputs;
 
       struct Outputs {
@@ -370,7 +370,7 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra outputs
-        std::string outputs_length;    // "outputs_length"
+        std::string outputs_length;  // "outputs_length"
       } outputs;
 
       struct PipelineModel {

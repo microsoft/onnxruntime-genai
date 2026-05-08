@@ -2,10 +2,7 @@
 // Licensed under the MIT License.
 //
 // ParakeetTdtProcessor — decodes the user-provided audio and computes the
-// full mel-spectrogram (with NeMo-style per-feature normalization) once
-// up-front via onnxruntime-extensions. The chunked TDT decoding inside
-// ParakeetTdtState then just slices time ranges from this cached mel —
-// boundary frames are bit-exact to NeMo's non-streaming preprocessing.
+// full mel-spectrogram (with NeMo-style per-feature normalization).
 //
 // Outputs in the NamedTensors map:
 //   * "mel_features" : float32 [1, num_mels, total_frames] — globally
@@ -32,14 +29,7 @@ struct ParakeetTdtProcessor : Processor {
                                         const Payload& payload) const override;
 
  private:
-  int sample_rate_;
-  int num_mels_;
-  int fft_size_;
-  int hop_length_;
-  int win_length_;
-  float preemph_;
-  float log_eps_;
-  int32_t decoder_start_token_id_;
+  const Config& config_;
 };
 
 }  // namespace Generators

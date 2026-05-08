@@ -55,7 +55,6 @@ struct ParakeetTdtConfig {
 
   // TDT parameters
   std::vector<int> tdt_durations;
-  int tdt_num_extra_outputs{};
 
   // Encoder I/O names
   std::string enc_in_audio;
@@ -68,7 +67,7 @@ struct ParakeetTdtConfig {
   std::string dec_in_targets_length;
   std::string dec_in_lstm_hidden_state;
   std::string dec_in_lstm_cell_state;
-  std::string dec_out_outputs;   // decoder_output
+  std::string dec_out_outputs;  // decoder_output
   std::string dec_out_outputs_length;
   std::string dec_out_lstm_hidden_state;
   std::string dec_out_lstm_cell_state;
@@ -119,9 +118,9 @@ struct ParakeetTdtState : State {
  private:
   // LSTM decoder state held between TDT decoding steps.
   struct DecState {
-    std::unique_ptr<OrtValue> state_h;        // [lstm_layers, 1, lstm_dim]
-    std::unique_ptr<OrtValue> state_c;        // [lstm_layers, 1, lstm_dim]
-    std::unique_ptr<OrtValue> decoder_output; // [1, lstm_dim, 1]
+    std::unique_ptr<OrtValue> state_h;         // [lstm_layers, 1, lstm_dim]
+    std::unique_ptr<OrtValue> state_c;         // [lstm_layers, 1, lstm_dim]
+    std::unique_ptr<OrtValue> decoder_output;  // [1, lstm_dim, 1]
     int64_t last_token{0};
   };
 
