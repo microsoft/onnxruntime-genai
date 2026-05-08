@@ -55,19 +55,19 @@ void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
 
   enc_in_audio = enc.inputs.audio_features;
   enc_out_encoded = enc.outputs.encoder_outputs;
-  enc_in_length = m.enc_in_length;
-  enc_out_length = m.enc_out_length;
+  enc_in_length = enc.inputs.input_lengths;
+  enc_out_length = enc.outputs.output_lengths;
 
   join_in_encoder = jo.inputs.encoder_outputs;
   join_in_decoder = jo.inputs.decoder_outputs;
   join_out_logits = jo.outputs.logits;
 
   dec_in_targets = dec.inputs.targets;
-  dec_in_target_length = dec.inputs.target_length;
+  dec_in_targets_length = dec.inputs.targets_length;
   dec_in_lstm_hidden_state = dec.inputs.lstm_hidden_state;
   dec_in_lstm_cell_state = dec.inputs.lstm_cell_state;
   dec_out_outputs = dec.outputs.outputs;
-  dec_out_prednet_lengths = dec.outputs.prednet_lengths;
+  dec_out_outputs_length = dec.outputs.outputs_length;
   dec_out_lstm_hidden_state = dec.outputs.lstm_hidden_state;
   dec_out_lstm_cell_state = dec.outputs.lstm_cell_state;
 }
@@ -171,7 +171,7 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
   auto run_options = OrtRunOptions::Create();
 
   auto targets_type = model_.session_info_.GetInputDataType(cfg_.dec_in_targets);
-  auto tgt_len_type = model_.session_info_.GetInputDataType(cfg_.dec_in_target_length);
+  auto tgt_len_type = model_.session_info_.GetInputDataType(cfg_.dec_in_targets_length);
 
   auto targets_shape = std::array<int64_t, 2>{1, 1};
   auto targets = OrtValue::CreateTensor(allocator, targets_shape, targets_type);
@@ -182,21 +182,21 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
   }
 
   auto tgt_len_shape = std::array<int64_t, 1>{1};
-  auto target_length = OrtValue::CreateTensor(allocator, tgt_len_shape, tgt_len_type);
+  auto targets_length = OrtValue::CreateTensor(allocator, tgt_len_shape, tgt_len_type);
   if (tgt_len_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    *target_length->GetTensorMutableData<int64_t>() = 1;
+    *targets_length->GetTensorMutableData<int64_t>() = 1;
   } else {
-    *target_length->GetTensorMutableData<int32_t>() = 1;
+    *targets_length->GetTensorMutableData<int32_t>() = 1;
   }
 
   const char* dec_input_names[] = {
-      cfg_.dec_in_targets.c_str(), cfg_.dec_in_target_length.c_str(),
+      cfg_.dec_in_targets.c_str(), cfg_.dec_in_targets_length.c_str(),
       cfg_.dec_in_lstm_hidden_state.c_str(), cfg_.dec_in_lstm_cell_state.c_str()};
-  OrtValue* dec_inputs[] = {targets.get(), target_length.get(),
+  OrtValue* dec_inputs[] = {targets.get(), targets_length.get(),
                             dec_.state_h.get(), dec_.state_c.get()};
 
   const char* dec_output_names[] = {
-      cfg_.dec_out_outputs.c_str(), cfg_.dec_out_prednet_lengths.c_str(),
+      cfg_.dec_out_outputs.c_str(), cfg_.dec_out_outputs_length.c_str(),
       cfg_.dec_out_lstm_hidden_state.c_str(), cfg_.dec_out_lstm_cell_state.c_str()};
 
   auto dec_outputs = model_.session_decoder_->Run(
@@ -204,7 +204,7 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
       dec_input_names, dec_inputs, 4,
       dec_output_names, 4);
 
-  // Decoder is run with target_length=1, so its output already has shape
+  // Decoder is run with targets_length=1, so its output already has shape
   // [1, dec_dim, 1] — exactly what the joiner expects. Just take ownership.
   dec_.decoder_output = std::move(dec_outputs[0]);
   dec_.state_h = std::move(dec_outputs[2]);

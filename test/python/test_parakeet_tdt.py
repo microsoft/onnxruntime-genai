@@ -74,11 +74,7 @@ def _transcribe(model_path: str, audio_path: str) -> str:
     while not generator.is_done():
         generator.generate_next_token()
 
-    tokens = list(generator.get_sequence(0))
-    if tokens:
-        # The processor injects a single SOS placeholder at index 0; skip it.
-        tokens = tokens[1:]
-    return processor.decode(tokens).strip()
+    return processor.decode(generator.get_sequence(0)).strip()
 
 
 def test_parakeet_create(parakeet_tdt_model_path):

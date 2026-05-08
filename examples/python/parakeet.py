@@ -1,16 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 """
-Parakeet TDT speech recognition — Whisper-style API.
-
-Mirrors examples/python/whisper.py so the same public API
-(`og.Audios`, `model.create_multimodal_processor()`, `og.Generator`) is used:
+Parakeet TDT speech recognition
 
   python parakeet.py --model_path <model_dir> --audio_file <audio>
 
 The model loads the audio in one shot and decodes it with the standard
-Generator loop. Internally the encoder is fed in fixed-length chunks
-(0.8 s with 9 s left context + 1.6 s right context, matching NeMo).
+Generator loop.
 """
 
 import argparse
@@ -69,11 +65,7 @@ def run(args: argparse.Namespace) -> None:
         generator.generate_next_token()
     elapsed = time.perf_counter() - t0
 
-    # The processor injects a single placeholder token at index 0; skip it.
-    tokens = list(generator.get_sequence(0))
-    if tokens:
-        tokens = tokens[1:]
-    transcription = processor.decode(tokens)
+    transcription = processor.decode(generator.get_sequence(0))
 
     print()
     print("Transcription:")

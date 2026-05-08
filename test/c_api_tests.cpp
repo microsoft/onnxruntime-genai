@@ -1680,7 +1680,7 @@ std::string RunParakeetTdt(const std::string& audio_path) {
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
     auto count = generator->GetSequenceCount(0);
-    if (count <= 1) continue;  // index 0 is the SOS placeholder
+    if (count == 0) continue;
     auto last = generator->GetSequenceData(0)[count - 1];
     if (auto piece = tokenizer_stream->Decode(last); piece && *piece) {
       transcription += piece;

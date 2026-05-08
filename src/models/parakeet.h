@@ -65,11 +65,11 @@ struct ParakeetTdtConfig {
 
   // Decoder (prediction network) I/O names
   std::string dec_in_targets;
-  std::string dec_in_target_length;
+  std::string dec_in_targets_length;
   std::string dec_in_lstm_hidden_state;
   std::string dec_in_lstm_cell_state;
   std::string dec_out_outputs;   // decoder_output
-  std::string dec_out_prednet_lengths;
+  std::string dec_out_outputs_length;
   std::string dec_out_lstm_hidden_state;
   std::string dec_out_lstm_cell_state;
 

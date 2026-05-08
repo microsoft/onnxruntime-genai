@@ -159,8 +159,6 @@ struct Config {
     int right_context_samples{};       // Right context in PCM samples (e.g., 25600 for 1.6s)
     std::vector<int> tdt_durations;    // e.g., {0, 1, 2, 3, 4}
     int tdt_num_extra_outputs{};       // Number of duration logit outputs (e.g., 5)
-    std::string enc_in_length{"length"};
-    std::string enc_out_length{"encoded_lengths"};
 
     struct Encoder {
       std::string filename;
@@ -355,7 +353,7 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra inputs
-        std::string target_length;    // "target_length"
+        std::string targets_length;    // "targets_length"
       } inputs;
 
       struct Outputs {
@@ -372,7 +370,7 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
         // Parakeet TDT decoder (prediction network) extra outputs
-        std::string prednet_lengths;    // "prednet_lengths"
+        std::string outputs_length;    // "outputs_length"
       } outputs;
 
       struct PipelineModel {

@@ -340,8 +340,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
-    } else if (name == "target_length") {
-      v_.target_length = JSON::Get<std::string_view>(value);
+    } else if (name == "targets_length") {
+      v_.targets_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -375,8 +375,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
-    } else if (name == "prednet_lengths") {
-      v_.prednet_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "outputs_length") {
+      v_.outputs_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1159,10 +1159,6 @@ struct Model_Element : JSON::Element {
       v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "tdt_num_extra_outputs") {
       v_.tdt_num_extra_outputs = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "enc_in_length") {
-      v_.enc_in_length = JSON::Get<std::string_view>(value);
-    } else if (name == "enc_out_length") {
-      v_.enc_out_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
