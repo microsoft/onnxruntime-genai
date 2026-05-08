@@ -125,8 +125,8 @@ struct ParakeetTdtState : State {
     int64_t last_token{0};
   };
 
-  void TranscribeAll(const float* audio, size_t num_samples);
-  void ProcessChunk(const float* audio, size_t total_audio,
+  void TranscribeAll();
+  void ProcessChunk(size_t total_audio,
                     size_t chunk_start, size_t chunk_end, bool is_last);
   void RunTDTDecoder(OrtValue* encoder_output,
                      int64_t start_frame,
@@ -142,16 +142,10 @@ struct ParakeetTdtState : State {
   std::vector<int32_t> decoded_tokens_;
   int32_t eos_token_id_{};
 
-  // Per-mel-bin global mean/std computed once over the entire utterance and
-  // applied to every chunk's mel — matches NeMo non-streaming
-  // `normalize_batch` ("per_feature" with N-1, eps=1e-5).
-  std::vector<float> global_mel_mean_;
-  std::vector<float> global_mel_inv_std_;
-
   // Full-utterance mel features computed once in TranscribeAll and reused by
   // every chunk (NeMo-style preprocessing — no per-chunk featurizer state).
-  // Layout: [num_mels, total_mel_frames_], row-major, already globally
-  // mean/std normalized.
+  // Layout: [num_mels, total_mel_frames_], row-major, normalized once via
+  // ort_extensions::PerFeatureNormalize.
   std::vector<float> full_mel_;
   int total_mel_frames_{0};
 

@@ -1,13 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// ParakeetTdtProcessor — feeds raw PCM samples decoded from the user-provided
-// Audios object into the Generator pipeline. The actual mel spectrogram and
-// chunked TDT decoding happen inside ParakeetTdtState::SetExtraInputs (driven
-// by these tensors), so this processor's job is just to:
-//   * decode the audio file(s) to float32 mono PCM at the model's sample rate
-//   * package them as a NamedTensors map containing "audio_pcm" and an
-//     "input_ids" entry seeded with the decoder SOS token.
+// ParakeetTdtProcessor — decodes the user-provided audio and computes the
+// full mel-spectrogram (with NeMo-style per-feature normalization) once
+// up-front via onnxruntime-extensions. The chunked TDT decoding inside
+// ParakeetTdtState then just slices time ranges from this cached mel —
+// boundary frames are bit-exact to NeMo's non-streaming preprocessing.
+//
+// Outputs in the NamedTensors map:
+//   * "mel_features" : float32 [1, num_mels, total_frames] — globally
+//     mean/std normalized.
+//   * "input_ids"    : int32   [1, 1] — decoder SOS token (drives the
+//     standard genai Generator search loop).
 
 #pragma once
 
@@ -29,6 +33,12 @@ struct ParakeetTdtProcessor : Processor {
 
  private:
   int sample_rate_;
+  int num_mels_;
+  int fft_size_;
+  int hop_length_;
+  int win_length_;
+  float preemph_;
+  float log_eps_;
   int32_t decoder_start_token_id_;
 };
 

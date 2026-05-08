@@ -4,11 +4,22 @@
 #include "../generators.h"
 #include "model.h"
 #include "parakeet_processor.h"
+#include "runner.hpp"             // ort_extensions::CppAllocator / AttrDict
+#include "c_api_utils.hpp"
+#include "speech_features.hpp"    // PerFeatureNormalize
+#include "nemo_mel_spectrogram.h" // NemoStreamingMelExtractor
 
 namespace Generators {
 
 ParakeetTdtProcessor::ParakeetTdtProcessor(Config& config, const SessionInfo& /*session_info*/) {
-  sample_rate_ = config.model.sample_rate;
+  const auto& m = config.model;
+  sample_rate_ = m.sample_rate;
+  num_mels_ = m.num_mels;
+  fft_size_ = m.fft_size;
+  hop_length_ = m.hop_length;
+  win_length_ = m.win_length;
+  preemph_ = m.preemph;
+  log_eps_ = m.log_eps;
   decoder_start_token_id_ = static_cast<int32_t>(config.model.decoder_start_token_id);
 }
 
@@ -27,7 +38,7 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
-  // Decode the audio file(s) to float32 mono PCM at the model's rate ──
+  // ── 1. Decode audio file → float32 mono PCM at the model's sample rate ──
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
   CheckResult(OrtxDecodeAudio(audios->audios_.get(), 0,
                               static_cast<int64_t>(sample_rate_),
@@ -47,21 +58,52 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
   if (pcm_dims == 1) {
     num_samples = pcm_shape[0];
   } else if (pcm_dims == 2) {
-    // [channels, samples] — stereo_to_mono should have collapsed this to 1.
     num_samples = pcm_shape[1];
   } else {
     throw std::runtime_error("Unexpected PCM tensor rank: " + std::to_string(pcm_dims));
   }
 
-  auto pcm_value = OrtValue::CreateTensor<float>(allocator,
-                                                  std::vector<int64_t>{1, num_samples});
-  std::memcpy(pcm_value->GetTensorMutableData<float>(), pcm_data,
-              static_cast<size_t>(num_samples) * sizeof(float));
-  named_tensors->emplace("audio_pcm", std::make_shared<Tensor>(std::move(pcm_value)));
+  // ── 2. Full-utterance mel via onnxruntime-extensions ────────────────────
+  nemo_mel::NemoMelConfig mel_cfg{};
+  mel_cfg.num_mels = num_mels_;
+  mel_cfg.fft_size = fft_size_;
+  mel_cfg.hop_length = hop_length_;
+  mel_cfg.win_length = win_length_;
+  mel_cfg.sample_rate = sample_rate_;
+  mel_cfg.preemph = preemph_;
+  mel_cfg.log_eps = log_eps_;
 
-  // Seed the Generator's sequence with the decoder SOS token. The TDT
-  // prediction network consumes this as its initial "previous token"
-  // input; the user is expected to slice tokens[1:] when decoding.
+  nemo_mel::NemoStreamingMelExtractor mel_extractor(mel_cfg);
+  auto [mel_data, num_frames] = mel_extractor.Process(pcm_data, static_cast<size_t>(num_samples));
+  if (num_frames <= 0) {
+    throw std::runtime_error("ParakeetTdtProcessor: audio is too short to produce mel frames.");
+  }
+
+  // ── 3. Per-feature mean/std normalization (NeMo `normalize_batch`) ──────
+  ort_extensions::PerFeatureNormalize norm_kernel;
+  ort_extensions::AttrDict norm_attrs{
+      {"eps", static_cast<double>(1e-5f)},
+      {"feature_first", int64_t{1}},
+  };
+  if (auto status = norm_kernel.Init(norm_attrs); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Init failed: ") + status.Message());
+  }
+
+  std::vector<int64_t> mel_shape{num_mels_, static_cast<int64_t>(num_frames)};
+  ortc::Tensor<float> norm_in(mel_shape, mel_data.data());
+  ortc::Tensor<float> norm_out(&ort_extensions::CppAllocator::Instance());
+  if (auto status = norm_kernel.Compute(norm_in, norm_out); !status.IsOk()) {
+    throw std::runtime_error(std::string("PerFeatureNormalize::Compute failed: ") + status.Message());
+  }
+
+  // ── 4. Package the normalized mel as the model input tensor ─────────────
+  auto mel_value = OrtValue::CreateTensor<float>(
+      allocator, std::vector<int64_t>{1, num_mels_, static_cast<int64_t>(num_frames)});
+  std::memcpy(mel_value->GetTensorMutableData<float>(), norm_out.Data(),
+              static_cast<size_t>(num_mels_) * num_frames * sizeof(float));
+  named_tensors->emplace("mel_features", std::make_shared<Tensor>(std::move(mel_value)));
+
+  // ── 5. Seed input_ids with the decoder SOS token ────────────────────────
   auto ids_value = OrtValue::CreateTensor<int32_t>(allocator,
                                                     std::vector<int64_t>{1, 1});
   *ids_value->GetTensorMutableData<int32_t>() = decoder_start_token_id_;

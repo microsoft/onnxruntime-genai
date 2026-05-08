@@ -21,10 +21,6 @@
 #include <stdexcept>
 
 #include "../generators.h"
-#include "runner.hpp"             // onnxruntime-extensions: TensorPtr typedef
-#include "c_api_utils.hpp"        // onnxruntime-extensions: AttrDict / CppAllocator
-#include "speech_features.hpp"    // onnxruntime-extensions: PerFeatureNormalize
-#include "nemo_mel_spectrogram.h" // onnxruntime-extensions: NemoStreamingMelExtractor
 #include "parakeet.h"
 
 namespace Generators {
@@ -215,79 +211,31 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
   dec_.last_token = token_id;
 }
 
-void ParakeetTdtState::TranscribeAll(const float* audio, size_t num_samples) {
-  if (num_samples == 0) return;
+void ParakeetTdtState::TranscribeAll() {
+  if (total_mel_frames_ <= 0) return;
 
   InitializeDecoderState();
 
-  // ── 1. Compute mel-spectrogram ONCE over the entire utterance ───────────
-  // This matches NeMo's non-streaming `AudioToMelSpectrogramPreprocessor`:
-  // the featurizer runs over the full audio with a single pre-emphasis /
-  // overlap state, so frames near every chunk boundary are bit-exact to the
-  // ones the encoder was trained on.
+  // The processor has already produced `full_mel_` (shape
+  // [num_mels, total_mel_frames_], globally normalized). We just walk it in
+  // chunks defined by `cfg_.chunk_samples` (audio-sample space) to keep the
+  // existing chunk_samples / left_context_samples / right_context_samples
+  // configuration semantics.
   const auto& m = model_.config_->model;
-  const int num_mels = m.num_mels;
-
-  {
-    nemo_mel::NemoMelConfig mel_cfg{};
-    mel_cfg.num_mels = num_mels;
-    mel_cfg.fft_size = m.fft_size;
-    mel_cfg.hop_length = m.hop_length;
-    mel_cfg.win_length = m.win_length;
-    mel_cfg.sample_rate = cfg_.sample_rate;
-    mel_cfg.preemph = m.preemph;
-    mel_cfg.log_eps = m.log_eps;
-
-    nemo_mel::NemoStreamingMelExtractor mel_extractor(mel_cfg);
-    auto [full_mel, num_frames] = mel_extractor.Process(audio, num_samples);
-    full_mel_ = std::move(full_mel);
-    total_mel_frames_ = num_frames;
-  }
-  if (total_mel_frames_ <= 0) return;
-
-  // ── 2. Global per-mel-bin mean/std (NeMo `normalize_batch` "per_feature")─
-  global_mel_mean_.assign(num_mels, 0.0f);
-  global_mel_inv_std_.assign(num_mels, 1.0f);
-  if (total_mel_frames_ >= 2) {
-    for (int b = 0; b < num_mels; ++b) {
-      double sum = 0.0;
-      const float* row = full_mel_.data() + static_cast<size_t>(b) * total_mel_frames_;
-      for (int t = 0; t < total_mel_frames_; ++t) sum += row[t];
-      const double mean = sum / total_mel_frames_;
-      double sq = 0.0;
-      for (int t = 0; t < total_mel_frames_; ++t) {
-        double d = row[t] - mean;
-        sq += d * d;
-      }
-      const double var = sq / (total_mel_frames_ - 1);  // Bessel-corrected
-      const double std_dev = std::sqrt(var) + 1e-5;
-      global_mel_mean_[b] = static_cast<float>(mean);
-      global_mel_inv_std_[b] = static_cast<float>(1.0 / std_dev);
-    }
-  }
-
-  // ── 3. Apply the global mean/std in-place over the cached mel ───────────
-  for (int b = 0; b < num_mels; ++b) {
-    const float mean = global_mel_mean_[b];
-    const float inv_std = global_mel_inv_std_[b];
-    float* row = full_mel_.data() + static_cast<size_t>(b) * total_mel_frames_;
-    for (int t = 0; t < total_mel_frames_; ++t) {
-      row[t] = (row[t] - mean) * inv_std;
-    }
-  }
-
-  // ── 4. Walk the audio in fixed-size chunks; ProcessChunk slices mel ─────
+  const int hop = m.hop_length;
+  const size_t total_audio = static_cast<size_t>(total_mel_frames_) * hop;
   const size_t chunk_sz = static_cast<size_t>(cfg_.chunk_samples);
+
   size_t processed = 0;
-  while (processed < num_samples) {
-    size_t chunk_end = std::min(processed + chunk_sz, num_samples);
-    bool is_last = (chunk_end >= num_samples);
-    ProcessChunk(audio, num_samples, processed, chunk_end, is_last);
+  while (processed < total_audio) {
+    size_t chunk_end = std::min(processed + chunk_sz, total_audio);
+    bool is_last = (chunk_end >= total_audio);
+    ProcessChunk(total_audio, processed, chunk_end, is_last);
     processed = chunk_end;
   }
 }
 
-void ParakeetTdtState::ProcessChunk(const float* audio, size_t total_audio,
+void ParakeetTdtState::ProcessChunk(size_t total_audio,
                                   size_t chunk_start, size_t chunk_end, bool is_last) {
   auto& allocator = model_.allocator_cpu_;
 
@@ -295,7 +243,6 @@ void ParakeetTdtState::ProcessChunk(const float* audio, size_t total_audio,
   const int hop = m.hop_length;
   const int sub = cfg_.subsampling_factor;
   const int num_mels = m.num_mels;
-  (void)audio;  // Audio is no longer touched here; mel was cached up-front.
 
   const size_t left_samples = static_cast<size_t>(cfg_.left_context_samples);
   const size_t right_samples = static_cast<size_t>(cfg_.right_context_samples);
@@ -459,26 +406,35 @@ void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
 void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   if (decoded_) return;
 
-  // Locate the raw PCM tensor produced by ParakeetTdtProcessor.
-  const Tensor* pcm_tensor = nullptr;
+  // Locate the pre-computed mel-features tensor produced by ParakeetTdtProcessor.
+  // Expected shape: [1, num_mels, total_frames], already globally normalized.
+  const Tensor* mel_tensor = nullptr;
   for (const auto& ei : extra_inputs) {
-    if (ei.name == "audio_pcm" || ei.name == cfg_.enc_in_audio) {
-      pcm_tensor = ei.tensor.get();
+    if (ei.name == "mel_features") {
+      mel_tensor = ei.tensor.get();
       break;
     }
   }
-  if (!pcm_tensor) {
-    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: 'audio_pcm' input is missing.");
+  if (!mel_tensor) {
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: 'mel_features' input is missing.");
   }
 
-  auto info = pcm_tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+  auto info = mel_tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
   auto shape = info->GetShape();
-  const float* pcm = pcm_tensor->ort_tensor_->GetTensorData<float>();
-  size_t num_samples = info->GetElementCount();
-  // Shape may be [1, num_samples] or [num_samples] — element_count is what matters.
-  (void)shape;
+  if (shape.size() != 3 || shape[0] != 1) {
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: mel_features must have shape [1, num_mels, T].");
+  }
+  const int num_mels = static_cast<int>(shape[1]);
+  total_mel_frames_ = static_cast<int>(shape[2]);
+  if (num_mels != model_.config_->model.num_mels) {
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: mel num_mels mismatch with model config.");
+  }
 
-  TranscribeAll(pcm, num_samples);
+  const float* mel_src = mel_tensor->ort_tensor_->GetTensorData<float>();
+  full_mel_.assign(mel_src,
+                   mel_src + static_cast<size_t>(num_mels) * total_mel_frames_);
+
+  TranscribeAll();
   decoded_ = true;
 }
 
