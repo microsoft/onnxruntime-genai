@@ -135,7 +135,6 @@ struct ParakeetTdtState : State {
   ParakeetTdtConfig cfg_;
 
   DecState dec_;
-  int32_t eos_token_id_{};
 
   // Full-utterance mel features supplied by ParakeetTdtProcessor via
   // SetExtraInputs and reused by every chunk (no per-chunk featurizer state).
@@ -171,7 +170,7 @@ struct ParakeetTdtState : State {
   int64_t current_end_frame_{0};
   int symbols_this_frame_{0};
 
-  // Logits buffer reused across calls (size = vocab_size + 1).
+  // Logits buffer reused across calls (size = vocab_size).
   int logits_size_{};
   std::vector<float> logits_buffer_;
   DeviceSpan<float> logits_device_;

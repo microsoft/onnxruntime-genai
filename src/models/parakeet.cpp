@@ -107,7 +107,6 @@ ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const Generato
       model_{model},
       cfg_{model.parakeet_config_} {
   logits_size_ = model_.config_->model.vocab_size;
-  eos_token_id_ = static_cast<int32_t>(cfg_.blank_id);
 
   // Allocate the persistent logits buffer (CPU-resident, one-hot).
   logits_buffer_.assign(static_cast<size_t>(logits_size_), 0.0f);
@@ -183,9 +182,8 @@ void ParakeetTdtState::EncodeNextChunk() {
 
   // Convert window + chunk boundaries from sample-space to mel-frame space.
   const int64_t win_left_mel = static_cast<int64_t>(win_left / hop);
-  int64_t win_right_mel = static_cast<int64_t>(win_right / hop);
-  if (win_right_mel > total_mel_frames_) win_right_mel = total_mel_frames_;
-  int64_t num_mel_frames = win_right_mel - win_left_mel;
+  const int64_t win_right_mel = std::min<int64_t>(win_right / hop, total_mel_frames_);
+  const int64_t num_mel_frames = win_right_mel - win_left_mel;
 
   next_chunk_start_ = chunk_end;
   if (is_last) finished_ = true;
@@ -216,7 +214,7 @@ void ParakeetTdtState::EncodeNextChunk() {
   auto processed_signal = OrtValue::CreateTensor(inference_device.GetAllocator(), signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   ByteWrapTensor(inference_device, *processed_signal).CopyFrom(ByteWrapTensor(cpu_device, *signal_cpu));
 
-  // Tiny scalar input — keep on CPU; ORT bridges to the session's EP.
+  // Tiny scalar input, keep on CPU; ORT bridges to the session's EP.
   auto len_shape = std::array<int64_t, 1>{1};
   auto signal_length = OrtValue::CreateTensor(cpu_allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   *signal_length->GetTensorMutableData<int64_t>() = num_mel_frames;
@@ -245,13 +243,13 @@ void ParakeetTdtState::EncodeNextChunk() {
 
   // Map chunk start/end (sample-space) to encoder-frame indices within this
   // window. encoder_frame_index = mel_frame_index / subsampling_factor.
-  int64_t chunk_start_mel = static_cast<int64_t>(chunk_start / hop) - win_left_mel;
-  int64_t chunk_end_mel = static_cast<int64_t>(chunk_end / hop) - win_left_mel;
+  // Drop left-context frames; on the last chunk consume every remaining
+  // encoder frame (no right-context to trim).
+  const int64_t chunk_start_mel = static_cast<int64_t>(chunk_start / hop) - win_left_mel;
+  const int64_t chunk_end_mel = static_cast<int64_t>(chunk_end / hop) - win_left_mel;
   int64_t decode_start = chunk_start_mel / sub;
   int64_t decode_end = is_last ? enc_total : std::min(chunk_end_mel / sub, enc_total);
-  if (decode_start < 0) decode_start = 0;
-  if (decode_end > enc_total) decode_end = enc_total;
-  if (decode_end < decode_start) decode_end = decode_start;
+  if (decode_end < decode_start) decode_end = decode_start;  // last-chunk rounding
 
   current_t_ = decode_start;
   current_end_frame_ = decode_end;
