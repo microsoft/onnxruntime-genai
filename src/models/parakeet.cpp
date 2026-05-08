@@ -322,12 +322,14 @@ int32_t ParakeetTdtState::EmitNextToken() {
       }
     }
 
-    // Duration argmax. When the predicted token is the blank, forbid
-    // duration index 0 (zero-duration blank) — that combination would emit
-    // nothing and stall on the same frame, which is the known v3 "sentence
-    // dropping" failure mode (sherpa-onnx reports the same fix).
+    // Duration argmax. When the predicted token is blank, forbid duration
+    // index 0: (blank, 0) emits nothing AND doesn't advance current_t_, and
+    // since symbols_this_frame_ is only incremented on a non-blank emit, the
+    // max_symbols_per_step escape never fires either. The loop would hang on
+    // the same frame forever, re-running the joiner with identical inputs.
+    // Forcing dur_idx >= 1 on blank guarantees forward progress.
     int dur_idx = 0;
-    if (num_durations > 0) {
+    {
       const int dur_off = num_tok_logits;
       const int start_i = (best_token == blank_id) ? 1 : 0;
       float best_dur_score = -std::numeric_limits<float>::infinity();
@@ -338,7 +340,11 @@ int32_t ParakeetTdtState::EmitNextToken() {
         }
       }
     }
-    int skip = (dur_idx < num_durations) ? cfg_.tdt_durations[dur_idx] : dur_idx;
+    // Map the duration argmax index to an actual encoder-frame skip count via
+    // the TDT duration table (e.g. v3 uses [0,1,2,3,4], so the lookup is the
+    // identity here, but the table format supports non-contiguous schedules
+    // like [0,1,2,4,8]).
+    int skip = cfg_.tdt_durations[dur_idx];
 
     bool emitted = false;
     int32_t emitted_token = 0;
@@ -349,16 +355,23 @@ int32_t ParakeetTdtState::EmitNextToken() {
       StepDecoder(emitted_token);
     }
 
-    if (skip > 0) symbols_this_frame_ = 0;
-    if (symbols_this_frame_ >= max_sym) {
+    // Frame-advance bookkeeping. Two cases:
+    //  - skip > 0: model voted to leave this frame, so reset the per-frame
+    //    symbol counter for the next frame.
+    //  - skip == 0: model wants to stay (only possible on a non-blank emit
+    //    here, since blank+0 is forbidden above). Bump-counter logic already
+    //    incremented symbols_this_frame_; if we've hit the cap, force a
+    //    one-frame skip to escape runaway emission at this frame.
+    if (skip > 0) {
+      symbols_this_frame_ = 0;
+    } else if (symbols_this_frame_ >= max_sym) {
       symbols_this_frame_ = 0;
       skip = 1;
     }
     current_t_ += skip;
 
     if (emitted) return emitted_token;
-    // Pure-blank frame: keep looping silently (skip is always >= 1 here
-    // because zero-duration blanks are forbidden above).
+    // Pure-blank frame: nothing to return, loop and process the next frame.
   }
 }
 
