@@ -110,13 +110,4 @@ def parakeet_tdt_model_path(request):
 
 @pytest.fixture
 def test_data_path(request):
-    """Path containing the bundled audio fixtures (audios/jfk.flac, etc.).
-
-    Defaults to the in-repo `test/test_models` directory so tests work even
-    when --test_models points at an external model directory.
-    """
-    test_data = request.config.getoption("--test_models")
-    if os.path.isdir(os.path.join(test_data, "audios")):
-        return test_data
-    repo_default = os.path.join(os.path.dirname(__file__), "..", "test_models")
-    return os.path.abspath(repo_default)
+    return request.config.getoption("--test_models")
