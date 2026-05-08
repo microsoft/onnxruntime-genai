@@ -151,6 +151,10 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void UpdateAttentionMask(int total_length, int new_length);
   bool ShouldUseStaticMaskHandling() const;
 
+  // Shared predicate for the two static-handling entry points above; both
+  // delegate to this. See definition in position_inputs.cpp for the rationale.
+  bool ShouldUseStaticInputsForGraphReplay() const;
+
   const Model& model_;
   State& state_;
 
