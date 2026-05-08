@@ -22,6 +22,13 @@ log = logging.getLogger("gemma4-tests")
 GEMMA4_MODEL_PATH = Path("gemma4-vision-preprocessing")
 
 
+@pytest.fixture(autouse=True)
+def _skip_if_no_gemma4(test_data_path):
+    model_path = Path(test_data_path) / GEMMA4_MODEL_PATH
+    if not model_path.exists():
+        pytest.skip(f"Gemma4 test model not found at {model_path}")
+
+
 def test_gemma4_model_load(test_data_path):
     """Test that the Gemma4 model loads successfully."""
     model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
