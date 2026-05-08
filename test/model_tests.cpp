@@ -424,6 +424,7 @@ TEST(ModelTests, MutableSamplingPreservesKVCache) {
   // Baseline: pure greedy run
   auto params_baseline = OgaGeneratorParams::Create(*model);
   params_baseline->SetSearchOption("max_length", max_length);
+  params_baseline->SetSearchOption("min_length", max_length);
   params_baseline->SetSearchOptionBool("do_sample", false);
 
   auto gen_baseline = OgaGenerator::Create(*model, *params_baseline);
@@ -436,6 +437,7 @@ TEST(ModelTests, MutableSamplingPreservesKVCache) {
   // Test run: greedy for first (switch_at - input_len) tokens, then switch to sampling
   auto params_test = OgaGeneratorParams::Create(*model);
   params_test->SetSearchOption("max_length", max_length);
+  params_test->SetSearchOption("min_length", max_length);
   params_test->SetSearchOptionBool("do_sample", false);
 
   auto gen_test = OgaGenerator::Create(*model, *params_test);

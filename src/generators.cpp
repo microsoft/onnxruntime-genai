@@ -552,6 +552,8 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 }
 
 void Generator::SetSearchNumber(const char* name, double value) {
+  if (!search_)
+    throw std::runtime_error("SetSearchNumber is not supported for this model type");
   std::string_view n{name};
   if (n == "temperature") {
     temperature_override_ = static_cast<float>(value);
@@ -560,6 +562,8 @@ void Generator::SetSearchNumber(const char* name, double value) {
   } else if (n == "top_p") {
     top_p_override_ = static_cast<float>(value);
   } else if (n == "repetition_penalty") {
+    if (value <= 0.0 || !std::isfinite(value))
+      throw std::runtime_error("repetition_penalty must be a positive finite value");
     repetition_penalty_override_ = static_cast<float>(value);
   } else if (n == "min_length") {
     min_length_override_ = static_cast<int>(value);
@@ -570,6 +574,8 @@ void Generator::SetSearchNumber(const char* name, double value) {
 }
 
 void Generator::SetSearchBool(const char* name, bool value) {
+  if (!search_)
+    throw std::runtime_error("SetSearchBool is not supported for this model type");
   std::string_view n{name};
   if (n == "do_sample") {
     do_sample_override_ = value;
@@ -688,10 +694,14 @@ void Generator::GenerateNextToken() {
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
-    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
-           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
-           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
-           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+    bool effective_do_sample = do_sample_override_.value_or(search.do_sample);
+    int effective_top_k = top_k_override_.value_or(search.top_k);
+    float effective_top_p = top_p_override_.value_or(search.top_p);
+    float effective_temperature = temperature_override_.value_or(search.temperature);
+    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << effective_do_sample << ' '
+           << SGR::Fg_Green << "top_k: " << SGR::Reset << effective_top_k << ' '
+           << SGR::Fg_Green << "top_p: " << SGR::Reset << effective_top_p << ' '
+           << SGR::Fg_Green << "temperature: " << SGR::Reset << effective_temperature << ' '
            << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
            << std::endl;
   }
