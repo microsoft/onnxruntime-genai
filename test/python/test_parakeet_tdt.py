@@ -24,8 +24,34 @@ import onnxruntime_genai as og
 # to skip the WER assertion (the test will still run end-to-end and confirm
 # the model produces non-empty output).
 REFERENCE_TRANSCRIPTIONS = {
-    "jfk.flac": "",
-    "tedlium_long_120s.flac": "",
+    "jfk.flac": (
+        "And so my fellow Americans ask not what your country can do for you "
+        "ask what you can do for your country"
+    ),
+    "tedlium_long_120s.flac": (
+        "I'm going to talk today about energy and climate. And that might seem a bit "
+        "surprising because my full time work at the foundation is mostly about "
+        "vaccines and seeds, about the things that we need to invent and deliver to "
+        "help the poorest two billion live better lives. But energy and climate are "
+        "extremely important to these people. In fact, more important than to anyone "
+        "else on the planet. The climate getting worse means that many years their "
+        "crops won't grow. There'll be too much rain, not enough rain. Things will "
+        "change in ways that their fragile environment simply can't support. And that "
+        "leads to starvation, it leads to uncertainty, it leads to unrest. The climate changes "
+        "will be terrible for them. Also, the price of energy is very important to them. In "
+        "fact, if you could pick just one thing to lower the price of, to reduce "
+        "poverty, by far you would pick energy. Now, the price of energy has come "
+        "down over time. Really, advanced civilization is based on advances in in"
+        "energy. The coal revolution fueled the industrial revolution, and even in "
+        "the 1900s, we've seen a very rapid decline in the price of electricity. "
+        "That's why we have refrigerators, air conditioning. We can make modern "
+        "materials and do so many things. And so we're in a wonderful situation with "
+        "electricity in the rich world. But as we make it cheaper, and let's say, "
+        "let's go for making it twice as cheap. We need to meet a new constraint, and "
+        "that constraint has to do with CO2. CO2 is warming the planet, and the "
+        "equation on CO2 is actually a very straightforward one. If you sum up the "
+        "CO2."
+    ),
 }
 
 
