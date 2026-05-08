@@ -62,6 +62,14 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
+  // Override p_device_inputs_ to CPU for multimodal models on CUDA.
+  // ORT's InsertedPrecisionFreeCast (F32→F16) is always placed on CPU.
+  // When GenAI allocates inputs on GPU, the CPU Cast reads GPU memory → crash.
+  // Keeping inputs on CPU avoids this; the embedding session handles the transfer.
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::NvTensorRtRtx) {
+    p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+    p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
+  }
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
@@ -199,6 +207,11 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
+void DecoderState::RewindTo(size_t index) {
+  position_inputs_->RewindTo(index);
+  kv_cache_.RewindTo(index);
+}
+
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
@@ -311,6 +324,11 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  decoder_state_->RewindTo(index);
+  is_prompt_ = true;
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
