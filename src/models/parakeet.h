@@ -153,8 +153,9 @@ struct ParakeetTdtState : State {
   bool finished_{false};
   bool initialized_{false};
 
-  // Current encoder window (output of the most recent encoder run).
-  // The encoder runs on chunk + left context + right context, so its output
+  // Current encoder window (output of the most recent encoder run), staged
+  // on CPU for per-frame slicing into the joiner. The encoder runs on
+  // chunk + left context + right context, so the underlying tensor
   // [1, hidden_dim, T'] covers all three regions. The three indices below
   // carve out only the chunk-proper region for decoding; the context frames
   // exist so the encoder has enough receptive field at chunk boundaries.
@@ -164,7 +165,7 @@ struct ParakeetTdtState : State {
   //                                ↑          ↑          ↑
   //                            current_t_  current_end_  current_enc_time_
   //                            (start)      _frame_       (= T')
-  std::unique_ptr<OrtValue> current_encoder_;
+  std::vector<float> current_encoder_cpu_;  // [hidden_dim, T'] flattened
   int64_t current_enc_time_{0};
   int64_t current_t_{0};
   int64_t current_end_frame_{0};
