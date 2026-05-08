@@ -38,8 +38,6 @@ void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
 
   tdt_durations = m.tdt_durations;
 
-  vocab_size = m.vocab_size;
-
   enc_in_audio = enc.inputs.audio_features;
   enc_out_encoded = enc.outputs.encoder_outputs;
   enc_in_length = enc.inputs.input_lengths;
@@ -59,25 +57,9 @@ void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
   dec_out_lstm_cell_state = dec.outputs.lstm_cell_state;
 }
 
-// ─── ParakeetTdtModel ──────────────────────────────────────────────────────────
-
 ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   parakeet_config_.PopulateFromConfig(*config_);
-
-  // The TDT joiner produces logits over [vocab_size + 1] tokens (last index is
-  // the blank/eos). The genai_config.json typically reports vocab_size = 8192
-  // (real tokens) and eos_token_id = 8192 (the blank). Bump the search-visible
-  // vocab_size by one so the eos token is reachable through normal argmax.
-  // Bump only the search-visible vocab_size so the eos/blank token id is
-  // reachable through the standard search. parakeet_config_.vocab_size must
-  // stay equal to the *real* number of non-blank tokens, otherwise the joiner
-  // argmax loop below would read one slot past the token-logit region (into
-  // the TDT duration logits) and could return token id == real_vocab, which
-  // is out of range for the decoder embedding.
-  if (parakeet_config_.blank_id >= config_->model.vocab_size) {
-    config_->model.vocab_size = parakeet_config_.blank_id + 1;
-  }
 
   encoder_session_options_ = OrtSessionOptions::Create();
   decoder_session_options_ = OrtSessionOptions::Create();
@@ -85,29 +67,26 @@ ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true, false);
+                                   *encoder_session_options_, true);
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true, false);
+                                 *decoder_session_options_, true);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true, false);
+                                   *joiner_session_options_, true);
   }
 
   std::string encoder_filename = config_->model.encoder.filename;
-  if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
 
   std::string decoder_filename = config_->model.decoder.filename;
-  if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
 
   std::string joiner_filename = config_->model.joiner.filename;
-  if (joiner_filename.empty()) joiner_filename = "joint.onnx";
 
   session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
@@ -123,13 +102,10 @@ std::unique_ptr<State> ParakeetTdtModel::CreateState(DeviceSpan<int32_t> /*seque
   return std::make_unique<ParakeetTdtState>(*this, params);
 }
 
-// ─── ParakeetTdtState ──────────────────────────────────────────────────────────
-
 ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       cfg_{model.parakeet_config_} {
-  // Use the (possibly bumped) vocab_size so the eos token id is in range.
   logits_size_ = model_.config_->model.vocab_size;
   eos_token_id_ = static_cast<int32_t>(cfg_.blank_id);
 
@@ -285,7 +261,6 @@ int32_t ParakeetTdtState::EmitNextToken() {
   auto run_options = OrtRunOptions::Create();
 
   const int num_durations = static_cast<int>(cfg_.tdt_durations.size());
-  const int vocab_size = cfg_.vocab_size;
   const int blank_id = cfg_.blank_id;
   const int max_sym = cfg_.max_symbols_per_step;
   const int64_t hidden_dim = cfg_.hidden_dim;
@@ -330,8 +305,9 @@ int32_t ParakeetTdtState::EmitNextToken() {
 
     const float* logits_data = join_outputs[0]->GetTensorData<float>();
 
-    // Token argmax over [0..vocab_size] (inclusive of blank at index vocab_size).
-    const int num_tok_logits = vocab_size + 1;
+    // Joiner output layout: [token_logits (blank_id + 1) | duration_logits].
+    // Token argmax covers indices [0..blank_id] inclusive.
+    const int num_tok_logits = blank_id + 1;
     int best_token = 0;
     float best_score = logits_data[0];
     for (int i = 1; i < num_tok_logits; ++i) {

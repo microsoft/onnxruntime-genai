@@ -42,7 +42,6 @@ struct ParakeetTdtConfig {
   int decoder_lstm_layers{};
 
   // Vocabulary
-  int vocab_size{};
   int blank_id{};
 
   // Streaming chunk config
@@ -140,6 +139,7 @@ struct ParakeetTdtState : State {
 
   // Full-utterance mel features supplied by ParakeetTdtProcessor via
   // SetExtraInputs and reused by every chunk (no per-chunk featurizer state).
+  // This matches PyTorch implementation from Nvidia.
   // Layout: [num_mels, total_mel_frames_], row-major, already normalized in
   // the processor via ort_extensions::PerFeatureNormalize.
   std::vector<float> full_mel_;
@@ -154,10 +154,20 @@ struct ParakeetTdtState : State {
   bool initialized_{false};
 
   // Current encoder window (output of the most recent encoder run).
+  // The encoder runs on chunk + left context + right context, so its output
+  // [1, hidden_dim, T'] covers all three regions. The three indices below
+  // carve out only the chunk-proper region for decoding; the context frames
+  // exist so the encoder has enough receptive field at chunk boundaries.
+  //
+  //   encoder frames:  0 ........ a ........ b ........ T'
+  //                    └─ left ──┘└── chunk ─┘└─ right ─┘
+  //                                ↑          ↑          ↑
+  //                            current_t_  current_end_  current_enc_time_
+  //                            (start)      _frame_       (= T')
   std::unique_ptr<OrtValue> current_encoder_;
-  int64_t current_enc_time_{0};   // T' of current_encoder_ (shape[2])
-  int64_t current_t_{0};          // next encoder frame to consume
-  int64_t current_end_frame_{0};  // exclusive upper bound for current chunk
+  int64_t current_enc_time_{0};
+  int64_t current_t_{0};
+  int64_t current_end_frame_{0};
   int symbols_this_frame_{0};
 
   // Logits buffer reused across calls (size = vocab_size + 1).
