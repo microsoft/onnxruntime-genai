@@ -61,6 +61,17 @@ ParakeetTdtModel::ParakeetTdtModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     : Model{std::move(config)} {
   parakeet_config_.PopulateFromConfig(*config_);
 
+  // Generation termination relies on the standard search path comparing the
+  // last emitted token against config.model.eos_token_id. ParakeetTdtState
+  // returns blank_id when finished_, so blank_id must be one of the
+  // configured EOS ids or generator loops will hang.
+  const auto& eos_ids = config_->model.eos_token_id;
+  if (std::find(eos_ids.begin(), eos_ids.end(), parakeet_config_.blank_id) == eos_ids.end()) {
+    throw std::runtime_error(
+        "Parakeet TDT: model.blank_id (" + std::to_string(parakeet_config_.blank_id) +
+        ") must be present in model.eos_token_id so generation terminates correctly.");
+  }
+
   encoder_session_options_ = OrtSessionOptions::Create();
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
@@ -278,26 +289,32 @@ int32_t ParakeetTdtState::EmitNextToken() {
 
     // Build encoder_frame [1, 1, hidden_dim] on CPU from the mirrored
     // encoder output, then copy it onto the inference device for the joiner.
+    // Tensors are allocated once on the first iteration and reused thereafter
+    // to avoid per-frame allocator churn.
     const float* enc_data = current_encoder_cpu_.data();
     const int64_t enc_time = current_enc_time_;
     auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
-    auto encoder_frame_cpu = OrtValue::CreateTensor(cpu_allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    float* frame_data = encoder_frame_cpu->GetTensorMutableData<float>();
+    if (!encoder_frame_cpu_) {
+      encoder_frame_cpu_ = OrtValue::CreateTensor(cpu_allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      encoder_frame_ = OrtValue::CreateTensor(inference_device.GetAllocator(), frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+    float* frame_data = encoder_frame_cpu_->GetTensorMutableData<float>();
     for (int64_t d = 0; d < hidden_dim; ++d) {
       frame_data[d] = enc_data[d * enc_time + current_t_];
     }
-    auto encoder_frame = OrtValue::CreateTensor(inference_device.GetAllocator(), frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    ByteWrapTensor(inference_device, *encoder_frame).CopyFrom(ByteWrapTensor(cpu_device, *encoder_frame_cpu));
+    ByteWrapTensor(inference_device, *encoder_frame_).CopyFrom(ByteWrapTensor(cpu_device, *encoder_frame_cpu_));
 
     // Decoder output is [1, dec_dim, 1] on the inference device; reshape to
     // [1, 1, dec_dim] for the joiner via a same-device byte copy (the
     // underlying memory layout is identical).
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
-    auto decoder_frame = OrtValue::CreateTensor(inference_device.GetAllocator(), dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    ByteWrapTensor(inference_device, *decoder_frame).CopyFrom(ByteWrapTensor(inference_device, *dec_.decoder_output));
+    if (!decoder_frame_) {
+      decoder_frame_ = OrtValue::CreateTensor(inference_device.GetAllocator(), dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+    ByteWrapTensor(inference_device, *decoder_frame_).CopyFrom(ByteWrapTensor(inference_device, *dec_.decoder_output));
 
     const char* join_input_names[] = {cfg_.join_in_encoder.c_str(), cfg_.join_in_decoder.c_str()};
-    OrtValue* join_inputs[] = {encoder_frame.get(), decoder_frame.get()};
+    OrtValue* join_inputs[] = {encoder_frame_.get(), decoder_frame_.get()};
     const char* join_output_names[] = {cfg_.join_out_logits.c_str()};
 
     auto join_outputs = model_.session_joiner_->Run(
@@ -310,9 +327,9 @@ int32_t ParakeetTdtState::EmitNextToken() {
     auto logits_cpu = logits_span.CopyDeviceToCpu();
     const float* logits_data = logits_cpu.data();
 
-    // Joiner output layout: [token_logits (blank_id + 1) | duration_logits].
-    // Token argmax covers indices [0..blank_id] inclusive.
-    const int num_tok_logits = blank_id + 1;
+    // Joiner output layout: [token_logits (vocab_size) | duration_logits].
+    // Token argmax covers all vocab indices; blank_id is one of them.
+    const int num_tok_logits = model_.config_->model.vocab_size;
     int best_token = 0;
     float best_score = logits_data[0];
     for (int i = 1; i < num_tok_logits; ++i) {

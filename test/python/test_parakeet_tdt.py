@@ -7,8 +7,10 @@ Mirrors the structure of the existing nemotron / whisper tests:
 - transcription tests on bundled audio clips (jfk.flac, tedlium_long_120s.flac)
 - a WER assertion (< 0.1) against a reference transcription
 
-Reference transcriptions are intentionally left blank — fill in the empty
-string in REFERENCE_TRANSCRIPTIONS once the ground truth has been confirmed.
+Reference transcriptions for the bundled clips are defined in
+REFERENCE_TRANSCRIPTIONS below. Setting an entry to an empty string skips the
+WER assertion for that clip (the test still runs end-to-end and confirms the
+model produces non-empty output).
 """
 
 import os

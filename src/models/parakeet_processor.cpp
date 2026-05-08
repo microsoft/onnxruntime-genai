@@ -55,7 +55,7 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
     throw std::runtime_error("Unexpected PCM tensor rank: " + std::to_string(pcm_dims));
   }
 
-  // Full-utterance mel calculation.
+  // 2. Full-utterance mel calculation.
   nemo_mel::NemoMelConfig mel_cfg{};
   mel_cfg.num_mels = m.num_mels;
   mel_cfg.fft_size = m.fft_size;

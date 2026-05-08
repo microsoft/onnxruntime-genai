@@ -174,6 +174,14 @@ struct ParakeetTdtState : State {
   int logits_size_{};
   std::vector<float> logits_buffer_;
   DeviceSpan<float> logits_device_;
+
+  // Per-step joiner inputs, allocated lazily on the first decoding step and
+  // reused across every subsequent step to avoid per-frame allocator churn.
+  // Shapes are fixed: encoder_frame_* = [1, 1, encoder_hidden_dim],
+  // decoder_frame_ = [1, 1, decoder_lstm_dim].
+  std::unique_ptr<OrtValue> encoder_frame_cpu_;
+  std::unique_ptr<OrtValue> encoder_frame_;
+  std::unique_ptr<OrtValue> decoder_frame_;
 };
 
 }  // namespace Generators

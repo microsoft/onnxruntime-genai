@@ -1660,9 +1660,6 @@ TEST(CAPITests, ParakeetTdtCreate) {
 }
 
 namespace {
-// Run the Parakeet TDT pipeline end-to-end on the given audio file.
-// Returns the decoded transcription. Skips the test if either the model
-// directory or the audio file is missing.
 std::string RunParakeetTdt(const std::string& audio_path) {
   auto model = OgaModel::Create(PARAKEET_TDT_PATH);
   auto processor = OgaMultiModalProcessor::Create(*model);
