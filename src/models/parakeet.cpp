@@ -199,59 +199,46 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
   dec_.last_token = token_id;
 }
 
-void ParakeetTdtState::RunChunkedDecoding() {
-  if (total_mel_frames_ <= 0) return;
-
-  InitializeDecoderState();
-
-  // The processor has already produced `full_mel_` (shape
-  // [num_mels, total_mel_frames_], globally normalized). We just walk it in
-  // chunks defined by `cfg_.chunk_samples` (audio-sample space) to keep the
-  // existing chunk_samples / left_context_samples / right_context_samples
-  // configuration semantics.
-  const auto& m = model_.config_->model;
-  const int hop = m.hop_length;
-  const size_t total_audio = static_cast<size_t>(total_mel_frames_) * hop;
-  const size_t chunk_sz = static_cast<size_t>(cfg_.chunk_samples);
-
-  size_t processed = 0;
-  while (processed < total_audio) {
-    size_t chunk_end = std::min(processed + chunk_sz, total_audio);
-    bool is_last = (chunk_end >= total_audio);
-    ProcessChunk(total_audio, processed, chunk_end, is_last);
-    processed = chunk_end;
-  }
-}
-
-void ParakeetTdtState::ProcessChunk(size_t total_audio,
-                                    size_t chunk_start, size_t chunk_end, bool is_last) {
-  auto& allocator = model_.allocator_cpu_;
-
+void ParakeetTdtState::EncodeNextChunk() {
   const auto& m = model_.config_->model;
   const int hop = m.hop_length;
   const int sub = cfg_.subsampling_factor;
   const int num_mels = m.num_mels;
-
+  const size_t chunk_sz = static_cast<size_t>(cfg_.chunk_samples);
   const size_t left_samples = static_cast<size_t>(cfg_.left_context_samples);
   const size_t right_samples = static_cast<size_t>(cfg_.right_context_samples);
 
-  // Window in audio-sample space (preserved so that the mel-frame slice
-  // matches what we'd get if the encoder were fed the same audio range).
+  // Window in audio-sample space (preserved so the mel-frame slice matches
+  // what we'd get if the encoder were fed the same audio range directly).
+  size_t chunk_start = next_chunk_start_;
+  size_t chunk_end = std::min(chunk_start + chunk_sz, total_audio_);
+  bool is_last = (chunk_end >= total_audio_);
   size_t win_left = (chunk_start > left_samples) ? (chunk_start - left_samples) : 0;
-  size_t win_right = std::min(chunk_end + right_samples, total_audio);
+  size_t win_right = std::min(chunk_end + right_samples, total_audio_);
 
   // Convert window + chunk boundaries from sample-space to mel-frame space.
   const int64_t win_left_mel = static_cast<int64_t>(win_left / hop);
   int64_t win_right_mel = static_cast<int64_t>(win_right / hop);
   if (win_right_mel > total_mel_frames_) win_right_mel = total_mel_frames_;
   int64_t num_mel_frames = win_right_mel - win_left_mel;
-  if (num_mel_frames <= 0) return;
+
+  next_chunk_start_ = chunk_end;
+  if (is_last) finished_ = true;
+
+  if (num_mel_frames <= 0) {
+    current_encoder_.reset();
+    current_enc_time_ = 0;
+    current_t_ = 0;
+    current_end_frame_ = 0;
+    return;
+  }
+
+  auto& allocator = model_.allocator_cpu_;
 
   // Slice the cached, globally-normalized mel ([num_mels, T_full]) into a
   // contiguous [1, num_mels, num_mel_frames] tensor for the encoder.
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, num_mel_frames};
-  auto& allocator_ref = allocator;
-  auto processed_signal = OrtValue::CreateTensor(allocator_ref, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   float* dst = processed_signal->GetTensorMutableData<float>();
   for (int b = 0; b < num_mels; ++b) {
     const float* src = full_mel_.data() + static_cast<size_t>(b) * total_mel_frames_ + win_left_mel;
@@ -260,7 +247,7 @@ void ParakeetTdtState::ProcessChunk(size_t total_audio,
   }
 
   auto len_shape = std::array<int64_t, 1>{1};
-  auto signal_length = OrtValue::CreateTensor(allocator_ref, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto signal_length = OrtValue::CreateTensor(allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   *signal_length->GetTensorMutableData<int64_t>() = num_mel_frames;
 
   const char* enc_input_names[] = {cfg_.enc_in_audio.c_str(), cfg_.enc_in_length.c_str()};
@@ -273,62 +260,60 @@ void ParakeetTdtState::ProcessChunk(size_t total_audio,
       enc_input_names, enc_inputs, 2,
       enc_output_names, 2);
 
-  auto* encoded = enc_outputs[0].get();
+  current_encoder_ = std::move(enc_outputs[0]);
   int64_t enc_total = *enc_outputs[1]->GetTensorData<int64_t>();
+  auto enc_shape = current_encoder_->GetTensorTypeAndShapeInfo()->GetShape();
+  current_enc_time_ = enc_shape[2];
 
   // Map chunk start/end (sample-space) to encoder-frame indices within this
-  // window.  encoder_frame_index = mel_frame_index / subsampling_factor.
+  // window. encoder_frame_index = mel_frame_index / subsampling_factor.
   int64_t chunk_start_mel = static_cast<int64_t>(chunk_start / hop) - win_left_mel;
   int64_t chunk_end_mel = static_cast<int64_t>(chunk_end / hop) - win_left_mel;
   int64_t decode_start = chunk_start_mel / sub;
-  int64_t decode_end;
-  if (is_last) {
-    decode_end = enc_total;
-  } else {
-    decode_end = std::min(chunk_end_mel / sub, enc_total);
-  }
+  int64_t decode_end = is_last ? enc_total : std::min(chunk_end_mel / sub, enc_total);
   if (decode_start < 0) decode_start = 0;
   if (decode_end > enc_total) decode_end = enc_total;
-  if (decode_end <= decode_start) return;
+  if (decode_end < decode_start) decode_end = decode_start;
 
-  RunTDTDecoder(encoded, decode_start, decode_end);
+  current_t_ = decode_start;
+  current_end_frame_ = decode_end;
+  symbols_this_frame_ = 0;
 }
 
-void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
-                                     int64_t start_frame,
-                                     int64_t end_frame) {
+int32_t ParakeetTdtState::EmitNextToken() {
   auto& allocator = model_.allocator_cpu_;
   auto run_options = OrtRunOptions::Create();
-
-  auto enc_info = encoder_output->GetTensorTypeAndShapeInfo();
-  auto enc_shape = enc_info->GetShape();
-  // Encoder output: [1, hidden_dim, T']
-  const int64_t hidden_dim = enc_shape[1];
-  const int64_t enc_time = enc_shape[2];
-  const float* enc_data = encoder_output->GetTensorData<float>();
 
   const int num_durations = static_cast<int>(cfg_.tdt_durations.size());
   const int vocab_size = cfg_.vocab_size;
   const int blank_id = cfg_.blank_id;
   const int max_sym = cfg_.max_symbols_per_step;
+  const int64_t hidden_dim = cfg_.hidden_dim;
+  const int64_t dec_dim = cfg_.decoder_lstm_dim;
 
-  int symbols_this_frame = 0;
-  int64_t t = start_frame;
+  while (true) {
+    // Advance through chunks until the current encoder window has frames
+    // left, or we've consumed the entire utterance.
+    while (current_t_ >= current_end_frame_) {
+      if (finished_) return static_cast<int32_t>(blank_id);  // eos
+      EncodeNextChunk();
+    }
 
-  while (t < end_frame) {
     // Joiner expects feature-last: encoder_output [1, 1, hidden_dim],
     // decoder_output [1, 1, dec_dim].
+    const float* enc_data = current_encoder_->GetTensorData<float>();
+    const int64_t enc_time = current_enc_time_;
+
     auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
     auto encoder_frame = OrtValue::CreateTensor(allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     float* frame_data = encoder_frame->GetTensorMutableData<float>();
     for (int64_t d = 0; d < hidden_dim; ++d) {
-      frame_data[d] = enc_data[d * enc_time + t];
+      frame_data[d] = enc_data[d * enc_time + current_t_];
     }
 
     // Decoder output is [1, dec_dim, 1]; reshape to [1, 1, dec_dim] for the
     // joiner (same memory layout, only the shape descriptor changes).
     const float* dec_data = dec_.decoder_output->GetTensorData<float>();
-    int64_t dec_dim = cfg_.decoder_lstm_dim;
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
     auto decoder_frame = OrtValue::CreateTensor(allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     std::memcpy(decoder_frame->GetTensorMutableData<float>(), dec_data,
@@ -372,28 +357,32 @@ void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
         }
       }
     }
-    int skip = (dur_idx < static_cast<int>(cfg_.tdt_durations.size()))
-                   ? cfg_.tdt_durations[dur_idx]
-                   : dur_idx;
+    int skip = (dur_idx < num_durations) ? cfg_.tdt_durations[dur_idx] : dur_idx;
 
+    bool emitted = false;
+    int32_t emitted_token = 0;
     if (best_token != blank_id) {
-      symbols_this_frame++;
-      decoded_tokens_.push_back(static_cast<int32_t>(best_token));
-      StepDecoder(static_cast<int32_t>(best_token));
+      symbols_this_frame_++;
+      emitted_token = static_cast<int32_t>(best_token);
+      emitted = true;
+      StepDecoder(emitted_token);
     }
 
-    if (skip > 0) symbols_this_frame = 0;
-    if (symbols_this_frame >= max_sym) {
-      symbols_this_frame = 0;
+    if (skip > 0) symbols_this_frame_ = 0;
+    if (symbols_this_frame_ >= max_sym) {
+      symbols_this_frame_ = 0;
       skip = 1;
     }
+    current_t_ += skip;
 
-    t += skip;
+    if (emitted) return emitted_token;
+    // Pure-blank frame: keep looping silently (skip is always >= 1 here
+    // because zero-duration blanks are forbidden above).
   }
 }
 
 void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  if (decoded_) return;
+  if (mel_loaded_) return;
 
   // Locate the pre-computed mel-features tensor produced by ParakeetTdtProcessor.
   // Expected shape: [1, num_mels, total_frames], already globally normalized.
@@ -423,28 +412,31 @@ void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_input
   full_mel_.assign(mel_src,
                    mel_src + static_cast<size_t>(num_mels) * total_mel_frames_);
 
-  RunChunkedDecoding();
-  decoded_ = true;
+  // Map mel-frame extent back to audio-sample space; this is what the chunk
+  // / left-context / right-context windows are expressed in.
+  total_audio_ = static_cast<size_t>(total_mel_frames_) * model_.config_->model.hop_length;
+  next_chunk_start_ = 0;
+  finished_ = (total_audio_ == 0);
+  mel_loaded_ = true;
 }
 
-DeviceSpan<float> ParakeetTdtState::Run(int total_length,
+DeviceSpan<float> ParakeetTdtState::Run(int /*total_length*/,
                                         DeviceSpan<int32_t>& /*next_tokens*/,
                                         DeviceSpan<int32_t> /*next_indices*/) {
-  // total_length = current sequence length AFTER the just-appended tokens.
-  // The processor inserts a single placeholder token at index 0 (decoder_start),
-  // so the next emitted token corresponds to index (total_length - 1).
-  size_t emit_index = (total_length > 0) ? static_cast<size_t>(total_length - 1) : 0;
-
-  // Reset buffer to all-zeros, place a high score at the desired token id.
-  std::fill(logits_buffer_.begin(), logits_buffer_.end(), 0.0f);
-
-  int32_t next_token;
-  if (emit_index < decoded_tokens_.size()) {
-    next_token = decoded_tokens_[emit_index];
-  } else {
-    next_token = eos_token_id_;
+  // First call: prime the decoder LSTM and encode the first chunk. Subsequent
+  // calls advance the TDT loop by exactly one emitted token (or return eos
+  // when the audio is fully consumed).
+  if (!initialized_) {
+    InitializeDecoderState();
+    EncodeNextChunk();
+    initialized_ = true;
   }
 
+  int32_t next_token = EmitNextToken();
+
+  // Encode the emitted token id as a one-hot logits row that the standard
+  // search will pick up via argmax.
+  std::fill(logits_buffer_.begin(), logits_buffer_.end(), 0.0f);
   if (next_token >= 0 && next_token < logits_size_) {
     logits_buffer_[static_cast<size_t>(next_token)] = 100.0f;
   }

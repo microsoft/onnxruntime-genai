@@ -97,14 +97,14 @@ struct ParakeetTdtModel : Model {
   ParakeetTdtConfig parakeet_config_;
 };
 
-// State holding the chunked TDT decoding pipeline.
+// State driving the streaming TDT decoder.
 //
-// On the first call to SetExtraInputs() (which receives the full mel-spectrogram
-// tensor produced by ParakeetTdtProcessor) the entire utterance is transcribed
-// internally — chunk by chunk — and the resulting token ids are stored in
-// `decoded_tokens_`. Each subsequent State::Run() returns a one-hot logits row
-// that selects the next pre-computed token; once the list is exhausted the eos
-// token id is emitted so that the search loop terminates.
+// SetExtraInputs() only caches the full mel tensor produced by the processor;
+// no encoder/decoder/joiner work is done there. Each call to State::Run()
+// advances the TDT loop by exactly one emitted token: the encoder is run
+// lazily, one chunk at a time, only when the current encoder window has been
+// fully consumed. Blank frames are skipped silently inside Run() so that the
+// caller always observes a real token (or eos when the audio is exhausted).
 struct ParakeetTdtState : State {
   ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
@@ -123,12 +123,12 @@ struct ParakeetTdtState : State {
     int64_t last_token{0};
   };
 
-  void RunChunkedDecoding();
-  void ProcessChunk(size_t total_audio,
-                    size_t chunk_start, size_t chunk_end, bool is_last);
-  void RunTDTDecoder(OrtValue* encoder_output,
-                     int64_t start_frame,
-                     int64_t end_frame);
+  // Encode the next audio chunk and update current_encoder_ / current_t_ /
+  // current_end_frame_. Sets finished_ when the trailing chunk is encoded.
+  void EncodeNextChunk();
+  // Run the TDT loop until a non-blank token is emitted, or return blank_id
+  // (== eos) when the whole utterance has been consumed.
+  int32_t EmitNextToken();
   void InitializeDecoderState();
   void StepDecoder(int32_t token_id);
 
@@ -136,8 +136,6 @@ struct ParakeetTdtState : State {
   ParakeetTdtConfig cfg_;
 
   DecState dec_;
-  bool decoded_{false};
-  std::vector<int32_t> decoded_tokens_;
   int32_t eos_token_id_{};
 
   // Full-utterance mel features supplied by ParakeetTdtProcessor via
@@ -146,6 +144,21 @@ struct ParakeetTdtState : State {
   // the processor via ort_extensions::PerFeatureNormalize.
   std::vector<float> full_mel_;
   int total_mel_frames_{0};
+  bool mel_loaded_{false};
+
+  // Streaming state: where the next chunk starts (in audio-sample space),
+  // total audio length, and whether the trailing chunk has been encoded.
+  size_t total_audio_{0};
+  size_t next_chunk_start_{0};
+  bool finished_{false};
+  bool initialized_{false};
+
+  // Current encoder window (output of the most recent encoder run).
+  std::unique_ptr<OrtValue> current_encoder_;
+  int64_t current_enc_time_{0};   // T' of current_encoder_ (shape[2])
+  int64_t current_t_{0};          // next encoder frame to consume
+  int64_t current_end_frame_{0};  // exclusive upper bound for current chunk
+  int symbols_this_frame_{0};
 
   // Logits buffer reused across calls (size = vocab_size + 1).
   int logits_size_{};
