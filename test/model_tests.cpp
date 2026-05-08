@@ -409,3 +409,68 @@ Print all primes between 1 and n
   std::cout << tokenizer->Decode(result) << "\r\n";
 }
 #endif
+
+// Test that changing sampling parameters mid-generation preserves KV-cache correctness.
+// Generate tokens with greedy, switch to sampling mid-way, verify:
+// 1. Tokens before the switch match a pure-greedy baseline (KV-cache intact)
+// 2. No crash or corruption after switching
+TEST(ModelTests, MutableSamplingPreservesKVCache) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 195, 731};
+  const int max_length = 20;
+  const int switch_at = 10;  // switch after generating this many tokens (including input)
+
+  // Baseline: pure greedy run
+  auto params_baseline = OgaGeneratorParams::Create(*model);
+  params_baseline->SetSearchOption("max_length", max_length);
+  params_baseline->SetSearchOptionBool("do_sample", false);
+
+  auto gen_baseline = OgaGenerator::Create(*model, *params_baseline);
+  gen_baseline->AppendTokens(input_ids);
+  while (!gen_baseline->IsDone()) {
+    gen_baseline->GenerateNextToken();
+  }
+  auto baseline_seq = gen_baseline->GetSequence(0);
+
+  // Test run: greedy for first (switch_at - input_len) tokens, then switch to sampling
+  auto params_test = OgaGeneratorParams::Create(*model);
+  params_test->SetSearchOption("max_length", max_length);
+  params_test->SetSearchOptionBool("do_sample", false);
+
+  auto gen_test = OgaGenerator::Create(*model, *params_test);
+  gen_test->AppendTokens(input_ids);
+
+  int seq_len = static_cast<int>(input_ids.size());
+  // Generate greedy up to switch point
+  while (seq_len < switch_at && !gen_test->IsDone()) {
+    gen_test->GenerateNextToken();
+    seq_len++;
+  }
+
+  // Verify tokens up to switch point match baseline (KV-cache is correct)
+  auto test_seq_at_switch = gen_test->GetSequence(0);
+  for (int i = 0; i < switch_at && i < static_cast<int>(test_seq_at_switch.size()); i++) {
+    EXPECT_EQ(test_seq_at_switch[i], baseline_seq[i])
+        << "Token mismatch at position " << i << " before sampling switch";
+  }
+
+  // Switch to sampling
+  gen_test->SetSearchBool("do_sample", true);
+  gen_test->SetSearchNumber("top_k", 5);
+  gen_test->SetSearchNumber("temperature", 1.0);
+
+  // Continue generating — should not crash, and tokens should be valid
+  while (!gen_test->IsDone()) {
+    gen_test->GenerateNextToken();
+  }
+
+  auto test_seq_final = gen_test->GetSequence(0);
+  EXPECT_EQ(static_cast<int>(test_seq_final.size()), max_length);
+
+  // Tokens before switch should still match baseline (unchanged by later sampling)
+  for (int i = 0; i < switch_at; i++) {
+    EXPECT_EQ(test_seq_final[i], baseline_seq[i])
+        << "Token at position " << i << " corrupted after sampling switch";
+  }
+}

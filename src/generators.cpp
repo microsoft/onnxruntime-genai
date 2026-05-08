@@ -551,6 +551,60 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
+void Generator::SetSearchNumber(const char* name, double value) {
+  std::string_view n{name};
+  if (n == "temperature") {
+    temperature_override_ = static_cast<float>(value);
+  } else if (n == "top_k") {
+    top_k_override_ = static_cast<int>(value);
+  } else if (n == "top_p") {
+    top_p_override_ = static_cast<float>(value);
+  } else if (n == "repetition_penalty") {
+    repetition_penalty_override_ = static_cast<float>(value);
+  } else if (n == "min_length") {
+    min_length_override_ = static_cast<int>(value);
+  } else {
+    throw std::runtime_error("Unknown search number: " + std::string(name));
+  }
+  UpdateSamplingMethod();
+}
+
+void Generator::SetSearchBool(const char* name, bool value) {
+  std::string_view n{name};
+  if (n == "do_sample") {
+    do_sample_override_ = value;
+  } else {
+    throw std::runtime_error("Unknown search bool: " + std::string(name));
+  }
+  UpdateSamplingMethod();
+}
+
+void Generator::UpdateSamplingMethod() {
+  const auto& search = search_->params_->search;
+  bool do_sample = do_sample_override_.value_or(search.do_sample);
+  int top_k = top_k_override_.value_or(search.top_k);
+  float top_p = top_p_override_.value_or(search.top_p);
+  float temperature = temperature_override_.value_or(search.temperature);
+
+  if (!do_sample || top_k == 1 || temperature == 0) {
+    sampling_method_ = SamplingMethod::kGreedy;
+  } else {
+    if (search.num_beams != 1)
+      throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+    if (top_p < 0.0f || top_p > 1.0f)
+      throw std::runtime_error("top_p must be between 0.0 and 1.0");
+    if (top_k < 0)
+      throw std::runtime_error("top_k must be 0 or greater");
+    if (top_p > 0.0f && top_p < 1.0f && top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopKTopP;
+    } else if (top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopK;
+    } else {
+      sampling_method_ = SamplingMethod::kTopP;
+    }
+  }
+}
+
 size_t Generator::TokenCount() const {
   if (is_nemotron_speech_model_)
     return static_cast<NemotronSpeechState*>(state_.get())->TokenCount();
@@ -627,8 +681,10 @@ void Generator::GenerateNextToken() {
   }
   computed_logits_ = false;
   auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  int min_length = min_length_override_.value_or(search.min_length);
+  float repetition_penalty = repetition_penalty_override_.value_or(search.repetition_penalty);
+  search_->ApplyMinLength(min_length);
+  search_->ApplyRepetitionPenalty(repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -641,18 +697,21 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
+  int top_k = top_k_override_.value_or(search.top_k);
+  float top_p = top_p_override_.value_or(search.top_p);
+  float temperature = temperature_override_.value_or(search.temperature);
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:
       search_->SelectTop();
       return;
     case SamplingMethod::kTopKTopP:
-      search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+      search_->SampleTopKTopP(top_k, top_p, temperature);
       return;
     case SamplingMethod::kTopK:
-      search_->SampleTopK(search.top_k, search.temperature);
+      search_->SampleTopK(top_k, temperature);
       return;
     case SamplingMethod::kTopP:
-      search_->SampleTopP(search.top_p, search.temperature);
+      search_->SampleTopP(top_p, temperature);
       return;
     default:
       throw std::runtime_error("Unknown sampling method");

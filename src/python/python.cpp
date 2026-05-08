@@ -290,6 +290,20 @@ struct PyGenerator {
     generator_->SetRuntimeOption(key.c_str(), value.c_str());
   }
 
+  void SetSearchOptions(const pybind11::kwargs& dict) {
+    for (auto& entry : dict) {
+      auto name = entry.first.cast<std::string>();
+      if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+        generator_->SetSearchNumber(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        generator_->SetSearchBool(name.c_str(), entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+        generator_->SetSearchNumber(name.c_str(), entry.second.cast<int>());
+      } else
+        throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
+    }
+  }
+
  private:
   std::unique_ptr<OgaGenerator> generator_;
 };
@@ -496,7 +510,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
-      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption)
+      .def("set_search_options", &PyGenerator::SetSearchOptions);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
