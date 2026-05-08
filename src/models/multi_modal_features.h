@@ -19,6 +19,14 @@ struct MultiModalFeatures {
   void Update(bool is_prompt);
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
 
+  // Pre-allocate an empty features tensor for Input mode when no source session provides one.
+  // Used when the embedding model requires an input (e.g., audio_features) but no corresponding
+  // encoder session exists.
+  void AllocateEmptyFeatures();
+
+  // Reshape features tensor in-place (e.g., flatten 3D [B, T, H] to 2D [B*T, H])
+  void ReshapeFeatures(std::vector<int64_t> new_shape);
+
   auto& GetShape() const { return shape_; }
   OrtValue* Get() { return features_.get(); }
 

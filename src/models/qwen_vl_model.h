@@ -27,11 +27,10 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
  protected:
-  void OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) override;
+  void OnStageComplete(size_t stage_id) override;
 
  private:
-  void InjectVisionEmbeddings(const std::string& embeddings_output_name,
-                              DeviceSpan<int32_t>& input_token_ids);
+  void InjectVisionEmbeddings(const std::string& embeddings_output_name);
 
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
