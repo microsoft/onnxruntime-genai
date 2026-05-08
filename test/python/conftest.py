@@ -99,5 +99,37 @@ def nemotron_speech_model_path(request):
 
 
 @pytest.fixture
+def parakeet_tdt_model_path(request):
+    """Return the path to a parakeet_tdt model directory, or skip if not available.
+
+    Accepts any of these layouts for --test_models:
+      <test_models>/genai_config.json
+      <test_models>/fp32/genai_config.json
+      <test_models>/parakeet-tdt/genai_config.json
+      <test_models>/parakeet-tdt/fp32/genai_config.json
+    """
+    test_data = request.config.getoption("--test_models")
+    candidates = [
+        test_data,
+        os.path.join(test_data, "fp32"),
+        os.path.join(test_data, "parakeet-tdt"),
+        os.path.join(test_data, "parakeet-tdt", "fp32"),
+    ]
+    for cand in candidates:
+        if os.path.exists(os.path.join(cand, "genai_config.json")):
+            return cand
+    pytest.skip(f"Parakeet TDT model not found under {test_data} (looked in {candidates})")
+
+
+@pytest.fixture
 def test_data_path(request):
-    return request.config.getoption("--test_models")
+    """Path containing the bundled audio fixtures (audios/jfk.flac, etc.).
+
+    Defaults to the in-repo `test/test_models` directory so tests work even
+    when --test_models points at an external model directory.
+    """
+    test_data = request.config.getoption("--test_models")
+    if os.path.isdir(os.path.join(test_data, "audios")):
+        return test_data
+    repo_default = os.path.join(os.path.dirname(__file__), "..", "test_models")
+    return os.path.abspath(repo_default)

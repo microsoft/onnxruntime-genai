@@ -1633,3 +1633,81 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
 }
+
+#ifndef PARAKEET_TDT_PATH
+#define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_JFK
+#define PARAKEET_TDT_AUDIO_JFK MODEL_PATH "audios/jfk.flac"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_TEDLIUM
+#define PARAKEET_TDT_AUDIO_TEDLIUM MODEL_PATH "audios/tedlium_long_120s.flac"
+#endif
+
+// Test that the Parakeet TDT model + processor + generator construct correctly.
+TEST(CAPITests, ParakeetTdtCreate) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+namespace {
+// Run the Parakeet TDT pipeline end-to-end on the given audio file.
+// Returns the decoded transcription. Skips the test if either the model
+// directory or the audio file is missing.
+std::string RunParakeetTdt(const std::string& audio_path) {
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+
+  std::vector<const char*> paths{audio_path.c_str()};
+  auto audios = OgaAudios::Load(paths);
+  auto inputs = processor->ProcessAudios("", audios.get());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*inputs);
+
+  std::string transcription;
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+    auto count = generator->GetSequenceCount(0);
+    if (count <= 1) continue;  // index 0 is the SOS placeholder
+    auto last = generator->GetSequenceData(0)[count - 1];
+    if (auto piece = tokenizer_stream->Decode(last); piece && *piece) {
+      transcription += piece;
+    }
+  }
+  return transcription;
+}
+}  // namespace
+
+// Transcribe the bundled JFK clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeJfk) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_JFK))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_JFK;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_JFK);
+  EXPECT_FALSE(transcription.empty());
+}
+
+// Transcribe a 120s TED clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeLong) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_TEDLIUM))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_TEDLIUM;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_TEDLIUM);
+  EXPECT_FALSE(transcription.empty());
+}
