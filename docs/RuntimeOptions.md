@@ -32,7 +32,7 @@ Note: Difference from SessionOptions `enable_profiling` in genai_config.json
 
 The `enable_profiling` option in `genai_config.json` under `SessionOptions` is a session-level configuration. When enabled, it collects all profiling data from session creation to session end and aggregates them into a single JSON file. This configuration cannot be started or stopped dynamically during inference.
 
-In contrast, ``enable_profiling` in runtime option provides dynamic control:
+In contrast, `enable_profiling` in runtime option provides dynamic control:
 - Can be enabled or disabled at any point during generation
 - Each token generation produces its own profiling file when enabled
 - Useful for profiling specific portions of the generation process

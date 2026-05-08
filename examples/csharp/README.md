@@ -75,7 +75,7 @@ Please read through [our constrained decoding](https://github.com/microsoft/onnx
 
 Here are some examples of how you can run the C# examples with function/tool calling.
 
-```
+```powershell
 # Using JSON Schema with only tool call output
 .\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 

@@ -56,6 +56,7 @@ __all__ = [
     "Qwen3Model",
     "Qwen3VLTextModel",
     "Qwen25VLTextModel",
+    "Qwen35TextModel",
     "QwenModel",
     "VideoChatFlashQwenModel",
     "SmolLM3Model",

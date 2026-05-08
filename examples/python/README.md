@@ -18,7 +18,7 @@ python model-chat.py -m {path to model folder} -e {execution provider}
 ```
 
 ```bash
-# The `model-generate` script generates the entire output sequence in one function call
+# The `model-generate` script generates the entire output sequence in one function call.
 python model-generate.py -m {path to model folder} -e {execution provider}
 ```
 

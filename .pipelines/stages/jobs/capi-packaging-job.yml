@@ -20,6 +20,12 @@ parameters:
   default: 'release'
 - name: enable_winml
   type: boolean
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
 
 jobs:
 - job: capi_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
@@ -74,6 +80,8 @@ jobs:
     value: ${{ parameters.os }}
   - name: feed_name
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
+  - name: ORT_HOME_CMAKE_ARG
+    value: ''
 
   workspace:
     clean: all
@@ -102,6 +110,8 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
@@ -111,6 +121,8 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
@@ -119,6 +131,8 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'ios') }}:
     - template: steps/capi-appleframework-step.yml

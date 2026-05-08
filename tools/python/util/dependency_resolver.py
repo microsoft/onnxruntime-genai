@@ -17,7 +17,7 @@ from .platform_helpers import is_linux, is_windows, is_windows_arm
 _log = get_logger("util.dependency_resolver")
 
 
-def _download_ort(use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike):
+def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
         mach = None
@@ -42,8 +42,6 @@ def _download_ort(use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir
             package_name = "Microsoft.ML.OnnxRuntime.Gpu.Windows"
         else:
             raise NotImplementedError("ORT with CUDA is not supported on this platform")
-    elif use_rocm:
-        package_name = "Microsoft.ML.OnnxRuntime.Rocm"
     elif use_dml:
         package_name = "Microsoft.ML.OnnxRuntime.DirectML"
     else:
@@ -135,12 +133,12 @@ def _download_d3d12(destination_dir: PathLike):
     return _lib_path()
 
 
-def download_dependencies(use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike):
+def download_dependencies(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
     dependencies_dir = destination_dir / "dependencies"
     if not dependencies_dir.exists():
         dependencies_dir.mkdir(parents=True)
 
-    ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, dependencies_dir)
+    ort_lib_dir = _download_ort(use_cuda, use_dml, dependencies_dir)
     libs = listdir(ort_lib_dir)
     for file_name in libs:
         if isfile(Path(ort_lib_dir) / file_name):

@@ -248,7 +248,6 @@ class WhisperDecoder(Model):
             "past_key_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
             "past_value_cross": ["batch_size", self.num_attn_heads, self.max_source_positions, self.head_size],  # ['batch_size', 'num_heads', 'num_frames / 2', 'head_size']
         }
-        self.make_inputs_init()
 
         # Set output dicts
         self.output_names = {
