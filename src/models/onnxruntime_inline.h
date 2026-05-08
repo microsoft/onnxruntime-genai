@@ -356,6 +356,31 @@ inline std::string OrtEpDevice::Vendor() const {
   return std::string(vendor);
 }
 
+inline const OrtHardwareDevice* OrtEpDevice::Device() const {
+  return Ort::api->EpDevice_Device(this);
+}
+
+inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
+  return Ort::api->HardwareDevice_Type(this);
+}
+
+inline uint32_t OrtHardwareDevice::VendorId() const {
+  return Ort::api->HardwareDevice_VendorId(this);
+}
+
+inline uint32_t OrtHardwareDevice::DeviceId() const {
+  return Ort::api->HardwareDevice_DeviceId(this);
+}
+
+inline std::string OrtHardwareDevice::Vendor() const {
+  const char* vendor = Ort::api->HardwareDevice_Vendor(this);
+  return std::string(vendor);
+}
+
+inline const OrtKeyValuePairs* OrtHardwareDevice::Metadata() const {
+  return Ort::api->HardwareDevice_Metadata(this);
+}
+
 inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid) {
   if (strcmp(logid, "onnxruntime-node") == 0) {
     Ort::ThrowOnError(Ort::api->SetLanguageProjection(&v, OrtLanguageProjection::ORT_PROJECTION_NODEJS));

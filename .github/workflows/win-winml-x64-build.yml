@@ -17,7 +17,7 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
-  binaryDir: 'build/cuda/win-x64'
+  binaryDir: 'build/winml/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
@@ -62,10 +62,19 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2091'
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2091' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
           cmake --build --preset windows_x64_winml_relwithdebinfo --parallel
           cmake --build --preset windows_x64_winml_relwithdebinfo --target PyPackageBuild
 
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\ort\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\ort\lib" `
+            "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\RelWithDebInfo"
+          cmake --build examples\c\build --config RelWithDebInfo

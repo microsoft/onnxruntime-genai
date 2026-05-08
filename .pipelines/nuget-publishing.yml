@@ -48,11 +48,6 @@ parameters:
     type: boolean
     default: true
 
-  - name: enable_win_qnn
-    displayName: 'Whether QNN nuget package should be built.'
-    type: boolean
-    default: true
-
   - name: enable_winml
     displayName: 'Whether Windows WinML package is built.'
     type: boolean
@@ -102,6 +97,19 @@ parameters:
     values:
       - dev
       - stable
+
+  - name: ort_build_version
+    displayName: 'OnnxRuntime nightly version for build-time compilation (e.g., 1.25.0-dev-20260125-1205-727db0d3dc). Leave as ''default'' to use the default version in ortlib.cmake.'
+    type: string
+    default: 'default'
+
+  - name: ort_build_source
+    displayName: 'Package source for build-time ORT download. NuGet uses nuget.org, Ort-Nightly uses the ADO nightly feed.'
+    type: string
+    default: 'NuGet'
+    values:
+      - 'NuGet'
+      - 'Ort-Nightly'
 
   - name: custom_ort_package_versioned_name
     displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
@@ -153,6 +161,8 @@ extends:
           build_config: ${{ parameters.build_config }}
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
+          ort_build_version: ${{ parameters.ort_build_version }}
+          ort_build_source: ${{ parameters.ort_build_source }}
 
       - template: stages/nuget-packaging-stage.yml
         parameters:
@@ -169,7 +179,6 @@ extends:
           ort_cuda_version: ${{ parameters.ort_cuda_version }}
           ort_dml_version: ${{ parameters.ort_dml_version }}
           build_config: ${{ parameters.build_config }}
-          enable_win_qnn: ${{ parameters.enable_win_qnn }}
           nuget_version_type: ${{ parameters.nuget_version_type }}
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}

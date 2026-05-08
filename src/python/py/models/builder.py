@@ -27,7 +27,9 @@ from builders import (
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2Model,
     LlamaModel,
+    Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
@@ -41,8 +43,9 @@ from builders import (
     Phi4MMModel,
     PhiModel,
     Qwen3Model,
-    Qwen25VLTextModel,
     Qwen3VLTextModel,
+    Qwen25VLTextModel,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     WhisperModel,
@@ -88,10 +91,7 @@ def check_extra_options(kv_pairs, execution_provider):
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
 
     if "int4_nodes_to_exclude" in kv_pairs:
-        nodes_to_exclude = []
-        for node in kv_pairs["int4_nodes_to_exclude"].split(","):
-            nodes_to_exclude.append(node)
-        kv_pairs["int4_nodes_to_exclude"] = nodes_to_exclude
+        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -248,10 +248,21 @@ def create_model(
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2ForCausalLM":
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        if hasattr(config, "quantization_config"):
+            delattr(config, "quantization_config")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
@@ -292,6 +303,8 @@ def create_model(
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
@@ -405,13 +418,14 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
                     rtn = RTN algorithm for int4 quantization.
                     rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                     k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.

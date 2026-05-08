@@ -14,8 +14,9 @@ from .gptoss import GPTOSSModel
 from .granite import GraniteModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
+from .lfm2 import LFM2Model
 from .llama import LlamaModel
-from .mistral import MistralModel
+from .mistral import Mistral3TextModel, MistralModel
 from .nemotron import NemotronModel
 from .olmo import OLMoModel
 from .phi import (
@@ -28,7 +29,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel
+from .qwen import Qwen3Model, Qwen3VLTextModel, Qwen25VLTextModel, Qwen35TextModel, QwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -42,7 +43,9 @@ __all__ = [
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
+    "LFM2Model",
     "LlamaModel",
+    "Mistral3TextModel",
     "MistralModel",
     "Model",
     "NemotronModel",
@@ -58,6 +61,7 @@ __all__ = [
     "Qwen3Model",
     "Qwen3VLTextModel",
     "Qwen25VLTextModel",
+    "Qwen35TextModel",
     "QwenModel",
     "SmolLM3Model",
     "WhisperModel",

@@ -1,9 +1,5 @@
-if(USE_ROCM AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}")
-  message(FATAL_ERROR "Expected the ONNX Runtime providers ROCm library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_ROCM_LIB}. Actual: Not found.")
-endif()
-
+# ROCm support has been removed.
 if(USE_ROCM)
-  add_compile_definitions(USE_ROCM=1)
-else()
-  add_compile_definitions(USE_ROCM=0)
+  message(FATAL_ERROR "ROCm is no longer supported. Please remove -DUSE_ROCM=ON from your CMake configuration.")
 endif()
+add_compile_definitions(USE_ROCM=0)

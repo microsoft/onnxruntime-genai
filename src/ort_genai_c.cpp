@@ -15,6 +15,7 @@
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/silero_vad.h"
 
 namespace Generators {
 
@@ -1127,5 +1128,20 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* proces
 }
 
 void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value) {
+  OGA_TRY
+  processor->SetOption(key, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value) {
+  OGA_TRY
+  auto result = processor->GetOption(key);
+  *value = AllocOgaString(result);
+  return nullptr;
+  OGA_CATCH
+}
 
 }  // extern "C"

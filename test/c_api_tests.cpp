@@ -23,10 +23,6 @@
 
 #include "test_utils.h"
 
-#ifndef PHI2_PATH
-#define PHI2_PATH test_utils::GetPhi2Path().c_str()
-#endif
-
 TEST(CAPITests, Config) {
 #if TEST_PHI2
   // Test modifying config settings
@@ -1336,38 +1332,105 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
-#endif
 
-#if USE_GUIDANCE
-TEST(CAPITests, SetGuidance) {
-#if TEST_PHI2
+TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
 
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  int max_length = 10;
 
-  const char* input_string = "who are you?";
-  auto input_sequences = OgaSequences::Create();
-  tokenizer->Encode(input_string, *input_sequences);
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 32);
-  params->SetGuidance("regex", "answer: .*", false);
+  params->SetSearchOption("max_length", max_length);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
-  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
-  auto output = std::string(out_string).substr(std::string(input_string).size());
-  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 
-#endif
+  // Verify generation completed and produced output
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, static_cast<size_t>(input_ids_shape[1]));
+  ASSERT_LE(sequence_length, max_length);
+}
+
+TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate a few tokens
+  generator->GenerateNextToken();
+
+  // RewindTo should throw for LFM2 because conv state cannot be rewound
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
 }
 #endif
 
+// Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
+// Skipped when the phi3-fp16-nvtrt model is not available (CI-only model).
+TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
+  std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+  if (!std::filesystem::exists(nvtrt_path)) {
+    GTEST_SKIP() << "NvTensorRtRtx model not available at " << nvtrt_path;
+  }
+
+  auto config = OgaConfig::Create(nvtrt_path.c_str());
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  int max_length = 20;
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  std::vector<int32_t> input_ids{1, 15043, 29892, 920};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  generator->RewindTo(6);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+}
+
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+
+#ifndef STREAMING_ASR_CHUNK_SAMPLES
+constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
 #endif
 
 // Helper: if mel is not null, set inputs and run the decode loop
@@ -1509,4 +1572,64 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   OgaDestroyGeneratorParams(params);
   OgaDestroyStreamingProcessor(processor);
   OgaDestroyModel(model);
+}
+
+// Test VAD set_option/get_option on StreamingProcessor
+TEST(CAPITests, StreamingASRVadSetGetOption) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  // Default: VAD disabled
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+
+  // Set and get threshold
+  processor->SetOption("silence_duration_ms", "1000");
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+
+  // Enable VAD if silero_vad.onnx is available
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (std::filesystem::exists(vad_path)) {
+    processor->SetOption("use_vad", "true");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+    processor->SetOption("vad_threshold", "0.8");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+    // Disable
+    processor->SetOption("use_vad", "false");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+  }
+  SUCCEED();
+}
+
+// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
+TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  processor->SetOption("use_vad", "true");
+  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+
+  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // First 2 silence chunks should still be processed (not dropped)
+  auto mel1 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+
+  auto mel2 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+
+  // Third silence chunk should be dropped (> min_silence_chunks)
+  auto mel3 = processor->Process(silence.data(), silence.size());
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  SUCCEED();
 }
