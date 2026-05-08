@@ -18,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 #include "../generators.h"
@@ -368,20 +369,25 @@ void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
       }
     }
 
-    int skip = 0;
+    // Duration argmax. When the predicted token is the blank, forbid
+    // duration index 0 (zero-duration blank) — that combination would emit
+    // nothing and stall on the same frame, which is the known v3 "sentence
+    // dropping" failure mode (sherpa-onnx reports the same fix).
+    int dur_idx = 0;
     if (num_durations > 0) {
       const int dur_off = num_tok_logits;
-      float best_dur_score = logits_data[dur_off];
-      for (int i = 1; i < num_durations; ++i) {
+      const int start_i = (best_token == blank_id) ? 1 : 0;
+      float best_dur_score = -std::numeric_limits<float>::infinity();
+      for (int i = start_i; i < num_durations; ++i) {
         if (logits_data[dur_off + i] > best_dur_score) {
           best_dur_score = logits_data[dur_off + i];
-          skip = i;
+          dur_idx = i;
         }
       }
-      if (skip < static_cast<int>(cfg_.tdt_durations.size())) {
-        skip = cfg_.tdt_durations[skip];
-      }
     }
+    int skip = (dur_idx < static_cast<int>(cfg_.tdt_durations.size()))
+                   ? cfg_.tdt_durations[dur_idx]
+                   : dur_idx;
 
     if (best_token != blank_id) {
       symbols_this_frame++;
@@ -391,10 +397,6 @@ void ParakeetTdtState::RunTDTDecoder(OrtValue* encoder_output,
 
     if (skip > 0) symbols_this_frame = 0;
     if (symbols_this_frame >= max_sym) {
-      symbols_this_frame = 0;
-      skip = 1;
-    }
-    if (best_token == blank_id && skip == 0) {
       symbols_this_frame = 0;
       skip = 1;
     }

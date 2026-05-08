@@ -15,8 +15,27 @@ Generator loop. Internally the encoder is fed in fixed-length chunks
 
 import argparse
 import os
+import time
+import wave
 
 import onnxruntime_genai as og
+
+
+def _audio_duration_seconds(path: str) -> float:
+    try:
+        with wave.open(path, "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate > 0:
+                return frames / float(rate)
+    except wave.Error:
+        pass
+    try:
+        import soundfile as sf  # type: ignore
+        info = sf.info(path)
+        return float(info.frames) / float(info.samplerate)
+    except Exception:
+        return 0.0
 
 
 def run(args: argparse.Namespace) -> None:
@@ -35,8 +54,10 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"Loading audio: {args.audio_file}")
     audios = og.Audios.open(args.audio_file)
+    audio_seconds = _audio_duration_seconds(args.audio_file)
 
     print("Processing audio...")
+    t0 = time.perf_counter()
     inputs = processor("", audios=audios)
 
     params = og.GeneratorParams(model)
@@ -46,6 +67,7 @@ def run(args: argparse.Namespace) -> None:
 
     while not generator.is_done():
         generator.generate_next_token()
+    elapsed = time.perf_counter() - t0
 
     # The processor injects a single placeholder token at index 0; skip it.
     tokens = list(generator.get_sequence(0))
@@ -56,6 +78,13 @@ def run(args: argparse.Namespace) -> None:
     print()
     print("Transcription:")
     print(f"    {transcription.strip()}")
+
+    print()
+    if audio_seconds > 0:
+        rtfx = audio_seconds / elapsed if elapsed > 0 else float("inf")
+        print(f"Audio duration: {audio_seconds:.2f}s | Inference: {elapsed:.2f}s | RTFx: {rtfx:.2f}x")
+    else:
+        print(f"Inference: {elapsed:.2f}s")
 
 
 if __name__ == "__main__":
