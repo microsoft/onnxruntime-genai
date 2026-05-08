@@ -3,7 +3,7 @@
 //
 // Parakeet TDT speech recognition model.
 //
-// Mirrors the Whisper model structure (Model + State subclasses) so it can
+// Mirrors the standard batch model structure (Model + State subclasses) so it can
 // be driven by the standard Generator pipeline:
 //
 //     model = og.Model(config)
@@ -67,7 +67,7 @@ struct ParakeetTdtConfig {
   std::string dec_in_targets_length;
   std::string dec_in_lstm_hidden_state;
   std::string dec_in_lstm_cell_state;
-  std::string dec_out_outputs;  // decoder_output
+  std::string dec_out_outputs;
   std::string dec_out_outputs_length;
   std::string dec_out_lstm_hidden_state;
   std::string dec_out_lstm_cell_state;
@@ -99,13 +99,12 @@ struct ParakeetTdtModel : Model {
 
 // State holding the chunked TDT decoding pipeline.
 //
-// On the first call to SetExtraInputs() (which receives the raw PCM tensor
-// produced by ParakeetTdtProcessor) the entire utterance is transcribed in
-// one shot internally — chunk by chunk — and the resulting token ids are
-// stored in `decoded_tokens_`. Each subsequent State::Run() returns a
-// one-hot logits row that selects the next pre-computed token; once the
-// list is exhausted the eos token id is emitted so that the search loop
-// terminates.
+// On the first call to SetExtraInputs() (which receives the full mel-spectrogram
+// tensor produced by ParakeetTdtProcessor) the entire utterance is transcribed
+// internally — chunk by chunk — and the resulting token ids are stored in
+// `decoded_tokens_`. Each subsequent State::Run() returns a one-hot logits row
+// that selects the next pre-computed token; once the list is exhausted the eos
+// token id is emitted so that the search loop terminates.
 struct ParakeetTdtState : State {
   ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
@@ -124,7 +123,7 @@ struct ParakeetTdtState : State {
     int64_t last_token{0};
   };
 
-  void TranscribeAll();
+  void RunChunkedDecoding();
   void ProcessChunk(size_t total_audio,
                     size_t chunk_start, size_t chunk_end, bool is_last);
   void RunTDTDecoder(OrtValue* encoder_output,
@@ -141,10 +140,10 @@ struct ParakeetTdtState : State {
   std::vector<int32_t> decoded_tokens_;
   int32_t eos_token_id_{};
 
-  // Full-utterance mel features computed once in TranscribeAll and reused by
-  // every chunk (NeMo-style preprocessing — no per-chunk featurizer state).
-  // Layout: [num_mels, total_mel_frames_], row-major, normalized once via
-  // ort_extensions::PerFeatureNormalize.
+  // Full-utterance mel features supplied by ParakeetTdtProcessor via
+  // SetExtraInputs and reused by every chunk (no per-chunk featurizer state).
+  // Layout: [num_mels, total_mel_frames_], row-major, already normalized in
+  // the processor via ort_extensions::PerFeatureNormalize.
   std::vector<float> full_mel_;
   int total_mel_frames_{0};
 

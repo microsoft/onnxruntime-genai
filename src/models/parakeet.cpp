@@ -1,18 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Parakeet TDT speech recognition model — Whisper-style integration.
+// Parakeet TDT speech recognition model
 //
-// The chunked encoder + TDT decoder pipeline is preserved verbatim from the
-// original ParakeetTdtStreamingASR implementation; the only difference is that
-// it is now driven by State::SetExtraInputs / State::Run instead of an
-// external StreamingASR object, so it can be used through the standard
-// Generator / MultiModalProcessor public API.
-//
-// All mel-spectrogram extraction and per-feature normalization are delegated
-// to onnxruntime-extensions (nemo_mel::NemoStreamingMelExtractor and
-// ort_extensions::PerFeatureNormalize). No mel/FFT/normalization math is
-// implemented here.
 
 #include <algorithm>
 #include <array>
@@ -25,8 +15,6 @@
 #include "parakeet.h"
 
 namespace Generators {
-
-// ─── ParakeetTdtConfig ─────────────────────────────────────────────────────────
 
 void ParakeetTdtConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
@@ -211,7 +199,7 @@ void ParakeetTdtState::StepDecoder(int32_t token_id) {
   dec_.last_token = token_id;
 }
 
-void ParakeetTdtState::TranscribeAll() {
+void ParakeetTdtState::RunChunkedDecoding() {
   if (total_mel_frames_ <= 0) return;
 
   InitializeDecoderState();
@@ -435,7 +423,7 @@ void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_input
   full_mel_.assign(mel_src,
                    mel_src + static_cast<size_t>(num_mels) * total_mel_frames_);
 
-  TranscribeAll();
+  RunChunkedDecoding();
   decoded_ = true;
 }
 

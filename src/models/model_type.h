@@ -48,7 +48,6 @@ struct ModelType {
   }
 
   inline static bool IsTDT(const std::string& model_type) {
-    // Token-and-Duration Transducer (offline ASR).
     static constexpr std::array<std::string_view, 1> TDT = {"parakeet_tdt"};
     return std::find(TDT.begin(), TDT.end(), model_type) != TDT.end();
   }

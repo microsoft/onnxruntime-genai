@@ -156,8 +156,8 @@ struct Config {
     int max_symbols_per_step{};
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
-    int left_context_samples{};      // Left context in PCM samples (e.g., 143360 for 9.0s)
-    int right_context_samples{};     // Right context in PCM samples (e.g., 25600 for 1.6s)
+    int left_context_samples{};
+    int right_context_samples{};
     std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
     struct Encoder {
@@ -352,8 +352,9 @@ struct Config {
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
         // Parakeet TDT decoder (prediction network) extra inputs
-        std::string targets_length;  // "targets_length"
+        std::string targets_length;
       } inputs;
 
       struct Outputs {
@@ -369,8 +370,9 @@ struct Config {
         std::string outputs;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
         // Parakeet TDT decoder (prediction network) extra outputs
-        std::string outputs_length;  // "outputs_length"
+        std::string outputs_length;
       } outputs;
 
       struct PipelineModel {
