@@ -162,7 +162,7 @@ if __name__ == "__main__":
     parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
     parser.add_argument('-rw', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
     parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
-    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers') 
+    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
 
     get_generator_params_args(parser)
     get_guidance_args(parser)

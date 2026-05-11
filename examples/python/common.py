@@ -34,32 +34,18 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     Returns:
         None
     """
-    if not ep_path:
-        return  # No library path specified, skip registration
-
-    print(f"Registering execution provider: {ep}")
 
     if use_winml:
-        # Requies winml.py file
-        # Modified from here: https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/tutorial?tabs=python#acquiring-the-model-and-preprocessing
+        # If use_winml is true, all winml execution providers will be queried and registered.
+        # Please refer to https://pypi.org/project/windowsml/
         try:
             import winml
-
-            print(winml.register_execution_providers(ort=False, ort_genai=True))
-        except ImportError:
-            print("WinML not available, using default execution providers")
+            for ep_name in winml.register_execution_providers():
+                print(f"Registered WinML execution provider: {ep_name}")
         except Exception as e:
             print(f"Failed to register WinML execution providers: {e}")
-    elif ep == "cuda":
-        og.register_execution_provider_library("CUDAExecutionProvider", ep_path)
-    elif ep == "NvTensorRtRtx":
-        og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
     else:
-        print(f"Warning: EP registration not supported for {ep}")
-        print(
-            "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs."
-        )
-        return
+        og.register_execution_provider_library(ep, ep_path)
 
     print(f"Registered {ep} successfully!")
 
