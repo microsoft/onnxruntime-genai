@@ -1426,12 +1426,10 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 }
 
 // Test RewindTo with the qwen-2.5 model. Exercises the static mask rewind path if
-// the EP supports it (DML by default, WebGPU with enableGraphCapture=1 set by
-// _test_utils.py), otherwise falls back to the dynamic mask path.
+// the EP supports it (DML by default, WebGPU/CUDA when graph capture is enabled
+// in model generation via _test_utils.py), otherwise falls back to the dynamic mask path.
 // Skipped when qwen-2.5 model is not available.
-// CUDA failure here is a pre-existing issue that this PR exposes.
-// Keep CUDA excluded for this test and fix it in a separate PR.
-#if TEST_QWEN_2_5 && !USE_CUDA
+#if TEST_QWEN_2_5
 TEST(CAPITests, RewindQwen25CAPI) {
   std::string model_path = QWEN_2_5_PATH;
   if (!std::filesystem::exists(model_path)) {
@@ -1480,7 +1478,7 @@ TEST(CAPITests, RewindQwen25CAPI) {
     EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
   }
 }
-#endif  // TEST_QWEN_2_5 && !USE_CUDA
+#endif  // TEST_QWEN_2_5
 
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"

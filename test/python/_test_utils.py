@@ -126,10 +126,11 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         extra_options += ["int4_accuracy_level=4"]
     if one_layer:
         extra_options += ["num_hidden_layers=1"]
-    # Graph capture is a generic model option. Currently only WebGPU translates
-    # it into a builder extra_option. CUDA graph capture support can be added here later.
+    # Graph capture is a generic model option and maps to EP-specific builder flags.
     if enable_graph_capture and device == "webgpu":
         extra_options += ["enable_webgpu_graph=true"]
+    if enable_graph_capture and device == "cuda":
+        extra_options += ["enable_cuda_graph=true"]
     if len(extra_options) > 1:
         command += extra_options
 
