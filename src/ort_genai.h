@@ -714,6 +714,7 @@ struct OgaMultiModalProcessor : OgaAbstract {
     OgaStringArray* strs;
     OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
     OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs, images, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -728,6 +729,7 @@ struct OgaMultiModalProcessor : OgaAbstract {
     OgaStringArray* strs;
     OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
     OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs, audios, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -742,6 +744,7 @@ struct OgaMultiModalProcessor : OgaAbstract {
     OgaStringArray* strs;
     OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
     OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs, images, audios, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
