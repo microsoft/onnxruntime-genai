@@ -224,6 +224,11 @@ void ParakeetTdtState::EncodeNextChunk() {
   }
   auto processed_signal = OrtValue::CreateTensor(inference_device.GetAllocator(), signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   ByteWrapTensor(inference_device, *processed_signal).CopyFrom(ByteWrapTensor(cpu_device, *signal_cpu));
+  // Ensure the H2D copy of the mel slice has completed on the inference
+  // device's stream before the encoder session runs. Without this sync the
+  // encoder can read uninitialised device memory in a hot eval loop, surfacing
+  // as `cudaErrorInvalidValue` at the first Cast/Conv node of pre_encode.
+  inference_device.Synchronize();
 
   // Tiny scalar input, keep on CPU; ORT bridges to the session's EP.
   auto len_shape = std::array<int64_t, 1>{1};
@@ -312,6 +317,8 @@ int32_t ParakeetTdtState::EmitNextToken() {
       decoder_frame_ = OrtValue::CreateTensor(inference_device.GetAllocator(), dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
     ByteWrapTensor(inference_device, *decoder_frame_).CopyFrom(ByteWrapTensor(inference_device, *dec_.decoder_output));
+    // Ensure both joiner inputs are visible to the joiner session's stream.
+    inference_device.Synchronize();
 
     const char* join_input_names[] = {cfg_.join_in_encoder.c_str(), cfg_.join_in_decoder.c_str()};
     OrtValue* join_inputs[] = {encoder_frame_.get(), decoder_frame_.get()};
