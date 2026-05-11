@@ -138,6 +138,13 @@ struct NemotronEncoderSubState : State {
   size_t cache_channel_input_idx_{};
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
+
+  // Pre-allocated output tensors
+  std::unique_ptr<OrtValue> enc_output_;  // dynamic shape, allocated per-run
+  std::unique_ptr<OrtValue> enc_len_output_;
+  std::unique_ptr<OrtValue> enc_cache_ch_output_;
+  std::unique_ptr<OrtValue> enc_cache_tm_output_;
+  std::unique_ptr<OrtValue> enc_cache_chlen_output_;
 };
 
 /// Sub-state for the RNNT prediction network (decoder LSTM).
@@ -160,6 +167,11 @@ struct NemotronPredictionSubState : State {
   size_t targets_input_idx_{};
   size_t lstm_hidden_input_idx_{};
   size_t lstm_cell_input_idx_{};
+
+  // Pre-allocated output tensors
+  std::unique_ptr<OrtValue> dec_output_;
+  std::unique_ptr<OrtValue> dec_h_output_;
+  std::unique_ptr<OrtValue> dec_c_output_;
 };
 
 /// Sub-state for the joiner network.
@@ -179,6 +191,9 @@ struct NemotronJoinerSubState : State {
 
   size_t encoder_input_idx_{};
   size_t decoder_input_idx_{};
+
+  // Pre-allocated output tensor
+  std::unique_ptr<OrtValue> joint_output_;
 };
 
 /// Orchestrator state for the full RNNT pipeline.
