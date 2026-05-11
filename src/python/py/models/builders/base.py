@@ -387,7 +387,7 @@ class Model:
             if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None
             else False,
         )
-        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
+        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"}
 
         # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
         if self.shared_embeddings and (self.exclude_embeds or self.exclude_lm_head):
@@ -667,9 +667,15 @@ class Model:
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        self.update_genai_config(genai_config)
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def update_genai_config(self, genai_config):
+        """Override in subclasses to modify genai_config before it is written to disk."""
+        pass
 
     def make_key_value_cache_names(self, layer_id):
         """
@@ -709,7 +715,7 @@ class Model:
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
+        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
             if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
@@ -728,6 +734,17 @@ class Model:
                     customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+
+            if quant_method == "k_quant_linear" and hasattr(self, "layer_types"):
+                # Promote linear attention projections and their MLPs to INT8.
+                # Linear attention recurrence accumulates quantization errors across
+                # the full sequence (no softmax normalization).
+                for i, lt in enumerate(self.layer_types):
+                    if lt == "linear_attention":
+                        for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                            customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                        for proj in ("gate_proj", "up_proj", "down_proj"):
+                            customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
             customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
@@ -4079,6 +4096,7 @@ class Model:
         # hf_final_layernorm:             for Phi-2
         # hf_transformer_final_layernorm: for ChatGLM-3
         # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
+        # hf_embedding_norm:              for LFM-2
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = (
             hasattr(model, "model")
@@ -4097,11 +4115,16 @@ class Model:
             and hasattr(model.model.language_model, "norm")
             and module == model.model.language_model.norm
         )
+        hf_embedding_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "embedding_norm")
+            and module == model.model.embedding_norm
+        )
 
         # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm, hf_embedding_norm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 

@@ -40,6 +40,7 @@ struct Config {
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view PixelPositionIdsName = "pixel_position_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
 
@@ -127,8 +128,10 @@ struct Config {
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
 
-    // Qwen2.5-VL specific token IDs
+    // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
     int image_token_id{};
+    int audio_token_id{};
+    int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
 
@@ -237,6 +240,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
@@ -302,6 +306,10 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
+      // Hybrid SSM+Attention (LFM2) parameters
+      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
         int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
@@ -332,6 +340,7 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
         // RNNT decoder inputs
         std::string targets;
@@ -346,6 +355,7 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
 
         // RNNT decoder outputs
         std::string outputs;
