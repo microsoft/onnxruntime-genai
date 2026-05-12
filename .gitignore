@@ -31,6 +31,7 @@ examples/csharp/ModelChat/models
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
+!test/test_models/hf-internal-testing/tiny-qwen35-cuda/*.onnx
 !test/test_models/grammars/
 !test/test_models/qwen-vision-preprocessing/
 !test/test_models/qwen-vision-preprocessing/*.onnx
@@ -38,6 +39,7 @@ examples/csharp/ModelChat/models
 !test/test_models/qwen3-vl-vision-preprocessing/*.onnx
 !test/test_models/qwen35-hybrid-preprocessing/
 !test/test_models/qwen35-hybrid-preprocessing/*.onnx
+!test/test_models/mistral3-vision-preprocessing/
 
 .ipynb_checkpoints/
 /src/java/.gradle

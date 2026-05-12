@@ -380,23 +380,50 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
 }
 
 void DefaultPositionInputs::RewindMask(size_t index) {
-  if (state_.params_->use_graph_capture) {
-    throw std::runtime_error("PositionInputs::RewindMask - Static buffer is not supported for continuous decoding.");
-#if 0  // TODO: Fix implementation, cudaMemsetAsync of 1 is setting bytes of 1 vs int32's of 1
-    int past_length = static_cast<int>(index);
-    int max_length = static_cast<int>(state_.params_->search.max_length);
-    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                    0,
-                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * max_length,
-                    model_.cuda_stream_);
-    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                    1,
-                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * past_length,
-                    model_.cuda_stream_);
-#endif
+  if (ShouldUseStaticMaskHandling()) {
+    // Static mask layout: [batch_beam_size, max_length]
+    // Rewind to index: write 1s for [0, index), 0s for [index, max_length)
+    size_t max_len = static_cast<size_t>(state_.params_->search.max_length);
+    if (index > max_len) {
+      throw std::runtime_error("RewindMask: index exceeds max_length");
+    }
+    size_t batch_beam_size = static_cast<size_t>(attention_mask_shape_[0]);
+    auto byte_span = attention_mask_->GetByteSpan();
+    auto cpu_data = byte_span.CpuSpan();
+    if (type_ == Ort::TypeToTensorType<int32_t>) {
+      auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
+      for (size_t i = 0; i < batch_beam_size; i++) {
+        std::fill_n(data + i * max_len, index, static_cast<int32_t>(1));
+        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int32_t>(0));
+      }
+    } else {
+      auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
+      for (size_t i = 0; i < batch_beam_size; i++) {
+        std::fill_n(data + i * max_len, index, static_cast<int64_t>(1));
+        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int64_t>(0));
+      }
+    }
+    byte_span.CopyCpuToDevice();
+    return;
   }
+
+  // Dynamic mask: adjust shape so the next Update() creates the correct-sized tensor.
+  // For batch_beam_size == 1 (the only case RewindTo supports), the CPU UpdateAttentionMask
+  // fills the entire next mask with 1s, so no data fixup is needed - just the shape.
+  attention_mask_shape_[1] = static_cast<int64_t>(index);
 }
 
+// Returns true when the attention mask is a fixed-size [batch_beam_size, max_length] buffer
+// that must be updated in-place (write 1s/0s) rather than re-created per step.
+// Currently triggered by:
+//   - DML (always uses graph capture, see IsGraphCaptureEnabled in config.cpp)
+//   - WebGPU with enableGraphCapture=1 in provider options
+//   - NvTensorRtRtx with past-present shared buffers
+// Not yet using this path:
+//   - CUDA: graph capture is currently disabled in GenAI due to bugs
+//     (IsGraphCaptureEnabled throws for CUDA). Once re-enabled, RewindMask's
+//     static path will work for CUDA as well since it uses device-agnostic
+//     CpuSpan/CopyCpuToDevice.
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
          (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
@@ -422,16 +449,16 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
 
   if (has_posid_input_) {
     position_ids_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
-    if (position_ids_type_ != Ort::TypeToTensorType<int32_t>)
-      throw std::runtime_error("WindowedPositionInputs only supports int32_t position_ids");
+    if (position_ids_type_ != Ort::TypeToTensorType<int32_t> && position_ids_type_ != Ort::TypeToTensorType<int64_t>)
+      throw std::runtime_error("WindowedPositionInputs only supports int32_t or int64_t position_ids");
 
     position_ids_shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
   }
 
   if (has_mask_input_) {
     attention_mask_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
-    if (attention_mask_type_ != Ort::TypeToTensorType<int32_t>)
-      throw std::runtime_error("WindowedPositionInputs only supports int32_t attention_mask");
+    if (attention_mask_type_ != Ort::TypeToTensorType<int32_t> && attention_mask_type_ != Ort::TypeToTensorType<int64_t>)
+      throw std::runtime_error("WindowedPositionInputs only supports int32_t or int64_t attention_mask");
 
     attention_mask_shape_ = {1, model_.config_->model.context_length};
   }
@@ -465,14 +492,20 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // next_tokens -> [0, a, b, c, d, e]
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 0, position_ids_ -> [0, 0, 1]
-      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
-      for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
-        if (next_tokens.Span()[i] == model_.config_->model.pad_token_id) {
-          position_ids_data[i] = 0;
-        } else {
-          position_ids_data[i] = j++;
+      auto fill_first_window = [&](auto* position_ids_data) {
+        using T = std::remove_pointer_t<decltype(position_ids_data)>;
+        for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
+          if (next_tokens.Span()[i] == model_.config_->model.pad_token_id) {
+            position_ids_data[i] = T{0};
+          } else {
+            position_ids_data[i] = static_cast<T>(j++);
+          }
         }
-      }
+      };
+      if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_first_window(position_ids_->GetTensorMutableData<int64_t>());
+      else
+        fill_first_window(position_ids_->GetTensorMutableData<int32_t>());
     }
 
     if (has_mask_input_) {
@@ -482,17 +515,23 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // next_tokens -> [0, a, b, c, d, e]
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
-      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
-      std::fill_n(attention_mask_data, attention_mask_shape_[1] - window_size_, 0);
-      for (size_t i = 0; i < window_size_; i++) {
-        attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0 : 1;
-      }
-      for (size_t i = 0; i < window_size_; i++) {
-        if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == 1) {
-          attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
-          break;
+      auto fill_first_mask = [&](auto* attention_mask_data) {
+        using T = std::remove_pointer_t<decltype(attention_mask_data)>;
+        std::fill_n(attention_mask_data, attention_mask_shape_[1] - window_size_, T{0});
+        for (size_t i = 0; i < window_size_; i++) {
+          attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? T{0} : T{1};
         }
-      }
+        for (size_t i = 0; i < window_size_; i++) {
+          if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == T{1}) {
+            attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
+            break;
+          }
+        }
+      };
+      if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_first_mask(attention_mask_->GetTensorMutableData<int64_t>());
+      else
+        fill_first_mask(attention_mask_->GetTensorMutableData<int32_t>());
     }
   } else if (window_index_ < num_windows_) {
     if (has_posid_input_) {
@@ -501,9 +540,14 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 1, position_ids_ -> [2, 3, 4]
 
-      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
-      const auto last_position = position_ids_data[window_size_ - 1];
-      std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
+      auto fill_next_window = [&](auto* position_ids_data) {
+        const auto last_position = position_ids_data[window_size_ - 1];
+        std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
+      };
+      if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_next_window(position_ids_->GetTensorMutableData<int64_t>());
+      else
+        fill_next_window(position_ids_->GetTensorMutableData<int32_t>());
     }
 
     if (has_mask_input_) {
@@ -511,30 +555,51 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // next_tokens -> [0, a, b, c, d, e]
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 1, attention_mask_ -> ([0] * context_length - (2 * window_size_)) + [0, 1, 1, 1, 1, 1]
-      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
-      std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, 1);
-      attention_mask_backward_offset_ -= window_size_;
+      auto fill_next_mask = [&](auto* attention_mask_data) {
+        using T = std::remove_pointer_t<decltype(attention_mask_data)>;
+        std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, T{1});
+        attention_mask_backward_offset_ -= window_size_;
+      };
+      if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_next_mask(attention_mask_->GetTensorMutableData<int64_t>());
+      else
+        fill_next_mask(attention_mask_->GetTensorMutableData<int32_t>());
     }
   } else {
     // All prompt token chunks have been processed. Now we process the tokens generated by the model.
     if (has_posid_input_) {
       // next_tokens -> [f]
       // position_ids_ -> [5]
-      const auto last_position = position_ids_->GetTensorData<int32_t>()[position_ids_shape_[1] - 1];
-      if (position_ids_shape_[1] != 1) {
-        position_ids_shape_[1] = 1;
-        position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
-      }
-      position_ids_->GetTensorMutableData<int32_t>()[0] = last_position + 1;
+      auto fill_generated = [&](auto* data) {
+        using T = std::remove_pointer_t<decltype(data)>;
+        const auto last_position = data[position_ids_shape_[1] - 1];
+        if (position_ids_shape_[1] != 1) {
+          position_ids_shape_[1] = 1;
+          position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
+          data = position_ids_->GetTensorMutableData<T>();
+        }
+        data[0] = last_position + 1;
+      };
+      if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_generated(position_ids_->GetTensorMutableData<int64_t>());
+      else
+        fill_generated(position_ids_->GetTensorMutableData<int32_t>());
     }
 
     if (has_mask_input_) {
       // next_tokens -> [f]
       // attention_mask_ -> ([0] * context_length - (2 * window_size_) - 1) + [0, 1, 1, 1, 1, 1, 1]
-      attention_mask_->GetTensorMutableData<int32_t>()[attention_mask_backward_offset_] = 1;
-      if (attention_mask_backward_offset_ > 0) {
-        attention_mask_backward_offset_ -= 1;
-      }
+      auto fill_generated_mask = [&](auto* data) {
+        using T = std::remove_pointer_t<decltype(data)>;
+        data[attention_mask_backward_offset_] = T{1};
+        if (attention_mask_backward_offset_ > 0) {
+          attention_mask_backward_offset_ -= 1;
+        }
+      };
+      if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)
+        fill_generated_mask(attention_mask_->GetTensorMutableData<int64_t>());
+      else
+        fill_generated_mask(attention_mask_->GetTensorMutableData<int32_t>());
     }
   }
 

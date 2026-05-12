@@ -155,7 +155,7 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
   return text;
 }
 
-void StreamingTranscribe(const std::string& model_path, const std::string& audio_path) {
+void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, const std::string& use_vad_override = "") {
   auto [sample_rate, chunk_samples] = LoadConfig(model_path);
 
   std::cout << "Loading audio: " << audio_path << std::endl;
@@ -166,6 +166,23 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   auto config = OgaConfig::Create(model_path.c_str());
   auto model = OgaModel::Create(*config);
   auto processor = OgaStreamingProcessor::Create(*model);
+
+  // VAD is off by default. Use --use_vad true to enable (requires "vad" section in genai_config.json).
+  processor->SetOption("use_vad", "false");
+  if (use_vad_override == "true") {
+    try {
+      processor->SetOption("use_vad", "true");
+    } catch (const std::exception& e) {
+      std::cout << "  VAD: disabled (no VAD config in genai_config.json: " << e.what() << ")" << std::endl;
+    }
+  }
+  auto use_vad = std::string(processor->GetOption("use_vad"));
+  std::cout << "  Use VAD: " << use_vad << std::endl;
+
+  if (use_vad == "true") {
+    std::cout << "  VAD threshold: " << processor->GetOption("vad_threshold") << std::endl;
+  }
+
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
   auto params = OgaGeneratorParams::Create(*model);
@@ -177,14 +194,21 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto start = std::chrono::high_resolution_clock::now();
   std::string full_transcript;
+  int chunks_total = 0;
+  int chunks_processed = 0;
+  int chunks_skipped = 0;
 
   // Stream audio in chunks
   for (size_t i = 0; i < audio.size(); i += chunk_samples) {
     size_t remaining = std::min(static_cast<size_t>(chunk_samples), audio.size() - i);
     auto inputs = processor->Process(audio.data() + i, remaining);
+    chunks_total++;
     if (inputs) {
+      chunks_processed++;
       generator->SetInputs(*inputs);
       full_transcript += DecodeTokens(*generator, *tokenizer_stream);
+    } else {
+      chunks_skipped++;
     }
   }
 
@@ -205,6 +229,11 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   std::cout << "  " << full_transcript << std::endl;
   std::cout << std::string(60, '=') << std::endl;
   std::cout << "  Audio: " << duration << "s | Wall: " << wall_time << "s | RTF: " << (duration / wall_time) << "x" << std::endl;
+  if (use_vad == "true") {
+    double pct_saved = (chunks_total > 0) ? (static_cast<double>(chunks_skipped) / chunks_total * 100.0) : 0.0;
+    std::cout << "  VAD Metrics: " << chunks_total << " total chunks, " << chunks_processed << " processed, "
+              << chunks_skipped << " skipped (" << pct_saved << "% compute saved)" << std::endl;
+  }
 }
 
 int main(int argc, char* argv[]) {
@@ -215,12 +244,15 @@ int main(int argc, char* argv[]) {
 
   std::string model_path;
   std::string audio_file;
+  std::string use_vad;
 
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--model_path" && i + 1 < argc) {
       model_path = argv[++i];
     } else if (std::string(argv[i]) == "--audio_file" && i + 1 < argc) {
       audio_file = argv[++i];
+    } else if (std::string(argv[i]) == "--use_vad" && i + 1 < argc) {
+      use_vad = argv[++i];
     }
   }
 
@@ -230,7 +262,7 @@ int main(int argc, char* argv[]) {
   }
 
   try {
-    StreamingTranscribe(model_path, audio_file);
+    StreamingTranscribe(model_path, audio_file, use_vad);
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;

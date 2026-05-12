@@ -660,7 +660,22 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             }
             return pybind11::none();
           },
-          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.");
+          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
+      .def(
+          "set_option",
+          [](OgaStreamingProcessor& proc, const std::string& key, const std::string& value) {
+            proc.SetOption(key.c_str(), value.c_str());
+          },
+          pybind11::arg("key"),
+          pybind11::arg("value"),
+          "Set a processor option. Keys: 'use_vad', 'vad_threshold', 'silence_duration_ms', 'prefix_padding_ms'.")
+      .def(
+          "get_option",
+          [](OgaStreamingProcessor& proc, const std::string& key) {
+            return std::string(proc.GetOption(key.c_str()));
+          },
+          pybind11::arg("key"),
+          "Get a processor option value by key.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);

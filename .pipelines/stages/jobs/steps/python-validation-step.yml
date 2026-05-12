@@ -17,7 +17,7 @@ steps:
     displayName: "Log in to container registry"
 
   - powershell: |
-      $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+      $env:AZCOPY_MSI_CLIENT_ID = "f07143e5-63f7-4a7a-af08-c0418cc3f7fe";
       azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
     displayName: 'Download CUDA $(cuda_version)'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -38,9 +38,6 @@ steps:
       elseif ("$(ep)" -eq "webgpu") {
         python -m pip install -r test/python/webgpu/torch/requirements.txt
         python -m pip install -r test/python/webgpu/ort/requirements.txt
-      }
-      elseif ("$(arch)" -eq "arm64") {
-        python -m pip install onnxruntime-qnn
       }
       else {
         python -m pip install -r test/python/cpu/torch/requirements.txt
@@ -71,7 +68,6 @@ steps:
         --rm \
         --volume $(Build.Repository.LocalPath):/ort_genai_src \
         --volume $(Build.BinariesDirectory):/ort_genai_binary \
-        -e HF_TOKEN=$HF_TOKEN \
         -w /ort_genai_src/ $(cuda_docker_image) \
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
