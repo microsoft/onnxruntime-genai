@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import onnx_ir as ir
@@ -57,7 +57,9 @@ class Model:
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
             else config.rope_scaling["original_max_position_embeddings"]
-            if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings")
+            if hasattr(config, "rope_scaling")
+            and isinstance(config.rope_scaling, Mapping)
+            and "original_max_position_embeddings" in config.rope_scaling
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -233,6 +235,10 @@ class Model:
             if hasattr(config, "rope_theta")
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
+            else config.rope_scaling["rope_theta"]
+            if hasattr(config, "rope_scaling")
+            and isinstance(config.rope_scaling, Mapping)
+            and "rope_theta" in config.rope_scaling
             else 10000
         )
         self.rope_attrs = {
@@ -381,7 +387,7 @@ class Model:
             if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None
             else False,
         )
-        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
+        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"}
 
         # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
         if self.shared_embeddings and (self.exclude_embeds or self.exclude_lm_head):
@@ -453,13 +459,17 @@ class Model:
             }
 
         elif "beta_fast" in config.rope_scaling:
-            # For models that use YARN (e.g. OpenAI OS-minier)
+            # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
             factor = config.rope_scaling["factor"] if "factor" in config.rope_scaling else 0
             beta_slow = config.rope_scaling["beta_slow"] if "beta_slow" in config.rope_scaling else 0
             beta_fast = config.rope_scaling["beta_fast"] if "beta_fast" in config.rope_scaling else 0
 
             self.rope_attrs["mscale_policy"] = config.rope_scaling["rope_type"]
-            self.rope_attrs["mscale"] = self.make_mscale(config.rope_scaling["factor"])
+            self.rope_attrs["mscale"] = self.make_mscale(
+                config.rope_scaling["factor"],
+                config_mscale=config.rope_scaling.get("mscale", 0),
+                config_mscale_all_dim=config.rope_scaling.get("mscale_all_dim", 0),
+            )
             self.rope_attrs["rescale_inv_freq"] = {
                 "factor": factor,
                 "ntk_alpha": beta_slow,
@@ -657,9 +667,15 @@ class Model:
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        self.update_genai_config(genai_config)
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def update_genai_config(self, genai_config):
+        """Override in subclasses to modify genai_config before it is written to disk."""
+        pass
 
     def make_key_value_cache_names(self, layer_id):
         """
@@ -699,7 +715,7 @@ class Model:
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
+        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
             if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
@@ -718,6 +734,17 @@ class Model:
                     customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+
+            if quant_method == "k_quant_linear" and hasattr(self, "layer_types"):
+                # Promote linear attention projections and their MLPs to INT8.
+                # Linear attention recurrence accumulates quantization errors across
+                # the full sequence (no softmax normalization).
+                for i, lt in enumerate(self.layer_types):
+                    if lt == "linear_attention":
+                        for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                            customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                        for proj in ("gate_proj", "up_proj", "down_proj"):
+                            customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
             customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
@@ -951,6 +978,11 @@ class Model:
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
+    def make_and(self, name, inputs, shape):
+        output = f"{name}/output_0"
+        self.make_node("And", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
+
     def make_isinf(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
@@ -989,6 +1021,14 @@ class Model:
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_rsqrt(self, name, inputs, dtype, shape):
+        """Reciprocal square root: 1 / sqrt(x)."""
+        sqrt_name = f"{name}/Sqrt"
+        self.make_sqrt(sqrt_name, inputs, dtype, shape)
+        output = f"{name}/output_0"
+        self.make_node("Reciprocal", inputs=[f"{sqrt_name}/output_0"], outputs=[output], name=f"{name}/Reciprocal")
         self.make_value(output, dtype, shape=shape)
 
     def make_cast(self, name, root_input, dtype, shape):
@@ -1049,6 +1089,26 @@ class Model:
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_cos(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Cos", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_sin(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Sin", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_softplus(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Softplus", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_reduce_l2(self, name, inputs, dtype, shape, keepdims=False):
+        output = f"{name}/output_0"
+        self.make_node("ReduceL2", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_conv(self, name, inputs, dtype, shape, **kwargs):
@@ -1289,6 +1349,9 @@ class Model:
         return matmul
     
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
+        if not hasattr(q_matmul, "qweight"):
+            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
@@ -1654,7 +1717,23 @@ class Model:
             return 1.0
         return 0.1 * np.log(mscale) + 1.0
 
-    def make_mscale(self, mscale):
+    def make_mscale(self, mscale, config_mscale=0, config_mscale_all_dim=0):
+        """Compute the magnitude scaling factor for rotary embeddings.
+
+        When both ``config_mscale`` and ``config_mscale_all_dim`` are provided
+        and > 0, uses the full HuggingFace formula:
+            get_mscale(s, ms) = 0.1 * ms * log(s) + 1.0  (if s > 1, else 1.0)
+            attention_factor = get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)
+        When only ``config_mscale`` > 0, it is used directly as the cos/sin
+        multiplier (e.g. Ministral-3-3B sets ``mscale=1.0`` to disable scaling).
+        Otherwise, compute from the scaling factor using the policy-specific formula.
+        """
+        if config_mscale > 0 and config_mscale_all_dim > 0:
+            def _get_mscale(scale, ms):
+                return (0.1 * ms * np.log(scale) + 1.0) if scale > 1 else 1.0
+            return float(_get_mscale(mscale, config_mscale) / _get_mscale(mscale, config_mscale_all_dim))
+        if config_mscale > 0:
+            return float(config_mscale)
         if self.rope_attrs["mscale_policy"] in {"su", "longrope"}:
             return self.make_mscale_su(mscale)
         elif self.rope_attrs["mscale_policy"] == "yarn":
@@ -1706,8 +1785,8 @@ class Model:
         )
         assert 0 < low < high < d_half - 1
 
-        interpolation = 1.0 / (self.rope_attrs["rescale_inv_freq"]["factor"] * inv_freq)
-        extrapolation = 1.0 / inv_freq
+        interpolation = inv_freq / self.rope_attrs["rescale_inv_freq"]["factor"]
+        extrapolation = inv_freq
 
         ramp = (torch.arange(d_half, dtype=torch.float32, device=inv_freq.device) - low) / (high - low)
         mask = 1 - ramp.clamp(0, 1)
@@ -2725,6 +2804,54 @@ class Model:
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
+
+    def make_causal_conv_with_state(self, name, **kwargs):
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        output = f"{name}/output_0"
+        present_conv = kwargs["present_conv_state"]
+        outputs = [output, present_conv]
+        self.make_node(
+            "CausalConvWithState",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            ndim=kwargs.get("ndim", 1),
+            activation=kwargs.get("activation", "silu"),
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
+
+    def make_linear_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["past_recurrent_state"],
+            kwargs["decay"],
+            kwargs["beta"],
+        ]
+        output = f"{name}/output_0"
+        present_recurrent = kwargs["present_recurrent_state"]
+        outputs = [output, present_recurrent]
+        self.make_node(
+            "LinearAttention",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            q_num_heads=kwargs["q_num_heads"],
+            kv_num_heads=kwargs["kv_num_heads"],
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
@@ -3969,6 +4096,7 @@ class Model:
         # hf_final_layernorm:             for Phi-2
         # hf_transformer_final_layernorm: for ChatGLM-3
         # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
+        # hf_embedding_norm:              for LFM-2
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = (
             hasattr(model, "model")
@@ -3987,11 +4115,16 @@ class Model:
             and hasattr(model.model.language_model, "norm")
             and module == model.model.language_model.norm
         )
+        hf_embedding_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "embedding_norm")
+            and module == model.model.embedding_norm
+        )
 
         # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm, hf_embedding_norm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 

@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Qwen VL Vision pipeline implementation with optional QNN EP for vision attention stage.
+// Qwen VL Vision pipeline implementation.
 
 #include "qwen_vl_vision.h"
 #include "../generators.h"
@@ -20,11 +20,9 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        int64_t spatial_merge_size,
                                        int64_t patch_size,
                                        int64_t window_size,
-                                       bool use_qnn_attn,
-                                       const std::string& qnn_backend_path)
+                                       const OrtSessionOptions* vision_attn_session_options)
     // Match declaration order to avoid MSVC C5038 warning-as-error
-    : use_qnn_attn_(use_qnn_attn),
-      qnn_backend_path_(qnn_backend_path),
+    : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
       window_size_(window_size > 0
@@ -63,47 +61,7 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     }
   }
 
-  if (use_qnn_attn_) {
-    // Ensure QNN provider is available
-    auto so = OrtSessionOptions::Create();
-
-    so->SetIntraOpNumThreads(2).SetInterOpNumThreads(1);
-
-    // QNN provider options
-    std::unordered_map<std::string, std::string> qnn_options = {
-        {"backend_path", qnn_backend_path_},
-        {"htp_performance_mode", "burst"},
-        {"htp_graph_finalization_optimization_mode", "3"},
-        {"soc_model", "60"}};
-
-    auto providers = Ort::GetAvailableProviders();
-    bool has_qnn = std::find(providers.begin(), providers.end(), std::string("QNNExecutionProvider")) != providers.end();
-    if (has_qnn) {
-      const char* keys[] = {"backend_path", "htp_performance_mode", "htp_graph_finalization_optimization_mode", "soc_model"};
-      const char* values[] = {qnn_backend_path_.c_str(), "burst", "3", "60"};
-      so->AppendExecutionProvider("QNNExecutionProvider", keys, values, 4);
-    } else {
-      // Use registered QNN EP - use GenAI wrapper APIs
-      auto ep_devices = GetOrtEnv().GetEpDevices();
-      std::vector<const OrtEpDevice*> qnn_devices;
-      qnn_devices.reserve(ep_devices.size());
-
-      for (const auto* device : ep_devices) {
-        if (device->Name() == "QNNExecutionProvider") {
-          qnn_devices.push_back(device);
-        }
-      }
-
-      if (qnn_devices.empty()) {
-        throw std::runtime_error("QNNExecutionProvider requested for vision attention but not registered.");
-      }
-      so->AppendExecutionProvider_V2(GetOrtEnv(), qnn_devices, qnn_options);
-    }
-
-    vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), so.get());
-  } else {
-    vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), nullptr);
-  }
+  vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), vision_attn_session_options_);
 }
 
 std::unique_ptr<OrtValue> QwenVisionPipeline::CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const {
@@ -136,15 +94,25 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 
   size_t pixel_count = 1;
   for (auto d : pixel_shape) pixel_count *= static_cast<size_t>(d);
-  auto pixel_tensor = CreateTensor(pixel_data, pixel_count, pixel_shape);
+
+  // Match pixel_values rank to what patch_embed expects
+  auto pe_input_info = patch_embed_session_->GetInputTypeInfo(0);
+  auto pe_expected_rank = pe_input_info->GetTensorTypeAndShapeInfo().GetShape().size();
+  std::vector<int64_t> actual_shape = pixel_shape;
+  while (actual_shape.size() < pe_expected_rank) {
+    actual_shape.insert(actual_shape.begin(), 1);
+  }
+  while (actual_shape.size() > pe_expected_rank && actual_shape[0] == 1) {
+    actual_shape.erase(actual_shape.begin());
+  }
+
+  auto pixel_tensor = CreateTensor(pixel_data, pixel_count, actual_shape);
 
   auto pe_in_name = patch_embed_session_->GetInputName(0);
   const char* pe_input_names[] = {pe_in_name.c_str()};
   OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
-  // pixel_values layout is [num_patches, channels] — dim[0] is the patch count.
-  // (dim[1] is channels per patch, e.g. 1176 for Qwen2.5-VL, 1536 for Qwen3-VL.)
-  const int64_t num_patches = pixel_shape[0];
+  const int64_t num_patches = actual_shape.size() >= 2 ? actual_shape[actual_shape.size() - 2] : actual_shape[0];
   if (hidden_dim_ <= 0) {
     throw std::runtime_error(
         "Vision pipeline: patch_embed hidden dimension unknown - check patch_embed model output shape");

@@ -332,6 +332,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "past_conv_names") {
+      v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -363,6 +365,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
       v_.rnn_states = JSON::Get<std::string_view>(value);
+    } else if (name == "present_conv_names") {
+      v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -592,6 +596,8 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv_cache_size") {
+      v_.conv_cache_size = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -628,6 +634,10 @@ struct Decoder_Element : JSON::Element {
     if (name == "pipeline") {
       return pipeline_;
     }
+    if (name == "layer_types") {
+      layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
+      return *layer_types_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -640,6 +650,7 @@ struct Decoder_Element : JSON::Element {
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
+  std::unique_ptr<StringArray_Element> layer_types_;
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -648,6 +659,8 @@ struct VisionInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "pixel_values") {
       v_.pixel_values = JSON::Get<std::string_view>(value);
+    } else if (name == "pixel_position_ids") {
+      v_.pixel_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "image_grid_thw") {
@@ -964,6 +977,43 @@ struct Joiner_Element : JSON::Element {
   JoinerOutputs_Element outputs_{v_.outputs};
 };
 
+struct VAD_Element : JSON::Element {
+  explicit VAD_Element(Config::Model::VAD& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "threshold") {
+      v_.threshold = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "silence_duration_ms") {
+      v_.silence_duration_ms = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "prefix_padding_ms") {
+      v_.prefix_padding_ms = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::VAD& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -1059,6 +1109,10 @@ struct Model_Element : JSON::Element {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "image_token_id") {
       v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "audio_token_id") {
+      v_.audio_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "boa_token_id") {
+      v_.boa_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "video_token_id") {
       v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "vision_start_token_id") {
@@ -1121,6 +1175,9 @@ struct Model_Element : JSON::Element {
     if (name == "joiner") {
       return joiner_;
     }
+    if (name == "vad") {
+      return vad_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1133,6 +1190,7 @@ struct Model_Element : JSON::Element {
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
+  VAD_Element vad_{v_.vad};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {
@@ -1204,6 +1262,8 @@ struct Search_Element : JSON::Element {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
+    } else if (name == "blank_penalty") {
+      v_.blank_penalty = static_cast<float>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1336,12 +1396,12 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
                                                });
     if (provider_options != session_options.provider_options.end()) {
       if (provider_options->name == "cuda") {
-        // Graph Capture is currently broken for CUDA
         for (const auto& value : provider_options->options) {
           if (value.first == "enable_cuda_graph" && value.second == "1") {
-            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+            return true;
           }
         }
+        return false;
       } else if (provider_options->name == "DML") {
         return true;
       } else if (provider_options->name == "WebGPU") {
