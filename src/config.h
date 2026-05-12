@@ -406,6 +406,7 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    bool kv_cache_fixed_to_max_length{};  // AMD RyzenAI only: kv-cache is allocated as a fixed buffer sized to max_length from genai_config.json. When set, max_length cannot be overridden via SetSearchOption.
   } search;
 
   struct Engine {
