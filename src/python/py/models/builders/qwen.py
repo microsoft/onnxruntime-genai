@@ -1425,7 +1425,7 @@ class Qwen35TextModel(Model):
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
-        pos_ids_input = self.input_names["position_ids"]
+        pos_ids_input = self._pos_ids_3d
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
