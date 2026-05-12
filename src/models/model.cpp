@@ -76,6 +76,19 @@ class DirGuard {
   }
 };
 
+bool IsTextOnlyQwen3_5(const Config& config) {
+  // Qwen3.5 text-only exports can fold token embeddings into the decoder
+  // graph. In that layout, genai_config.json intentionally omits embedding
+  // and vision component models; routing through MultiModalLanguageModel would
+  // pass the model directory itself to ORT for those empty filenames, causing
+  // ORT to look for a model-package manifest.json. Keep model.type as qwen3_5
+  // so the decoder-only path still uses Qwen's 3D mRoPE position IDs.
+  return config.model.type == "qwen3_5" &&
+         !config.model.decoder.filename.empty() &&
+         config.model.embedding.filename.empty() &&
+         config.model.vision.filename.empty();
+}
+
 }  // namespace
 
 State::State(const GeneratorParams& params, const Model& model)
@@ -824,6 +837,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "lfm2")
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
+  if (IsTextOnlyQwen3_5(*config))
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))

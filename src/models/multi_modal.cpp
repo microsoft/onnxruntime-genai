@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include <algorithm>
 #include <cstring>
 #include <numeric>
 
@@ -653,7 +654,7 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
   // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds.
   // Use a decoder-only SessionInfo to avoid false positives: the combined session_info_
   // includes embedding session inputs (which always has input_ids), causing this check
-  // to incorrectly fire for models like mistral3 whose decoder has no input_ids input.
+  // to incorrectly fire for models like mistral3/Qwen3.5 whose decoder has no input_ids input.
   {
     SessionInfo decoder_only_info;
     decoder_only_info.Add(*model_.decoder_session_);
