@@ -173,7 +173,7 @@ struct ParakeetTdtState : State {
   // Logits buffer reused across calls (size = vocab_size).
   int logits_size_{};
   std::vector<float> logits_buffer_;
-  DeviceSpan<float> logits_device_;
+  DeviceSpan<float> logits_device_buffer_;
 
   // Per-step joiner inputs, allocated lazily on the first decoding step and
   // reused across every subsequent step to avoid per-frame allocator churn.

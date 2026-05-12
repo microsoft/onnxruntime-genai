@@ -124,13 +124,15 @@ ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const Generato
 }
 
 void ParakeetTdtState::InitializeDecoderState() {
-  auto& inference_device = *model_.p_device_inputs_;
+  auto& cpu_allocator = model_.allocator_cpu_;
 
   auto state_shape = std::array<int64_t, 3>{cfg_.decoder_lstm_layers, 1, cfg_.decoder_lstm_dim};
-  dec_.state_h = OrtValue::CreateTensor(inference_device.GetAllocator(), state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  ByteWrapTensor(inference_device, *dec_.state_h).Zero();
-  dec_.state_c = OrtValue::CreateTensor(inference_device.GetAllocator(), state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  ByteWrapTensor(inference_device, *dec_.state_c).Zero();
+  dec_.state_h = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(dec_.state_h->GetTensorMutableData<float>(), 0,
+              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
+  dec_.state_c = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(dec_.state_c->GetTensorMutableData<float>(), 0,
+              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
 
   // Prime the decoder with the blank token to obtain the initial decoder_output.
   StepDecoder(static_cast<int32_t>(cfg_.blank_id));
@@ -208,29 +210,20 @@ void ParakeetTdtState::EncodeNextChunk() {
   }
 
   auto& cpu_allocator = model_.allocator_cpu_;
-  auto& cpu_device = *GetDeviceInterface(DeviceType::CPU);
-  auto& inference_device = *model_.p_device_inputs_;
 
   // Slice the cached, globally-normalized mel ([num_mels, T_full]) into a
-  // contiguous [1, num_mels, num_mel_frames] tensor staged on CPU, then copy
-  // it onto the inference device for the encoder.
+  // contiguous [1, num_mels, num_mel_frames] CPU tensor. CUDA EP will copy
+  // to device internally if it needs to.
   auto signal_shape = std::array<int64_t, 3>{1, num_mels, num_mel_frames};
-  auto signal_cpu = OrtValue::CreateTensor(cpu_allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  float* dst = signal_cpu->GetTensorMutableData<float>();
+  auto processed_signal = OrtValue::CreateTensor(cpu_allocator, signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  float* dst = processed_signal->GetTensorMutableData<float>();
   for (int b = 0; b < num_mels; ++b) {
     const float* src = full_mel_.data() + static_cast<size_t>(b) * total_mel_frames_ + win_left_mel;
     std::memcpy(dst + static_cast<size_t>(b) * num_mel_frames, src,
                 static_cast<size_t>(num_mel_frames) * sizeof(float));
   }
-  auto processed_signal = OrtValue::CreateTensor(inference_device.GetAllocator(), signal_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  ByteWrapTensor(inference_device, *processed_signal).CopyFrom(ByteWrapTensor(cpu_device, *signal_cpu));
-  // Ensure the H2D copy of the mel slice has completed on the inference
-  // device's stream before the encoder session runs. Without this sync the
-  // encoder can read uninitialised device memory in a hot eval loop, surfacing
-  // as `cudaErrorInvalidValue` at the first Cast/Conv node of pre_encode.
-  inference_device.Synchronize();
 
-  // Tiny scalar input, keep on CPU; ORT bridges to the session's EP.
+  // Tiny scalar input, on CPU.
   auto len_shape = std::array<int64_t, 1>{1};
   auto signal_length = OrtValue::CreateTensor(cpu_allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   *signal_length->GetTensorMutableData<int64_t>() = num_mel_frames;
@@ -240,22 +233,43 @@ void ParakeetTdtState::EncodeNextChunk() {
   const char* enc_output_names[] = {cfg_.enc_out_encoded.c_str(), cfg_.enc_out_length.c_str()};
 
   auto run_options = OrtRunOptions::Create();
+
   auto enc_outputs = model_.session_encoder_->Run(
       run_options.get(),
       enc_input_names, enc_inputs, 2,
       enc_output_names, 2);
 
-  // Encoder output is on the inference device. Mirror it to CPU once so the
-  // per-frame slicing in EmitNextToken stays cheap (no per-frame D2H copies).
+  // Encoder output: read directly. Tensors that ORT placed on CUDA we'd need
+  // to copy back via the session's own allocator; with our CPU-resident inputs
+  // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
+  // just in case.
   auto enc_shape = enc_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
   current_enc_time_ = enc_shape[2];
-  auto enc_span = WrapTensor<float>(inference_device, *enc_outputs[0]);
-  auto enc_cpu = enc_span.CopyDeviceToCpu();
-  current_encoder_cpu_.assign(enc_cpu.begin(), enc_cpu.end());
+  size_t enc_elems = 1;
+  for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
 
-  // enc_outputs[1] (lengths) is also on device; copy the single int64 to CPU.
-  auto enc_len_span = WrapTensor<int64_t>(inference_device, *enc_outputs[1]);
-  int64_t enc_total = enc_len_span.CopyDeviceToCpu()[0];
+  auto& enc_mi = enc_outputs[0]->GetTensorMemoryInfo();
+  bool enc_on_cpu = (enc_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
+  if (enc_on_cpu) {
+    const float* src = enc_outputs[0]->GetTensorData<float>();
+    current_encoder_cpu_.assign(src, src + enc_elems);
+  } else {
+    auto& inference_device = *model_.p_device_inputs_;
+    auto enc_span = WrapTensor<float>(inference_device, *enc_outputs[0]);
+    auto enc_cpu = enc_span.CopyDeviceToCpu();
+    current_encoder_cpu_.assign(enc_cpu.begin(), enc_cpu.end());
+  }
+
+  auto& enc_len_mi = enc_outputs[1]->GetTensorMemoryInfo();
+  bool enc_len_on_cpu = (enc_len_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
+  int64_t enc_total;
+  if (enc_len_on_cpu) {
+    enc_total = enc_outputs[1]->GetTensorData<int64_t>()[0];
+  } else {
+    auto& inference_device = *model_.p_device_inputs_;
+    auto enc_len_span = WrapTensor<int64_t>(inference_device, *enc_outputs[1]);
+    enc_total = enc_len_span.CopyDeviceToCpu()[0];
+  }
 
   // Map chunk start/end (sample-space) to encoder-frame indices within this
   // window. encoder_frame_index = mel_frame_index / subsampling_factor.
@@ -274,8 +288,6 @@ void ParakeetTdtState::EncodeNextChunk() {
 
 int32_t ParakeetTdtState::EmitNextToken() {
   auto& cpu_allocator = model_.allocator_cpu_;
-  auto& cpu_device = *GetDeviceInterface(DeviceType::CPU);
-  auto& inference_device = *model_.p_device_inputs_;
   auto run_options = OrtRunOptions::Create();
 
   const int num_durations = static_cast<int>(cfg_.tdt_durations.size());
@@ -285,40 +297,33 @@ int32_t ParakeetTdtState::EmitNextToken() {
   const int64_t dec_dim = cfg_.decoder_lstm_dim;
 
   while (true) {
-    // Advance through chunks until the current encoder window has frames
-    // left, or we've consumed the entire utterance.
     while (current_t_ >= current_end_frame_) {
       if (finished_) return static_cast<int32_t>(blank_id);  // eos
       EncodeNextChunk();
     }
 
     // Build encoder_frame [1, 1, hidden_dim] on CPU from the mirrored
-    // encoder output, then copy it onto the inference device for the joiner.
-    // Tensors are allocated once on the first iteration and reused thereafter
-    // to avoid per-frame allocator churn.
+    // encoder output. Allocated once, reused.
     const float* enc_data = current_encoder_cpu_.data();
     const int64_t enc_time = current_enc_time_;
     auto frame_shape = std::array<int64_t, 3>{1, 1, hidden_dim};
-    if (!encoder_frame_cpu_) {
-      encoder_frame_cpu_ = OrtValue::CreateTensor(cpu_allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-      encoder_frame_ = OrtValue::CreateTensor(inference_device.GetAllocator(), frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    if (!encoder_frame_) {
+      encoder_frame_ = OrtValue::CreateTensor(cpu_allocator, frame_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
-    float* frame_data = encoder_frame_cpu_->GetTensorMutableData<float>();
+    float* enc_frame_data = encoder_frame_->GetTensorMutableData<float>();
     for (int64_t d = 0; d < hidden_dim; ++d) {
-      frame_data[d] = enc_data[d * enc_time + current_t_];
+      enc_frame_data[d] = enc_data[d * enc_time + current_t_];
     }
-    ByteWrapTensor(inference_device, *encoder_frame_).CopyFrom(ByteWrapTensor(cpu_device, *encoder_frame_cpu_));
 
-    // Decoder output is [1, dec_dim, 1] on the inference device; reshape to
-    // [1, 1, dec_dim] for the joiner via a same-device byte copy (the
-    // underlying memory layout is identical).
+    // Decoder output is [1, dec_dim, 1]; reshape to [1, 1, dec_dim] for
+    // the joiner via a plain memcpy (layout is identical for contiguous data).
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
     if (!decoder_frame_) {
-      decoder_frame_ = OrtValue::CreateTensor(inference_device.GetAllocator(), dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      decoder_frame_ = OrtValue::CreateTensor(cpu_allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
-    ByteWrapTensor(inference_device, *decoder_frame_).CopyFrom(ByteWrapTensor(inference_device, *dec_.decoder_output));
-    // Ensure both joiner inputs are visible to the joiner session's stream.
-    inference_device.Synchronize();
+    const float* dec_src = dec_.decoder_output->GetTensorData<float>();
+    std::memcpy(decoder_frame_->GetTensorMutableData<float>(), dec_src,
+                static_cast<size_t>(dec_dim) * sizeof(float));
 
     const char* join_input_names[] = {cfg_.join_in_encoder.c_str(), cfg_.join_in_decoder.c_str()};
     OrtValue* join_inputs[] = {encoder_frame_.get(), decoder_frame_.get()};
@@ -329,10 +334,18 @@ int32_t ParakeetTdtState::EmitNextToken() {
         join_input_names, join_inputs, 2,
         join_output_names, 1);
 
-    // Joiner logits land on the inference device; copy to CPU for argmax.
-    auto logits_span = WrapTensor<float>(inference_device, *join_outputs[0]);
-    auto logits_cpu = logits_span.CopyDeviceToCpu();
-    const float* logits_data = logits_cpu.data();
+    const float* logits_data;
+    std::vector<float> logits_buf;
+    auto& mi_jout = join_outputs[0]->GetTensorMemoryInfo();
+    if (mi_jout.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+      logits_data = join_outputs[0]->GetTensorData<float>();
+    } else {
+      auto& inference_device = *model_.p_device_inputs_;
+      auto logits_span = WrapTensor<float>(inference_device, *join_outputs[0]);
+      auto logits_cpu = logits_span.CopyDeviceToCpu();
+      logits_buf.assign(logits_cpu.begin(), logits_cpu.end());
+      logits_data = logits_buf.data();
+    }
 
     // Joiner output layout: [token_logits (vocab_size) | duration_logits].
     // Token argmax covers all vocab indices; blank_id is one of them.
@@ -453,16 +466,21 @@ DeviceSpan<float> ParakeetTdtState::Run(int /*total_length*/,
   int32_t next_token = EmitNextToken();
 
   // Encode the emitted token id as a one-hot logits row that the standard
-  // search will pick up via argmax.
+  // search will pick up via argmax. The search runs on the model's inference
+  // device, so we must allocate the logits buffer on that device.
+  auto& inference_device = *model_.p_device_inputs_;
+  if (logits_device_buffer_.empty()) {
+    logits_device_buffer_ = inference_device.Allocate<float>(static_cast<size_t>(logits_size_));
+  }
+  // Build the one-hot on CPU, then copy onto the inference device.
   std::fill(logits_buffer_.begin(), logits_buffer_.end(), 0.0f);
   if (next_token >= 0 && next_token < logits_size_) {
     logits_buffer_[static_cast<size_t>(next_token)] = 100.0f;
   }
-
-  // Wrap the CPU buffer into a DeviceSpan<float> the search can consume.
-  auto* cpu_device = GetDeviceInterface(DeviceType::CPU);
-  logits_device_ = cpu_device->WrapMemory(std::span<float>{logits_buffer_.data(), logits_buffer_.size()});
-  return logits_device_;
+  auto cpu_span = logits_device_buffer_.CpuSpan();
+  std::copy(logits_buffer_.begin(), logits_buffer_.end(), cpu_span.begin());
+  logits_device_buffer_.CopyCpuToDevice();
+  return logits_device_buffer_;
 }
 
 }  // namespace Generators
