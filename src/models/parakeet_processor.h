@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include "model.h"
 #include "ortx_cpp_helper.h"
 #include "processor.h"
 
