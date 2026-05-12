@@ -4,6 +4,10 @@ ONNX Runtime GenAI supports running models on Qualcomm Snapdragon NPUs via the Q
 Provider (EP). This enables hardware-accelerated LLM inference on Snapdragon-based devices on
 Windows ARM64 and Linux ARM64.
 
+ONNX models containing an EPContext node with `ep_context_type: "dlc"` are routed directly
+through the Genie API, enabling optimized LLM inference on the NPU. Models in this format are
+produced by the [olive-recipes](https://github.com/microsoft/olive-recipes) pipeline.
+
 ## Prerequisites
 
 **Packages**
