@@ -1343,9 +1343,11 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
   if (name == "max_length" && search.kv_cache_fixed_to_max_length) {
     const int new_value = static_cast<int>(value);
     if (new_value != search.max_length) {
-      Log("warning", "Ignoring max_length=" + std::to_string(new_value) +
-                         " override: kv_cache_fixed_to_max_length is enabled in genai_config.json (kv-cache pinned to max_length=" +
-                         std::to_string(search.max_length) + ").");
+      if (g_log.enabled && g_log.warning) {
+        Log("warning", "Ignoring max_length=" + std::to_string(new_value) +
+                           " override: kv_cache_fixed_to_max_length is enabled in genai_config.json (kv-cache pinned to max_length=" +
+                           std::to_string(search.max_length) + ").");
+      }
     }
     return;
   }
