@@ -4,19 +4,30 @@ namespace Generators {
 
 void softmax(std::span<float> values) {
   float max = *std::max_element(values.data(), values.data() + values.size());
-  std::transform(values.begin(), values.end(), values.begin(), [max](float v) { return std::exp(v - max); });
-  float sum = std::accumulate(values.begin(), values.end(), 0.0f);
-  std::transform(values.begin(), values.end(), values.begin(), [sum](float v) { return v / sum; });
+  // Fused: compute exp and accumulate sum in a single pass
+  float sum = 0.0f;
+  for (auto& v : values) {
+    v = std::exp(v - max);
+    sum += v;
+  }
+  if (sum > 0.0f) {
+    float inv_sum = 1.0f / sum;
+    for (auto& v : values)
+      v *= inv_sum;
+  }
 }
 
 void log_softmax(std::span<float> values) {
   float max = *std::max_element(values.data(), values.data() + values.size());
-  std::vector<float> scaled(values.begin(), values.end());
-  std::transform(values.begin(), values.end(), scaled.begin(), [max](float v) { return std::exp(v - max); });
-
-  float sum = std::accumulate(scaled.begin(), scaled.end(), 0.0f);
-  float log_max = std::log(sum);
-  std::transform(values.begin(), values.end(), values.begin(), [max, log_max](float v) { return v - max - log_max; });
+  // Fused: scale and compute sum of exponentials in a single pass
+  float sum = 0.0f;
+  for (auto& v : values) {
+    v -= max;
+    sum += std::exp(v);
+  }
+  float log_sum = std::log(sum);
+  for (auto& v : values)
+    v -= log_sum;
 }
 
 }  // namespace Generators

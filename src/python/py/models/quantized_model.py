@@ -211,6 +211,7 @@ class QuantizedModel:
         self._quant_attrs = quant_attrs
         self._load_quant_config(quant_attrs)  # codeql[py/init-calls-subclass]
 
+        lm_head_tensors = {}
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
                 weights = load_file(os.path.join(input_path, weight_file))
@@ -227,26 +228,29 @@ class QuantizedModel:
                         self.final_norm.weight = tensor
                     elif name == "model.norm.bias" or name == "transformer.encoder.final_layernorm.bias":
                         self.final_norm.bias = tensor
-                    elif name == "lm_head.weight" or name == "transformer.output_layer.weight":
-                        self.lm_head.weight = tensor
-                    elif name == "lm_head.bias" or name == "transformer.output_layer.bias":
-                        self.lm_head.bias = tensor
+                    elif name in {
+                        "lm_head.weight",
+                        "lm_head.bias",
+                        "lm_head.qweight",
+                        "lm_head.qzeros",
+                        "lm_head.weight_zero_point",
+                        "lm_head.scales",
+                        "lm_head.weight_scale",
+                        "lm_head.g_idx",
+                        "transformer.output_layer.weight",
+                        "transformer.output_layer.bias",
+                        "transformer.output_layer.qweight",
+                        "transformer.output_layer.qzeros",
+                        "transformer.output_layer.weight_zero_point",
+                        "transformer.output_layer.scales",
+                        "transformer.output_layer.weight_scale",
+                        "transformer.output_layer.g_idx",
+                    }:
+                        lm_head_tensors[name] = (tensor, local_bits, local_group_size)
                     elif name == "transformer.rotary_pos_emb.inv_freq":
                         # transformer.rotary_pos_emb.inv_freq in ChatGLM3.
                         # Skip rotary embedding weights since they can be re-calculated when looping through the model
                         continue
-                    elif name == "lm_head.qweight" or name == "transformer.output_layer.qweight":
-                        self._initialize_quantized_lm_head(local_bits, local_group_size)
-                        self.lm_head.qweight = tensor
-                    elif name in {"lm_head.qzeros", "lm_head.weight_zero_point", "transformer.output_layer.qzeros", "transformer.output_layer.weight_zero_point"}:
-                        self._initialize_quantized_lm_head(local_bits, local_group_size)
-                        self.lm_head.qzeros = tensor
-                    elif name in {"lm_head.scales", "lm_head.weight_scale", "transformer.output_layer.scales", "transformer.output_layer.weight_scale"}:
-                        self._initialize_quantized_lm_head(local_bits, local_group_size)
-                        self.lm_head.scales = tensor
-                    elif name == "lm_head.g_idx" or name == "transformer.output_layer.g_idx":
-                        self._initialize_quantized_lm_head(local_bits, local_group_size)
-                        self.lm_head.g_idx = tensor
                     else:
                         if name.startswith("transformer.encoder"):
                             # Chatglm3, e.g., transformer.encoder.layers.0.input_layernorm.weight
@@ -657,6 +661,9 @@ class QuantizedModel:
                                     setattr(submodule, q_attr, q_value)
                             setattr(submodule, tensor_name.split(".")[-1], tensor_value)
 
+        # Process collected lm_head tensors in defined order to avoid ordering issues
+        self._assign_lm_head_tensors(lm_head_tensors)
+
         # Set LM head weights + biases if not already set
         if isinstance(self.lm_head, TensorModule) and self.lm_head.weight is None:
             # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
@@ -670,6 +677,61 @@ class QuantizedModel:
 
         # Set properties of each layer based on quantization type
         self.set_properties()
+
+    # Canonical name mapping for lm_head tensors (transformer.output_layer.* -> lm_head.*)
+    _LM_HEAD_NAME_MAP = {  # noqa: RUF012
+        "transformer.output_layer.weight": "lm_head.weight",
+        "transformer.output_layer.bias": "lm_head.bias",
+        "transformer.output_layer.qweight": "lm_head.qweight",
+        "transformer.output_layer.qzeros": "lm_head.qzeros",
+        "transformer.output_layer.weight_zero_point": "lm_head.weight_zero_point",
+        "transformer.output_layer.scales": "lm_head.scales",
+        "transformer.output_layer.weight_scale": "lm_head.weight_scale",
+        "transformer.output_layer.g_idx": "lm_head.g_idx",
+    }
+
+    def _assign_lm_head_tensors(self, lm_head_tensors):
+        """Assign collected lm_head tensors in a defined order so that weight/bias
+        are always processed before quantization parameters (scales, qzeros, etc.),
+        regardless of safetensors dict iteration order."""
+        # Normalize names to canonical lm_head.* form
+        normalized = {}
+        for name, value in lm_head_tensors.items():
+            canonical = self._LM_HEAD_NAME_MAP.get(name, name)
+            normalized[canonical] = value
+
+        # Process weight and bias first, then quantization tensors
+        ordered_keys = [
+            "lm_head.weight",
+            "lm_head.bias",
+            "lm_head.qweight",
+            "lm_head.qzeros",
+            "lm_head.weight_zero_point",
+            "lm_head.scales",
+            "lm_head.weight_scale",
+            "lm_head.g_idx",
+        ]
+
+        for key in ordered_keys:
+            if key not in normalized:
+                continue
+            tensor, local_bits, local_group_size = normalized[key]
+            if key == "lm_head.weight":
+                self.lm_head.weight = tensor
+            elif key == "lm_head.bias":
+                self.lm_head.bias = tensor
+            elif key == "lm_head.qweight":
+                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.lm_head.qweight = tensor
+            elif key in {"lm_head.qzeros", "lm_head.weight_zero_point"}:
+                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.lm_head.qzeros = tensor
+            elif key in {"lm_head.scales", "lm_head.weight_scale"}:
+                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.lm_head.scales = tensor
+            elif key == "lm_head.g_idx":
+                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.lm_head.g_idx = tensor
 
     def _load_quant_config(self, quant_attrs):
         self.global_group_size = quant_attrs["config"]["group_size"]

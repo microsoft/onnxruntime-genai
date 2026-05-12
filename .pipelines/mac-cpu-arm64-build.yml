@@ -1,0 +1,247 @@
+trigger:
+  branches:
+    include:
+      - main
+      - rel-*
+  paths:
+    exclude:
+      - docs/**
+      - README.md
+      - CONTRIBUTING.md
+      - BUILD.md
+
+pr:
+  branches:
+    include:
+      - main
+      - rel-*
+  paths:
+    exclude:
+      - docs/**
+      - README.md
+      - CONTRIBUTING.md
+      - BUILD.md
+
+variables:
+  ORT_NIGHTLY_REST_API: 'https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1'
+  ORT_NIGHTLY_SOURCE: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
+  ORT_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime'
+
+jobs:
+- job: mac_cpu_arm64_build
+  displayName: 'MacOS CPU ARM64 Build'
+  timeoutInMinutes: 180
+  pool:
+    name: AcesShared
+    os: macOS
+    demands:
+      - ImageOverride -equals ACES_VM_SharedPool_Sequoia
+
+  workspace:
+    clean: all
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  - task: UsePythonVersion@0
+    displayName: 'Use Python 3.12'
+    inputs:
+      versionSpec: '3.12'
+      addToPath: true
+      architecture: 'arm64'
+
+  - bash: |
+      set -e -x
+      brew update --quiet
+      brew install --quiet cmake gradle ccache jq
+      # Temurin is distributed as a Homebrew cask, not a formula.
+      brew install --quiet --cask temurin@17
+      # Resolve JAVA_HOME for the freshly installed JDK 17.
+      JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+      echo "JAVA_HOME=$JAVA_HOME"
+      echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+      echo "##vso[task.prependpath]$JAVA_HOME/bin"
+      "$JAVA_HOME/bin/java" -version
+      cmake --version
+      gradle --version | head -n 5
+      ccache --version | head -n 1
+    displayName: 'Install build tools (Java 17 Temurin, cmake, gradle, ccache, jq)'
+
+  - task: UseDotNet@2
+    displayName: 'Setup .NET 8.0'
+    inputs:
+      packageType: 'sdk'
+      version: '8.0.x'
+
+  - task: UseDotNet@2
+    displayName: 'Setup .NET 9.0'
+    inputs:
+      packageType: 'sdk'
+      version: '9.0.x'
+
+  - bash: |
+      set -e -x
+      dotnet --version
+      dotnet --list-sdks
+    displayName: 'Verify .NET SDKs'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      ORT_NIGHTLY_VERSION=$(curl -s "$(ORT_NIGHTLY_REST_API)" | jq -r '.value[0].versions[0].normalizedVersion')
+      echo "$ORT_NIGHTLY_VERSION"
+      echo "##vso[task.setvariable variable=ORT_NIGHTLY_VERSION]$ORT_NIGHTLY_VERSION"
+    displayName: 'Get the latest OnnxRuntime nightly version'
+
+  - bash: |
+      set -e -x
+      dotnet new console
+      dotnet add package $(ORT_PACKAGE_NAME) --version $(ORT_NIGHTLY_VERSION) --source $(ORT_NIGHTLY_SOURCE) --package-directory .
+    displayName: 'Download OnnxRuntime nightly'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      mkdir -p ort/lib
+      mv $(ORT_PACKAGE_NAME)/$(ORT_NIGHTLY_VERSION)/build/native/include ort/
+      mv $(ORT_PACKAGE_NAME)/$(ORT_NIGHTLY_VERSION)/runtimes/osx-arm64/native/* ort/lib/
+    displayName: 'Extract OnnxRuntime library and header files'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
+      source "$HOME/.cargo/env"
+      rustup install 1.86.0
+      rustup override set 1.86.0
+      rustup component add rust-src
+      rustup show active-toolchain
+    displayName: 'Install Rust toolchain'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - task: Cache@2
+    displayName: 'Restore ccache'
+    inputs:
+      key: 'ccache | macos-arm64 | "$(Agent.OS)" | **/CMakePresets.json, **/CMakeLists.txt'
+      restoreKeys: |
+        ccache | macos-arm64 | "$(Agent.OS)"
+        ccache | macos-arm64
+      path: '$(Build.SourcesDirectory)/.ccache'
+
+  - bash: |
+      set -e -x
+      ccache --set-config cache_dir=$(Build.SourcesDirectory)/.ccache
+      ccache --set-config max_size=2G
+      ccache --zero-stats
+    displayName: 'Configure ccache'
+
+  - bash: |
+      set -e -x
+      export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
+      export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+      export CCACHE_DIR=$(Build.SourcesDirectory)/.ccache
+      cmake --preset macos_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    displayName: 'Configure CMake'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
+      export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+      export CCACHE_DIR=$(Build.SourcesDirectory)/.ccache
+      cmake --build --preset macos_arm64_cpu_release --parallel
+      cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
+      ccache --show-stats
+    displayName: 'Build with CMake'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    continueOnError: false
+
+  - bash: |
+      set -e -x
+      cmake -S examples/c -B examples/c/build \
+        -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+        -DORT_INCLUDE_DIR=$(Build.SourcesDirectory)/build/cpu/osx-arm64/_deps/ortlib-src/build/native/include \
+        -DORT_LIB_DIR=$(Build.SourcesDirectory)/build/cpu/osx-arm64/_deps/ortlib-src/runtimes/osx-arm64/native \
+        -DOGA_INCLUDE_DIR=$(Build.SourcesDirectory)/src \
+        -DOGA_LIB_DIR=$(Build.SourcesDirectory)/build/cpu/osx-arm64
+      cmake --build examples/c/build --config Release
+    displayName: 'Build the C examples'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      python3 -m venv genai-macos-venv
+      source genai-macos-venv/bin/activate
+      python3 -m pip install -r test/python/requirements.txt
+      python3 -m pip install -r test/python/macos/torch/requirements.txt
+      python3 -m pip install -r test/python/macos/ort/requirements.txt
+      python3 -m pip install build/cpu/osx-arm64/wheel/onnxruntime_genai*.whl --no-deps
+    displayName: 'Install the Python wheel and test dependencies'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      ctest --test-dir build/cpu/osx-arm64/src/java --build-config Release --verbose --timeout 10800
+    displayName: 'Run the Java tests'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      rm -rf ort
+    displayName: 'Remove the ort lib and header files'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64
+      ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64/wheel
+    displayName: 'Verify build artifacts'
+    condition: always()
+    continueOnError: true
+
+  - bash: |
+      set -e -x
+      source genai-macos-venv/bin/activate
+      export ORTGENAI_LOG_ORT_LIB=1
+      python3 -m pip install requests
+      python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+    displayName: 'Run the Python tests'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      export ORTGENAI_LOG_ORT_LIB=1
+      cd test/csharp
+      dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal
+    displayName: 'Build the C# API and run the C# tests'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      export ORTGENAI_LOG_ORT_LIB=1
+      cd examples/csharp/ModelChat
+      dotnet build -c Release
+      cd ../ModelMM
+      dotnet build -c Release
+    displayName: 'Build the C# examples'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      export ORTGENAI_LOG_ORT_LIB=1
+      python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+      ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+    displayName: 'Test the C# LLM example with tool calling'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      set -e -x
+      export ORTGENAI_LOG_ORT_LIB=1
+      export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$(Build.SourcesDirectory)/build/cpu/osx-arm64
+      ./build/cpu/osx-arm64/unit_tests
+    displayName: 'Run unit tests'
+    workingDirectory: '$(Build.SourcesDirectory)'
