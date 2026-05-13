@@ -5,8 +5,12 @@ Provider (EP). This enables hardware-accelerated LLM inference on Snapdragon-bas
 Windows ARM64 and Linux ARM64.
 
 ONNX models containing an EPContext node with `ep_context_type: "dlc"` are routed directly
-through the Genie API, enabling optimized LLM inference on the NPU. Models in this format are
-produced by the [olive-recipes](https://github.com/microsoft/olive-recipes) pipeline.
+through the Genie API — Qualcomm's optimized LLM inference runtime, part of the QAIRT SDK,
+which provides accelerated token generation on the Snapdragon NPU. This routing is transparent
+to OGA users; no additional configuration is required. Models in this format are produced by
+newer QAIRT-targeting [olive-recipes](https://github.com/microsoft/olive-recipes) pipelines.
+Older QNN-targeting recipes produce models without the DLC EPContext type and do not use the
+Genie pathway.
 
 ## Prerequisites
 
@@ -33,6 +37,8 @@ import onnxruntime_genai as og
 
 # Register the QNN EP plugin before loading the model.
 # The library is included in the onnxruntime-qnn package.
+# Note: registration uses the full EP name "QNNExecutionProvider"; provider options
+# (Config.set_provider_option / genai_config.json) use the short name "QNN".
 og.register_execution_provider_library(
     "QNNExecutionProvider",
     "/path/to/onnxruntime_providers_qnn.dll"  # or libonnxruntime_providers_qnn.so on Linux
@@ -46,6 +52,7 @@ og.register_execution_provider_library(
 #   model = og.Model(config)
 model = og.Model("/path/to/model")
 tokenizer = og.Tokenizer(model)
+tokenizer_stream = tokenizer.create_stream()
 
 params = og.GeneratorParams(model)
 params.set_search_options(max_length=200)
@@ -54,7 +61,7 @@ generator.append_tokens(tokenizer.encode("What color is the sky?"))
 
 while not generator.is_done():
     generator.generate_next_token()
-    print(tokenizer.decode(generator.get_next_tokens()[0]), end="", flush=True)
+    print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end="", flush=True)
 print()
 ```
 
