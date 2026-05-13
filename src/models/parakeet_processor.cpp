@@ -6,7 +6,7 @@
 #include "parakeet_processor.h"
 #include "runner.hpp"
 #include "c_api_utils.hpp"
-#include "speech_features.hpp"
+#include "nemo_speech_features.hpp"
 #include "nemo_mel_spectrogram.h"
 
 namespace Generators {
