@@ -22,7 +22,7 @@ def main(args):
     model = og.Model(config)
 
     tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    stream = tokenizer.create_stream()
 
     search_options = {
         name: getattr(args, name)
@@ -57,13 +57,13 @@ def main(args):
 
         # NOTE: since get_next_tokens returns only the last token, we'll need to use get_sequence instead
         # new_tokens = generator.get_next_tokens()[0]
-        # print(tokenizer_stream.decode(new_tokens), end='', flush=True)
+        # print(stream.decode(new_tokens), end='', flush=True)
 
         seq = generator.get_sequence(0)
         new_tokens = seq[prev_len:]
         seq_str = ""
         for token in new_tokens:
-            seq_str += tokenizer_stream.decode(token)
+            seq_str += stream.decode(token)
         print(seq_str, end="", flush=True)
         prev_len = len(seq)
         full_seq_str += seq_str

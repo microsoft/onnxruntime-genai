@@ -133,8 +133,6 @@ def _parse_args():
         "--use_trt_rtx", action="store_true", help="Whether to use TensorRT-RTX. Default is to not use TensorRT-RTX."
     )
 
-    parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
-
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     parser.add_argument(
@@ -534,7 +532,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_TRT_RTX={'ON' if args.use_trt_rtx else 'OFF'}",
-        f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -682,7 +679,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -729,7 +726,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -775,16 +772,18 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     samples_to_build = [
         "-DMODEL_QA=ON",
         "-DMODEL_CHAT=ON",
-        "-DMODEL_VISION=ON",
-        "-DPHI4-MM=ON",
+        "-DMODEL_MM=ON",
         "-DWHISPER=ON",
+        "-DNEMOTRON_SPEECH=ON"
     ]
 
-    include_dir = REPO_ROOT / "src"
-    lib_dir = args.build_dir
+    ort_include_dir = REPO_ROOT / "ort" / "include"
+    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    oga_include_dir = REPO_ROOT / "src"
+    oga_lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
-        lib_dir = lib_dir / args.config
+        oga_lib_dir = oga_lib_dir / args.config
 
     cmake_command = (
         [
@@ -798,8 +797,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ]
         + samples_to_build
         + [
-            "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
-            "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
+            "-DORT_LIB_DIR=" + str(ort_lib_dir),
+            "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
+            "-DOGA_LIB_DIR=" + str(oga_lib_dir),
         ]
     )
 

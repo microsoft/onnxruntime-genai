@@ -20,9 +20,8 @@ static constexpr auto ep_name_ = "RyzenAILightExecutionProvider";
 #if defined(_WIN32)
 static constexpr auto ep_filename_ = "onnxruntime_providers_ryzenai.dll";
 #else
-static constexpr auto ep_filename_ = "onnxruntime_providers_ryzenai.so";
+static constexpr auto ep_filename_ = "libonnxruntime_providers_ryzenai.so";
 #endif
-static constexpr auto func_custom_ops_ = "RyzenAI_RegisterCustomOps";
 static constexpr auto func_shutdown_ = "RyzenAI_Shutdown";
 
 static Ort::Allocator* ort_allocator_{};
@@ -62,6 +61,7 @@ struct Memory : DeviceBuffer {
 
 struct Interface : RyzenAIInterface {
   Interface() {
+    ep_path_ = ep_filename_;
     // If already loaded then nothing to do
 #if defined(_WIN32)
     if (GetModuleHandleA(ep_filename_))
@@ -161,7 +161,7 @@ struct Interface : RyzenAIInterface {
                                                                            ep_keys.data(), ep_values.data(), ep_keys.size()));
     }
 
-    Ort::ThrowOnError(Ort::api->RegisterCustomOpsUsingFunction(&session_options, func_custom_ops_));
+    Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(&session_options, ep_path_.native().c_str()));
   }
 
   DeviceType GetType() const override { return DeviceType::RyzenAI; }
@@ -208,10 +208,6 @@ RyzenAIInterface* GetRyzenAIInterface() {
   });
 
   return RyzenAI::interface_.get();
-}
-
-bool IsRyzenAIPrunedModel(const Model& model) {
-  return model.p_device_->GetType() == DeviceType::RyzenAI && model.IsPruned();
 }
 
 }  // namespace Generators

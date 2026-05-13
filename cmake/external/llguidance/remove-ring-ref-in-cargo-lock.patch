@@ -1,0 +1,49 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index c23c372..8637592 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,23 +1,23 @@
+ [workspace]
+ members = [
+-    "python_ext",
++    # "python_ext",
+     "parser",
+-    "sample_parser",
+-    "json_stats",
++    # "sample_parser",
++    # "json_stats",
+     "toktrie",
+-    "toktrie_hf_tokenizers",
+-    "toktrie_hf_downloader",
+-    "toktrie_tiktoken",
++    # "toktrie_hf_tokenizers",
++    # "toktrie_hf_downloader",
++    # "toktrie_tiktoken",
+ ]
+ # just exclude python_ext since it doesn't build without maturin
+ default-members = [
+     "parser",
+-    "sample_parser",
+-    "json_stats",
++    # "sample_parser",
++    # "json_stats",
+     "toktrie",
+-    "toktrie_hf_tokenizers",
+-    "toktrie_hf_downloader",
+-    "toktrie_tiktoken",
++    # "toktrie_hf_tokenizers",
++    # "toktrie_hf_downloader",
++    # "toktrie_tiktoken",
+ ]
+ resolver = "2"
+ 
+@@ -41,6 +41,6 @@ opt-level = 3
+ [workspace.dependencies]
+ toktrie = { path = "toktrie" }
+ llguidance = { path = "parser" }
+-toktrie_hf_tokenizers = { path = "toktrie_hf_tokenizers" }
+-toktrie_hf_downloader = { path = "toktrie_hf_downloader" }
+-toktrie_tiktoken = { path = "toktrie_tiktoken" }
++# toktrie_hf_tokenizers = { path = "toktrie_hf_tokenizers" }
++# toktrie_hf_downloader = { path = "toktrie_hf_downloader" }
++# toktrie_tiktoken = { path = "toktrie_tiktoken" }

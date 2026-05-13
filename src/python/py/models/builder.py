@@ -5,6 +5,8 @@
 #
 # Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
+# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
 """
@@ -25,6 +27,38 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
+)
+from builders import (
+    ChatGLMModel,
+    ErnieModel,
+    Gemma2Model,
+    Gemma3Model,
+    GemmaModel,
+    GPTOSSModel,
+    GraniteModel,
+    InternLM2Model,
+    LFM2Model,
+    LlamaModel,
+    Mistral3TextModel,
+    MistralModel,
+    Model,
+    NemotronModel,
+    OLMoModel,
+    Phi3MiniLongRoPEModel,
+    Phi3MiniModel,
+    Phi3MoELongRoPEModel,
+    Phi3SmallLongRoPEModel,
+    Phi3SmallModel,
+    Phi3VModel,
+    Phi4MMModel,
+    PhiModel,
+    Qwen3Model,
+    Qwen3VLTextModel,
+    Qwen25VLTextModel,
+    Qwen35TextModel,
+    QwenModel,
+    SmolLM3Model,
+    WhisperModel,
 )
 from tqdm import tqdm
 from transformers import (
@@ -4647,9 +4681,20 @@ def check_extra_options(kv_pairs, execution_provider):
     Check key-value pairs and set values correctly
     """
     bools = [
-        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "enable_webgpu_graph",
-        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
-        "use_fused_attn",
+        "int4_is_symmetric",
+        "exclude_embeds",
+        "exclude_lm_head",
+        "include_hidden_states",
+        "enable_cuda_graph",
+        "enable_webgpu_graph",
+        "use_8bits_moe",
+        "use_qdq",
+        "use_webgpu_fp32",
+        "use_cuda_bf16",
+        "shared_embeddings",
+        "hf_remote",
+        "disable_qkv_fusion",
+        "prune_lm_head",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -4667,10 +4712,7 @@ def check_extra_options(kv_pairs, execution_provider):
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
 
     if "int4_nodes_to_exclude" in kv_pairs:
-        nodes_to_exclude = []
-        for node in kv_pairs["int4_nodes_to_exclude"].split(","):
-            nodes_to_exclude.append(node)
-        kv_pairs["int4_nodes_to_exclude"] = nodes_to_exclude
+        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -4718,7 +4760,7 @@ def parse_hf_token(hf_token):
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     int4_cpu = precision == "int4" and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider == "cuda" and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
     if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
         # FP32 precision
@@ -4778,7 +4820,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         config.hidden_act = "swiglu"
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
-    elif config.architectures[0] == "Ernie4_5_ForCausalLM":
+    elif config.architectures[0] == "Ernie4_5ForCausalLM":
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -4804,10 +4846,23 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "InternLM2ForCausalLM":
+        onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2ForCausalLM":
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        if hasattr(config, "quantization_config"):
+            delattr(config, "quantization_config")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
@@ -4838,54 +4893,32 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+        text_config = config.text_config
+        # Promote text_config attributes onto the top-level config so that
+        # the Model base class can read them (hidden_size, num_attention_heads, etc.)
+        for key in vars(text_config):
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
-        # Qwen3-VL: extract text_config and export text decoder only.
-        # The vision encoder is exported separately via --export_vision_only.
-        # Import Qwen3VLTextModel from custom directory.
-        import sys as _sys
-        _custom_dir = os.path.join(os.path.dirname(__file__), "custom")
-        if _custom_dir not in _sys.path:
-            _sys.path.insert(0, _custom_dir)
-        from custom.qwen3_text import Qwen3VLTextModel
         text_config = config.text_config
-        # Promote text_config attributes onto the top-level config so that
-        # the Model base class can read them (hidden_size, num_attention_heads, etc.)
-        for key in vars(text_config):
+        for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        # Ensure architectures is preserved for model_type detection
-        config.architectures = ["Qwen3VLForConditionalGeneration"]
-        print("WARNING: Qwen3-VL: exporting text decoder only.")
-        print("WARNING: Use --export_vision_only to export the vision encoder separately.")
-        print("WARNING: Setting exclude_embeds=true by default (embeddings come from vision encoder).")
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        onnx_model.model_type = "qwen3_vl"
-    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        # Qwen3.5-VL: hybrid SSM+Attention text decoder.
-        # 24 linear_attention (GatedDeltaNet SSM) + 8 full_attention (GQA) layers.
-        # Import Qwen3_5VLTextModel from custom directory.
-        import sys as _sys
-        _custom_dir = os.path.join(os.path.dirname(__file__), "custom")
-        if _custom_dir not in _sys.path:
-            _sys.path.insert(0, _custom_dir)
-        from custom.qwen3_5_text import Qwen3_5VLTextModel
-        text_config = config.text_config
-        # Promote text_config attributes onto the top-level config so that
-        # the Model base class can read them (hidden_size, num_attention_heads, etc.)
-        for key in vars(text_config):
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
-        # Ensure architectures is preserved for model_type detection
-        config.architectures = ["Qwen3_5ForConditionalGeneration"]
-        print("WARNING: Qwen3.5-VL: exporting text decoder only (hybrid SSM+Attention).")
-        print("WARNING: Use --export_vision_only to export the vision encoder separately.")
-        print("WARNING: Setting exclude_embeds=true by default (embeddings come from vision encoder).")
-        extra_options["exclude_embeds"] = True
-        onnx_model = Qwen3_5VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        onnx_model.model_type = "qwen3_5_vl"
+    elif config.architectures[0] == "SmolLM3ForCausalLM":
+        onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "WhisperForConditionalGeneration":
+        onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MobileLLMForCausalLM":
@@ -5000,8 +5033,10 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization.
+                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
+                qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
+                    Default is 128 for trt-rtx, 32 for others. Supported EPs: cpu, webgpu, trt-rtx.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -5011,16 +5046,22 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
+                    rtn = RTN algorithm for int4 quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                int4_tied_embeddings = Enable weight sharing for quantization. Default is false.
-                    Use this option when you want to share the weights in the embedding and unembedding.
+                    k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
+                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
+                    Use this option to share weights and reduce model size by eliminating duplicate weights.
+                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.
+                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
-                    The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
@@ -5055,6 +5096,9 @@ def get_args():
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
+                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
+                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
             """),
     )
 
@@ -5079,6 +5123,7 @@ def get_args():
         exit(0)
 
     print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
     return args
 
 if __name__ == '__main__':

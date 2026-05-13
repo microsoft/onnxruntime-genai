@@ -13,6 +13,7 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -74,6 +75,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
+  // Query the params to get the value set for a param
+  double GetSearchNumber(std::string_view name) const;
+  bool GetSearchBool(std::string_view name) const;
+
   int max_batch_size{0};
   bool use_graph_capture{};
   bool use_multi_profile{};
@@ -95,6 +100,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone();
+  size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
@@ -124,6 +130,17 @@ struct Generator : LeakChecked<Generator> {
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength
   Action last_action_{standard};
+
+  // Pre-computed per-token decisions: avoid repeated checks each token
+  bool is_nemotron_speech_model_{};
+  int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
+  enum class SamplingMethod { kGreedy,
+                              kTopK,
+                              kTopP,
+                              kTopKTopP };
+  SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  void InitializeSamplingMethod(const GeneratorParams& params);
+  void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
 struct OrtGlobals {
@@ -136,6 +153,14 @@ struct OrtGlobals {
     std::unique_ptr<OrtSession> session_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
+
+  // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
+  // Destroyed before env_ to ensure proper cleanup order
+  struct SessionCache {
+    std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
+    std::mutex mutex_;
+  };
+  SessionCache graph_session_cache_;
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;

@@ -31,7 +31,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     } else {
       std::cout << "Loading audios..." << std::endl;
       for (const auto& audio_path : audio_paths) {
-        if (!FileExists(audio_path.c_str())) {
+        std::filesystem::path p(audio_path);
+        if (!std::filesystem::exists(p)) {
           throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
         }
       }
@@ -57,11 +58,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetInputs(*inputs);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
 
     for (size_t i = 0; i < static_cast<size_t>(num_beams * batch_size); ++i) {
@@ -72,8 +70,7 @@ void CXX_API(const char* model_path, int32_t num_beams) {
       std::cout << processor->Decode(tokens, num_tokens) << std::endl;
     }
 
-    for (int i = 0; i < 3; ++i)
-      std::cout << std::endl;
+    std::cout << "\n\n\n";
   }
 }
 
@@ -114,7 +111,8 @@ void C_API(const char* model_path, int32_t num_beams) {
     } else {
       std::cout << "Loading audios..." << std::endl;
       for (const auto& audio_path : audio_paths) {
-        if (!FileExists(audio_path.c_str())) {
+        std::filesystem::path p(audio_path);
+        if (!std::filesystem::exists(p)) {
           throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
         }
         std::vector<const char*> audio_paths_c;
@@ -164,8 +162,8 @@ void C_API(const char* model_path, int32_t num_beams) {
       std::cout << str << std::endl;
     }
 
-    for (int i = 0; i < 3; ++i)
-      std::cout << std::endl;
+    std::cout << "\n\n"
+              << std::endl;
 
     OgaDestroyGenerator(generator);
     OgaDestroyGeneratorParams(params);
