@@ -35,6 +35,115 @@ from transformers import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Vision Encoder Export — builder.py ONNX IR flow
+# ---------------------------------------------------------------------------
+# The vision encoder is built through the same ONNX IR flow as the text
+# decoder (using make_* methods), NOT via torch.onnx.export.
+# Implementation lives in src/python/py/models/custom/
+# ---------------------------------------------------------------------------
+
+def create_vision_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+    """
+    Export a VLM vision encoder to ONNX using torch.onnx.export (dynamo=False).
+
+    Dispatches to the appropriate VisionEncoderModel subclass based on the
+    model architecture detected from config.json.
+
+    Supported architectures:
+        Qwen3VLForConditionalGeneration  → Qwen3VLVisionModel  (Qwen3-VL)
+        Qwen3_5ForConditionalGeneration  → Qwen3VLVisionModel  (Qwen3.5-VL)
+        Any arch with vision_config      → Qwen3VLVisionModel  (generic fallback)
+
+    ONNX Interface
+    --------------
+    Inputs:
+        pixel_values   : float32  [total_patches, feat_dim]
+        image_grid_thw : int64    [num_images, 3]
+    Output:
+        image_features : float32/float16  [merged_patches, out_hidden_size]
+
+    Key export settings:
+        do_constant_folding=False : keeps image_grid_thw as a live ONNX input
+        dynamo=False              : uses legacy TorchScript exporter (avoids
+                                    data-dependent shape errors from torch.linspace)
+
+    Args:
+        model_name: HuggingFace model name (used when input_path is empty)
+        input_path: local path to model directory
+        output_dir: directory to save the ONNX model
+        precision: "fp16", "fp32", or "bf16"
+        execution_provider: "cpu", "cuda", etc.
+        cache_dir: cache directory for HF downloads
+        **extra_options: additional options passed to the vision model
+    """
+    import sys as _sys
+    # Add custom models directory to path so we can import from it
+    _custom_dir = os.path.join(os.path.dirname(__file__), "custom")
+    if _custom_dir not in _sys.path:
+        _sys.path.insert(0, _custom_dir)
+
+    from custom.qwen_vision import Qwen3VLVisionModel
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Determine model path
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    hf_name = input_path if os.path.isdir(input_path) else model_name
+    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+    hf_remote = extra_options.get("hf_remote", True)
+
+    # Load config to detect architecture
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+
+    # Set io_dtype based on precision
+    io_dtype = set_io_dtype(precision, execution_provider, extra_options)
+
+    # Dispatch to appropriate vision model class
+    arch = config.architectures[0] if config.architectures else ""
+
+    # All Qwen VL variants use the same Qwen3VLVisionModel exporter
+    _qwen_vl_archs = {
+        "Qwen3VLForConditionalGeneration",   # Qwen3-VL
+        "Qwen3_5ForConditionalGeneration",   # Qwen3.5-VL
+        "Qwen2VLForConditionalGeneration",   # Qwen2-VL (same vision encoder)
+    }
+
+    if arch in _qwen_vl_archs or hasattr(config, "vision_config"):
+        vcfg = config.vision_config
+        # Pass model path and token to extra_options for weight loading
+        extra_options["model_name_or_path"] = hf_name
+        extra_options["hf_token"] = hf_token
+        vision_model = Qwen3VLVisionModel(vcfg, io_dtype, cache_dir, extra_options)
+        print(f"Building vision encoder for {arch}")
+        print(f"  depth={vcfg.depth}, hidden={vcfg.hidden_size}, heads={vcfg.num_heads}")
+        patch_size = vcfg.patch_size if not isinstance(vcfg.patch_size, (list, tuple)) else vcfg.patch_size[0]
+        temporal_patch_size = vcfg.temporal_patch_size if not isinstance(vcfg.temporal_patch_size, (list, tuple)) else vcfg.temporal_patch_size[0]
+        in_channels = getattr(vcfg, "in_channels", 3)  # default 3 (RGB) for models that omit this field
+        feat_dim = in_channels * temporal_patch_size * patch_size * patch_size
+        print(f"  feat_dim = {in_channels} * {temporal_patch_size} * {patch_size}^2 = {feat_dim}")
+        print(f"  out_hidden_size = {vcfg.out_hidden_size}")
+    else:
+        raise NotImplementedError(
+            f"Vision encoder export not supported for architecture: {arch}\n"
+            f"Supported: {', '.join(sorted(_qwen_vl_archs))}, or any model with vision_config"
+        )
+
+    # Export the vision encoder
+    vision_model.make_vision_model(input_path if os.path.isdir(input_path) else hf_name)
+
+    # Save the ONNX model
+    vision_model.save_model(output_dir)
+
+    print(f"\nVision encoder exported successfully to {output_dir}")
+    print(f"  ONNX inputs:  pixel_values [N, feat_dim], image_grid_thw [B, 3]")
+    print(f"  ONNX output:  image_features [M, {vcfg.out_hidden_size}]")
+
+
+##########
+
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
@@ -307,7 +416,14 @@ class Model:
             self.output_names = ["hidden_states"] + self.output_names
 
     def make_rope_init(self, config):
-        if "short_factor" in config.rope_scaling:
+        if "mrope_section" in config.rope_scaling:
+            # For models that use MRoPE (e.g. Qwen2.5-VL, Qwen3-VL)
+            self.rope_attrs["mrope"] = {
+                "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
+                "interleaved": config.rope_scaling.get("mrope_interleaved", False),  # Whether MRoPE is interleaved
+            }
+
+        elif "short_factor" in config.rope_scaling:
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
             self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
             short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
@@ -687,8 +803,17 @@ class Model:
             outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
-        # Make constant ops for 0, 1, 2, 3, etc.
+        # Make constants for 0, 1, 2, 3, etc. as ONNX initializers (not Constant op nodes).
+        # Using initializers avoids creating extra graph nodes that appear as "layers" in
+        # ONNX viewers. The value is stored as a graph initializer instead.
         # Format of name is "/model/constants/{dtype}/{num}"
+
+        # Guard against duplicate registration (make_node checks node_names for the
+        # constant_nodes path, but make_constant is called directly from make_node
+        # using the constants path — track both to prevent double-registration).
+        node_name = name.replace("constants", "constant_nodes")
+        if node_name in self.node_names:
+            return
 
         path = name.split("/")
         onnx_dtype = ir.DataType[path[-2]]
@@ -696,9 +821,12 @@ class Model:
         assert isinstance(num, (int, float, list, tuple)), f"Invalid constant value: {num}"
         tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
 
-        node_name = name.replace("constants", "constant_nodes")
-        self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
-        self.make_value(name, onnx_dtype, shape=[])
+        # Register as initializer instead of Constant op node
+        value = self.make_value(name, onnx_dtype, shape=ir.Shape(tensor.shape))
+        value.const_value = tensor
+        self.model.graph.register_initializer(value)
+        # Mark as "created" so make_node doesn't try to create it again
+        self.node_names.add(node_name)
 
     def make_gather(self, name, inputs, dtype, shape, axis):
         output = f"{name}/output_0"
@@ -4521,6 +4649,7 @@ def check_extra_options(kv_pairs, execution_provider):
     bools = [
         "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "enable_webgpu_graph",
         "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
+        "use_fused_attn",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -4711,6 +4840,52 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        # Qwen3-VL: extract text_config and export text decoder only.
+        # The vision encoder is exported separately via --export_vision_only.
+        # Import Qwen3VLTextModel from custom directory.
+        import sys as _sys
+        _custom_dir = os.path.join(os.path.dirname(__file__), "custom")
+        if _custom_dir not in _sys.path:
+            _sys.path.insert(0, _custom_dir)
+        from custom.qwen3_text import Qwen3VLTextModel
+        text_config = config.text_config
+        # Promote text_config attributes onto the top-level config so that
+        # the Model base class can read them (hidden_size, num_attention_heads, etc.)
+        for key in vars(text_config):
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        # Ensure architectures is preserved for model_type detection
+        config.architectures = ["Qwen3VLForConditionalGeneration"]
+        print("WARNING: Qwen3-VL: exporting text decoder only.")
+        print("WARNING: Use --export_vision_only to export the vision encoder separately.")
+        print("WARNING: Setting exclude_embeds=true by default (embeddings come from vision encoder).")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "qwen3_vl"
+    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        # Qwen3.5-VL: hybrid SSM+Attention text decoder.
+        # 24 linear_attention (GatedDeltaNet SSM) + 8 full_attention (GQA) layers.
+        # Import Qwen3_5VLTextModel from custom directory.
+        import sys as _sys
+        _custom_dir = os.path.join(os.path.dirname(__file__), "custom")
+        if _custom_dir not in _sys.path:
+            _sys.path.insert(0, _custom_dir)
+        from custom.qwen3_5_text import Qwen3_5VLTextModel
+        text_config = config.text_config
+        # Promote text_config attributes onto the top-level config so that
+        # the Model base class can read them (hidden_size, num_attention_heads, etc.)
+        for key in vars(text_config):
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        # Ensure architectures is preserved for model_type detection
+        config.architectures = ["Qwen3_5ForConditionalGeneration"]
+        print("WARNING: Qwen3.5-VL: exporting text decoder only (hybrid SSM+Attention).")
+        print("WARNING: Use --export_vision_only to export the vision encoder separately.")
+        print("WARNING: Setting exclude_embeds=true by default (embeddings come from vision encoder).")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen3_5VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "qwen3_5_vl"
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MobileLLMForCausalLM":
@@ -4730,6 +4905,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
+
     if not config_only:
         # Make ONNX model
         onnx_model.make_model(input_path)
@@ -4742,6 +4918,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+
 
 
 def get_args():
@@ -4797,6 +4974,17 @@ def get_args():
         type=str,
         default=os.path.join('.', 'cache_dir'),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
+    )
+
+    parser.add_argument(
+        "--export_vision_only",
+        action="store_true",
+        help=textwrap.dedent("""\
+            Export only the standalone vision encoder for VLM models (e.g. Qwen3-VL).
+            When set, the standard text-decoder build is skipped and only the vision
+            encoder ONNX model is written to the output directory.
+            Requires --model_name or --input pointing to the full VLM checkpoint.
+            """),
     )
 
     parser.add_argument(
@@ -4871,6 +5059,25 @@ def get_args():
     )
 
     args = parser.parse_args()
+
+    if args.export_vision_only:
+        model_id = args.input if args.input else args.model_name
+        if not model_id:
+            parser.error("--export_vision_only requires --model_name or --input to specify the model.")
+        print(f"Exporting vision encoder for: {model_id}")
+        extra_options = parse_extra_options(args.extra_options, args.execution_provider)
+        create_vision_model(
+            model_name=args.model_name,
+            input_path=args.input,
+            output_dir=args.output,
+            precision=args.precision,
+            execution_provider=args.execution_provider,
+            cache_dir=args.cache_dir,
+            **extra_options,
+        )
+        print("Vision encoder export complete. Exiting.")
+        exit(0)
+
     print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
     return args
 

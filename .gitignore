@@ -39,3 +39,11 @@ examples/csharp/HelloPhi/models
 /src/java/build
 /src/java/CMakeFiles
 /src/java/CMakeCache.txt
+
+/experiment
+/hf_models
+/docs
+/output
+/xtra
+setup_hf_token.sh
+run.sh
