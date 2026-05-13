@@ -67,7 +67,8 @@ def get_model_paths():
         # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
         "phi-4-mini": ("microsoft/Phi-4-mini-instruct", True, False),
-        "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False, True),
+        "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False, False),
+        "qwen-2.5-0.5b-graph": ("Qwen/Qwen2.5-0.5B-Instruct", False, True),
     }
 
     ci_data_path = os.path.join(get_ci_data_path(), "pytorch")
@@ -137,6 +138,11 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     run_subprocess(command).check_returncode()
 
 
+# Devices that support graph capture. Models with enable_graph_capture=True
+# are only built for these devices.
+_GRAPH_CAPTURE_DEVICES = {"cuda", "webgpu", "dml", "nvtensorrtrtx"}
+
+
 def download_models(download_path, precision, device, log):
     log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
 
@@ -147,6 +153,8 @@ def download_models(download_path, precision, device, log):
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer, graph_capture) in ci_paths.items():
+        if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
+            continue
         try:
             output_path = os.path.join(download_path, model_name, precision, device)
             log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
@@ -160,6 +168,8 @@ def download_models(download_path, precision, device, log):
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, (hf_name, one_layer, graph_capture) in hf_paths.items():
+        if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
+            continue
         try:
             from huggingface_hub import model_info
 

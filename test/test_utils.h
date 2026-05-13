@@ -64,3 +64,7 @@ inline bool IsEngineTestsEnabled() {
 #ifndef QWEN_2_5_PATH
 #define QWEN_2_5_PATH test_utils::GetModelPath("qwen-2.5-0.5b").c_str()
 #endif
+
+#ifndef QWEN_2_5_GRAPH_PATH
+#define QWEN_2_5_GRAPH_PATH test_utils::GetModelPath("qwen-2.5-0.5b-graph").c_str()
+#endif

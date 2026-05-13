@@ -1431,7 +1431,12 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 // Skipped when qwen-2.5 model is not available.
 #if TEST_QWEN_2_5
 TEST(CAPITests, RewindQwen25CAPI) {
-  std::string model_path = QWEN_2_5_PATH;
+  // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),
+  // fall back to baseline model when it is not available.
+  std::string model_path = QWEN_2_5_GRAPH_PATH;
+  if (!std::filesystem::exists(model_path)) {
+    model_path = QWEN_2_5_PATH;
+  }
   if (!std::filesystem::exists(model_path)) {
     GTEST_SKIP() << "qwen-2.5 model not available at " << model_path;
   }
