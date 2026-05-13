@@ -2921,6 +2921,59 @@ class Model:
         self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
+    def make_packed_qkv_slices(self, layer_id, packed_input):
+        # Slice the packed qkv_proj output along the last dim into Q, K, V.
+        # GroupQueryAttention takes separate Q/K/V inputs, so the packed buffer
+        # must be split here; otherwise q_path would carry the full packed tensor
+        # and k_path/v_path would retain stale values from a prior unpacked layer.
+        q_size = self.num_attn_heads * self.head_size
+        k_size = self.num_kv_heads * self.head_size
+        v_size = self.num_kv_heads * self.head_size
+        seq_dim = "sequence_length"
+        axes_const = "/model/constants/INT64/[-1]"
+
+        q_slice_name = f"/model/layers.{layer_id}/attn/q_proj/Slice"
+        self.make_slice(
+            q_slice_name,
+            [
+                packed_input,
+                "/model/constants/INT64/[0]",
+                f"/model/constants/INT64/[{q_size}]",
+                axes_const,
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size", seq_dim, q_size],
+        )
+        self.attention_attrs["q_path"] = f"{q_slice_name}/output_0"
+
+        k_slice_name = f"/model/layers.{layer_id}/attn/k_proj/Slice"
+        self.make_slice(
+            k_slice_name,
+            [
+                packed_input,
+                f"/model/constants/INT64/[{q_size}]",
+                f"/model/constants/INT64/[{q_size + k_size}]",
+                axes_const,
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size", seq_dim, k_size],
+        )
+        self.attention_attrs["k_path"] = f"{k_slice_name}/output_0"
+
+        v_slice_name = f"/model/layers.{layer_id}/attn/v_proj/Slice"
+        self.make_slice(
+            v_slice_name,
+            [
+                packed_input,
+                f"/model/constants/INT64/[{q_size + k_size}]",
+                f"/model/constants/INT64/[{q_size + k_size + v_size}]",
+                axes_const,
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size", seq_dim, v_size],
+        )
+        self.attention_attrs["v_path"] = f"{v_slice_name}/output_0"
+
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
@@ -3004,6 +3057,11 @@ class Model:
                     v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
                     self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                     self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
+
+        # If a packed qkv MatMul (+ optional packed Add) produced a single fused buffer,
+        # split it back into Q/K/V so downstream ops (GQA/MHA) see correct per-projection inputs.
+        if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal:
+            self.make_packed_qkv_slices(layer_id, self.attention_attrs["q_path"])
 
     def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
         # Make Q/K SimplifiedLayerNorm nodes
