@@ -44,10 +44,10 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
                 print(f"Registered WinML execution provider: {ep_name}")
         except Exception as e:
             print(f"Failed to register WinML execution providers: {e}")
-    else:
+    elif ep_path:
         og.register_execution_provider_library(ep, ep_path)
 
-    print(f"Registered {ep} successfully!")
+        print(f"Registered {ep} from {ep_path} successfully!")
 
 
 def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
@@ -62,24 +62,16 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     Returns:
         og.Config: ORT GenAI config object with all options set
     """
-    # Create config with EP
-    # - If follow_config, then use the default EP stored inside the GenAI config.
-    # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
     config = og.Config(path)
-    if ep != "follow_config":
-        config.clear_providers()
-        if ep != "cpu":
-            print(f"Setting model to {ep}")
-            config.append_provider(ep)
 
-        # Set any EP-specific options
-        for k, v in ep_options.items():
-            if k == "enable_cuda_graph" and ep in {"cuda", "NvTensorRtRtx"} and search_options.get("num_beams", 1) > 1:
-                # Disable CUDA graph if using beam search (num_beams > 1),
-                # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
-                config.set_provider_option(ep, "enable_cuda_graph", "0")
-            else:
-                config.set_provider_option(ep, k, v)
+    # Set any EP-specific options
+    for k, v in ep_options.items():
+        if k == "enable_cuda_graph" and ep in {"cuda", "NvTensorRtRtx"} and search_options.get("num_beams", 1) > 1:
+            # Disable CUDA graph if using beam search (num_beams > 1),
+            # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
+            config.set_provider_option(ep, "enable_cuda_graph", "0")
+        else:
+            config.set_provider_option(ep, k, v)
 
     if "chunk_size" in search_options and search_options["chunk_size"] == 0:
         # Remove chunk_size of 0

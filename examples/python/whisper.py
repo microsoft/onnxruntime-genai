@@ -23,14 +23,8 @@ class Format:
 def run(args: argparse.Namespace):
     print("Loading model...")
     config = og.Config(args.model_path)
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
     model = og.Model(config)
     processor = model.create_multimodal_processor()
-    tokenizer = og.Tokenizer(model)
 
     while True:
         readline.set_completer_delims(" \t\n;")
@@ -108,9 +102,7 @@ if __name__ == "__main__":
         "--execution_provider",
         type=str,
         required=False,
-        default="follow_config",
-        choices=["cpu", "cuda", "follow_config"],
-        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+        help="Execution provider to run the ONNX Runtime session with. Defaults to whatever is listed in the genai_config.json.",
     )
     parser.add_argument("-b", "--num_beams", type=int, default=4, help="Number of beams")
     parser.add_argument("-a", "--audio", type=str, default="", help="Path to audio file for CI testing purposes")

@@ -15,10 +15,6 @@ def main(args):
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
     config = og.Config(args.model_path)
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            config.append_provider(args.execution_provider)
     model = og.Model(config)
 
     tokenizer = og.Tokenizer(model)
@@ -95,9 +91,7 @@ if __name__ == "__main__":
         "--execution_provider",
         type=str,
         required=False,
-        default="follow_config",
-        choices=["cpu", "cuda", "dml", "follow_config"],
-        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+        help="Execution provider to run the ONNX Runtime session with. Defaults to whatever is listed in the genai_config.json.",
     )
     parser.add_argument(
         "--enable_ff_tokens",

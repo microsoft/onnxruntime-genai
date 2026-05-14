@@ -117,9 +117,8 @@ def main():
     parser.add_argument("--audio_file", type=str, required=True)
     parser.add_argument("--use_vad", type=str, choices=["true", "false"], default=None,
                         help="Override VAD setting from genai_config.json (true/false).")
-    parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
-                        choices=["cpu", "cuda", "dml", "follow_config"],
-                        help="Execution provider to run with. Defaults to follow_config.")
+    parser.add_argument("-e", "--execution_provider", type=str, required=False,
+                        help="Execution provider to run with. Defaults to whatever is listed in the genai_config.json.")
     args = parser.parse_args()
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
