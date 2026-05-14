@@ -4,13 +4,10 @@ ONNX Runtime GenAI supports running models on Qualcomm Snapdragon NPUs via the Q
 Provider (EP). This enables hardware-accelerated LLM inference on Snapdragon-based devices on
 Windows ARM64 and Linux ARM64.
 
-ONNX models containing an EPContext node with `ep_context_type: "dlc"` are routed directly
-through the Genie API — Qualcomm's optimized LLM inference runtime, part of the QAIRT SDK,
-which provides accelerated token generation on the Snapdragon NPU. This routing is transparent
-to OGA users; no additional configuration is required. Models in this format are produced by
-newer QAIRT-targeting [olive-recipes](https://github.com/microsoft/olive-recipes) pipelines.
-Older QNN-targeting recipes produce models without the DLC EPContext type and do not use the
-Genie pathway.
+For best performance, use the newer QAIRT-targeting pipelines from
+[olive-recipes](https://github.com/microsoft/olive-recipes), which optimize models for
+accelerated NPU inference via the Genie runtime. Older QNN-targeting recipes produce
+standard QNN models that also work but do not use this acceleration pathway.
 
 ## Prerequisites
 
