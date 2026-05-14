@@ -105,7 +105,11 @@ jobs:
       - name: Configure CMake
         run: |
           $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
+          # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
+          # time and memory usage manageable. The full SM list in CMakePresets.json
+          # is intended for release packaging, not CI validation.
           cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=True -DTEST_QWEN_2_5=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
+            -DCMAKE_CUDA_ARCHITECTURES=86-real `
             -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
