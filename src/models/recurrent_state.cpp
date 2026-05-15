@@ -151,7 +151,8 @@ void RecurrentState::Add() {
     past_byte_spans_.reserve(num_layers * 2);
     present_byte_spans_.reserve(num_layers * 2);
     for (int i = 0; i < num_layers * 2; ++i) {
-      past_byte_spans_.push_back(ByteWrapTensor(device, *pasts_[i]));
+      auto& past = past_present_share_buffer_ ? presents_[i] : pasts_[i];
+      past_byte_spans_.push_back(ByteWrapTensor(device, *past));
       present_byte_spans_.push_back(ByteWrapTensor(device, *presents_[i]));
     }
   }
