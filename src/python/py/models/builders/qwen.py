@@ -929,7 +929,7 @@ class Qwen35TextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
-        self.is_text_only = extra_options.get("exclude_embeds") is False
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
@@ -2051,27 +2051,3 @@ class Qwen35TextModel(Model):
         del self.input_names["past_key_values.value"]
         del self.output_names["present.key"]
         del self.output_names["present.value"]
-
-    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        super().save_processing(model_name_or_path, extra_kwargs, out_dir)
-        # Patch tokenizer regex: remove \p{M} (Unicode Mark category).
-        # Qwen3.5 is the only model family whose tokenizer uses \p{M}.
-        # onnxruntime-extensions has hand-coded matchers for known regex
-        # sub-patterns (e.g. [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]) but Qwen3.5's
-        # pattern ([\p{L}\p{M}]+) is not in that table, so it falls through
-        # to std::regex which does not support Unicode property escapes.
-        # Removing \p{M} is safe because Mark characters (diacritics,
-        # combining marks) are rare in typical LLM input and \p{L} already
-        # covers the vast majority of letter+mark sequences.
-        for fname in ("tokenizer_config.json", "tokenizer.json"):
-            fpath = os.path.join(out_dir, fname)
-            if os.path.exists(fpath):
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                if "\\p{M}" not in content:
-                    continue
-                content = content.replace("[\\p{L}\\p{M}]", "\\p{L}")
-                content = content.replace("[^\\s\\p{L}\\p{M}\\p{N}]", "[^\\s\\p{L}\\p{N}]")
-                with open(fpath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"Patched unsupported \\p{{M}} regex in {fname}")
