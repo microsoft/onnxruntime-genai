@@ -17,7 +17,10 @@ env:
 
 jobs:
   windows-cpu-x64-build:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=onnxruntime-genai-Win2022-CPU"
+      - "JobId=win-cpu-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     permissions:
       security-events: write
       actions: read

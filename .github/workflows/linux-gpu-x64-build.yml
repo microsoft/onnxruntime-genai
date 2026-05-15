@@ -21,7 +21,10 @@ jobs:
   linux-cuda-x64-build:
     env:
       PYTHON_EXECUTABLE: "/opt/python/cp312-cp312/bin/python3.12"
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"
+      - "JobId=linux-gpu-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v5
