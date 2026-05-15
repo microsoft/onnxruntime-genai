@@ -40,6 +40,11 @@ examples/csharp/ModelChat/models
 !test/test_models/qwen35-hybrid-preprocessing/
 !test/test_models/qwen35-hybrid-preprocessing/*.onnx
 !test/test_models/mistral3-vision-preprocessing/
+!test/test_models/multimodal-decoder-no-input-ids/
+!test/test_models/multimodal-decoder-no-input-ids/*
+!test/test_models/multimodal-decoder-with-input-ids/
+!test/test_models/multimodal-decoder-with-input-ids/*
+!test/test_models/create_decoder_input_ids_test_models.py
 
 .ipynb_checkpoints/
 /src/java/.gradle
