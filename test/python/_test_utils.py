@@ -140,7 +140,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
 
 # Devices that support graph capture. Models with enable_graph_capture=True
 # are only built for these devices.
-_GRAPH_CAPTURE_DEVICES = {"cuda", "webgpu", "dml", "nvtensorrtrtx"}
+_GRAPH_CAPTURE_DEVICES = {"webgpu", "dml", "nvtensorrtrtx"}
 
 
 def download_models(download_path, precision, device, log):
