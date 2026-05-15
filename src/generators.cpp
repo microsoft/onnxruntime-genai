@@ -4,9 +4,12 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "models/streaming_processor.h"
+#include "models/nemotron_speech.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
@@ -84,11 +87,28 @@ GetOrtGlobals() {
   return globals;
 }
 
-// Used by Shutdown() to display the counts and types of any leaked objects
+// Used by Shutdown() to display the counts and types of any leaked objects.
+// Leak reporting is gated to debug builds or when logging is enabled, since
+// consuming applications often cannot guarantee model teardown before process
+// exit, and there is little they can do in response at that point.
+static bool ShouldReportLeaks() {
+#if !defined(NDEBUG)
+  return true;
+#else
+  return g_log.enabled;
+#endif
+}
+
 template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
-  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
-  return ((LeakChecked<Types>::Count() != 0) || ...);
+  const bool report = ShouldReportLeaks();
+  bool any_leaked = false;
+  ((LeakChecked<Types>::Count() != 0
+        ? (any_leaked = true,
+           report ? (std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl, 0) : 0)
+        : 0),
+   ...);
+  return any_leaked && report;
 }
 
 void Shutdown() {
@@ -268,7 +288,7 @@ GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
-      p_device{model.p_device_inputs_} {
+      p_device{model.p_device_scoring_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
   }
@@ -288,6 +308,52 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
          (search.num_beams == 1 || model_type == "whisper");
 }
 
+double GeneratorParams::GetSearchNumber(std::string_view name) const {
+  if (name == "batch_size") {
+    return static_cast<double>(search.batch_size);
+  } else if (name == "chunk_size") {
+    return static_cast<double>(search.chunk_size.value_or(0));
+  } else if (name == "diversity_penalty") {
+    return search.diversity_penalty;
+  } else if (name == "length_penalty") {
+    return search.length_penalty;
+  } else if (name == "max_length") {
+    return static_cast<double>(search.max_length);
+  } else if (name == "min_length") {
+    return static_cast<double>(search.min_length);
+  } else if (name == "no_repeat_ngram_size") {
+    return static_cast<double>(search.no_repeat_ngram_size);
+  } else if (name == "num_beams") {
+    return static_cast<double>(search.num_beams);
+  } else if (name == "num_return_sequences") {
+    return static_cast<double>(search.num_return_sequences);
+  } else if (name == "random_seed") {
+    return static_cast<double>(search.random_seed);
+  } else if (name == "repetition_penalty") {
+    return search.repetition_penalty;
+  } else if (name == "temperature") {
+    return search.temperature;
+  } else if (name == "top_k") {
+    return static_cast<double>(search.top_k);
+  } else if (name == "top_p") {
+    return search.top_p;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
+  }
+}
+
+bool GeneratorParams::GetSearchBool(std::string_view name) const {
+  if (name == "do_sample") {
+    return search.do_sample;
+  } else if (name == "early_stopping") {
+    return search.early_stopping;
+  } else if (name == "past_present_share_buffer") {
+    return search.past_present_share_buffer;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
+  }
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -299,6 +365,14 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+  // RNNT models don't use the traditional search/logits pipeline,
+  // so skip the standard validations and just create the state.
+  if (ModelType::IsRNNT(model.config_->model.type)) {
+    state_ = model.CreateState({}, params);
+    is_nemotron_speech_model_ = dynamic_cast<NemotronSpeechState*>(state_.get()) != nullptr;
+    return;
+  }
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -311,6 +385,46 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
+
+  InitializePhi3RopeThreshold(params);
+  InitializeSamplingMethod(params);
+}
+
+void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
+  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
+  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+                                          model_->p_device_->GetType() == DeviceType::DML;
+
+  // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
+  // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
+  const auto& model_type = model_->config_->model.type;
+  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
+    if (model_type == "phi3" || model_type == "phimoe")
+      phi3_rope_threshold_ = 4097;
+    else if (model_type == "phi3small")
+      phi3_rope_threshold_ = 8193;
+  }
+}
+
+void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
+  const auto& search = params.search;
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
+    sampling_method_ = SamplingMethod::kGreedy;
+  } else {
+    if (search.num_beams != 1)
+      throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+    if (search.top_p < 0.0f || search.top_p > 1.0f)
+      throw std::runtime_error("top_p must be between 0.0 and 1.0");
+    if (search.top_k < 0)
+      throw std::runtime_error("top_k must be 0 or greater");
+    if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopKTopP;
+    } else if (search.top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopK;
+    } else {
+      sampling_method_ = SamplingMethod::kTopP;
+    }
+  }
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
@@ -413,7 +527,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -426,7 +540,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   }
   SetLogits(logits);
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  if (guidance_logits_processor_ && last_action_ == Action::generated) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
@@ -454,8 +568,21 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
+size_t Generator::TokenCount() const {
+  if (is_nemotron_speech_model_)
+    return static_cast<NemotronSpeechState*>(state_.get())->TokenCount();
+  return static_cast<size_t>(search_->GetSequenceLength());
+}
+
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+
+  if (is_nemotron_speech_model_) {
+    // Pending mel input means we haven't started processing this chunk yet
+    if (!extra_inputs_.empty()) return false;
+    return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
+  }
+
   if (computed_logits_) {
     return false;
   }
@@ -485,24 +612,24 @@ void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+
+  // RNNT models: yield one token per call from the decoder state machine
+  if (is_nemotron_speech_model_) {
+    state_->SetExtraInputs(extra_inputs_);
+    extra_inputs_.clear();
+    static_cast<NemotronSpeechState*>(state_.get())->StepToken();
+    return;
+  }
+
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
-  // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
-  // TODO: change this when these EPs support multi rope factors
-  const bool epUsesSingleRopeFactor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx || model_->p_device_->GetType() == DeviceType::DML;
-
-  // TODO: Extend the solution to make it work for batch size > 1, num beams > 1, multimodal and DML
-  // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
-  // at this stage which is achieved by rewinding to zero and appending the current sequence
-  // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
-  // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
-  if (search_->params_->BatchBeamSize() == 1 && !epUsesSingleRopeFactor) {
-    if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8193) && (model_->config_->model.type == "phi3small"))) {
-      auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
-      RewindToLength(0);
-      AppendTokens(current_seq);
-    }
+  // Phi3 model switches from short factor to long factor at the ROPE threshold token,
+  // needs recomputation of Position IDs and KV Cache via rewind + re-append.
+  if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
+    auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
+    RewindToLength(0);
+    AppendTokens(current_seq);
   }
 
   if (!computed_logits_) {
@@ -531,33 +658,26 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
-    search_->SelectTop();
-    return;
-  }
-
-  // The user explicitly called TopK_TopP on a beam search
-  if (search.num_beams != 1)
-    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
-
-  // Sanity checks
-  if (search.top_p < 0.0f || search.top_p > 1.0f)
-    throw std::runtime_error("top_p must be between 0.0 and 1.0");
-  if (search.top_k < 0)
-    throw std::runtime_error("top_k must be 0 or greater");
-
-  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
-    search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
-  } else if (search.top_k > 1) {
-    search_->SampleTopK(search.top_k, search.temperature);
-  } else {
-    assert(search.top_k == 0);
-    search_->SampleTopP(search.top_p, search.temperature);
+  switch (sampling_method_) {
+    case SamplingMethod::kGreedy:
+      search_->SelectTop();
+      return;
+    case SamplingMethod::kTopKTopP:
+      search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+      return;
+    case SamplingMethod::kTopK:
+      search_->SampleTopK(search.top_k, search.temperature);
+      return;
+    case SamplingMethod::kTopP:
+      search_->SampleTopP(search.top_p, search.temperature);
+      return;
+    default:
+      throw std::runtime_error("Unknown sampling method");
   }
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline")
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

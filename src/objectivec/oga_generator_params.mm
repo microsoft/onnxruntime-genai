@@ -37,6 +37,20 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
+- (double)getSearchNumber:(NSString*)key error:(NSError**)error {
+  try {
+    return _generatorParams->GetSearchNumber([key UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_DOUBLE(error)
+}
+
+- (BOOL)getSearchBool:(NSString*)key error:(NSError**)error {
+  try {
+    return _generatorParams->GetSearchBool([key UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
 - (OgaGeneratorParams&)CXXAPIOgaGeneratorParams {
   return *(_generatorParams.get());
 }

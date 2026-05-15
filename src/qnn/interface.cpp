@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../models/model.h"
 #include "interface.h"
 
 namespace Generators {
@@ -76,6 +77,25 @@ struct InterfaceImpl : DeviceInterface {
 DeviceInterface* GetQNNInterface() {
   static std::unique_ptr<DeviceInterface> g_device = std::make_unique<QNN::InterfaceImpl>();
   return g_device.get();
+}
+
+bool IsQNNStatefulModel(const Model& model) {
+  const auto& provider_options = model.config_->model.decoder.session_options.provider_options;
+  for (const auto& po : provider_options) {
+    if (po.name == "QNN") {
+      for (const auto& option : po.options) {
+        // For QNN, if session option 'genie_model' is set to true, the session will encapsulate
+        // a stateful model, so KVCache will be managed internally.
+        if (option.first == "genie_model") {
+          std::string lower_value(option.second);
+          std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                         [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+          return lower_value == "true";
+        }
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace Generators

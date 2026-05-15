@@ -27,10 +27,12 @@ class PhiModel(Model):
             location="input",
         )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+
+        old_skip_input = self.layernorm_attrs["skip_input"]
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
-        residual_add_inputs = [self.layernorm_attrs["skip_input"], self.mlp_attrs["output_0"]]
+        residual_add_inputs = [old_skip_input, self.layernorm_attrs["skip_input"]]
         self.make_add(
             residual_add_name,
             residual_add_inputs,
@@ -61,7 +63,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         if "position_ids" in self.input_names:
             position_ids_result = self.make_position_ids_reformatting()
             self.position_ids_name = (
-                f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+                f"{position_ids_result}/output_0" if position_ids_result != self.input_names["position_ids"] else self.input_names["position_ids"]
             )
         else:
             # When position_ids is not an input (use_rope_in_attn is True),
@@ -103,7 +105,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         compute_str_dtype = self.to_str_dtype(compute_dtype)
 
         # Cast position_ids to int32 for WebGPU
-        input_tensor = "position_ids"
+        input_tensor = self.input_names["position_ids"]
         if is_webgpu:
             cast_input_name = f"{basename}/Cast_input"
             self.make_cast(

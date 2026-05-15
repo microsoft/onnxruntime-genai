@@ -16,11 +16,15 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(CreateKeyValueCache(*this)),
+      recurrent_state_(CreateRecurrentState(*this)),
       position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
   logits_.Add();
-  kv_cache_->Add();
+  if (kv_cache_)
+    kv_cache_->Add();
+  if (recurrent_state_)
+    recurrent_state_->Add();
 }
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -80,7 +84,10 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 
 void DecoderOnly_State::RewindTo(size_t index) {
   position_inputs_->RewindTo(index);
-  kv_cache_->RewindTo(index);
+  if (kv_cache_)
+    kv_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
@@ -107,7 +114,10 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   }
 
   position_inputs_->Update(next_tokens, position_length, static_cast<int>(new_length));
-  kv_cache_->Update(beam_indices, kv_cache_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, kv_cache_length);
+  if (recurrent_state_)
+    recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
 }
 

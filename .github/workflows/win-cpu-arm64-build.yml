@@ -82,20 +82,35 @@ jobs:
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release
+          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
           cmake --build --preset windows_arm64_cpu_release --parallel
           cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
 
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DNEMOTRON_SPEECH=ON `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-arm64\native" `
+            "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
+
       - name: Install the Python Wheel and Test Dependencies
         run: |
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
           choco uninstall llvm --yes
-          python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
-          python -m pip install onnxruntime-qnn
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          python -m pip install -r test\python\requirements.txt --user
+          python -m pip install -r test\python\cpu\torch\requirements.txt --user
+          python -m pip install -r test\python\cpu\ort\requirements.txt --user
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+
+      - name: Run the Java tests
+        run: |
+          ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python Tests
         run: |
@@ -106,9 +121,17 @@ jobs:
           cd test\csharp
           dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Build the C# Examples
         run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+          cd examples\csharp\ModelChat
+          dotnet build -c Release
+          cd ..\ModelMM
+          dotnet build -c Release
+
+      - name: Test the C# LLM Example with Tool Calling
+        run: |
+          python3 test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\test_models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\test_models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Verify Build Artifacts
         if: always()

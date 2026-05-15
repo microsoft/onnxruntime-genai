@@ -15,7 +15,4 @@ struct RyzenAIInterface : DeviceInterface {
 
 RyzenAIInterface* GetRyzenAIInterface();
 
-struct Model;
-bool IsRyzenAIPrunedModel(const Model& model);
-
 }  // namespace Generators

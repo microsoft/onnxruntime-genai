@@ -192,12 +192,30 @@ struct PyGeneratorParams {
     }
   }
 
-  void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
-  }
-
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
+  }
+
+  pybind11::dict GetSearchOptions() {
+    pybind11::dict d;
+    d["batch_size"] = params_->GetSearchNumber("batch_size");
+    d["chunk_size"] = params_->GetSearchNumber("chunk_size");
+    d["diversity_penalty"] = params_->GetSearchNumber("diversity_penalty");
+    d["do_sample"] = params_->GetSearchBool("do_sample");
+    d["early_stopping"] = params_->GetSearchBool("early_stopping");
+    d["length_penalty"] = params_->GetSearchNumber("length_penalty");
+    d["max_length"] = params_->GetSearchNumber("max_length");
+    d["min_length"] = params_->GetSearchNumber("min_length");
+    d["no_repeat_ngram_size"] = params_->GetSearchNumber("no_repeat_ngram_size");
+    d["num_beams"] = params_->GetSearchNumber("num_beams");
+    d["num_return_sequences"] = params_->GetSearchNumber("num_return_sequences");
+    d["past_present_share_buffer"] = params_->GetSearchBool("past_present_share_buffer");
+    d["random_seed"] = params_->GetSearchNumber("random_seed");
+    d["repetition_penalty"] = params_->GetSearchNumber("repetition_penalty");
+    d["temperature"] = params_->GetSearchNumber("temperature");
+    d["top_k"] = params_->GetSearchNumber("top_k");
+    d["top_p"] = params_->GetSearchNumber("top_p");
+    return d;
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
@@ -240,6 +258,10 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
+  size_t TokenCount() const {
+    return generator_->TokenCount();
+  }
+
   pybind11::array_t<float> GetLogits() {
     return ToNumpy(*generator_->GetLogits());
   }
@@ -262,6 +284,10 @@ struct PyGenerator {
 
   void SetActiveAdapter(OgaAdapters& adapters, const std::string& adapter_name) {
     generator_->SetActiveAdapter(adapters, adapter_name.c_str());
+  }
+
+  void SetRuntimeOption(const std::string& key, const std::string& value) {
+    generator_->SetRuntimeOption(key.c_str(), value.c_str());
   }
 
  private:
@@ -316,11 +342,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
-           pybind11::arg("enable_ff_tokens") = false);
+           pybind11::arg("enable_ff_tokens") = false)
+      .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -450,7 +476,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
-      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); });
+      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
+      .def("create_streaming_processor", [](OgaModel& model) { return OgaStreamingProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.");
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
@@ -461,13 +488,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
+      .def("token_count", &PyGenerator::TokenCount)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindTo)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
-      .def("set_active_adapter", &PyGenerator::SetActiveAdapter);
+      .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -602,6 +631,51 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("step", &OgaEngine::Step)
       .def("remove_request", &OgaEngine::Remove)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
+
+  pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
+      .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),
+           "Create a StreamingProcessor for mel spectrogram extraction.\n"
+           "The model must be of type 'nemotron_speech'.")
+      .def(
+          "process",
+          [](OgaStreamingProcessor& proc, pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast> audio_chunk) -> pybind11::object {
+            auto buf = audio_chunk.request();
+            if (buf.ndim != 1) {
+              throw std::runtime_error("audio_chunk must be a 1-D array, got " + std::to_string(buf.ndim) + "-D");
+            }
+            auto result = proc.Process(static_cast<const float*>(buf.ptr), static_cast<size_t>(buf.size));
+            if (result) {
+              return pybind11::cast(std::move(result));
+            }
+            return pybind11::none();
+          },
+          pybind11::arg("audio_chunk"),
+          "Feed raw PCM audio. Returns a NamedTensors if a full chunk is ready, or None if more audio is needed.")
+      .def(
+          "flush",
+          [](OgaStreamingProcessor& proc) -> pybind11::object {
+            auto result = proc.Flush();
+            if (result) {
+              return pybind11::cast(std::move(result));
+            }
+            return pybind11::none();
+          },
+          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
+      .def(
+          "set_option",
+          [](OgaStreamingProcessor& proc, const std::string& key, const std::string& value) {
+            proc.SetOption(key.c_str(), value.c_str());
+          },
+          pybind11::arg("key"),
+          pybind11::arg("value"),
+          "Set a processor option. Keys: 'use_vad', 'vad_threshold', 'silence_duration_ms', 'prefix_padding_ms'.")
+      .def(
+          "get_option",
+          [](OgaStreamingProcessor& proc, const std::string& key) {
+            return std::string(proc.GetOption(key.c_str()));
+          },
+          pybind11::arg("key"),
+          "Get a processor option value by key.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);

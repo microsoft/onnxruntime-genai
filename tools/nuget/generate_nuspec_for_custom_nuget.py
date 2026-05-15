@@ -13,19 +13,19 @@ def generate_files(lines, args):
     platform_map = {
         "win-arm64": args.win_arm64,
         "win-x64": args.win_x64,
-        "osx-x64": args.osx_x64,
         "osx-arm64": args.osx_arm64,
+        "linux-x64": args.linux_x64,
     }
 
-    avoid_keywords = {"pdb"}
+    avoid_keywords = {"pdb", "onnxruntime-genai-cuda.dll", "onnxruntime-genai-cuda.lib"}
     processed_includes = set()
     for platform, platform_dir in platform_map.items():
         for file in glob.glob(os.path.join(platform_dir, "lib", "*")):
             if not os.path.isfile(file):
                 continue
-            if any(keyword in file for keyword in avoid_keywords):
-                continue
             file_name = os.path.basename(file)
+            if any(keyword in file_name for keyword in avoid_keywords):
+                continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
 
@@ -72,8 +72,8 @@ def parse_arguments():
     )
     parser.add_argument("--win_arm64", required=True, help="Ort-genai win-arm64 directory")
     parser.add_argument("--win_x64", required=True, help="Ort-genai win-x64 directory")
-    parser.add_argument("--osx_x64", required=True, help="Ort-genai osx-x64 directory")
     parser.add_argument("--osx_arm64", required=True, help="Ort-genai osx-arm64 directory")
+    parser.add_argument("--linux_x64", required=True, help="Ort-genai linux-x64 directory")
 
     args = parser.parse_args()
     args.sdk_info = ""

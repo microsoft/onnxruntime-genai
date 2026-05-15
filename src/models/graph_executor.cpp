@@ -83,13 +83,10 @@ OrtSession* GetOrCreateSession(
   }
 
   // Build model using Model Editor API
-  OrtModel* model = GraphBuilder::Build(config);
+  auto model = GraphBuilder::Build(config);
 
   // Create session from model
-  auto session = CreateSession(model, ep_name, session_config_keys, session_config_values);
-
-  // Release the model - session has its own copy
-  Ort::api->ReleaseModel(model);
+  auto session = CreateSession(model.get(), ep_name, session_config_keys, session_config_values);
 
   OrtSession* session_ptr = session.get();
   cache.sessions_[key] = std::move(session);

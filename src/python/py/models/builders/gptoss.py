@@ -70,7 +70,7 @@ class GPTOSSModel(Model):
         self.window_size = original_window_size
 
     def make_moe(self, layer_id, mlp, root_input):
-        if self.ep in {"cpu", "cuda", "trt-rtx"}:
+        if self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
             self.make_moe_fused(layer_id, mlp, root_input)
         else:
             self.make_moe_decomposed(layer_id, mlp, root_input)

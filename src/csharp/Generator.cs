@@ -46,6 +46,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
         }
 
+        /// <summary>
+        /// Gets the number of tokens in the generator
+        /// </summary>
+        /// <returns>The token count</returns>
+        public ulong TokenCount()
+        {
+            return NativeMethods.OgaGenerator_TokenCount(_generatorHandle).ToUInt64();
+        }
+
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));

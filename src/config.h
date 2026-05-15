@@ -40,6 +40,7 @@ struct Config {
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view PixelPositionIdsName = "pixel_position_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
 
@@ -60,6 +61,25 @@ struct Config {
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+
+    // Cache-aware streaming encoder names
+    static constexpr std::string_view EncoderInputLengthsName = "length";
+    static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
+    static constexpr std::string_view CacheLastTimeName = "cache_last_time";
+    static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
+    static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
+    static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
+    static constexpr std::string_view CacheLastChannelLenNextName = "cache_last_channel_len_next";
+
+    // Cross present key/value names
+    static constexpr std::string_view CrossPresentKeyName = "present_key_cross_%d";
+    static constexpr std::string_view CrossPresentValueName = "present_value_cross_%d";
+
+    // Joiner names
+    static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
+    static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -108,13 +128,31 @@ struct Config {
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
 
-    // Qwen2.5-VL specific token IDs
+    // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
     int image_token_id{};
+    int audio_token_id{};
+    int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
 
     int vocab_size{};
     int context_length{};
+
+    // Streaming ASR / RNNT model parameters
+    int num_mels{};
+    int fft_size{};
+    int hop_length{};
+    int win_length{};
+    float preemph{};
+    float log_eps{};
+    int subsampling_factor{};
+    int left_context{};
+    int conv_context{};
+    int pre_encode_cache_size{};
+    int sample_rate{};
+    int chunk_samples{};
+    int blank_id{};
+    int max_symbols_per_step{};
 
     struct Encoder {
       std::string filename;
@@ -133,12 +171,22 @@ struct Config {
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        // Cache-aware streaming encoder I/O names
+        std::string input_lengths{Defaults::EncoderInputLengthsName};
+        std::string cache_last_channel{Defaults::CacheLastChannelName};
+        std::string cache_last_time{Defaults::CacheLastTimeName};
+        std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
       } inputs;
 
       struct Outputs {
         std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
-        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+        std::string cross_present_key_names{Defaults::CrossPresentKeyName}, cross_present_value_names{Defaults::CrossPresentValueName};
+        // Cache-aware streaming encoder output names
+        std::string output_lengths{Defaults::EncoderOutputLengthsName};
+        std::string cache_last_channel_next{Defaults::CacheLastChannelNextName};
+        std::string cache_last_time_next{Defaults::CacheLastTimeNextName};
+        std::string cache_last_channel_len_next{Defaults::CacheLastChannelLenNextName};
       } outputs;
     } encoder;
 
@@ -163,9 +211,17 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
-      // Qwen2.5-VL specific vision config values
+      // Qwen VL specific vision config values.
+      // These are only needed for the QNN 3-stage pipeline (patch_embed → vision_attn → patch_merger),
+      // where the C++ runtime computes window attention indices between stages.
+      // For standard single-ONNX CUDA/CPU models, windowing is baked into the ONNX graph
+      // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
+      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
+                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -184,6 +240,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
@@ -214,6 +271,30 @@ struct Config {
       } outputs;
     } speech;
 
+    struct Joiner {
+      std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string encoder_outputs{Defaults::JoinerEncoderOutputsName};
+        std::string decoder_outputs{Defaults::JoinerDecoderOutputsName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::JoinerLogitsName};
+      } outputs;
+    } joiner;
+
+    struct VAD {
+      std::string filename;
+      float threshold{0.5f};
+      int silence_duration_ms{500};
+      int prefix_padding_ms{300};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+    } vad;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
@@ -224,6 +305,10 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+
+      // Hybrid SSM+Attention (LFM2) parameters
+      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -255,6 +340,12 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+
+        // RNNT decoder inputs
+        std::string targets;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } inputs;
 
       struct Outputs {
@@ -264,6 +355,12 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
+
+        // RNNT decoder outputs
+        std::string outputs;
+        std::string lstm_hidden_state;
+        std::string lstm_cell_state;
       } outputs;
 
       struct PipelineModel {
@@ -301,13 +398,14 @@ struct Config {
     int top_k{50};                     // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
-    bool early_stopping{true};         //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
+    bool early_stopping{true};         // Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
     int no_repeat_ngram_size{};        // Unused param
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
+    float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
   } search;
 
   struct Engine {

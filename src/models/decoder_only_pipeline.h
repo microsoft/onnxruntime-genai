@@ -14,6 +14,7 @@
 #include "windowed_kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "recurrent_state.h"
 
 namespace Generators {
 
@@ -73,8 +74,7 @@ struct DecoderOnlyPipelineState : State {
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).
   // stage_id: ID of the stage that just completed
-  // next_tokens: current input tokens for pipeline
-  virtual void OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) {}
+  virtual void OnStageComplete(size_t stage_id) {}
 
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
@@ -103,6 +103,7 @@ struct DecoderOnlyPipelineState : State {
   const bool do_key_value_cache_partial_update_;
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
+  std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
