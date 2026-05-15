@@ -125,6 +125,7 @@ jobs:
           --volume $DOTNET_INSTALL_DIR:/opt/dotnet \
           -e PATH="/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
           -e DOTNET_ROOT=/opt/dotnet \
+          -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /onnxruntime_src/test/csharp && \
@@ -137,6 +138,7 @@ jobs:
           --volume $DOTNET_INSTALL_DIR:/opt/dotnet \
           -e PATH="/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
           -e DOTNET_ROOT=/opt/dotnet \
+          -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /onnxruntime_src/examples/csharp/ModelChat && dotnet build -c Release && \
