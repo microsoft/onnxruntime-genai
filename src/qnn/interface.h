@@ -3,9 +3,13 @@
 
 namespace Generators {
 
+struct Config;
+struct DeviceInterface;
+struct Model;
+
 DeviceInterface* GetQNNInterface();
 
-struct Model;
+bool IsQNNGPUBackend(const Config& config);
 bool IsQNNStatefulModel(const Model& model);
 
 }  // namespace Generators

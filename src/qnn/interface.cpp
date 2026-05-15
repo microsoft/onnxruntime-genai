@@ -79,6 +79,25 @@ DeviceInterface* GetQNNInterface() {
   return g_device.get();
 }
 
+bool IsQNNGPUBackend(const Config& config) {
+  const auto& provider_options = config.model.decoder.session_options.provider_options;
+  for (const auto& po : provider_options) {
+    if (po.name == "QNN") {
+      if (po.device_filtering_options) {
+        const auto device_type = po.device_filtering_options->hardware_device_type;
+        return device_type == OrtHardwareDeviceType_GPU;
+      }
+
+      for (const auto& option : po.options) {
+        if (option.first == "backend_type") {
+          return option.second == "gpu";
+        }
+      }
+    }
+  }
+  return false;
+}
+
 bool IsQNNStatefulModel(const Model& model) {
   const auto& provider_options = model.config_->model.decoder.session_options.provider_options;
   for (const auto& po : provider_options) {

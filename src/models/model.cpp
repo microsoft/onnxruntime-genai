@@ -24,6 +24,7 @@
 #include "qwen2_5_vl_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
+#include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
 #include "session_options.h"
 
@@ -432,10 +433,15 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  // QnnHtpShared is a special case. This allocator is only made available when the provider option
-  // 'enable_htp_shared_memory_allocator' is set to 1.
   if (type == DeviceType::QNN) {
-    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
+    if (IsQNNGPUBackend(config)) {
+      provider_options_list.back().device_filtering_options = Config::DeviceFilteringOptions{ OrtHardwareDeviceType_GPU };
+    } else {
+      // For the QNN HTP backend, thea allocator for QnnHtpShared is only made available when the provider option
+      // 'enable_htp_shared_memory_allocator' is set to 1.
+      provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
+      provider_options_list.back().device_filtering_options = Config::DeviceFilteringOptions{ OrtHardwareDeviceType_NPU };
+    }
   }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
