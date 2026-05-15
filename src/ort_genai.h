@@ -114,7 +114,7 @@ struct OgaStringArray {
     return std::unique_ptr<OgaStringArray>(p);
   }
 
-  static std::unique_ptr<OgaStringArray> Create(const char** strings, size_t count) {
+  static std::unique_ptr<OgaStringArray> Create(const char* const* strings, size_t count) {
     OgaStringArray* p;
     OgaCheckResult(OgaCreateStringArrayFromStrings(strings, count, &p));
     return std::unique_ptr<OgaStringArray>(p);
