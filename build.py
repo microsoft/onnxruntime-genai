@@ -830,7 +830,6 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
             "-G",
             args.cmake_generator,
             "-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
-
         ]
         + samples_to_build
     )
