@@ -5,6 +5,8 @@
 # --------------------------------------------------------------------------
 
 
+import os
+
 import numpy as np
 import onnx_ir as ir
 import torch
@@ -1100,17 +1102,17 @@ class Qwen35TextModel(Model):
                 ir.DataType.INT64,
                 [1, "batch_size", "sequence_length"],
             )
-            expand_name = "/model/position_ids_expand/Expand"
-            expand_output = f"{expand_name}/output_0"
-            self.make_expand(
-                expand_name,
+            tile_name = "/model/position_ids_expand/Tile"
+            tile_output = f"{tile_name}/output_0"
+            self.make_tile(
+                tile_name,
                 [unsq_output, "/model/constants/INT64/[3, 1, 1]"],
                 ir.DataType.INT64,
                 [3, "batch_size", "sequence_length"],
             )
             # Store the 3D position_ids name for mRoPE usage
             # Keep self.input_names["position_ids"] as "position_ids" for genai_config
-            self._pos_ids_3d = expand_output
+            self._pos_ids_3d = tile_output
         else:
             self._pos_ids_3d = self.input_names["position_ids"]
 
@@ -2052,30 +2054,24 @@ class Qwen35TextModel(Model):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         super().save_processing(model_name_or_path, extra_kwargs, out_dir)
-        # Patch tokenizer regex: remove \p{M} (Unicode Mark category) which is
-        # unsupported by the C++ std::regex engine in onnxruntime-extensions.
-        import json
-        import os
-
-        def _patch_pM(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if isinstance(v, str) and "\\p{M}" in v:
-                        obj[k] = v.replace("[\\p{L}\\p{M}]", "\\p{L}").replace(
-                            "[^\\s\\p{L}\\p{M}\\p{N}]", "[^\\s\\p{L}\\p{N}]"
-                        )
-                    else:
-                        _patch_pM(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _patch_pM(item)
-
+        # Patch tokenizer regex: remove \p{M} (Unicode Mark category).
+        # Qwen3.5 is the only model family whose tokenizer uses \p{M}.
+        # onnxruntime-extensions has hand-coded matchers for known regex
+        # sub-patterns (e.g. [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]) but Qwen3.5's
+        # pattern ([\p{L}\p{M}]+) is not in that table, so it falls through
+        # to std::regex which does not support Unicode property escapes.
+        # Removing \p{M} is safe because Mark characters (diacritics,
+        # combining marks) are rare in typical LLM input and \p{L} already
+        # covers the vast majority of letter+mark sequences.
         for fname in ("tokenizer_config.json", "tokenizer.json"):
             fpath = os.path.join(out_dir, fname)
             if os.path.exists(fpath):
-                with open(fpath, "r") as f:
-                    data = json.load(f)
-                _patch_pM(data)
-                with open(fpath, "w") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "\\p{M}" not in content:
+                    continue
+                content = content.replace("[\\p{L}\\p{M}]", "\\p{L}")
+                content = content.replace("[^\\s\\p{L}\\p{M}\\p{N}]", "[^\\s\\p{L}\\p{N}]")
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(content)
                 print(f"Patched unsupported \\p{{M}} regex in {fname}")

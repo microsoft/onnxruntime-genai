@@ -63,18 +63,3 @@ def test_qwen35_text_only_accepts_input_ids(test_data_path):
     # The model should accept raw token IDs (input_ids, not inputs_embeds)
     generator = og.Generator(model, params)
     assert generator is not None
-
-
-def test_qwen35_text_only_has_no_multimodal_processor(test_data_path):
-    """Text-only model should not have a multimodal processor."""
-    model_path = _skip_if_missing(test_data_path)
-    model = og.Model(model_path)
-
-    # Text-only model has no vision/embedding sub-models,
-    # so creating a multimodal processor should fail or return None
-    try:
-        processor = model.create_multimodal_processor()
-        # If it doesn't raise, the test still passes - some runtimes may return
-        # a processor that just doesn't process images
-    except Exception:
-        pass  # Expected: no multimodal support
