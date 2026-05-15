@@ -22,7 +22,8 @@ struct MultiModalFeatures {
   // Pre-allocate an empty features tensor for Input mode when no source session provides one.
   // Used when the embedding model requires an input (e.g., audio_features) but no corresponding
   // encoder session exists.
-  void AllocateEmptyFeatures();
+  // When device_override is provided, allocates on that device instead of the model's default.
+  void AllocateEmptyFeatures(DeviceInterface* device_override = nullptr);
 
   // Reshape features tensor in-place (e.g., flatten 3D [B, T, H] to 2D [B*T, H])
   void ReshapeFeatures(std::vector<int64_t> new_shape);

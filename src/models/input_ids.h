@@ -11,7 +11,9 @@ struct InputIDs {
 };
 
 struct DefaultInputIDs : InputIDs {
-  DefaultInputIDs(State& state);
+  // When device_override is non-null, input_ids tensors are allocated on that
+  // device instead of the model's default input device.
+  DefaultInputIDs(State& state, DeviceInterface* device_override = nullptr);
   DefaultInputIDs(const DefaultInputIDs&) = delete;
   DefaultInputIDs& operator=(const DefaultInputIDs&) = delete;
 
@@ -30,6 +32,7 @@ struct DefaultInputIDs : InputIDs {
  private:
   State& state_;
   const Model& model_{state_.model_};
+  DeviceInterface* p_device_;  // Device for input_ids tensors (may differ from model's default)
   size_t input_index_{~0U};
 
   bool is_prompt_{true};

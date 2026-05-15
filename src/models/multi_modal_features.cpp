@@ -78,11 +78,12 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   state_.inputs_[index_] = other.state_.outputs_[other.index_];
 }
 
-void MultiModalFeatures::AllocateEmptyFeatures() {
+void MultiModalFeatures::AllocateEmptyFeatures(DeviceInterface* device_override) {
   // Skip if already allocated (avoids redundant allocation when called from
   // both EmbeddingState::SetExtraInputs and the pipeline prompt path)
   if (features_ && state_.inputs_[index_] == features_.get()) return;
-  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+  auto& allocator = device_override ? device_override->GetAllocator() : model_.p_device_->GetAllocator();
+  features_ = OrtValue::CreateTensor(allocator, shape_, type_);
   state_.inputs_[index_] = features_.get();
 }
 
