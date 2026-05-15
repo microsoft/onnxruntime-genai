@@ -25,20 +25,17 @@ compiled QNN graph artifacts. The `genai_config.json` and model files are produc
 
 ## Usage
 
-The QNN EP is a plugin and must be registered before loading the model. Pass the path to the
-`onnxruntime_providers_qnn` shared library from the `onnxruntime-qnn` package
-(`onnxruntime_providers_qnn.dll` on Windows, `libonnxruntime_providers_qnn.so` on Linux):
+The QNN EP is a plugin and must be registered before loading the model. The `onnxruntime-qnn`
+package provides helpers to locate the library and EP name:
 
 ```python
 import onnxruntime_genai as og
+import onnxruntime_qnn
 
 # Register the QNN EP plugin before loading the model.
-# The library is included in the onnxruntime-qnn package.
-# Note: registration uses the full EP name "QNNExecutionProvider"; provider options
-# (Config.set_provider_option / genai_config.json) use the short name "QNN".
 og.register_execution_provider_library(
-    "QNNExecutionProvider",
-    "/path/to/onnxruntime_providers_qnn.dll"  # or libonnxruntime_providers_qnn.so on Linux
+    onnxruntime_qnn.get_ep_name(),      # "QNNExecutionProvider"
+    onnxruntime_qnn.get_library_path()  # platform-aware path to the QNN EP shared library
 )
 
 # Load model. The genai_config.json from the olive-recipes pipeline already
