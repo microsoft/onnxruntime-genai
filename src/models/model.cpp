@@ -227,7 +227,7 @@ State::~State() {
   if (graph_capture_session_ && !graph_id_.empty()) {
     int id = std::atoi(graph_id_.c_str());
     if (id > 0) {
-      graph_capture_session_->ReleaseGraph(id);
+      graph_capture_session_->ReleaseCapturedGraph(id);
     }
   }
 
