@@ -53,6 +53,12 @@ std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allo
 
 template <typename SrcT, typename DstT>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
+
+// Helper to emplace a processed tensor with correct type dispatch (float, bf16, fp16)
+void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
+                            OrtxTensor* tensor, ONNXTensorElementDataType type,
+                            Ort::Allocator& allocator);
+
 struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;

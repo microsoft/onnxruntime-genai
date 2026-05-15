@@ -1332,7 +1332,98 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+
+TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify generation completed and produced output
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, static_cast<size_t>(input_ids_shape[1]));
+  ASSERT_LE(sequence_length, max_length);
+}
+
+TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate a few tokens
+  generator->GenerateNextToken();
+
+  // RewindTo should throw for LFM2 because conv state cannot be rewound
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
+}
 #endif
+
+// Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
+// Skipped when the phi3-fp16-nvtrt model is not available (CI-only model).
+TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
+  std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+  if (!std::filesystem::exists(nvtrt_path)) {
+    GTEST_SKIP() << "NvTensorRtRtx model not available at " << nvtrt_path;
+  }
+
+  auto config = OgaConfig::Create(nvtrt_path.c_str());
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  int max_length = 20;
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  std::vector<int32_t> input_ids{1, 15043, 29892, 920};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  generator->RewindTo(6);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+}
 
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"

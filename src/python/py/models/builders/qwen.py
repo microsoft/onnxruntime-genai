@@ -8,7 +8,6 @@
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
 from transformers import (
     AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -440,17 +439,17 @@ class Qwen25VLTextModel(Model):
         shape_node = f"{basename}/Shape"
         self.make_shape(shape_node, q_or_k_path, [3])
 
-        # Extract B and S
+        # Extract B and S (scalar Gather indices → scalar outputs)
         batch_size_node = f"{basename}/BatchSize/Gather"
         batch_size_out = f"{batch_size_node}/output_0"
         self.make_gather(
-            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [], 0
+            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/0"], ir.DataType.INT64, [], 0
         )
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
         self.make_gather(
-            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [], 0
+            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
         )
 
         # Calculate Total Tokens = B * S
@@ -947,22 +946,28 @@ class Qwen35TextModel(Model):
             if "partial_rotary_factor" in config.rope_scaling:
                 config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
 
+        # Parse layer types before super().__init__() because
+        # make_int4_algo_config() is called from the base class init
+        # and needs self.layer_types to identify linear attention layers.
+        # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
+        text_config = getattr(config, "text_config", config)
+        num_layers = extra_options.get("num_hidden_layers", getattr(text_config, "num_hidden_layers", 0))
+        if hasattr(config, "layer_types") and config.layer_types is not None:
+            self.layer_types = list(config.layer_types)
+        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
+            interval = config.full_attention_interval
+            self.layer_types = [
+                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)
+            ]
+        else:
+            self.layer_types = ["full_attention"] * num_layers
+
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
-
-        # HF Qwen3_5RMSNorm always computes in float32 regardless of model
-        # dtype.  Force the builder to cast inputs to fp32 before LayerNorm
-        # and cast back after, matching HF behaviour and preventing precision
-        # loss that compounds across 36+ layers in fp16/bf16 builds.
-        self.layernorm_attrs["cast"]["use_fp32"] = True
-        self.layernorm_attrs["cast"]["root_input"] = True
-        self.layernorm_attrs["cast"]["skip_input"] = True
-        self.layernorm_attrs["cast"]["output_0"] = True
-        self.layernorm_attrs["cast"]["output_3"] = True
 
         # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
@@ -984,17 +989,6 @@ class Qwen35TextModel(Model):
         # Pre-compute cos/sin cache tables and interleaving masks for mRoPE
         self._make_rotary_caches()
 
-        # Parse layer types
-        if hasattr(config, "layer_types") and config.layer_types is not None:
-            self.layer_types = list(config.layer_types)
-        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
-            interval = config.full_attention_interval
-            self.layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(self.num_layers)
-            ]
-        else:
-            self.layer_types = ["full_attention"] * self.num_layers
-
         # Store linear attention config
         self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
         self.linear_value_head_dim = getattr(config, "linear_value_head_dim", 128)
@@ -1012,30 +1006,6 @@ class Qwen35TextModel(Model):
         self.attention_attrs["k_norm"] = True
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
-
-        # Mixed-precision quantization for linear attention layers.
-        # Baseline: whole model INT4. Override linear attention layer nodes
-        # to INT8 for better accuracy with modest size increase.
-        #
-        # Linear attention recurrence accumulates errors across the full sequence,
-        # unlike softmax attention which normalizes per-step.
-        int8_nodes = {}
-        for i, lt in enumerate(self.layer_types):
-            if lt == "linear_attention":
-                # All linear attention projections: INT8
-                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                # MLP projections in linear attention layers: INT8
-                for proj in ("gate_proj", "up_proj", "down_proj"):
-                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-
-        if int8_nodes:
-            algo_config = self.quant_attrs["int4"].get("algo_config")
-            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-                algo_config.customized_weight_config.update(int8_nodes)
-            else:
-                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
-                self.quant_attrs["int4"]["algo_config"] = algo_config
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1402,6 +1372,84 @@ class Qwen35TextModel(Model):
 
         return interleave("cos", cos_cache), interleave("sin", sin_cache)
 
+    def _make_synthetic_position_ids(self):
+        """Build synthetic position_ids [B, S] with values 0 .. B*S-1.
+
+        Derives B and S from the ``position_ids`` model input ``[3, B, S]``
+        instead of using Shape on intermediate Q/K tensors.  This avoids a
+        data-dependency on Q/K computation.
+
+        B*S is obtained by reshaping position_ids to ``[3, -1]`` and reading
+        the inferred dimension from the shape.  This lets the runtime compute
+        the product implicitly (Reshape is metadata-only) and avoids an
+        explicit INT64 Mul that would fall back to CPU on WebGPU.
+
+        Uses a fixed basename so ``make_node`` dedup ensures nodes are
+        created once and reused across all layers and Q/K calls.
+        """
+        basename = "/model/attn/synthetic_pos_ids"
+        pos_ids_input = self.input_names["position_ids"]
+
+        # Shape(position_ids) → [3, B, S]
+        shape_name = f"{basename}/Shape"
+        self.make_shape(shape_name, root_input=pos_ids_input, shape=[3])
+
+        # Slice shape[1:3] → [B, S] (used as reshape target at the end)
+        bs_shape_name = f"{basename}/bs_shape/Slice"
+        self.make_slice(
+            bs_shape_name,
+            inputs=[
+                f"{shape_name}/output_0",
+                "/model/constants/INT64/[1]",
+                "/model/constants/INT64/[3]",
+                "/model/constants/INT64/[0]",
+            ],
+            dtype=ir.DataType.INT64,
+            shape=[2],
+        )
+
+        # Reshape position_ids [3, B, S] → [3, -1] to get B*S implicitly
+        flat_name = f"{basename}/flat/Reshape"
+        self.make_reshape(
+            flat_name,
+            inputs=[pos_ids_input, "/model/constants/INT64/[3, -1]"],
+            dtype=ir.DataType.INT64,
+            shape=[3, "batch_seq"],
+        )
+
+        # Shape([3, B*S]) → [3, B*S], Gather scalar index 1 → scalar B*S
+        shape2_name = f"{basename}/Shape2"
+        self.make_shape(shape2_name, root_input=f"{flat_name}/output_0", shape=[2])
+
+        total_name = f"{basename}/total/Gather"
+        self.make_gather(
+            total_name,
+            inputs=[f"{shape2_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=[],
+            axis=0,
+        )
+
+        # Range(0, B*S, 1)
+        range_name = f"{basename}/range/Range"
+        self.make_range(
+            range_name,
+            inputs=["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_seq"],
+        )
+
+        # Reshape to [B, S]
+        pos_ids_name = f"{basename}/Reshape"
+        self.make_reshape(
+            pos_ids_name,
+            inputs=[f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_size", "sequence_length"],
+        )
+
+        return f"{pos_ids_name}/output_0"
+
     def _apply_mrope_rotation(self, layer_id, qk_path, qk_shape, dyn_cos, dyn_sin, num_heads, basename):
         """Apply mRoPE via com.microsoft.RotaryEmbedding (4-input variant).
 
@@ -1449,45 +1497,10 @@ class Qwen35TextModel(Model):
             rope_sin = f"{sin_cast_name}/output_0"
 
         # --- Build synthetic position_ids [B, S] = Range(0, B*S).reshape(B, S) ---
-        # Shape(Q/K input) → [B, S, N*H], Gather dim 0 and 1 → B, S
-        shape_name = f"{basename}/qk_shape/Shape"
-        self.make_shape(shape_name, qk_path, [3])
-
-        batch_name = f"{basename}/batch/Gather"
-        self.make_gather(batch_name, [f"{shape_name}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [1], axis=0)
-
-        seq_name = f"{basename}/seq/Gather"
-        self.make_gather(seq_name, [f"{shape_name}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0)
-
-        total_name = f"{basename}/total/Mul"
-        self.make_mul(total_name, [f"{batch_name}/output_0", f"{seq_name}/output_0"], ir.DataType.INT64, [1])
-
-        range_name = f"{basename}/range/Range"
-        self.make_range(
-            range_name,
-            ["/model/constants/INT64/[0]", f"{total_name}/output_0", "/model/constants/INT64/[1]"],
-            ir.DataType.INT64,
-            ["batch_seq"],
-        )
-
-        # Reshape to [B, S]
-        bs_shape_name = f"{basename}/bs_shape/Concat"
-        self.make_concat(
-            bs_shape_name,
-            [f"{batch_name}/output_0", f"{seq_name}/output_0"],
-            ir.DataType.INT64,
-            [2],
-            axis=0,
-        )
-
-        pos_ids_name = f"{basename}/pos_ids/Reshape"
-        self.make_reshape(
-            pos_ids_name,
-            [f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
-            ir.DataType.INT64,
-            ["batch_size", "sequence_length"],
-        )
-        pos_ids = f"{pos_ids_name}/output_0"
+        # Derive B and S from the position_ids input [3, B, S] instead of
+        # using Shape on intermediate Q/K tensors.  Shared across all layers
+        # and Q/K calls via make_node dedup.
+        pos_ids = self._make_synthetic_position_ids()
 
         # --- Reshape Q/K to [B, N, S, H] for com.microsoft.RotaryEmbedding ---
         head_size = qk_shape[-1] // num_heads if isinstance(qk_shape[-1], int) else self.head_size
