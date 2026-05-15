@@ -5,8 +5,6 @@
 # --------------------------------------------------------------------------
 
 
-import os
-
 import numpy as np
 import onnx_ir as ir
 import torch
