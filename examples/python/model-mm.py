@@ -9,6 +9,7 @@ import onnxruntime_genai as og
 from common import (
     apply_chat_template,
     get_config,
+    get_ep_args,
     get_generator_params_args,
     get_guidance,
     get_guidance_args,
@@ -183,7 +184,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI question/answer example for ORT GenAI")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='ONNX model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-e', '--execution_provider', type=str, required=False, help="Execution provider to run the ONNX Runtime session with. Defaults to whatever is listed in the genai_config.json.")
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
@@ -192,9 +192,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_paths", nargs="*", type=str, required=False, default=[], help="Paths to the images, mainly for CI usage")
     parser.add_argument("--audio_paths", nargs="*", type=str, required=False, default=[], help="Paths to the audios, mainly for CI usage")
     parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
-    parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
-    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
 
+    get_ep_args(parser)
     get_generator_params_args(parser)
     get_guidance_args(parser)
 

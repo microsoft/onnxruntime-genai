@@ -62,7 +62,15 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     Returns:
         og.Config: ORT GenAI config object with all options set
     """
+    # Create config with EP
+    # - If follow_config, then use the default EP stored inside the GenAI config.
+    # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
     config = og.Config(path)
+    if ep != "follow_config":
+        config.clear_providers()
+        if ep != "cpu":
+            print(f"Setting model to {ep}")
+            config.append_provider(ep)
 
     # Set any EP-specific options
     for k, v in ep_options.items():
@@ -529,6 +537,54 @@ def get_guidance(
         raise ValueError("Invalid response format provided")
 
     return guidance_type, guidance_data, json.dumps([asdict(tool) for tool in tools])
+
+
+def get_ep_args(parser: argparse.ArgumentParser) -> None:
+    """
+    Add an argument group for execution providers
+
+    Args:
+        parser (argparse.ArgumentParser): original parser object with existing arguments
+    Returns:
+        None
+    """
+
+    all_eps = [
+        "follow_config",                # Follow whatever EP is specified in the GenAI config
+        "cpu",                          # CPU EP
+        "cuda",                         # Provider-bridge execution provider for CUDA EP
+        "CUDAExecutionProvider",        # CUDA EP alias (usable for plug-in)
+        "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
+        "OpenVINOExecutionProvider",    # Intel IHV EP
+        "QNNExecutionProvider",         # Qualcomm IHV EP
+        "VitisAIExecutionProvider",     # AMD IHV EP
+        "WebGpuExecutionProvider",      # WebGPU EP
+    ]
+
+    ep_group = parser.add_argument_group("Execution Providers")
+    ep_group.add_argument(
+        "-e",
+        "--execution_provider",
+        type=str,
+        default="follow_config",
+        choices=all_eps,
+        help="Execution provider to use for inference (default: follow_config)",
+    )
+
+    ep_group.add_argument(
+        "--ep_path",
+        type=str,
+        default="",
+        help="Path to the execution provider plug-in library",
+    )
+
+    # Requires windowsml package being installed.
+    ep_group.add_argument(
+        "--use_winml",
+        action="store_true",
+        default=False,
+        help="Use Windows ML to register execution providers (only applicable on Windows 10 and above)",
+    )
 
 
 def get_generator_params_args(parser: argparse.ArgumentParser) -> None:

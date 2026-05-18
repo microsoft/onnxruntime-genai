@@ -38,6 +38,52 @@ python model-mm.py -m {path to model folder} -e {execution provider}
 python model-mm.py -m {path to model folder} -e {execution provider} --image_paths image1.jpg image2.jpg --non_interactive
 ```
 
+## Execution Providers
+
+The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
+
+- `CUDAExecutionProvider`
+- `NvTensorRTRTXExecutionProvider`
+- `OpenVINOExecutionProvider`
+- `QNNExecutionProvider`
+- `VitisAIExecutionProvider`
+- `WebGpuExecutionProvider`
+
+Before an EP can be used, it must be **registered** with ONNX Runtime. The example scripts support three ways to do this. Pick the one that matches your scenario:
+
+### 1. Register a custom / locally-built EP (`--ep_path`)
+
+Use this when you are developing an EP locally and want to test it with ONNX Runtime GenAI.
+
+- Pass the EP name with `-e` and the path to the EP shared library with `--ep_path`.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder} -e {execution provider} --ep_path {path to onnxruntime_providers_ep.dll}
+  ```
+
+### 2. Use a provider-bridge EP
+
+Use this when the EP you want is already built into the underlying `onnxruntime` Python package as a provider-bridge EP. No registration arguments are required.
+
+- By default, the EP listed in the model's `genai_config.json` is used.
+- Optionally pass `-e` to override the default EP at runtime.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder}
+  ```
+
+### 3. Register EPs via Windows ML (`--use_winml`) — Windows only
+
+Use this when you want Windows ML to acquire, install, and register the EP for you (useful for testing model changes against existing EP libraries).
+
+- Requires the [`windowsml`](https://pypi.org/project/windowsml/) Python module to be installed.
+- `--use_winml` fetches the EP from Windows Update, installs it, and registers it with ONNX Runtime GenAI.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder} --use_winml
+  ```
+
+
 ## Tool Calling
 
 Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.
