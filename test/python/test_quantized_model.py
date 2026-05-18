@@ -1,10 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Unit tests for quantized_model.py lm_head tensor loading.
+"""Unit tests for quantized_model.py lm_head tensor loading and VLM key normalisation.
 
 These tests verify that lm_head tensors are assigned correctly regardless
-of the iteration order returned by safetensors.torch.load_file().
+of the iteration order returned by safetensors.torch.load_file(), and that
+the VLM/Quark checkpoint key normalisation introduced for Qwen3-VL-4B works
+correctly so future refactors do not silently break quantised VLM loading.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from onnxruntime_genai.models.quantized_model import (
     QuantizedModel,
     QuantizedTensorModule,
     TensorModule,
+    normalize_vlm_weight_name,
 )
 
 
@@ -203,3 +206,61 @@ def test_lm_head_bias_assigned():
 
     assert isinstance(model.lm_head, TensorModule)
     assert model.lm_head.bias is bias
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for VLM / Quark checkpoint key normalisation (Qwen3-VL-4B)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_vlm_weight_name_skips_vision_keys():
+    """Vision-tower tensors must be filtered out (return None)."""
+    assert normalize_vlm_weight_name("model.visual.patch_embed.weight") is None
+    assert normalize_vlm_weight_name("model.vision.encoder.layer.0.weight") is None
+    assert normalize_vlm_weight_name("visual.embed.weight") is None
+
+
+def test_normalize_vlm_weight_name_keeps_non_vision_keys():
+    """Non-vision keys that do not match any normalisation rule pass through unchanged."""
+    assert normalize_vlm_weight_name("model.embed_tokens.weight") == "model.embed_tokens.weight"
+    assert normalize_vlm_weight_name("lm_head.weight") == "lm_head.weight"
+    assert normalize_vlm_weight_name("model.norm.weight") == "model.norm.weight"
+
+
+def test_normalize_vlm_weight_name_strips_language_model_prefix():
+    """'model.language_model.*' must be rewritten to 'model.*'."""
+    assert (
+        normalize_vlm_weight_name("model.language_model.embed_tokens.weight")
+        == "model.embed_tokens.weight"
+    )
+    assert (
+        normalize_vlm_weight_name("model.language_model.layers.0.self_attn.q_proj.weight")
+        == "model.layers.0.self_attn.q_proj.weight"
+    )
+    assert (
+        normalize_vlm_weight_name("model.language_model.norm.weight")
+        == "model.norm.weight"
+    )
+
+
+def test_normalize_vlm_weight_name_quark_scale_renamed():
+    """Quark '.weight_quantizer.scale' must map to '.weight_scale'."""
+    assert (
+        normalize_vlm_weight_name("model.layers.0.self_attn.q_proj.weight_quantizer.scale")
+        == "model.layers.0.self_attn.q_proj.weight_scale"
+    )
+
+
+def test_normalize_vlm_weight_name_quark_zero_point_renamed():
+    """Quark '.weight_quantizer.zero_point' must map to '.weight_zero_point'."""
+    assert (
+        normalize_vlm_weight_name("model.layers.0.mlp.gate_proj.weight_quantizer.zero_point")
+        == "model.layers.0.mlp.gate_proj.weight_zero_point"
+    )
+
+
+def test_normalize_vlm_weight_name_combined_vlm_prefix_and_quark():
+    """VLM prefix stripping and Quark renaming must compose correctly."""
+    raw = "model.language_model.layers.2.self_attn.v_proj.weight_quantizer.scale"
+    expected = "model.layers.2.self_attn.v_proj.weight_scale"
+    assert normalize_vlm_weight_name(raw) == expected
