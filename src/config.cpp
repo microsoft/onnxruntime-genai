@@ -1264,6 +1264,8 @@ struct Search_Element : JSON::Element {
       v_.early_stopping = JSON::Get<bool>(value);
     } else if (name == "blank_penalty") {
       v_.blank_penalty = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "kv_cache_fixed_to_max_length") {
+      v_.kv_cache_fixed_to_max_length = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1335,6 +1337,20 @@ struct Engine_Element : JSON::Element {
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
+  // AMD RyzenAI fixed-buffer mode pins kv-cache size to max_length from genai_config.json,
+  // so runtime overrides that would change max_length must be ignored to preserve the pre-sized buffer.
+  // Same-value sets are silent no-ops; differing values are warned and dropped.
+  if (name == "max_length" && search.kv_cache_fixed_to_max_length) {
+    const int new_value = static_cast<int>(value);
+    if (new_value != search.max_length) {
+      if (g_log.enabled && g_log.warning) {
+        Log("warning", "Ignoring max_length=" + std::to_string(new_value) +
+                           " override: kv_cache_fixed_to_max_length is enabled in genai_config.json (kv-cache pinned to max_length=" +
+                           std::to_string(search.max_length) + ").");
+      }
+    }
+    return;
+  }
   try {
     Search_Element(search).OnValue(name, value);
   } catch (...) {
