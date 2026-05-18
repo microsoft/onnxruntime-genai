@@ -61,6 +61,7 @@ struct State {
 
  private:
   std::string graph_id_{};
+  OrtSession* graph_capture_session_{nullptr};  // session used for graph capture (not owned)
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };
