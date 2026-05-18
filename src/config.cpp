@@ -228,6 +228,25 @@ struct RunOptions_Element : JSON::Element {
   Config::RunOptions& v_;
 };
 
+struct RunProfiling_Element : JSON::Element {
+  explicit RunProfiling_Element(Config::Model::RunProfiling& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "output_prefix") {
+      v_.output_prefix = JSON::Get<std::string_view>(value);
+    } else if (name == "runs") {
+      v_.runs = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::RunProfiling& v_;
+};
+
 struct EncoderInputs_Element : JSON::Element {
   explicit EncoderInputs_Element(Config::Model::Encoder::Inputs& v) : v_{v} {}
 
@@ -622,6 +641,9 @@ struct Decoder_Element : JSON::Element {
       v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
       return sliding_window_;
     }
+    if (name == "run_profiling") {
+      return run_profiling_;
+    }
     // Support object-style pipeline: "pipeline": { "embeddings": { ... }, ... }
     if (name == "pipeline") {
       pipeline_object_ = std::make_unique<PipelineModelObject_Element>(v_.pipeline);
@@ -645,6 +667,7 @@ struct Decoder_Element : JSON::Element {
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
   std::unique_ptr<RunOptions_Element> run_options_;
+  RunProfiling_Element run_profiling_{v_.run_profiling};
   DecoderInputs_Element inputs_{v_.inputs};
   DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
