@@ -5,10 +5,8 @@
 // full mel-spectrogram (with NeMo-style per-feature normalization).
 //
 // Outputs in the NamedTensors map:
-//   * "mel_features" : float32 [1, num_mels, total_frames] — globally
+//   * "audio_features" : float32 [1, num_mels, total_frames] — globally
 //     mean/std normalized.
-//   * "input_ids"    : int32   [1, 1] — decoder SOS token (drives the
-//     standard genai Generator search loop).
 
 #pragma once
 

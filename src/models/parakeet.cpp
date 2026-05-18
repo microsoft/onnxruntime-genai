@@ -281,18 +281,10 @@ DeviceSpan<float> ParakeetJoinerSubState::Run(int /*total_length*/,
   return {};
 }
 
-// ---------------------------------------------------------------------------
-// ParakeetTdtState — orchestrator that drives the three sub-states through
-// the TDT loop. No direct session_*->Run() calls live here; everything goes
-// via sub_state->Run() → State::Run(*session).
-// ---------------------------------------------------------------------------
-
 ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       cfg_{model.parakeet_config_} {
-  logits_size_ = model_.config_->model.vocab_size;
-
   encoder_state_ = std::make_unique<ParakeetEncoderSubState>(model, params);
   decoder_state_ = std::make_unique<ParakeetDecoderSubState>(model, params);
   joiner_state_ = std::make_unique<ParakeetJoinerSubState>(model, params);
@@ -537,19 +529,19 @@ void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_input
   // Expected shape: [1, num_mels, total_frames], already globally normalized.
   const Tensor* mel_tensor = nullptr;
   for (const auto& ei : extra_inputs) {
-    if (ei.name == "mel_features") {
+    if (ei.name == Config::Defaults::AudioFeaturesName) {
       mel_tensor = ei.tensor.get();
       break;
     }
   }
   if (!mel_tensor) {
-    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: 'mel_features' input is missing.");
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: 'audio_features' input is missing.");
   }
 
   auto info = mel_tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
   auto shape = info->GetShape();
   if (shape.size() != 3 || shape[0] != 1) {
-    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: mel_features must have shape [1, num_mels, T].");
+    throw std::runtime_error("ParakeetTdtState::SetExtraInputs: audio_features must have shape [1, num_mels, T].");
   }
   const int num_mels = static_cast<int>(shape[1]);
   total_mel_frames_ = static_cast<int>(shape[2]);
@@ -572,32 +564,37 @@ void ParakeetTdtState::SetExtraInputs(const std::vector<ExtraInput>& extra_input
 DeviceSpan<float> ParakeetTdtState::Run(int /*total_length*/,
                                         DeviceSpan<int32_t>& /*next_tokens*/,
                                         DeviceSpan<int32_t> /*next_indices*/) {
-  // First call: prime the decoder LSTM and encode the first chunk. Subsequent
-  // calls advance the TDT loop by exactly one emitted token (or return eos
-  // when the audio is fully consumed).
+  throw std::runtime_error(
+      "ParakeetTdtState::Run() is not used directly. "
+      "TDT models bypass the standard search/logits pipeline; use "
+      "Generator::GenerateNextToken() with set_inputs.");
+}
+
+void ParakeetTdtState::StepToken() {
+  // First call: prime the decoder LSTM and encode the first chunk.
+  // Subsequent calls advance the TDT loop by exactly one emitted token (or
+  // mark the chunk done when the audio is fully consumed).
   if (!initialized_) {
     InitializeDecoderState();
     EncodeNextChunk();
     initialized_ = true;
   }
 
+  last_tokens_.clear();
+  const int blank_id = cfg_.blank_id;
   int32_t next_token = EmitNextToken();
 
-  // Encode the emitted token id as a one-hot logits row that the standard
-  // search will pick up via argmax. The search runs on the model's inference
-  // device, so the buffer is allocated there and we write the one-hot
-  // directly into its CPU-mapped span (no separate shadow buffer needed).
-  auto& inference_device = *model_.p_device_inputs_;
-  if (logits_device_buffer_.empty()) {
-    logits_device_buffer_ = inference_device.Allocate<float>(static_cast<size_t>(logits_size_));
+  // EmitNextToken returns blank_id as the end-of-stream marker (set when the
+  // trailing chunk is consumed). The framework search would normally treat
+  // blank as a real EOS token; here we just stop emitting and let the
+  // generator surface this via IsChunkDone().
+  if (next_token == blank_id) {
+    chunk_done_ = true;
+    return;
   }
-  auto cpu_span = logits_device_buffer_.CpuSpan();
-  std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
-  if (next_token >= 0 && next_token < logits_size_) {
-    cpu_span[static_cast<size_t>(next_token)] = 100.0f;
-  }
-  logits_device_buffer_.CopyCpuToDevice();
-  return logits_device_buffer_;
+
+  all_tokens_.push_back(next_token);
+  last_tokens_.push_back(next_token);
 }
 
 }  // namespace Generators

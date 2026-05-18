@@ -157,20 +157,32 @@ struct ParakeetJoinerSubState : State {
 
 // State driving the streaming TDT decoder.
 //
-// SetExtraInputs() only caches the full mel tensor produced by the processor;
-// no encoder/decoder/joiner work is done there. Each call to State::Run()
-// advances the TDT loop by exactly one emitted token: the encoder is run
-// lazily, one chunk at a time, only when the current encoder window has been
-// fully consumed. Blank frames are skipped silently inside Run() so that the
-// caller always observes a real token (or eos when the audio is exhausted).
+// TDT models bypass the standard search/logits pipeline: SetExtraInputs()
+// caches the full mel tensor produced by the processor, and each call to
+// StepToken() advances the TDT loop by exactly one emitted token. The
+// encoder runs lazily, one chunk at a time, only when the current encoder
+// window has been fully consumed. Blank frames are skipped silently inside
+// StepToken() so that the caller always observes a real token (or end-of-
+// stream when the audio is exhausted).
 struct ParakeetTdtState : State {
   ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
+  // TDT bypasses the search/logits pipeline entirely; the orchestrator state
+  // has no meaningful Run() and instead exposes StepToken() below.
   DeviceSpan<float> Run(int total_length,
                         DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+
+  // Run the TDT loop until a non-blank token is emitted, append it to the
+  // accumulated transcript, and expose it via GetStepTokens(). Sets the
+  // chunk-done flag when the audio has been fully consumed.
+  void StepToken();
+  bool IsChunkDone() const { return chunk_done_; }
+  std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
+  std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
+  size_t TokenCount() const { return all_tokens_.size(); }
 
  private:
   // Encode the next audio chunk and update current_encoder_ / current_t_ /
@@ -185,8 +197,7 @@ struct ParakeetTdtState : State {
   ParakeetTdtConfig cfg_;
 
   // Sub-states delegating to the three ORT sessions through the standard
-  // State::Run(session) path (which also picks up run_options from the
-  // genai config). The top-level state never calls session_*->Run directly.
+  // State::Run(session) path
   std::unique_ptr<ParakeetEncoderSubState> encoder_state_;
   std::unique_ptr<ParakeetDecoderSubState> decoder_state_;
   std::unique_ptr<ParakeetJoinerSubState> joiner_state_;
@@ -230,10 +241,9 @@ struct ParakeetTdtState : State {
   int64_t current_end_frame_{0};
   int symbols_this_frame_{0};
 
-  // One-hot logits buffer (size = vocab_size) on the inference device,
-  // returned from Run() so the standard search can argmax it.
-  int logits_size_{};
-  DeviceSpan<float> logits_device_buffer_;
+  std::vector<int32_t> all_tokens_;
+  std::vector<int32_t> last_tokens_;
+  bool chunk_done_{false};
 
   // Per-step joiner inputs, allocated lazily on the first decoding step and
   // reused across every subsequent step to avoid per-frame allocator churn.

@@ -133,6 +133,7 @@ struct Generator : LeakChecked<Generator> {
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   bool is_nemotron_speech_model_{};
+  bool is_parakeet_tdt_model_{};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy,
                               kTopK,

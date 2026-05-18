@@ -6,6 +6,7 @@
 #include "generators.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -348,11 +349,13 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
-  // RNNT models don't use the traditional search/logits pipeline,
+  // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
-  if (ModelType::IsRNNT(model.config_->model.type)) {
+  if (ModelType::IsRNNT(model.config_->model.type) ||
+      ModelType::IsTDT(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     is_nemotron_speech_model_ = dynamic_cast<NemotronSpeechState*>(state_.get()) != nullptr;
+    is_parakeet_tdt_model_ = dynamic_cast<ParakeetTdtState*>(state_.get()) != nullptr;
     return;
   }
 
@@ -554,6 +557,8 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 size_t Generator::TokenCount() const {
   if (is_nemotron_speech_model_)
     return static_cast<NemotronSpeechState*>(state_.get())->TokenCount();
+  if (is_parakeet_tdt_model_)
+    return static_cast<ParakeetTdtState*>(state_.get())->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
@@ -564,6 +569,11 @@ bool Generator::IsDone() {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
     return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
+  }
+
+  if (is_parakeet_tdt_model_) {
+    if (!extra_inputs_.empty()) return false;
+    return static_cast<ParakeetTdtState*>(state_.get())->IsChunkDone();
   }
 
   if (computed_logits_) {
@@ -601,6 +611,14 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     static_cast<NemotronSpeechState*>(state_.get())->StepToken();
+    return;
+  }
+
+  // TDT models: same single-token-per-call pattern as RNNT.
+  if (is_parakeet_tdt_model_) {
+    state_->SetExtraInputs(extra_inputs_);
+    extra_inputs_.clear();
+    static_cast<ParakeetTdtState*>(state_.get())->StepToken();
     return;
   }
 

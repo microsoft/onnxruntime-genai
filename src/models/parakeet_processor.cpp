@@ -93,14 +93,8 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
       allocator, std::vector<int64_t>{1, m.num_mels, static_cast<int64_t>(num_frames)});
   std::memcpy(mel_value->GetTensorMutableData<float>(), norm_out.Data(),
               static_cast<size_t>(m.num_mels) * num_frames * sizeof(float));
-  named_tensors->emplace("mel_features", std::make_shared<Tensor>(std::move(mel_value)));
-
-  // 5. Seed input_ids with the decoder SOS token.
-  auto ids_value = OrtValue::CreateTensor<int32_t>(allocator,
-                                                   std::vector<int64_t>{1, 1});
-  *ids_value->GetTensorMutableData<int32_t>() = static_cast<int32_t>(m.decoder_start_token_id);
-  named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
-                         std::make_shared<Tensor>(std::move(ids_value)));
+  named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
+                         std::make_shared<Tensor>(std::move(mel_value)));
 
   return named_tensors;
 }

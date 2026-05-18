@@ -15,6 +15,7 @@
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/parakeet.h"
 #include "models/silero_vad.h"
 
 namespace Generators {
@@ -488,6 +489,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
     *out_count = tokens.size();
     return nullptr;
   }
+  // For TDT models, same bypass: return tokens from last StepToken
+  if (auto* tdt_state = dynamic_cast<Generators::ParakeetTdtState*>(generator->state_.get())) {
+    auto tokens = tdt_state->GetStepTokens();
+    *out = tokens.data();
+    *out_count = tokens.size();
+    return nullptr;
+  }
   auto tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
   *out = tokens.data();
   *out_count = tokens.size();
@@ -588,10 +596,18 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* generator, OgaTenso
 }
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* generator, size_t index) {
+  // TDT models bypass the standard search; the orchestrator state owns the
+  // accumulated transcript directly.
+  if (auto* tdt_state = dynamic_cast<Generators::ParakeetTdtState*>(generator->state_.get())) {
+    return tdt_state->GetAllTokens().size();
+  }
   return generator->GetSequence(static_cast<int>(index)).size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index) {
+  if (auto* tdt_state = dynamic_cast<Generators::ParakeetTdtState*>(generator->state_.get())) {
+    return tdt_state->GetAllTokens().data();
+  }
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
 }
 
