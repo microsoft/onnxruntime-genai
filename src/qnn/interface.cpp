@@ -49,6 +49,30 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::QNN; }
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo(const Config& config) const override {
+    // Note: "QnnHtpShared" allocator is the correct name even when using the GPU backend. Eventually, the plan is to
+    // migrate to "QnnShared".
+    return OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  }
+
+  Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& config) const override {
+    auto provider_options = Config::ProviderOptions{"QNN", {}};
+
+    // QNN has separate allocators for NPU and GPU, and chooses which one to use based on the selected backend.
+    // So, we must use device_filtering_options to ensure the allocator session is created with the correct device.
+    // Otherwise, a conflict could arise between the allocator session and the main inference session (e.g. HTP
+    // allocations provided to a GPU session).
+    if (Generators::IsQNNGPUBackend(config)) {
+      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_GPU };
+    } else {
+      // For the HTP backend, thea allocator for QnnHtpShared is only made available when the provider option
+      // 'enable_htp_shared_memory_allocator' is set to 1.
+      provider_options.options.emplace_back("enable_htp_shared_memory_allocator", "1");
+      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_NPU };
+    }
+    return provider_options;
+  }
+
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
@@ -77,6 +101,25 @@ struct InterfaceImpl : DeviceInterface {
 DeviceInterface* GetQNNInterface() {
   static std::unique_ptr<DeviceInterface> g_device = std::make_unique<QNN::InterfaceImpl>();
   return g_device.get();
+}
+
+bool IsQNNGPUBackend(const Config& config) {
+  const auto& provider_options = config.model.decoder.session_options.provider_options;
+  for (const auto& po : provider_options) {
+    if (po.name == "QNN") {
+      if (po.device_filtering_options) {
+        const auto device_type = po.device_filtering_options->hardware_device_type;
+        return device_type == OrtHardwareDeviceType_GPU;
+      }
+
+      for (const auto& option : po.options) {
+        if (option.first == "backend_type") {
+          return option.second == "gpu";
+        }
+      }
+    }
+  }
+  return false;
 }
 
 bool IsQNNStatefulModel(const Model& model) {
