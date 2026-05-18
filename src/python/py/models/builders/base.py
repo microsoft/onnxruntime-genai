@@ -470,7 +470,6 @@ class Model:
             config.rope_scaling.get("rope_type", config.rope_scaling.get("type")) == "linear"
             and "factor" in config.rope_scaling
         ):
-            print("Linear RoPE scaling is used in this model.")
             # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
             # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.
             factor = float(config.rope_scaling["factor"])
