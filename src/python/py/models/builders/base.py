@@ -3,7 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 #
-# Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 from __future__ import annotations
@@ -494,6 +494,17 @@ class Model:
                 "ntk_beta": beta_fast,
                 "truncate": config.rope_scaling.get("truncate", True),
             }
+
+        elif (
+            config.rope_scaling.get("rope_type", config.rope_scaling.get("type")) == "linear"
+            and "factor" in config.rope_scaling
+        ):
+            # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
+            # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.
+            factor = float(config.rope_scaling["factor"])
+            if factor <= 0:
+                raise ValueError(f"rope_scaling.factor must be positive for linear RoPE scaling, got {factor}")
+            self.rope_attrs["rescale_factors"] = factor
 
         elif "mrope_section" in config.rope_scaling:
             # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
@@ -1163,6 +1174,11 @@ class Model:
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
         return output
+
+    def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
+        output = f"{name}/output_0"
+        self.make_node("LpNormalization", inputs=[root_input], outputs=[output], name=name, axis=axis, p=p)
+        self.make_value(output, dtype, shape=shape)
 
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
