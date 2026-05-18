@@ -43,12 +43,19 @@ struct NemotronConfig {
   // Pre-encode cache
   int pre_encode_cache_size{};
 
+  // Prompt-conditioned encoder (multilingual models). num_prompts==0 disables.
+  int num_prompts{};
+  int lang_id{};
+  // Number of encoded frames per chunk (chunk_samples / hop_length / subsampling_factor).
+  int chunk_encoded_frames{};
+
   // Encoder I/O names
   std::string enc_in_audio;
   std::string enc_in_length;
   std::string enc_in_cache_channel;
   std::string enc_in_cache_time;
   std::string enc_in_cache_channel_len;
+  std::string enc_in_prompt;
   std::string enc_out_encoded;
   std::string enc_out_length;
   std::string enc_out_cache_channel;
@@ -128,9 +135,12 @@ struct NemotronEncoderSubState : State {
   const NemotronSpeechModel& model_;
   NemotronEncoderCache cache_;
   std::unique_ptr<OrtValue> signal_length_;
+  std::unique_ptr<OrtValue> prompt_tensor_;
 
   // Whether the encoder model has a "length" input
   bool has_length_input_{};
+  // Whether the encoder model has a "prompt" input (prompt-conditioned multilingual model)
+  bool has_prompt_input_{};
 
   // Indices into inputs_/outputs_ vectors
   size_t mel_input_idx_{};
@@ -138,6 +148,7 @@ struct NemotronEncoderSubState : State {
   size_t cache_channel_input_idx_{};
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
+  size_t prompt_input_idx_{};
 };
 
 /// Sub-state for the RNNT prediction network (decoder LSTM).

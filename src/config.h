@@ -67,6 +67,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view PromptName = "prompt";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -153,6 +154,8 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+    int num_prompts{};   // Size of the one-hot prompt vector for multilingual prompt-conditioned encoders (0 = no prompt)
+    int lang_id{};       // Default language/prompt index used when the encoder takes a prompt input
 
     struct Encoder {
       std::string filename;
@@ -176,6 +179,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string prompt{Defaults::PromptName};
       } inputs;
 
       struct Outputs {
