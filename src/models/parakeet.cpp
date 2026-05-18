@@ -113,67 +113,194 @@ std::unique_ptr<State> ParakeetTdtModel::CreateState(DeviceSpan<int32_t> /*seque
   return std::make_unique<ParakeetTdtState>(*this, params);
 }
 
+ParakeetEncoderSubState::ParakeetEncoderSubState(const ParakeetTdtModel& model,
+                                                 const GeneratorParams& params)
+    : State{params, model},
+      model_{model},
+      cfg_{model.parakeet_config_} {
+  auto& cpu_allocator = model_.allocator_cpu_;
+
+  // signal_length is a tiny scalar input updated per chunk; allocate once.
+  auto len_shape = std::array<int64_t, 1>{1};
+  signal_length_ = OrtValue::CreateTensor(cpu_allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+  mel_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.enc_in_audio.c_str());
+  inputs_.push_back(nullptr);
+
+  length_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.enc_in_length.c_str());
+  inputs_.push_back(signal_length_.get());
+
+  output_names_.push_back(cfg_.enc_out_encoded.c_str());
+  outputs_.push_back(nullptr);
+  output_names_.push_back(cfg_.enc_out_length.c_str());
+  outputs_.push_back(nullptr);
+
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
+}
+
+void ParakeetEncoderSubState::SetInputs(OrtValue* mel_tensor, int64_t num_mel_frames) {
+  inputs_[mel_input_idx_] = mel_tensor;
+  *signal_length_->GetTensorMutableData<int64_t>() = num_mel_frames;
+}
+
+DeviceSpan<float> ParakeetEncoderSubState::Run(int /*total_length*/,
+                                               DeviceSpan<int32_t>& /*next_tokens*/,
+                                               DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_encoder_);
+  return {};
+}
+
+ParakeetDecoderSubState::ParakeetDecoderSubState(const ParakeetTdtModel& model,
+                                                 const GeneratorParams& params)
+    : State{params, model},
+      model_{model},
+      cfg_{model.parakeet_config_} {
+  auto& cpu_allocator = model_.allocator_cpu_;
+
+  auto targets_shape = std::array<int64_t, 2>{1, 1};
+  targets_ = OrtValue::CreateTensor(cpu_allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *targets_->GetTensorMutableData<int64_t>() = 0;
+
+  auto tgt_len_shape = std::array<int64_t, 1>{1};
+  targets_length_ = OrtValue::CreateTensor(cpu_allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *targets_length_->GetTensorMutableData<int64_t>() = 1;
+
+  ResetLstmState();
+
+  targets_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.dec_in_targets.c_str());
+  inputs_.push_back(targets_.get());
+
+  targets_length_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.dec_in_targets_length.c_str());
+  inputs_.push_back(targets_length_.get());
+
+  state_h_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.dec_in_lstm_hidden_state.c_str());
+  inputs_.push_back(state_h_.get());
+
+  state_c_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.dec_in_lstm_cell_state.c_str());
+  inputs_.push_back(state_c_.get());
+
+  output_names_.push_back(cfg_.dec_out_outputs.c_str());
+  outputs_.push_back(nullptr);
+  output_names_.push_back(cfg_.dec_out_outputs_length.c_str());
+  outputs_.push_back(nullptr);
+  output_names_.push_back(cfg_.dec_out_lstm_hidden_state.c_str());
+  outputs_.push_back(nullptr);
+  output_names_.push_back(cfg_.dec_out_lstm_cell_state.c_str());
+  outputs_.push_back(nullptr);
+
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+}
+
+void ParakeetDecoderSubState::ResetLstmState() {
+  auto& cpu_allocator = model_.allocator_cpu_;
+  auto state_shape = std::array<int64_t, 3>{cfg_.decoder_lstm_layers, 1, cfg_.decoder_lstm_dim};
+  state_h_ = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(state_h_->GetTensorMutableData<float>(), 0,
+              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
+  state_c_ = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memset(state_c_->GetTensorMutableData<float>(), 0,
+              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
+  // input slots may not exist yet during ctor; if they do, refresh them.
+  if (inputs_.size() > state_c_input_idx_) {
+    inputs_[state_h_input_idx_] = state_h_.get();
+    inputs_[state_c_input_idx_] = state_c_.get();
+  }
+}
+
+void ParakeetDecoderSubState::StepWithToken(int32_t token_id) {
+  *targets_->GetTensorMutableData<int64_t>() = token_id;
+
+  DeviceSpan<int32_t> dummy_tokens;
+  State::Run(*model_.session_decoder_);
+
+  state_h_.reset(outputs_[2]);
+  outputs_[2] = nullptr;
+  state_c_.reset(outputs_[3]);
+  outputs_[3] = nullptr;
+  inputs_[state_h_input_idx_] = state_h_.get();
+  inputs_[state_c_input_idx_] = state_c_.get();
+}
+
+std::unique_ptr<OrtValue> ParakeetDecoderSubState::TakeDecoderOutput() {
+  std::unique_ptr<OrtValue> out(outputs_[0]);
+  outputs_[0] = nullptr;
+  if (outputs_[1] != nullptr) {
+    std::unique_ptr<OrtValue> _(outputs_[1]);
+    outputs_[1] = nullptr;
+  }
+  return out;
+}
+
+DeviceSpan<float> ParakeetDecoderSubState::Run(int /*total_length*/,
+                                               DeviceSpan<int32_t>& /*next_tokens*/,
+                                               DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_decoder_);
+  return {};
+}
+
+ParakeetJoinerSubState::ParakeetJoinerSubState(const ParakeetTdtModel& model,
+                                               const GeneratorParams& params)
+    : State{params, model},
+      model_{model},
+      cfg_{model.parakeet_config_} {
+  encoder_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.join_in_encoder.c_str());
+  inputs_.push_back(nullptr);
+
+  decoder_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg_.join_in_decoder.c_str());
+  inputs_.push_back(nullptr);
+
+  output_names_.push_back(cfg_.join_out_logits.c_str());
+  outputs_.push_back(nullptr);
+
+  if (model_.config_->model.joiner.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.joiner.run_options.value());
+  }
+}
+
+void ParakeetJoinerSubState::SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame) {
+  inputs_[encoder_input_idx_] = encoder_frame;
+  inputs_[decoder_input_idx_] = decoder_frame;
+}
+
+DeviceSpan<float> ParakeetJoinerSubState::Run(int /*total_length*/,
+                                              DeviceSpan<int32_t>& /*next_tokens*/,
+                                              DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_joiner_);
+  return {};
+}
+
+// ---------------------------------------------------------------------------
+// ParakeetTdtState — orchestrator that drives the three sub-states through
+// the TDT loop. No direct session_*->Run() calls live here; everything goes
+// via sub_state->Run() → State::Run(*session).
+// ---------------------------------------------------------------------------
+
 ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       cfg_{model.parakeet_config_} {
   logits_size_ = model_.config_->model.vocab_size;
 
-  // Allocate the persistent logits buffer (CPU-resident, one-hot).
-  logits_buffer_.assign(static_cast<size_t>(logits_size_), 0.0f);
+  encoder_state_ = std::make_unique<ParakeetEncoderSubState>(model, params);
+  decoder_state_ = std::make_unique<ParakeetDecoderSubState>(model, params);
+  joiner_state_ = std::make_unique<ParakeetJoinerSubState>(model, params);
 }
 
 void ParakeetTdtState::InitializeDecoderState() {
-  auto& cpu_allocator = model_.allocator_cpu_;
-
-  auto state_shape = std::array<int64_t, 3>{cfg_.decoder_lstm_layers, 1, cfg_.decoder_lstm_dim};
-  dec_.state_h = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(dec_.state_h->GetTensorMutableData<float>(), 0,
-              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
-  dec_.state_c = OrtValue::CreateTensor(cpu_allocator, state_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memset(dec_.state_c->GetTensorMutableData<float>(), 0,
-              static_cast<size_t>(cfg_.decoder_lstm_layers) * cfg_.decoder_lstm_dim * sizeof(float));
-
-  // Prime the decoder with the blank token to obtain the initial decoder_output.
-  StepDecoder(static_cast<int32_t>(cfg_.blank_id));
-  dec_.last_token = cfg_.blank_id;
-}
-
-void ParakeetTdtState::StepDecoder(int32_t token_id) {
-  // Tiny scalar inputs stay on CPU; ORT bridges them automatically when the
-  // decoder session is on a different EP.
-  auto& cpu_allocator = model_.allocator_cpu_;
-  auto run_options = OrtRunOptions::Create();
-
-  auto targets_shape = std::array<int64_t, 2>{1, 1};
-  auto targets = OrtValue::CreateTensor(cpu_allocator, targets_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *targets->GetTensorMutableData<int64_t>() = token_id;
-
-  auto tgt_len_shape = std::array<int64_t, 1>{1};
-  auto targets_length = OrtValue::CreateTensor(cpu_allocator, tgt_len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *targets_length->GetTensorMutableData<int64_t>() = 1;
-
-  const char* dec_input_names[] = {
-      cfg_.dec_in_targets.c_str(), cfg_.dec_in_targets_length.c_str(),
-      cfg_.dec_in_lstm_hidden_state.c_str(), cfg_.dec_in_lstm_cell_state.c_str()};
-  OrtValue* dec_inputs[] = {targets.get(), targets_length.get(),
-                            dec_.state_h.get(), dec_.state_c.get()};
-
-  const char* dec_output_names[] = {
-      cfg_.dec_out_outputs.c_str(), cfg_.dec_out_outputs_length.c_str(),
-      cfg_.dec_out_lstm_hidden_state.c_str(), cfg_.dec_out_lstm_cell_state.c_str()};
-
-  auto dec_outputs = model_.session_decoder_->Run(
-      run_options.get(),
-      dec_input_names, dec_inputs, 4,
-      dec_output_names, 4);
-
-  // Decoder is run with targets_length=1, so its output already has shape
-  // [1, dec_dim, 1] — exactly what the joiner expects. Just take ownership.
-  dec_.decoder_output = std::move(dec_outputs[0]);
-  dec_.state_h = std::move(dec_outputs[2]);
-  dec_.state_c = std::move(dec_outputs[3]);
-  dec_.last_token = token_id;
+  decoder_state_->StepWithToken(static_cast<int32_t>(cfg_.blank_id));
+  decoder_output_ = decoder_state_->TakeDecoderOutput();
 }
 
 void ParakeetTdtState::EncodeNextChunk() {
@@ -223,51 +350,46 @@ void ParakeetTdtState::EncodeNextChunk() {
                 static_cast<size_t>(num_mel_frames) * sizeof(float));
   }
 
-  // Tiny scalar input, on CPU.
-  auto len_shape = std::array<int64_t, 1>{1};
-  auto signal_length = OrtValue::CreateTensor(cpu_allocator, len_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *signal_length->GetTensorMutableData<int64_t>() = num_mel_frames;
+  encoder_state_->SetInputs(processed_signal.get(), num_mel_frames);
+  DeviceSpan<int32_t> dummy_tokens;
+  encoder_state_->Run(0, dummy_tokens, {});
 
-  const char* enc_input_names[] = {cfg_.enc_in_audio.c_str(), cfg_.enc_in_length.c_str()};
-  OrtValue* enc_inputs[] = {processed_signal.get(), signal_length.get()};
-  const char* enc_output_names[] = {cfg_.enc_out_encoded.c_str(), cfg_.enc_out_length.c_str()};
-
-  auto run_options = OrtRunOptions::Create();
-
-  auto enc_outputs = model_.session_encoder_->Run(
-      run_options.get(),
-      enc_input_names, enc_inputs, 2,
-      enc_output_names, 2);
+  // Take ownership of the encoder outputs so the sub-state's slots are reset
+  // for the next chunk (whose shapes differ).
+  std::unique_ptr<OrtValue> enc_output(encoder_state_->outputs_[0]);
+  encoder_state_->outputs_[0] = nullptr;
+  std::unique_ptr<OrtValue> enc_length(encoder_state_->outputs_[1]);
+  encoder_state_->outputs_[1] = nullptr;
 
   // Encoder output: read directly. Tensors that ORT placed on CUDA we'd need
   // to copy back via the session's own allocator; with our CPU-resident inputs
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
-  auto enc_shape = enc_outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();
+  auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
   current_enc_time_ = enc_shape[2];
   size_t enc_elems = 1;
   for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
 
-  auto& enc_mi = enc_outputs[0]->GetTensorMemoryInfo();
+  auto& enc_mi = enc_output->GetTensorMemoryInfo();
   bool enc_on_cpu = (enc_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
   if (enc_on_cpu) {
-    const float* src = enc_outputs[0]->GetTensorData<float>();
+    const float* src = enc_output->GetTensorData<float>();
     current_encoder_cpu_.assign(src, src + enc_elems);
   } else {
     auto& inference_device = *model_.p_device_inputs_;
-    auto enc_span = WrapTensor<float>(inference_device, *enc_outputs[0]);
+    auto enc_span = WrapTensor<float>(inference_device, *enc_output);
     auto enc_cpu = enc_span.CopyDeviceToCpu();
     current_encoder_cpu_.assign(enc_cpu.begin(), enc_cpu.end());
   }
 
-  auto& enc_len_mi = enc_outputs[1]->GetTensorMemoryInfo();
+  auto& enc_len_mi = enc_length->GetTensorMemoryInfo();
   bool enc_len_on_cpu = (enc_len_mi.GetDeviceType() == OrtMemoryInfoDeviceType_CPU);
   int64_t enc_total;
   if (enc_len_on_cpu) {
-    enc_total = enc_outputs[1]->GetTensorData<int64_t>()[0];
+    enc_total = enc_length->GetTensorData<int64_t>()[0];
   } else {
     auto& inference_device = *model_.p_device_inputs_;
-    auto enc_len_span = WrapTensor<int64_t>(inference_device, *enc_outputs[1]);
+    auto enc_len_span = WrapTensor<int64_t>(inference_device, *enc_length);
     enc_total = enc_len_span.CopyDeviceToCpu()[0];
   }
 
@@ -288,7 +410,6 @@ void ParakeetTdtState::EncodeNextChunk() {
 
 int32_t ParakeetTdtState::EmitNextToken() {
   auto& cpu_allocator = model_.allocator_cpu_;
-  auto run_options = OrtRunOptions::Create();
 
   const int num_durations = static_cast<int>(cfg_.tdt_durations.size());
   const int blank_id = cfg_.blank_id;
@@ -321,27 +442,23 @@ int32_t ParakeetTdtState::EmitNextToken() {
     if (!decoder_frame_) {
       decoder_frame_ = OrtValue::CreateTensor(cpu_allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
-    const float* dec_src = dec_.decoder_output->GetTensorData<float>();
+    const float* dec_src = decoder_output_->GetTensorData<float>();
     std::memcpy(decoder_frame_->GetTensorMutableData<float>(), dec_src,
                 static_cast<size_t>(dec_dim) * sizeof(float));
 
-    const char* join_input_names[] = {cfg_.join_in_encoder.c_str(), cfg_.join_in_decoder.c_str()};
-    OrtValue* join_inputs[] = {encoder_frame_.get(), decoder_frame_.get()};
-    const char* join_output_names[] = {cfg_.join_out_logits.c_str()};
+    joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame_.get());
+    DeviceSpan<int32_t> dummy_tokens;
+    joiner_state_->Run(0, dummy_tokens, {});
 
-    auto join_outputs = model_.session_joiner_->Run(
-        run_options.get(),
-        join_input_names, join_inputs, 2,
-        join_output_names, 1);
-
+    OrtValue* join_logits = joiner_state_->outputs_[0];
     const float* logits_data;
     std::vector<float> logits_buf;
-    auto& mi_jout = join_outputs[0]->GetTensorMemoryInfo();
+    auto& mi_jout = join_logits->GetTensorMemoryInfo();
     if (mi_jout.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
-      logits_data = join_outputs[0]->GetTensorData<float>();
+      logits_data = join_logits->GetTensorData<float>();
     } else {
       auto& inference_device = *model_.p_device_inputs_;
-      auto logits_span = WrapTensor<float>(inference_device, *join_outputs[0]);
+      auto logits_span = WrapTensor<float>(inference_device, *join_logits);
       auto logits_cpu = logits_span.CopyDeviceToCpu();
       logits_buf.assign(logits_cpu.begin(), logits_cpu.end());
       logits_data = logits_buf.data();
@@ -389,7 +506,8 @@ int32_t ParakeetTdtState::EmitNextToken() {
       symbols_this_frame_++;
       emitted_token = static_cast<int32_t>(best_token);
       emitted = true;
-      StepDecoder(emitted_token);
+      decoder_state_->StepWithToken(emitted_token);
+      decoder_output_ = decoder_state_->TakeDecoderOutput();
     }
 
     // Frame-advance bookkeeping. Two cases:
@@ -467,18 +585,17 @@ DeviceSpan<float> ParakeetTdtState::Run(int /*total_length*/,
 
   // Encode the emitted token id as a one-hot logits row that the standard
   // search will pick up via argmax. The search runs on the model's inference
-  // device, so we must allocate the logits buffer on that device.
+  // device, so the buffer is allocated there and we write the one-hot
+  // directly into its CPU-mapped span (no separate shadow buffer needed).
   auto& inference_device = *model_.p_device_inputs_;
   if (logits_device_buffer_.empty()) {
     logits_device_buffer_ = inference_device.Allocate<float>(static_cast<size_t>(logits_size_));
   }
-  // Build the one-hot on CPU, then copy onto the inference device.
-  std::fill(logits_buffer_.begin(), logits_buffer_.end(), 0.0f);
-  if (next_token >= 0 && next_token < logits_size_) {
-    logits_buffer_[static_cast<size_t>(next_token)] = 100.0f;
-  }
   auto cpu_span = logits_device_buffer_.CpuSpan();
-  std::copy(logits_buffer_.begin(), logits_buffer_.end(), cpu_span.begin());
+  std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
+  if (next_token >= 0 && next_token < logits_size_) {
+    cpu_span[static_cast<size_t>(next_token)] = 100.0f;
+  }
   logits_device_buffer_.CopyCpuToDevice();
   return logits_device_buffer_;
 }

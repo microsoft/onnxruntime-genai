@@ -882,10 +882,6 @@ struct Speech_Element : JSON::Element {
     }
   }
 
-  Element& OnArray(std::string_view name) override {
-    throw JSON::unknown_value_error{};
-  }
-
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
       v_.session_options = Config::SessionOptions{};

@@ -96,6 +96,65 @@ struct ParakeetTdtModel : Model {
   ParakeetTdtConfig parakeet_config_;
 };
 
+struct ParakeetEncoderSubState : State {
+  ParakeetEncoderSubState(const ParakeetTdtModel& model, const GeneratorParams& params);
+
+  void SetInputs(OrtValue* mel_tensor, int64_t num_mel_frames);
+
+  DeviceSpan<float> Run(int total_length,
+                        DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
+ private:
+  const ParakeetTdtModel& model_;
+  const ParakeetTdtConfig& cfg_;
+  std::unique_ptr<OrtValue> signal_length_;
+  size_t mel_input_idx_{};
+  size_t length_input_idx_{};
+};
+
+struct ParakeetDecoderSubState : State {
+  ParakeetDecoderSubState(const ParakeetTdtModel& model, const GeneratorParams& params);
+
+  void ResetLstmState();
+
+  void StepWithToken(int32_t token_id);
+
+  std::unique_ptr<OrtValue> TakeDecoderOutput();
+
+  DeviceSpan<float> Run(int total_length,
+                        DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
+ private:
+  const ParakeetTdtModel& model_;
+  const ParakeetTdtConfig& cfg_;
+  std::unique_ptr<OrtValue> targets_;         // [1, 1] int64
+  std::unique_ptr<OrtValue> targets_length_;  // [1] int64, always 1
+  std::unique_ptr<OrtValue> state_h_;         // [layers, 1, dim] float
+  std::unique_ptr<OrtValue> state_c_;         // [layers, 1, dim] float
+  size_t targets_input_idx_{};
+  size_t targets_length_input_idx_{};
+  size_t state_h_input_idx_{};
+  size_t state_c_input_idx_{};
+};
+
+struct ParakeetJoinerSubState : State {
+  ParakeetJoinerSubState(const ParakeetTdtModel& model, const GeneratorParams& params);
+
+  void SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame);
+
+  DeviceSpan<float> Run(int total_length,
+                        DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
+ private:
+  const ParakeetTdtModel& model_;
+  const ParakeetTdtConfig& cfg_;
+  size_t encoder_input_idx_{};
+  size_t decoder_input_idx_{};
+};
+
 // State driving the streaming TDT decoder.
 //
 // SetExtraInputs() only caches the full mel tensor produced by the processor;
@@ -114,14 +173,6 @@ struct ParakeetTdtState : State {
                         DeviceSpan<int32_t> next_indices) override;
 
  private:
-  // LSTM decoder state held between TDT decoding steps.
-  struct DecState {
-    std::unique_ptr<OrtValue> state_h;         // [lstm_layers, 1, lstm_dim]
-    std::unique_ptr<OrtValue> state_c;         // [lstm_layers, 1, lstm_dim]
-    std::unique_ptr<OrtValue> decoder_output;  // [1, lstm_dim, 1]
-    int64_t last_token{0};
-  };
-
   // Encode the next audio chunk and update current_encoder_ / current_t_ /
   // current_end_frame_. Sets finished_ when the trailing chunk is encoded.
   void EncodeNextChunk();
@@ -129,12 +180,21 @@ struct ParakeetTdtState : State {
   // (== eos) when the whole utterance has been consumed.
   int32_t EmitNextToken();
   void InitializeDecoderState();
-  void StepDecoder(int32_t token_id);
 
   const ParakeetTdtModel& model_;
   ParakeetTdtConfig cfg_;
 
-  DecState dec_;
+  // Sub-states delegating to the three ORT sessions through the standard
+  // State::Run(session) path (which also picks up run_options from the
+  // genai config). The top-level state never calls session_*->Run directly.
+  std::unique_ptr<ParakeetEncoderSubState> encoder_state_;
+  std::unique_ptr<ParakeetDecoderSubState> decoder_state_;
+  std::unique_ptr<ParakeetJoinerSubState> joiner_state_;
+
+  // Most recent decoder output (kept here, since the joiner consumes it on
+  // every step but the decoder only runs on non-blank emits). Reshaped on
+  // the fly into decoder_frame_ before each joiner call.
+  std::unique_ptr<OrtValue> decoder_output_;
 
   // Full-utterance mel features supplied by ParakeetTdtProcessor via
   // SetExtraInputs and reused by every chunk (no per-chunk featurizer state).
@@ -170,9 +230,9 @@ struct ParakeetTdtState : State {
   int64_t current_end_frame_{0};
   int symbols_this_frame_{0};
 
-  // Logits buffer reused across calls (size = vocab_size).
+  // One-hot logits buffer (size = vocab_size) on the inference device,
+  // returned from Run() so the standard search can argmax it.
   int logits_size_{};
-  std::vector<float> logits_buffer_;
   DeviceSpan<float> logits_device_buffer_;
 
   // Per-step joiner inputs, allocated lazily on the first decoding step and
