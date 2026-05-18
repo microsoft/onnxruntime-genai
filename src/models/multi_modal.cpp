@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include "qwen_position_inputs.h"
 #include <algorithm>
 #include <cstring>
 #include <numeric>
