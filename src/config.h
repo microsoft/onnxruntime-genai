@@ -3,6 +3,8 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include "pipeline_config_schema.h"
+
 namespace Generators {
 
 struct RuntimeSettings;
@@ -83,6 +85,10 @@ struct Config {
   };
 
   fs::path config_path;  // Path of the config directory
+
+  int version{1};  // Config schema version (1 = legacy string dispatch, 2 = pipeline-as-config)
+
+  PipelineConfig pipeline_config;  // v2 pipeline configuration (populated for both v1 and v2 configs)
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {

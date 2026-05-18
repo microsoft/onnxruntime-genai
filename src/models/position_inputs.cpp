@@ -1,7 +1,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "position_inputs.h"
-#include "model_type.h"
 #include <vector>
 #include <numeric>
 #include <cmath>  // For std::round
@@ -426,7 +425,7 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 //     CpuSpan/CopyCpuToDevice.
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
-         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
+         (state_.params_->IsPastPresentShareBufferEnabled(*model_.config_) &&
           model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
@@ -964,8 +963,9 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
 }
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
-  // Check for Qwen-VL family models which require 3D mRoPE position IDs
-  if (ModelType::IsQwenVLFamily(state.model_.config_->model.type)) {
+  // Config-driven position strategy (v2 pipeline config, also populated for v1 via translator)
+  const auto& strategy = state.model_.config_->pipeline_config.state.position_ids.strategy;
+  if (strategy.has_value() && strategy.value() == "mrope_3d") {
     return std::make_unique<Qwen2VLPositionInputs>(state.model_, state, sequence_lengths);
   }
   if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {

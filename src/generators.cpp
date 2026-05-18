@@ -300,12 +300,15 @@ void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, 
   guidance_ff_tokens_enabled = enable_ff_tokens;
 }
 
-bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
+bool GeneratorParams::IsPastPresentShareBufferEnabled(const Config& config) const {
   // past_present_share_buffer is only actually enabled when:
   // 1. The config option is set to true, AND
-  // 2. Either num_beams == 1 OR the model is Whisper
+  // 2. Either num_beams == 1 OR the model is encoder-decoder (has encoder
+  //    session).  Encoder-decoder models like Whisper use cache_indirection
+  //    for beam reordering, making share buffer safe with beam search.
+  bool is_encoder_decoder = config.pipeline_config.sessions.count("encoder") > 0;
   return search.past_present_share_buffer &&
-         (search.num_beams == 1 || model_type == "whisper");
+         (search.num_beams == 1 || is_encoder_decoder);
 }
 
 double GeneratorParams::GetSearchNumber(std::string_view name) const {
