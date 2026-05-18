@@ -282,7 +282,7 @@ DeviceSpan<float> ParakeetJoinerSubState::Run(int /*total_length*/,
 }
 
 ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : TransducerState{params, model},
       model_{model},
       cfg_{model.parakeet_config_} {
   encoder_state_ = std::make_unique<ParakeetEncoderSubState>(model, params);

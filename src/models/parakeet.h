@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "model.h"
+#include "transducer_state.h"
 
 namespace Generators {
 
@@ -164,7 +165,7 @@ struct ParakeetJoinerSubState : State {
 // window has been fully consumed. Blank frames are skipped silently inside
 // StepToken() so that the caller always observes a real token (or end-of-
 // stream when the audio is exhausted).
-struct ParakeetTdtState : State {
+struct ParakeetTdtState : TransducerState {
   ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
@@ -178,11 +179,7 @@ struct ParakeetTdtState : State {
   // Run the TDT loop until a non-blank token is emitted, append it to the
   // accumulated transcript, and expose it via GetStepTokens(). Sets the
   // chunk-done flag when the audio has been fully consumed.
-  void StepToken();
-  bool IsChunkDone() const { return chunk_done_; }
-  std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
-  std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
-  size_t TokenCount() const { return all_tokens_.size(); }
+  void StepToken() override;
 
  private:
   // Encode the next audio chunk and update current_encoder_ / current_t_ /
@@ -240,10 +237,6 @@ struct ParakeetTdtState : State {
   int64_t current_t_{0};
   int64_t current_end_frame_{0};
   int symbols_this_frame_{0};
-
-  std::vector<int32_t> all_tokens_;
-  std::vector<int32_t> last_tokens_;
-  bool chunk_done_{false};
 
   // Per-step joiner inputs, allocated lazily on the first decoding step and
   // reused across every subsequent step to avoid per-frame allocator churn.

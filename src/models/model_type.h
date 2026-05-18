@@ -52,6 +52,12 @@ struct ModelType {
     return std::find(TDT.begin(), TDT.end(), model_type) != TDT.end();
   }
 
+  // Transducer models (RNNT, TDT) bypass the standard search/logits pipeline
+  // and drive a custom encoder/decoder/joiner loop via TransducerState.
+  inline static bool IsTransducer(const std::string& model_type) {
+    return IsRNNT(model_type) || IsTDT(model_type);
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
