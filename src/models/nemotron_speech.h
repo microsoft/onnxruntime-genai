@@ -66,6 +66,8 @@ struct NemotronConfig {
   // Joiner I/O names
   std::string join_in_encoder;
   std::string join_in_decoder;
+  std::string join_in_start;
+  std::string join_in_end;
   std::string join_out_logits;
 
   void PopulateFromConfig(const Config& config);
@@ -181,8 +183,8 @@ struct NemotronJoinerSubState : State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 
-  /// Update encoder/decoder frame input pointers before each run.
-  void SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame);
+  /// Set joiner inputs: full encoder output buffer with start/end frame index, and decoder output directly.
+  void SetInputs(OrtValue* encoder_output, OrtValue* decoder_output, int64_t start, int64_t end);
 
  private:
   friend struct NemotronSpeechState;
@@ -191,6 +193,12 @@ struct NemotronJoinerSubState : State {
 
   size_t encoder_input_idx_{};
   size_t decoder_input_idx_{};
+  size_t start_input_idx_{};
+  size_t end_input_idx_{};
+
+  // Pre-allocated start/end scalar tensors (CPU, int64)
+  std::unique_ptr<OrtValue> start_tensor_;
+  std::unique_ptr<OrtValue> end_tensor_;
 
   // Pre-allocated output tensor
   std::unique_ptr<OrtValue> joint_output_;
@@ -226,12 +234,9 @@ struct NemotronSpeechState : State {
   // Current mel input
   std::shared_ptr<Tensor> current_mel_;
 
-  // Encoder output persisted across StepToken calls
+  // Encoder output persisted across StepToken calls (on device for direct joiner input)
   std::unique_ptr<OrtValue> encoded_output_;
   int64_t encoded_len_{0};
-
-  // Pre-allocated encoder frame for joiner input
-  std::unique_ptr<OrtValue> encoder_frame_;
 
   // Decoder state machine
   int64_t time_step_{0};

@@ -79,6 +79,8 @@ struct Config {
     // Joiner names
     static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
+    static constexpr std::string_view JoinerStartName = "start";
+    static constexpr std::string_view JoinerEndName = "end";
     static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
@@ -279,6 +281,8 @@ struct Config {
       struct Inputs {
         std::string encoder_outputs{Defaults::JoinerEncoderOutputsName};
         std::string decoder_outputs{Defaults::JoinerDecoderOutputsName};
+        std::string start{Defaults::JoinerStartName};
+        std::string end{Defaults::JoinerEndName};
       } inputs;
 
       struct Outputs {

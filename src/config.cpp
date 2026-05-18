@@ -914,6 +914,10 @@ struct JoinerInputs_Element : JSON::Element {
       v_.encoder_outputs = JSON::Get<std::string_view>(value);
     } else if (name == "decoder_outputs") {
       v_.decoder_outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "start") {
+      v_.start = JSON::Get<std::string_view>(value);
+    } else if (name == "end") {
+      v_.end = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

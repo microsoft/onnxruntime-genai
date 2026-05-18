@@ -61,6 +61,8 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   // Joiner I/O names
   join_in_encoder = jo.inputs.encoder_outputs;
   join_in_decoder = jo.inputs.decoder_outputs;
+  join_in_start = jo.inputs.start;
+  join_in_end = jo.inputs.end;
   join_out_logits = jo.outputs.logits;
 
   // Decoder I/O names (RNNT prediction network)
@@ -100,17 +102,19 @@ void NemotronEncoderCache::Reset(const NemotronConfig& cfg, const SessionInfo& s
   Initialize(cfg, session_info, allocator, device);
 }
 
-void NemotronDecoderState::Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device) {
+void NemotronDecoderState::Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& /*allocator*/, DeviceInterface& device) {
   auto lstm_hidden_type = session_info.GetInputDataType(cfg.dec_in_lstm_hidden);
   auto lstm_cell_type = session_info.GetInputDataType(cfg.dec_in_lstm_cell);
 
+  auto& device_allocator = device.GetAllocator();
+
   // LSTM states: [lstm_layers, 1, lstm_dim]
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
-  lstm_hidden_state = OrtValue::CreateTensor(allocator, state_shape, lstm_hidden_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_hidden_state).Zero();
+  lstm_hidden_state = OrtValue::CreateTensor(device_allocator, state_shape, lstm_hidden_type);
+  ByteWrapTensor(device, *lstm_hidden_state).Zero();
 
-  lstm_cell_state = OrtValue::CreateTensor(allocator, state_shape, lstm_cell_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_cell_state).Zero();
+  lstm_cell_state = OrtValue::CreateTensor(device_allocator, state_shape, lstm_cell_type);
+  ByteWrapTensor(device, *lstm_cell_state).Zero();
 
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
@@ -272,6 +276,7 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
   auto& cfg = model_.nemotron_config_;
   auto& allocator = model_.allocator_cpu_;
   auto& device = *model_.p_device_;
+  auto& device_allocator = device.GetAllocator();
 
   lstm_state_.Initialize(cfg, model_.session_info_, allocator, device);
 
@@ -294,21 +299,20 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
   inputs_.push_back(lstm_state_.lstm_cell_state.get());
 
   // Register outputs: outputs, lstm_hidden, lstm_cell
-  // Pre-allocate on CPU so ORT handles device→CPU copy during session.Run()
   auto dec_out_type = model_.session_info_.GetOutputDataType(cfg.dec_out_outputs);
   auto dec_out_shape = std::array<int64_t, 3>{1, cfg.decoder_lstm_dim, 1};  // [batch, dim, target_len]
-  dec_output_ = OrtValue::CreateTensor(allocator, dec_out_shape, dec_out_type);
+  dec_output_ = OrtValue::CreateTensor(device_allocator, dec_out_shape, dec_out_type);
   output_names_.push_back(cfg.dec_out_outputs.c_str());
   outputs_.push_back(dec_output_.get());
 
   auto h_out_type = model_.session_info_.GetOutputDataType(cfg.dec_out_lstm_hidden);
   auto h_out_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
-  dec_h_output_ = OrtValue::CreateTensor(allocator, h_out_shape, h_out_type);
+  dec_h_output_ = OrtValue::CreateTensor(device_allocator, h_out_shape, h_out_type);
   output_names_.push_back(cfg.dec_out_lstm_hidden.c_str());
   outputs_.push_back(dec_h_output_.get());
 
   auto c_out_type = model_.session_info_.GetOutputDataType(cfg.dec_out_lstm_cell);
-  dec_c_output_ = OrtValue::CreateTensor(allocator, h_out_shape, c_out_type);
+  dec_c_output_ = OrtValue::CreateTensor(device_allocator, h_out_shape, c_out_type);
   output_names_.push_back(cfg.dec_out_lstm_cell.c_str());
   outputs_.push_back(dec_c_output_.get());
 
@@ -343,7 +347,22 @@ NemotronJoinerSubState::NemotronJoinerSubState(const NemotronSpeechModel& model,
   input_names_.push_back(cfg.join_in_decoder.c_str());
   inputs_.push_back(nullptr);  // Set before each run
 
-  // Register output - pre-allocate on CPU
+  // Start/end scalar inputs (int64, CPU)
+  auto scalar_shape = std::array<int64_t, 1>{1};
+  start_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  end_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *start_tensor_->GetTensorMutableData<int64_t>() = 0;
+  *end_tensor_->GetTensorMutableData<int64_t>() = 0;
+
+  start_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg.join_in_start.c_str());
+  inputs_.push_back(start_tensor_.get());
+
+  end_input_idx_ = inputs_.size();
+  input_names_.push_back(cfg.join_in_end.c_str());
+  inputs_.push_back(end_tensor_.get());
+
+  // Register output - pre-allocate on CPU; ORT copies from device implicitly
   auto joint_out_type = model_.session_info_.GetOutputDataType(cfg.join_out_logits);
   auto joint_out_shape = std::array<int64_t, 4>{1, 1, 1, cfg.vocab_size};
   joint_output_ = OrtValue::CreateTensor(model_.allocator_cpu_, joint_out_shape, joint_out_type);
@@ -356,9 +375,11 @@ NemotronJoinerSubState::NemotronJoinerSubState(const NemotronSpeechModel& model,
   }
 }
 
-void NemotronJoinerSubState::SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame) {
-  inputs_[encoder_input_idx_] = encoder_frame;
-  inputs_[decoder_input_idx_] = decoder_frame;
+void NemotronJoinerSubState::SetInputs(OrtValue* encoder_output, OrtValue* decoder_output, int64_t start, int64_t end) {
+  inputs_[encoder_input_idx_] = encoder_output;
+  inputs_[decoder_input_idx_] = decoder_output;
+  *start_tensor_->GetTensorMutableData<int64_t>() = start;
+  *end_tensor_->GetTensorMutableData<int64_t>() = end;
 }
 
 DeviceSpan<float> NemotronJoinerSubState::Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/, DeviceSpan<int32_t> /*next_indices*/) {
@@ -375,11 +396,6 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
   encoder_state_ = std::make_unique<NemotronEncoderSubState>(model, params);
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
   joiner_state_ = std::make_unique<NemotronJoinerSubState>(model, params);
-
-  // Pre-allocate encoder frame for joiner input
-  auto enc_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded);
-  auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
-  encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, enc_out_type);
 }
 
 NemotronSpeechState::~NemotronSpeechState() = default;
@@ -450,34 +466,20 @@ void NemotronSpeechState::RunEncoder() {
   encoder_state_->SetMelInput(mel_tensor, total_mel_frames);
   encoder_state_->UpdateCacheInputs();
 
-  // Pre-allocate encoded output on CPU with computed shape
-  // Don't pre-allocate outputs_[0] (encoded) — dynamic shape, leave for ORT to allocate
   encoder_state_->outputs_[0] = nullptr;
 
   DeviceSpan<int32_t> dummy_tokens;
   encoder_state_->Run(0, dummy_tokens);
 
-  // outputs_[0] allocated by ORT (may be on device). Copy to CPU.
+  // Take ownership of the ORT-allocated encoder output (stays on device for joiner GPU input)
   auto* enc_ort = encoder_state_->outputs_[0];
-  auto enc_shape = enc_ort->GetTensorTypeAndShapeInfo()->GetShape();
-  auto enc_type = enc_ort->GetTensorTypeAndShapeInfo()->GetElementType();
-  encoded_output_ = OrtValue::CreateTensor(model_.allocator_cpu_, enc_shape, enc_type);
-  // Try memcpy — if ORT provides CPU-accessible data pointer even for WebGPU outputs
-  size_t enc_bytes = 1;
-  for (auto d : enc_shape) enc_bytes *= d;
-  enc_bytes *= sizeof(float);
-  std::memcpy(encoded_output_->GetTensorMutableData<void>(),
-              enc_ort->GetTensorData<void>(), enc_bytes);
-  // Release ORT-allocated device tensor
+  encoded_output_.reset(enc_ort);
   encoder_state_->outputs_[0] = nullptr;
-  // prevent leak: ORT allocated it, we need to free it
-  std::unique_ptr<OrtValue> enc_device_tensor(enc_ort);
 
   // outputs_[1] is pre-allocated on CPU
   encoded_len_ = *encoder_state_->enc_len_output_->GetTensorData<int64_t>();
 
   // Swap pre-allocated cache outputs into cache inputs for next run
-  // The pre-allocated tensors now hold the new cache values on CPU
   std::swap(encoder_state_->cache_.cache_last_channel, encoder_state_->enc_cache_ch_output_);
   encoder_state_->outputs_[2] = encoder_state_->enc_cache_ch_output_.get();
 
@@ -502,43 +504,23 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
 
   auto enc_shape = encoded_output_->GetTensorTypeAndShapeInfo()->GetShape();
   int64_t time_steps = std::min(enc_shape[1], encoded_len_);
-  int64_t hidden_dim = enc_shape[2];
-  size_t frame_bytes = static_cast<size_t>(hidden_dim) * sizeof(float);
-
-  // encoded_output_ and encoder_frame_ are CPU tensors
-  auto& cpu_device = *GetDeviceInterface(DeviceType::CPU);
-  auto enc_span = ByteWrapTensor(cpu_device, *encoded_output_);
-  auto frame_span = ByteWrapTensor(cpu_device, *encoder_frame_);
 
   DeviceSpan<int32_t> dummy_tokens;
 
   while (time_step_ < time_steps) {
-    // Copy current encoder frame
-    auto src_frame = enc_span.subspan(static_cast<size_t>(time_step_) * frame_bytes, frame_bytes);
-    frame_span.CopyFrom(src_frame);
-
     // Run prediction network
     prediction_state_->UpdateInputs();
     prediction_state_->Run(0, dummy_tokens);
 
-    // Reshape decoder output for joiner: [1, dim, 1] -> [1, 1, dim] (zero-copy view)
-    auto dec_out_shape = prediction_state_->dec_output_->GetTensorTypeAndShapeInfo()->GetShape();
-    int64_t dim = dec_out_shape[1];
-    auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dim};
-    auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
-    auto& dec_mem_info = prediction_state_->dec_output_->GetTensorMemoryInfo();
-    void* dec_data_ptr = prediction_state_->dec_output_->GetTensorMutableData<void>();
-    auto decoder_frame = OrtValue::CreateTensor(dec_mem_info, dec_data_ptr,
-                                                static_cast<size_t>(dim) * sizeof(float),
-                                                decoder_frame_shape, dec_out_type);
-
-    // Run joiner
-    joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
+    // Run joiner — pass full encoder GPU buffer with start/end, and dec_output_ directly
+    joiner_state_->SetInputs(encoded_output_.get(), prediction_state_->dec_output_.get(),
+                             time_step_ * enc_shape[2], (time_step_ + 1) * enc_shape[2]);
+    //std::cerr << "Running joiner with encoder time step " << time_step_ << " (frames " << time_step_ * enc_shape[2] << " to " << (time_step_ + 1) * enc_shape[2] << ")" << std::endl;
     joiner_state_->Run(0, dummy_tokens);
 
-    // Argmax over logits (already on CPU)
-    auto logits_shape = joiner_state_->joint_output_->GetTensorTypeAndShapeInfo()->GetShape();
+    // Argmax over logits (on CPU)
     const float* logits = joiner_state_->joint_output_->GetTensorData<float>();
+    auto logits_shape = joiner_state_->joint_output_->GetTensorTypeAndShapeInfo()->GetShape();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 
