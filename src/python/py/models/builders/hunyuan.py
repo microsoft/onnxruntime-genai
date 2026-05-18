@@ -40,16 +40,7 @@ class HunyuanDenseV1Model(Model):
         # Disable rope_scaling: effective theta is now baked into config.rope_theta above.
         config.rope_scaling = None
 
-        # Disable QKV fusion so separate q_path/k_path/v_path are created in
-        # make_attention_input_proj — required so our override can apply QK norms
-        # on individual Q and K paths after RoPE.
-        extra_options = {**extra_options, "disable_qkv_fusion": True}
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # Enable Q/K norm: Hunyuan applies query_layernorm/key_layernorm after RoPE.
-        self.attention_attrs["q_norm"] = True
-        self.attention_attrs["k_norm"] = True
 
         # GQA fuses RoPE inside the attention op (use_rope_in_attn=True) which makes
         # it impossible to insert QK norms between RoPE output and the attention op.
@@ -61,6 +52,11 @@ class HunyuanDenseV1Model(Model):
                 self.input_names["position_ids"] = "position_ids"
 
         self.model_type = "hunyuandensev1"
+
+    def make_attention_init(self):
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        super().make_attention_init()
 
     def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
         """
