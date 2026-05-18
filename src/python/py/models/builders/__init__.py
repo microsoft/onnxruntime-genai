@@ -28,7 +28,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel, VideoChatFlashQwenModel
+from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, QwenModel, VideoChatFlashQwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
