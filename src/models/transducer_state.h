@@ -5,9 +5,7 @@
 //
 // Transducer models bypass the standard search/logits pipeline: each call
 // to StepToken() advances the decoder by one emitted symbol and appends it
-// to the running transcript. The Generator and C API talk to this base
-// interface so RNNT/TDT (and any future transducer variants) plug in
-// uniformly.
+// to the running transcript.
 
 #pragma once
 

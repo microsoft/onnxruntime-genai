@@ -17,10 +17,16 @@
 //         generator.generate_next_token()
 //     transcription = processor.decode(generator.get_sequence(0))
 //
-// Internally the encoder is fed in fixed-length chunks with left+right
-// context (matching the original NeMo streaming reference); the TDT
-// (Token-and-Duration Transducer) decoder runs against the encoder output
-// frames, producing one token id per call to State::Run().
+// Internally the encoder is fed one chunk at a time with left + right
+// context (matching the original NeMo streaming reference). The window
+// length varies across chunks: the first chunk is clipped on the left
+// (no past context available), the last chunk is clipped on the right
+// (no more audio), and middle chunks span the full
+// `left_context + chunk + right_context` extent. The encoder is therefore
+// exported with a dynamic time dimension and is given a `signal_length`
+// input each call. The TDT (Token-and-Duration Transducer) decoder runs
+// against the encoder's chunk-proper frames and emits one symbol id per
+// call to StepToken().
 
 #pragma once
 
@@ -157,14 +163,7 @@ struct ParakeetJoinerSubState : State {
 };
 
 // State driving the streaming TDT decoder.
-//
-// TDT models bypass the standard search/logits pipeline: SetExtraInputs()
-// caches the full mel tensor produced by the processor, and each call to
-// StepToken() advances the TDT loop by exactly one emitted token. The
-// encoder runs lazily, one chunk at a time, only when the current encoder
-// window has been fully consumed. Blank frames are skipped silently inside
-// StepToken() so that the caller always observes a real token (or end-of-
-// stream when the audio is exhausted).
+
 struct ParakeetTdtState : TransducerState {
   ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params);
 
@@ -204,20 +203,20 @@ struct ParakeetTdtState : TransducerState {
   // the fly into decoder_frame_ before each joiner call.
   std::unique_ptr<OrtValue> decoder_output_;
 
-  // Full-utterance mel features supplied by ParakeetTdtProcessor via
-  // SetExtraInputs and reused by every chunk (no per-chunk featurizer state).
-  // This matches PyTorch implementation from Nvidia.
-  // Layout: [num_mels, total_mel_frames_], row-major, already normalized in
-  // the processor via ort_extensions::PerFeatureNormalize.
   std::vector<float> full_mel_;
   int total_mel_frames_{0};
   bool mel_loaded_{false};
 
-  // Streaming state: where the next chunk starts (in audio-sample space),
-  // total audio length, and whether the trailing chunk has been encoded.
+  // Total audio length, in samples (set once when the mel arrives, since
+  // total_audio = total_mel_frames_ * hop_length conceptually).
   size_t total_audio_{0};
+  // Start of the next chunk-proper region, in audio-sample space. Advances
+  // by chunk_samples_ each EncodeNextChunk() call (clamped at total_audio_).
   size_t next_chunk_start_{0};
+  // True once the trailing chunk has been encoded; no more encoder runs.
   bool finished_{false};
+  // True after the decoder LSTM state has been seeded with the SOS token
+  // (lazy init on the first StepToken() call).
   bool initialized_{false};
 
   // Current encoder window (output of the most recent encoder run), staged
