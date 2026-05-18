@@ -121,6 +121,8 @@ VideoChatFlashProcessor::VideoChatFlashProcessor(Config& config, const SessionIn
   try {
     pixel_values_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_values);
   } catch (...) {
+    // pixel_values input may be absent when only the language decoder session is loaded;
+    // the default-initialized pixel_values_type_ (FLOAT) is used in that case.
   }
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);

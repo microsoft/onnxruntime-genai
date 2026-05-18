@@ -197,6 +197,15 @@ def create_model(
     # (av, cv2, decord, imageio) even though the LM backbone is standard Qwen2.5.
     # Load the raw config.json via Qwen2Config to avoid pulling in video deps.
     _vcf_arch = "VideoChatFlashQwenForCausalLM"
+
+    def _has_vcf_architecture(raw_config: dict[str, Any]) -> bool:
+        architectures = raw_config.get("architectures")
+        if isinstance(architectures, list):
+            return _vcf_arch in architectures
+        if isinstance(architectures, str):
+            return architectures == _vcf_arch
+        return False
+
     _is_vcf = False
     try:
         import json as _json
@@ -204,13 +213,13 @@ def create_model(
             _raw_cfg_path = os.path.join(hf_name, "config.json")
             if os.path.isfile(_raw_cfg_path):
                 with open(_raw_cfg_path) as _f:
-                    _is_vcf = _json.load(_f).get("architectures", [None])[0] == _vcf_arch
+                    _is_vcf = _has_vcf_architecture(_json.load(_f))
         else:
             # HF repo: peek at config.json without running custom code
             from huggingface_hub import hf_hub_download
             _cfg_file = hf_hub_download(repo_id=hf_name, filename="config.json", token=hf_token, cache_dir=cache_dir)
             with open(_cfg_file) as _f:
-                _is_vcf = _json.load(_f).get("architectures", [None])[0] == _vcf_arch
+                _is_vcf = _has_vcf_architecture(_json.load(_f))
     except Exception:
         pass
 
