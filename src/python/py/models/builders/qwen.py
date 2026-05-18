@@ -926,12 +926,25 @@ class VideoChatFlashQwenModel(QwenModel):
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Pre-configure before super().__init__() so the base class (Model)
+        # establishes these attributes on first assignment instead of us
+        # overwriting inherited values.
+        #
+        # The custom remote code requires video libraries (av, cv2, decord,
+        # imageio) which are not needed to export the LM backbone. Force
+        # hf_remote=False so base class helpers (make_genai_config,
+        # save_processing) use standard, non-remote-code paths.
+        extra_options = dict(extra_options) if extra_options else {}
+        extra_options["hf_remote"] = False
+
+        # Model.__init__ sets self.model_type = config.architectures[0]. The
+        # HF architecture string ("VideoChatFlashQwenForCausalLM") has already
+        # served its purpose in the dispatch table in builder.py; swap it for
+        # the runtime identifier expected by genai_config.json and the C++
+        # runtime registration in model.cpp.
+        config.architectures = ["videochat_flash_qwen"]
+
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.model_type = "videochat_flash_qwen"
-        # The custom remote code requires video libraries (av, cv2, decord, imageio)
-        # which are not needed to export the LM backbone. Disable trust_remote_code
-        # so base class helpers (make_genai_config, save_processing) use standard paths.
-        self.hf_remote = False
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # make_genai_config in base.py calls AutoConfig with trust_remote_code,

@@ -221,6 +221,11 @@ def create_model(
             with open(_cfg_file) as _f:
                 _is_vcf = _has_vcf_architecture(_json.load(_f))
     except Exception:
+        # Best-effort architecture peek: if config.json is unreadable, the
+        # huggingface_hub download fails (offline, private repo without token,
+        # missing file), or the JSON is malformed, fall through to the standard
+        # AutoConfig.from_pretrained() path below, which has richer error
+        # reporting and is the canonical loader for non-VCF models.
         pass
 
     if _is_vcf:
