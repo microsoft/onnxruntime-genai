@@ -1823,17 +1823,8 @@ class Qwen35TextModel(Model):
         full_shape = [*leading_dims, last_dim]
 
         node_name = f"{basename}/LpNormalization"
-        out_name = f"{node_name}/output_0"
-        self.make_value(out_name, dtype=self.io_dtype, shape=full_shape)
-        self.make_node(
-            "LpNormalization",
-            inputs=[input_name],
-            outputs=[out_name],
-            name=node_name,
-            axis=-1,
-            p=2,
-        )
-        return out_name
+        self.make_lp_normalization(node_name, input_name, self.io_dtype, full_shape, axis=-1, p=2)
+        return f"{node_name}/output_0"
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).
