@@ -115,7 +115,7 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
 
   // Initialize speech/audio processor only when configured. A phi4mm genai_config.json with
   // the "speech" block cleared (filename + config_filename both empty) loads vision-only and
-  // skips the ~0.8 GB speech ONNX entirely. Matches the Gemma4 processor's pattern.
+  // skip the speech ONNX entirely. Matches the Gemma4 processor's pattern.
   if (!config.model.speech.config_filename.empty()) {
     auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
     if (fs::exists(speech_config_path)) {
