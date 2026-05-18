@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include <limits>
 #include <numeric>
 #include <regex>
 
@@ -231,57 +232,103 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
     int64_t height_patches = height / kPatchSize;
     int64_t width_patches = width / kPatchSize;
-    int64_t total_patches = height_patches * width_patches;
-    int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
 
-    // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
-    // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
-    patched_pixel_values = OrtValue::CreateTensor<float>(
-        allocator, std::vector<int64_t>{1, total_patches, patch_dim});
-    auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
+    if (channels <= 0) {
+      throw std::runtime_error("Invalid channel count for image patching: channels=" +
+                               std::to_string(channels));
+    }
 
-    // Extract patches from single image in HWC format
-    // Each spatial patch is replicated kTemporalPatchSize times
-    int64_t patch_idx = 0;
-    for (int64_t ph = 0; ph < height_patches; ++ph) {
-      for (int64_t pw = 0; pw < width_patches; ++pw) {
-        int64_t h_start = ph * kPatchSize;
-        int64_t w_start = pw * kPatchSize;
+    // Image too small to form any patches — skip patching entirely.
+    // The downstream code will use the original (unpatched) pixel_values.
+    if (height_patches <= 0 || width_patches <= 0) {
+      // Fall through: patched_pixel_values remains null, so the else branch
+      // (non-patched pixel_values path) handles it.
+    } else {
+      // Check overflow for total_patches = height_patches * width_patches
+      if (height_patches > std::numeric_limits<int64_t>::max() / width_patches) {
+        throw std::runtime_error("Integer overflow computing total_patches: height_patches=" +
+                                 std::to_string(height_patches) + " * width_patches=" +
+                                 std::to_string(width_patches));
+      }
+      int64_t total_patches = height_patches * width_patches;
 
-        int64_t write_idx = patch_idx * patch_dim;
+      // Check overflow for patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize
+      int64_t patch_dim = channels;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kTemporalPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: channels=" +
+                                 std::to_string(channels) + " * kTemporalPatchSize=" +
+                                 std::to_string(kTemporalPatchSize));
+      }
+      patch_dim *= kTemporalPatchSize;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: " +
+                                 std::to_string(patch_dim) + " * kPatchSize=" +
+                                 std::to_string(kPatchSize) + " (first kPatchSize multiply)");
+      }
+      patch_dim *= kPatchSize;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: " +
+                                 std::to_string(patch_dim) + " * kPatchSize=" +
+                                 std::to_string(kPatchSize) + " (second kPatchSize multiply)");
+      }
+      patch_dim *= kPatchSize;
 
-        // Repeat the same spatial patch kTemporalPatchSize times
-        // Output: [temporal, channels, patch_h, patch_w]
-        for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
-          for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t h = 0; h < kPatchSize; ++h) {
-              for (int64_t w = 0; w < kPatchSize; ++w) {
-                // HWC format: pixel_values[height][width][channels]
-                int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
-                patched_data[write_idx++] = pixel_values_data[src_idx];
+      // Check overflow for total buffer size = total_patches * patch_dim
+      if (total_patches > std::numeric_limits<int64_t>::max() / patch_dim) {
+        throw std::runtime_error("Integer overflow computing patched buffer size: total_patches=" +
+                                 std::to_string(total_patches) + " * patch_dim=" +
+                                 std::to_string(patch_dim));
+      }
+
+      // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
+      // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
+      patched_pixel_values = OrtValue::CreateTensor<float>(
+          allocator, std::vector<int64_t>{1, total_patches, patch_dim});
+      auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
+
+      // Extract patches from single image in HWC format
+      // Each spatial patch is replicated kTemporalPatchSize times
+      int64_t patch_idx = 0;
+      for (int64_t ph = 0; ph < height_patches; ++ph) {
+        for (int64_t pw = 0; pw < width_patches; ++pw) {
+          int64_t h_start = ph * kPatchSize;
+          int64_t w_start = pw * kPatchSize;
+
+          int64_t write_idx = patch_idx * patch_dim;
+
+          // Repeat the same spatial patch kTemporalPatchSize times
+          // Output: [temporal, channels, patch_h, patch_w]
+          for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
+            for (int64_t c = 0; c < channels; ++c) {
+              for (int64_t h = 0; h < kPatchSize; ++h) {
+                for (int64_t w = 0; w < kPatchSize; ++w) {
+                  // HWC format: pixel_values[height][width][channels]
+                  int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
+                  patched_data[write_idx++] = pixel_values_data[src_idx];
+                }
               }
             }
           }
+          patch_idx++;
         }
-        patch_idx++;
       }
-    }
 
-    // Create image_grid_thw: [1, 3] for single image
-    if (status != kOrtxOK || !image_grid_thw) {
-      computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
-          allocator, std::vector<int64_t>{1, 3});
-      auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
+      // Create image_grid_thw: [1, 3] for single image
+      if (status != kOrtxOK || !image_grid_thw) {
+        computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
+            allocator, std::vector<int64_t>{1, 3});
+        auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
 
-      // For a single image: T=1 (one frame), H=height_patches, W=width_patches
-      // The kTemporalPatchSize is embedded in the patch dimension
-      grid_data[0] = 1;  // Single temporal frame for images
-      grid_data[1] = height_patches;
-      grid_data[2] = width_patches;
+        // For a single image: T=1 (one frame), H=height_patches, W=width_patches
+        // The kTemporalPatchSize is embedded in the patch dimension
+        grid_data[0] = 1;  // Single temporal frame for images
+        grid_data[1] = height_patches;
+        grid_data[2] = width_patches;
 
-      computed_grid_data = grid_data;
-      computed_grid_num_images = 1;
-    }
+        computed_grid_data = grid_data;
+        computed_grid_num_images = 1;
+      }
+    }  // end else (image large enough to patch)
   }
 
   auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
