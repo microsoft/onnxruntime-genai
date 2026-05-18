@@ -541,8 +541,6 @@ class Model:
             self.attention_attrs["use_packed_matmul"] = (
                 self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
                 and not self.extra_options.get("disable_qkv_fusion", False)
             )
 
@@ -1071,6 +1069,13 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
+
+    def make_split(self, name, inputs, axis, output_shapes, dtype):
+        outputs = [f"{name}/output_{i}" for i in range(len(output_shapes))]
+        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
+        for out, shape in zip(outputs, output_shapes):
+            self.make_value(out, dtype, shape=shape)
+        return outputs
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -2968,6 +2973,30 @@ class Model:
                     attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input
                 )
                 self.attention_attrs["q_path"] = f"{qkv_matmul_name}/output_0"
+
+                # When q_norm/k_norm are present, the packed-QKV path inside GQA cannot be used
+                # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
+                if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
+                    q_size = self.num_attn_heads * self.head_size
+                    kv_size = self.num_kv_heads * self.head_size
+                    split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
+                    split_outputs = self.make_split(
+                        split_name,
+                        inputs=[
+                            f"{qkv_matmul_name}/output_0",
+                            f"/model/constants/INT64/[{q_size}, {kv_size}, {kv_size}]",
+                        ],
+                        axis=-1,
+                        output_shapes=[
+                            ["batch_size", "sequence_length", q_size],
+                            ["batch_size", "sequence_length", kv_size],
+                            ["batch_size", "sequence_length", kv_size],
+                        ],
+                        dtype=self.io_dtype,
+                    )
+                    self.attention_attrs["q_path"] = split_outputs[0]
+                    self.attention_attrs["k_path"] = split_outputs[1]
+                    self.attention_attrs["v_path"] = split_outputs[2]
             else:
                 q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
                 q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
@@ -2996,7 +3025,12 @@ class Model:
 
         else:
             # Make Add nodes (if bias exists)
-            if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal and any_bias_exists:
+            if (
+                self.attention_attrs["use_packed_matmul"]
+                and qkv_dtype_equal
+                and any_bias_exists
+                and not (self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"])
+            ):
                 # Combine 3 Adds into 1 packed Add
                 qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
                 self.make_packed_add(
