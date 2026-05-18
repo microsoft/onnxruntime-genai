@@ -17,6 +17,9 @@ parameters:
   type: boolean
 - name: enable_linux_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -82,6 +85,15 @@ stages:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/py-validation-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}

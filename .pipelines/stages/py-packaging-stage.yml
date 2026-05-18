@@ -9,6 +9,9 @@ parameters:
   type: boolean
 - name: enable_linux_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -129,6 +132,17 @@ stages:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         os: 'linux'
         build_config: ${{ parameters.build_config }}
