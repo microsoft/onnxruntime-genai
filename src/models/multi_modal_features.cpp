@@ -63,7 +63,7 @@ void MultiModalFeatures::Update(bool is_prompt) {
   // num_feature_tokens will be 0 when no image is provided
   if (!is_prompt && shape_[shape_.size() - 2] > 0) {  // if num_image_tokens > 0
     shape_[shape_.size() - 2] = 0;
-    features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+    features_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
     state_.inputs_[index_] = features_.get();
   }
 }
@@ -82,7 +82,7 @@ void MultiModalFeatures::AllocateEmptyFeatures() {
   // Skip if already allocated (avoids redundant allocation when called from
   // both EmbeddingState::SetExtraInputs and the pipeline prompt path)
   if (features_ && state_.inputs_[index_] == features_.get()) return;
-  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+  features_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
   state_.inputs_[index_] = features_.get();
 }
 
