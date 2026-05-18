@@ -261,6 +261,49 @@ struct InterfaceImpl : DeviceInterface {
 
     return true;
   }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (batch_beam_size != 1) {
+      return false;
+    }
+
+    int start = total_length - new_kv_length;
+
+    auto upload = [&]<typename T>(T) {
+      // For the common single-token decode, use a stack variable to avoid heap allocation
+      T stack_val;
+      std::vector<T> heap_buf;
+      T* cpu_data;
+      if (new_kv_length == 1) {
+        stack_val = static_cast<T>(start);
+        cpu_data = &stack_val;
+      } else {
+        heap_buf.resize(new_kv_length);
+        for (int i = 0; i < new_kv_length; i++) {
+          heap_buf[i] = static_cast<T>(start + i);
+        }
+        cpu_data = heap_buf.data();
+      }
+
+      size_t byte_size = static_cast<size_t>(new_kv_length) * sizeof(T);
+      int64_t shape_val = static_cast<int64_t>(byte_size);
+      std::span<const int64_t> shape{&shape_val, 1};
+      static const auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+      auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, position_ids, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+      const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+      GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    };
+
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      upload(int32_t{});
+    } else {
+      upload(int64_t{});
+    }
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU
