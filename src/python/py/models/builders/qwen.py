@@ -1854,38 +1854,20 @@ class Qwen35TextModel(Model):
         return unflat_out
 
     def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
-        """L2-normalize along last dimension: x * rsqrt(sum(x^2) + eps)
+        """L2-normalize along last dimension via ORT's LpNormalization(p=2).
 
-        Matches the FLA library's l2norm used by the PyTorch reference:
-            inv_norm = rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
-            return x * inv_norm
+        Replaces the 5-node Square+ReduceSum+Add(eps)+Rsqrt+Mul subgraph with
+        a single LpNormalization op (natively supported by the WebGPU EP and
+        others). The +eps term is dropped; q/k come from RMSNorm+Proj so
+        magnitudes far exceed 1e-6, keeping any divergence within fp16 noise.
         """
         if leading_dims is None:
             leading_dims = ["batch_size", "sequence_length"]
         full_shape = [*leading_dims, last_dim]
-        reduced_shape = [*leading_dims, 1]
 
-        # sum(x^2, dim=-1, keepdim=True)
-        sq_name = f"{basename}/Square/Mul"
-        self.make_mul(sq_name, [input_name, input_name], self.io_dtype, full_shape)
-
-        sum_name = f"{basename}/SumSq/ReduceSum"
-        self.make_reduce_sum(sum_name, [f"{sq_name}/output_0", "/model/constants/INT64/[-1]"],
-                             self.io_dtype, reduced_shape, keepdims=True)
-
-        # sum(x^2) + eps
-        eps_name = self._get_shared_l2_eps()
-        add_eps_name = f"{basename}/AddEps/Add"
-        self.make_add(add_eps_name, [f"{sum_name}/output_0", eps_name], self.io_dtype, reduced_shape)
-
-        # x * rsqrt(sum(x^2) + eps)
-        rsqrt_name = f"{basename}/Rsqrt"
-        self.make_rsqrt(rsqrt_name, [f"{add_eps_name}/output_0"], self.io_dtype, reduced_shape)
-
-        norm_name = f"{basename}/Normalize/Mul"
-        self.make_mul(norm_name, [input_name, f"{rsqrt_name}/output_0"], self.io_dtype, full_shape)
-
-        return f"{norm_name}/output_0"
+        node_name = f"{basename}/LpNormalization"
+        self.make_lp_normalization(node_name, input_name, self.io_dtype, full_shape, axis=-1, p=2)
+        return f"{node_name}/output_0"
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).

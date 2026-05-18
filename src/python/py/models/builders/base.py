@@ -1071,6 +1071,11 @@ class Model:
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
 
+    def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
+        output = f"{name}/output_0"
+        self.make_node("LpNormalization", inputs=[root_input], outputs=[output], name=name, axis=axis, p=p)
+        self.make_value(output, dtype, shape=shape)
+
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Div", inputs=inputs, outputs=[output], name=name)
