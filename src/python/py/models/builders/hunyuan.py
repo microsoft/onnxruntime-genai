@@ -60,7 +60,7 @@ class HunyuanDenseV1Model(Model):
             if "position_ids" not in self.input_names:
                 self.input_names["position_ids"] = "position_ids"
 
-        self.model_type = "hunyuan_v1_dense"
+        self.model_type = "hunyuandensev1"
 
     def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
         """
