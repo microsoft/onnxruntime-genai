@@ -3005,12 +3005,13 @@ class Model:
                     self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                     self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
-    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+    def make_attention_qk_norm(self, layer_id, attention):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
             self.make_qk_norm(layer_id, attention)
 
-        # Make RotaryEmbedding nodes
+    def make_attention_qk_rope(self, layer_id, **kwargs):
+        # Make RotaryEmbedding nodes; returns (cos_cache_name, sin_cache_name)
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["rope"]:
             if self.attention_attrs["use_rope_in_attn"]:
@@ -3030,6 +3031,15 @@ class Model:
                     position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
                 )
                 self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
+        return cos_cache_name, sin_cache_name
+
+    def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
+        # Base order: norm first, then RoPE
+        self.make_attention_qk_norm(layer_id, attention)
+        return self.make_attention_qk_rope(layer_id, **kwargs)
+
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_attention_qk_rope_and_norm(layer_id, attention, **kwargs)
 
         # Get key-value cache names if they exist
         (past_k, past_v, present_k, present_v) = self.make_key_value_cache_names(layer_id)

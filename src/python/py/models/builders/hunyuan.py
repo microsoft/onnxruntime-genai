@@ -47,6 +47,10 @@ class HunyuanDenseV1Model(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        # Enable Q/K norm: Hunyuan applies query_layernorm/key_layernorm after RoPE.
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+
         # GQA fuses RoPE inside the attention op (use_rope_in_attn=True) which makes
         # it impossible to insert QK norms between RoPE output and the attention op.
         # Force explicit RotaryEmbedding nodes so our override can place QK norms after them.
@@ -58,76 +62,23 @@ class HunyuanDenseV1Model(Model):
 
         self.model_type = "hunyuan_v1_dense"
 
-    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+    def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
         """
-        Override to apply QK norms AFTER RoPE (Hunyuan-specific ordering).
+        Override to apply RoPE THEN QK norm (Hunyuan-specific ordering).
 
-        Base class order: [optional QK norm] -> RoPE -> repeat_kv -> attn_op
-        Hunyuan order:    RoPE -> [QK norm]  -> repeat_kv -> attn_op
+        Base order: [QK norm] -> RoPE
+        Hunyuan order: RoPE -> [QK norm]
 
-        The query_layernorm / key_layernorm weight attributes are aliased to
-        q_norm / k_norm so the existing make_qk_norm() infrastructure can be reused.
+        query_layernorm / key_layernorm are aliased to q_norm / k_norm so
+        the existing make_qk_norm() infrastructure can be reused.
         """
-
-        # Step 1: RoPE (no pre-RoPE QK norm for Hunyuan)
-        cos_cache_name, sin_cache_name = "", ""
-        if self.attention_attrs["use_rope_in_attn"]:
-            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
-        else:
-            q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(
-                q_rotary_name,
-                root_input=self.attention_attrs["q_path"],
-                position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
-            )
-            self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
-            k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(
-                k_rotary_name,
-                root_input=self.attention_attrs["k_path"],
-                position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
-            )
-            self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
-
-        # Step 2: QK norm AFTER RoPE — alias to what make_qk_norm expects.
-        # Non-quantized models use query_layernorm/key_layernorm;
-        # quantized models already map to q_norm/k_norm via tensor_map keys.
+        # Alias Hunyuan weight names to what make_qk_norm expects
         if not hasattr(attention, "q_norm"):
             attention.q_norm = attention.query_layernorm
         if not hasattr(attention, "k_norm"):
             attention.k_norm = attention.key_layernorm
-        self.make_qk_norm(layer_id, attention)
 
-        # Step 3: Repeat KV (for GQA with MultiHeadAttention op)
-        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
-        if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
-            self.attention_attrs["k_path"] = self.make_repeat_kv(
-                layer_id, root_input=self.attention_attrs["k_path"], past_kv=past_k, present_kv=present_k
-            )
-            self.attention_attrs["v_path"] = self.make_repeat_kv(
-                layer_id, root_input=self.attention_attrs["v_path"], past_kv=past_v, present_kv=present_v
-            )
-            past_k, past_v, present_k, present_v = "", "", "", ""
-
-        # Step 4: Sinks (attention sink tokens, rarely used)
-        sinks_name = ""
-        if self.attention_attrs["sinks"]:
-            sinks_name = f"model.layers.{layer_id}.attn.sinks"
-            self.make_initializer(attention.sinks, sinks_name, to=self.io_dtype)
-
-        # Step 5: Attention op (GroupQueryAttention or MultiHeadAttention)
-        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
-        self.make_attention_op(
-            attn_name,
-            q_path=self.attention_attrs["q_path"],
-            k_path=self.attention_attrs["k_path"],
-            v_path=self.attention_attrs["v_path"],
-            past_k=past_k,
-            past_v=past_v,
-            present_k=present_k,
-            present_v=present_v,
-            cos_cache=cos_cache_name,
-            sin_cache=sin_cache_name,
-            sinks=sinks_name,
-            **kwargs,
-        )
+        # RoPE first, then QK norm
+        cos_cache_name, sin_cache_name = self.make_attention_qk_rope(layer_id, **kwargs)
+        self.make_attention_qk_norm(layer_id, attention)
+        return cos_cache_name, sin_cache_name
