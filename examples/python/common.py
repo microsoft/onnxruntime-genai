@@ -74,10 +74,10 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
 
     # Set any EP-specific options
     for k, v in ep_options.items():
-        if k == "enable_cuda_graph" and ep in {"cuda", "NvTensorRtRtx"} and search_options.get("num_beams", 1) > 1:
-            # Disable CUDA graph if using beam search (num_beams > 1),
+        if k in {"enable_cuda_graph", "enableGraphCapture"} and search_options.get("num_beams", 1) > 1:
+            # Disable graph capture if using beam search (num_beams > 1),
             # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
-            config.set_provider_option(ep, "enable_cuda_graph", "0")
+            config.set_provider_option(ep, k, "0")
         else:
             config.set_provider_option(ep, k, v)
 
@@ -549,16 +549,19 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
         None
     """
 
+    # If --ep_path is provided, the execution provider specified by --execution_provider
+    # is registered with ONNX Runtime. It must match the name ONNX Runtime is expecting,
+    # not the genai canonical ep name.
     all_eps = [
-        "follow_config",                # Follow whatever EP is specified in the GenAI config
-        "cpu",                          # CPU EP
-        "cuda",                         # Provider-bridge execution provider for CUDA EP
-        "CUDAExecutionProvider",        # CUDA EP alias (usable for plug-in)
+        "follow_config",                   # Follow whatever EP is specified in the GenAI config
+        "cpu",                             # CPU EP
+        "cuda",                            # GenAI canonical name for CUDA EP
+        "CUDAExecutionProvider",           # CUDA EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
-        "OpenVINOExecutionProvider",    # Intel IHV EP
-        "QNNExecutionProvider",         # Qualcomm IHV EP
-        "VitisAIExecutionProvider",     # AMD IHV EP
-        "WebGpuExecutionProvider",      # WebGPU EP
+        "OpenVINOExecutionProvider",       # Intel IHV EP
+        "QNNExecutionProvider",            # Qualcomm IHV EP
+        "VitisAIExecutionProvider",        # AMD IHV EP
+        "WebGpuExecutionProvider",         # WebGPU EP
     ]
 
     ep_group = parser.add_argument_group("Execution Providers")

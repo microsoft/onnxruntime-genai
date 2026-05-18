@@ -42,6 +42,7 @@ python model-mm.py -m {path to model folder} -e {execution provider} --image_pat
 
 The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
 
+- `CPUExecutionProvider`
 - `CUDAExecutionProvider`
 - `NvTensorRTRTXExecutionProvider`
 - `OpenVINOExecutionProvider`
@@ -49,7 +50,7 @@ The ONNX Runtime GenAI Python package supports the following execution providers
 - `VitisAIExecutionProvider`
 - `WebGpuExecutionProvider`
 
-Before an EP can be used, it must be **registered** with ONNX Runtime. The example scripts support three ways to do this. Pick the one that matches your scenario:
+To use an EP with the example scripts, make sure it is available to ONNX Runtime using one of the three approaches below. Some scenarios require explicit registration arguments, while provider-bridge EPs do not. Pick the one that matches your scenario:
 
 ### 1. Register a custom / locally-built EP (`--ep_path`)
 
