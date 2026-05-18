@@ -106,10 +106,10 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
       audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
       audio_sizes_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_sizes)} {
-  const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
+  const auto image_processor_config = (config.shared_assets_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
-  const auto audio_processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
+  const auto audio_processor_config = (config.shared_assets_path / fs::path(config.model.speech.config_filename)).string();
   CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), audio_processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);

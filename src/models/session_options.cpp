@@ -3,6 +3,7 @@
 
 #include "session_options.h"
 
+#include <algorithm>
 #include <functional>
 #include <unordered_map>
 
@@ -196,6 +197,52 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   }
 
   return device;
+}
+
+std::string EpNameToProviderTag(std::string_view canonical_ep_name) {
+  // Canonical EP -> GenAI internal provider tag. Mirrors the dispatch
+  // table used by `SetProviderSessionOptions` above; a missing entry here
+  // means the provider has no GenAI-side AppendExecutionProvider and
+  // cannot be auto-injected. CPU is intentionally absent: the implicit
+  // CPU fallback runs whenever `providers` is empty.
+  static const std::unordered_map<std::string_view, std::string_view> kTable = {
+      {"CUDAExecutionProvider", "cuda"},
+      {"DmlExecutionProvider", "DML"},
+      {"NvTensorRtRtxExecutionProvider", "NvTensorRtRtx"},
+      {"OpenVINOExecutionProvider", "OpenVINO"},
+      {"QNNExecutionProvider", "QNN"},
+      {"RyzenAIExecutionProvider", "RyzenAI"},
+      {"VitisAIExecutionProvider", "VitisAI"},
+      {"WebGpuExecutionProvider", "WebGPU"},
+  };
+  auto it = kTable.find(canonical_ep_name);
+  if (it == kTable.end()) return {};
+  return std::string(it->second);
+}
+
+void EnsurePackageProvider(Config::SessionOptions& session_options,
+                           std::string_view canonical_ep_name) {
+  const std::string tag = EpNameToProviderTag(canonical_ep_name);
+  if (tag.empty()) return;  // CPU / unknown / empty -> no-op
+
+  auto& providers = session_options.providers;
+  auto it = std::find(providers.begin(), providers.end(), tag);
+  if (it == providers.end()) {
+    providers.insert(providers.begin(), tag);
+  } else if (it != providers.begin()) {
+    // Already present but not first; rotate it to the front so the
+    // package's selected EP wins priority over user-overlaid extras.
+    std::rotate(providers.begin(), it, std::next(it));
+  }
+
+  auto& provider_options = session_options.provider_options;
+  auto poit = std::find_if(provider_options.begin(), provider_options.end(),
+                           [&](const Config::ProviderOptions& po) { return po.name == tag; });
+  if (poit == provider_options.end()) {
+    Config::ProviderOptions po;
+    po.name = tag;
+    provider_options.push_back(std::move(po));
+  }
 }
 
 }  // namespace Generators

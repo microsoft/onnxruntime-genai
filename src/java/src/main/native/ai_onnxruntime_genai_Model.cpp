@@ -22,6 +22,28 @@ Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring m
 }
 
 JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Model_createModelWithEp(JNIEnv* env, jobject thiz, jstring model_path, jstring ep) {
+  CString path{env, model_path};
+  // `ep` may be null (Java callers pass null for "use defaulting"). Avoid
+  // calling GetStringUTFChars on a null jstring — its behaviour is undefined.
+  const char* c_ep = nullptr;
+  if (ep != nullptr) {
+    c_ep = env->GetStringUTFChars(ep, nullptr);
+  }
+
+  OgaModel* model = nullptr;
+  OgaResult* result = OgaCreateModelWithEp(path, c_ep, &model);
+  if (ep != nullptr) {
+    env->ReleaseStringUTFChars(ep, c_ep);
+  }
+  if (ThrowIfError(env, result)) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(model);
+}
+
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_createModelFromConfig(JNIEnv* env, jobject thiz, jlong config_handle) {
   const OgaConfig* config = reinterpret_cast<const OgaConfig*>(config_handle);
 

@@ -15,7 +15,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   // Find vision pipeline stage paths
   auto find_stage = [&](const std::string& id) -> std::string {
     for (const auto& stage : config_->model.vision.pipeline) {
-      if (stage.model_id == id) return (config_->config_path / fs::path(stage.filename)).string();
+      if (stage.model_id == id)
+        return (AssetFolder(config_->model.vision.component) / fs::path(stage.filename)).string();
     }
     return "";
   };
@@ -31,7 +32,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
       if (stage.session_options.has_value()) {
         auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
-        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
+        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false,
+                                       /*disable_graph_capture=*/false, config_->model.vision.component);
         vision_attn_so = emplaced.first->second.get();
       } else {
         // Fall back to primary session options when run_on_cpu=false but no stage-specific options

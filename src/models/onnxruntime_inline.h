@@ -708,6 +708,28 @@ inline OrtSessionOptions& OrtSessionOptions::AddExternalInitializers(const std::
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::AddExternalInitializersFromFilesInMemory(
+    const std::vector<std::basic_string<ORTCHAR_T>>& names,
+    const std::vector<char*>& buffers,
+    const std::vector<size_t>& lengths) {
+  const size_t inputs_num = names.size();
+  if (inputs_num != buffers.size() || inputs_num != lengths.size()) {
+    Ort::ThrowOnError(OrtStatus::Create(
+                          ORT_INVALID_ARGUMENT,
+                          "Expecting names, buffers, and lengths to have the same length")
+                          .get());
+  }
+  if (inputs_num == 0) return *this;
+  std::vector<const ORTCHAR_T*> names_ptr;
+  names_ptr.reserve(inputs_num);
+  for (size_t i = 0; i < inputs_num; ++i) {
+    names_ptr.push_back(names[i].c_str());
+  }
+  Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
+      this, names_ptr.data(), const_cast<char* const*>(buffers.data()), lengths.data(), inputs_num));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const OrtCUDAProviderOptions& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA(this, &provider_options));
   return *this;

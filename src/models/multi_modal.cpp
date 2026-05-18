@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include "session_options.h"
 #include <cstring>
 #include <numeric>
 
@@ -93,24 +94,62 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
+  // v4 package: vision/speech/embedding are SECONDARY sessions —
+  // the decoder is the model's primary, and only it should set
+  // `p_device_`. In flat-dir mode this is moot (all roles use the same
+  // EP, falling back to decoder.session_options via
+  // EffectiveSessionOptions), so the legacy `is_primary=true` is kept.
+  // In v4-package mode, each role's component can sit on a different EP
+  // captured by ComponentInstance::SelectedEp(); we ensure the role's
+  // own SessionOptions exists, inject the per-role EP at the front, and
+  // create the session as non-primary so its DeviceInterface doesn't
+  // clobber or conflict with the decoder's.
+  const bool package_mode = static_cast<bool>(config_->model_package);
+
+  auto inject_package_ep = [&](std::optional<Config::SessionOptions>& slot,
+                               const std::string& component_name) -> bool {
+    if (!package_mode || component_name.empty()) return false;
+    auto it = config_->component_instances.find(component_name);
+    if (it == config_->component_instances.end() || !it->second) return false;
+    if (!slot.has_value()) slot.emplace();
+    EnsurePackageProvider(*slot, it->second->SelectedEp());
+    return true;
+  };
+
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
+    const bool vision_packaged = inject_package_ep(config_->model.vision.session_options,
+                                                   config_->model.vision.component);
     vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options),
+                                   *vision_session_options_, !vision_packaged, /*disable_graph_capture=*/true,
+                                   config_->model.vision.component);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get(),
+                                    config_->model.vision.component);
   }
 
   if (speech) {
+    const bool speech_packaged = inject_package_ep(config_->model.speech.session_options,
+                                                   config_->model.speech.component);
     speech_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, /*disable_graph_capture=*/true);
-    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options),
+                                   *speech_session_options_, !speech_packaged, /*disable_graph_capture=*/true,
+                                   config_->model.speech.component);
+    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get(),
+                                    config_->model.speech.component);
   }
 
+  const bool embedding_packaged = inject_package_ep(config_->model.embedding.session_options,
+                                                    config_->model.embedding.component);
   embedding_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options),
+                                 *embedding_session_options_, !embedding_packaged, /*disable_graph_capture=*/true,
+                                 config_->model.embedding.component);
 
-  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
-  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get(),
+                                     config_->model.embedding.component);
+  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(),
+                                   config_->model.decoder.component);
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
@@ -716,11 +755,15 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();
+    const auto lora_adapter = (model_.AssetFolder(model_.config_->model.vision.component) /
+                               fs::path(*model_.config_->model.vision.adapter_filename))
+                                  .string();
     adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
   } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename)).string();
+    const auto lora_adapter = (model_.AssetFolder(model_.config_->model.speech.component) /
+                               fs::path(*model_.config_->model.speech.adapter_filename))
+                                  .string();
     adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }

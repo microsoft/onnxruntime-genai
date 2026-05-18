@@ -21,6 +21,22 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+- (nullable instancetype)initWithPath:(NSString*)path ep:(nullable NSString*)ep error:(NSError**)error {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
+  try {
+    if (ep == nil) {
+      _model = OgaModel::Create([path UTF8String]);
+    } else {
+      _model = OgaModel::Create([path UTF8String], [ep UTF8String]);
+    }
+    return self;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
 - (nullable instancetype)initWithConfig:(OGAConfig*)config error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;

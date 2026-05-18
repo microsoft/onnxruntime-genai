@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
+#include <fstream>
 #include <random>
 #include <set>
 #include <string>
@@ -306,7 +307,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.shared_assets_path.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -602,7 +603,8 @@ Model::~Model() {
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           const std::string& component_name) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -668,8 +670,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     if (custom_library_path.is_relative()) {
       bool resolved = false;
 
-      // First try: resolve relative to GenAI model folder (most intuitive for users)
-      fs::path model_relative_path = config_->config_path / custom_library_path;
+      // First try: resolve relative to the role's asset folder (variant
+      // folder in v4-package mode, GenAI model folder in flat-dir mode).
+      fs::path model_relative_path = AssetFolder(component_name) / custom_library_path;
       if (fs::exists(model_relative_path)) {
         custom_library_file_prefix = model_relative_path.string();
         resolved = true;
@@ -741,18 +744,110 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  // Package mode (v4): the captured EP from variant selection lives on
+  // the per-component ComponentInstance. Inject it at the front of the
+  // decoder's `providers` list (and ensure a matching ProviderOptions
+  // entry) before CreateSessionOptionsFromConfig walks the dispatch
+  // table. Empty `decoder.component`, missing instance, or
+  // CPU/unrecognised EP -> no-op (the implicit-CPU path still runs).
+  if (config_->model_package && !config_->model.decoder.component.empty()) {
+    auto it = config_->component_instances.find(config_->model.decoder.component);
+    if (it != config_->component_instances.end() && it->second) {
+      EnsurePackageProvider(config_->model.decoder.session_options, it->second->SelectedEp());
+    }
+  }
+
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
+                                 /*disable_graph_capture=*/false, config_->model.decoder.component);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      // Pipeline sub-models live alongside the decoder under the
+      // decoder's variant folder in v4-package mode, so their custom-ops
+      // resolution should mirror the decoder's component.
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
+                                     /*disable_graph_capture=*/false, config_->model.decoder.component);
     }
   }
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
+}
+
+fs::path Model::AssetFolder(const std::string& component_name) const {
+  if (!component_name.empty() && config_->model_package) {
+    auto it = config_->component_instances.find(component_name);
+    if (it != config_->component_instances.end() && it->second) {
+      return it->second->VariantFolderPath();
+    }
+  }
+  return config_->config_path;
+}
+
+void Model::ApplyPackageExternalInitializers(const std::string& component_name,
+                                             const std::string& filename,
+                                             OrtSessionOptions& session_options) {
+  if (component_name.empty() || !config_->model_package) return;
+  auto cit = config_->component_instances.find(component_name);
+  if (cit == config_->component_instances.end() || !cit->second) return;
+
+  auto mit = variant_manifests_.find(component_name);
+  if (mit == variant_manifests_.end()) {
+    // Lazy parse + cache. ParseVariantManifest throws on missing/malformed
+    // variant.json, which is correct: any v4 package reaching this point
+    // is required by the spec to have a valid variant.json for each
+    // selected component.
+    VariantManifest manifest = ParseVariantManifest(cit->second->VariantFolderPath());
+    mit = variant_manifests_.emplace(component_name, std::move(manifest)).first;
+  }
+
+  const VariantFile* file_entry = nullptr;
+  for (const auto& fe : mit->second.files) {
+    if (fe.filename == filename) {
+      file_entry = &fe;
+      break;
+    }
+  }
+  if (!file_entry || file_entry->shared_files.empty()) return;
+
+  std::vector<std::basic_string<ORTCHAR_T>> names;
+  std::vector<char*> buffers;
+  std::vector<size_t> lengths;
+  names.reserve(file_entry->shared_files.size());
+  buffers.reserve(file_entry->shared_files.size());
+  lengths.reserve(file_entry->shared_files.size());
+
+  for (const auto& [graph_filename, checksum] : file_entry->shared_files) {
+    fs::path resolved = cit->second->ResolveSharedWeight(checksum);
+
+    std::ifstream f(resolved.c_str(), std::ios::binary | std::ios::ate);
+    if (!f) {
+      throw std::runtime_error("model package: cannot open shared-weight blob: " + resolved.string());
+    }
+    const std::streamsize size = f.tellg();
+    f.seekg(0);
+    if (size < 0) {
+      throw std::runtime_error("model package: cannot stat shared-weight blob: " + resolved.string());
+    }
+    auto& buf = external_initializer_buffers_.emplace_back(static_cast<size_t>(size));
+    if (size > 0 && !f.read(buf.data(), size)) {
+      throw std::runtime_error("model package: cannot read shared-weight blob: " + resolved.string());
+    }
+
+#ifdef _WIN32
+    // ORTCHAR_T is wchar_t on Windows; widen the UTF-8 graph filename via fs::path.
+    fs::path graph_path(graph_filename);
+    names.emplace_back(graph_path.c_str());
+#else
+    names.push_back(graph_filename);
+#endif
+    buffers.push_back(buf.data());
+    lengths.push_back(static_cast<size_t>(size));
+  }
+
+  session_options.AddExternalInitializersFromFilesInMemory(names, buffers, lengths);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -765,7 +860,21 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options,
+                                                 const std::string& component_name) {
+  // Per-role asset folder: variant folder in v4-package mode, model
+  // folder in flat-dir mode (or empty/unknown component).
+  const fs::path asset_folder = AssetFolder(component_name);
+
+  // v4 package: register external initializers from the file entry's
+  // `shared_files` map before ORT consumes session_options. No-op in
+  // flat-dir, for empty/unknown component, files not in the variant
+  // manifest, or files with no shared_files.
+  if (session_options != nullptr) {
+    ApplyPackageExternalInitializers(component_name, model_filename, *session_options);
+  }
+
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -783,14 +892,14 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     // for the OrtSession through the ONNX Runtime API.
     // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
     DirGuard dir_guard;
-    dir_guard.ChangeTo(config_->config_path);
+    dir_guard.ChangeTo(asset_folder);
     auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
 
     return session;
   }
 
   // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  return OrtSession::Create(ort_env, (asset_folder / fs::path(model_filename)).c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
@@ -809,12 +918,13 @@ bool Model::IsPruned() const {
   return logits_shape[1] == 1;
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/,
+                                   std::string_view user_ep /*= {}*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay, user_ep);
   return CreateModel(ort_env, std::move(config));
 }
 

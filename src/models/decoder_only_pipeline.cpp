@@ -12,7 +12,9 @@ namespace Generators {
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
+    OrtSessionOptions* stage_so = GetSessionOptions(model.model_id);
+    sessions_.emplace_back(CreateSession(ort_env, model.filename, stage_so,
+                                         config_->model.decoder.component));
   }
 
   for (auto& session : sessions_) {
@@ -68,9 +70,16 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
-    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
-        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
-                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+    // Route through Model::CreateSession so a recreated session picks up
+    // the same external-initializer registration as the initial one
+    // (otherwise v4-package shared_files would only attach to the first
+    // session created in the constructor).
+    auto& mutable_model = const_cast<DecoderOnlyPipelineModel&>(model_);
+    mutable_model.sessions_[id_] = mutable_model.CreateSession(
+        model_.ort_env_,
+        model_.config_->model.decoder.pipeline[id_].filename,
+        model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id),
+        model_.config_->model.decoder.component);
   }
 
   if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {

@@ -3,13 +3,25 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include <memory>
+#include <string>
+#include <unordered_map>
+
 namespace Generators {
 
 struct RuntimeSettings;
+struct ModelPackageContext;
+struct ComponentInstance;
 
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay);
+  // Explicit-EP overload. `user_ep` is the public-facing optional `ep`
+  // argument from `og.Model(path[, ep])` / `og.Config(path[, ep])`. When
+  // empty the EP is defaulted from the package's per-component compatibility
+  // intersection. When non-empty in package mode, it bypasses defaulting and
+  // becomes the captured EP. In flat-dir mode, a non-empty `user_ep` raises.
+  Config(const fs::path& path, std::string_view json_overlay, std::string_view user_ep);
 
   struct Defaults {
     // Decoder names
@@ -82,7 +94,14 @@ struct Config {
     static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
-  fs::path config_path;  // Path of the config directory
+  fs::path config_path;  // Path of the config directory. In flat-dir mode this is also the model-asset root.
+  // Directory holding shared assets (tokenizer files, processor JSON, chat template) that are
+  // common across components. In flat-dir mode this equals config_path. In package mode (ORT v4)
+  // this is set to <pkg>/configs/ by the package loader. Runtime-resolved only; not parsed from
+  // genai_config.json. Per-component model assets (ONNX, LoRA, custom ops, external data) are
+  // intentionally NOT covered by this field — they are addressed per-component variant folder by
+  // later workstreams.
+  fs::path shared_assets_path;
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
@@ -156,6 +175,7 @@ struct Config {
 
     struct Encoder {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -192,6 +212,7 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -208,6 +229,7 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -253,6 +275,7 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -297,6 +320,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string component;  // v4-package-only: name of the package component this role maps to
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -430,12 +454,48 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+
+  // ----------------------------------------------------------------------
+  // v4 model-package mode (declarative). Empty in flat-dir mode.
+  //
+  // `model_package` is the package context. Per-component selected variants
+  // live in `component_instances`, keyed by package component name (later
+  // looked up via `model.<role>.component`).
+  //
+  // Both fields hold `shared_ptr` so that `Config` remains copyable: the C
+  // API path (`OgaCreateModelFromConfig`) clones the user-mutable config
+  // into a model-owned copy, and the package state is read-only after
+  // `Open` so sharing is safe. Declaration order is intentional —
+  // `component_instances` is destroyed before `model_package`, but the
+  // shared_ptrs decouple lifetime so reordering is also safe.
+  // ----------------------------------------------------------------------
+  std::shared_ptr<ModelPackageContext> model_package;
+  std::unordered_map<std::string, std::shared_ptr<ComponentInstance>> component_instances;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
+// Layer-2 override channel (caller-driven).
+//
+// Applies a JSON document to an existing Config in place, using the same
+// JSON parser registered for genai_config.json. Any field that can be set via
+// genai_config.json can therefore also be overridden here. The JSON parser
+// merges objects key-wise (ProviderOptionsObject_Element matches by `name`),
+// so e.g. an overlay that adds a single WebGPU provider_option does NOT
+// replace pre-existing provider_options entries for other providers.
+//
+// Used by:
+//   * OgaConfigOverlay() — exposed to C# (Config.Overlay), Java
+//     (Config.overlay), Python (og.Config.overlay) and ObjC mirrors.
+//   * RuntimeSettings::GenerateConfigOverlay() — handle-driven runtime
+//     overrides (e.g. WebGPU dawnProcTable) merged at Model::Create.
+//
+// Empty `json` is not supported (the underlying streaming parser requires at
+// least one value); callers must guard against the empty case.
+//
+// The layer-2 contract is regression-tested in test/runtime_settings_test.cpp.
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
@@ -446,5 +506,19 @@ void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view 
 void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name);
 void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name);
 void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name);
+
+// Returns the effective layer-2 session_options view for a non-decoder
+// component, falling back to the decoder's session_options when the component
+// has no explicit override. Replaces the inline ternary
+//   model.<component>.session_options.has_value()
+//       ? model.<component>.session_options.value()
+//       : model.decoder.session_options
+// that previously appeared in marian / whisper / multi_modal session-creation
+// paths. Behavior is identical to the inlined form; isolating it here gives v4
+// model-package mode a single seam where the layer-1 (variant.json) baseline
+// will eventually be merged in front of the layer-2 (genai_config) view.
+const Config::SessionOptions& EffectiveSessionOptions(
+    const Config& config,
+    const std::optional<Config::SessionOptions>& component_session_options);
 
 }  // namespace Generators

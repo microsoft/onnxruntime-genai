@@ -21,6 +21,28 @@ Java_ai_onnxruntime_genai_Config_createConfig(JNIEnv* env, jobject thiz, jstring
   return reinterpret_cast<jlong>(config);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Config_createConfigWithEp(JNIEnv* env, jobject thiz, jstring model_path, jstring ep) {
+  CString path{env, model_path};
+  // `ep` may be null (Java callers pass null for "use defaulting"). Avoid
+  // calling GetStringUTFChars on a null jstring — its behaviour is undefined.
+  const char* c_ep = nullptr;
+  if (ep != nullptr) {
+    c_ep = env->GetStringUTFChars(ep, nullptr);
+  }
+
+  OgaConfig* config = nullptr;
+  OgaResult* result = OgaCreateConfigWithEp(path, c_ep, &config);
+  if (ep != nullptr) {
+    env->ReleaseStringUTFChars(ep, c_ep);
+  }
+  if (ThrowIfError(env, result)) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(config);
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Config_destroyConfig(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);

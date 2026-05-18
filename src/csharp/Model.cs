@@ -16,6 +16,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
+        // Explicit-EP overload. `ep` selects the execution provider for v4 model
+        // packages, bypassing GenAI's compatibility-intersection defaulting. Pass null
+        // or empty to fall back to defaulting. In flat-directory mode a non-empty `ep`
+        // raises an error.
+        public Model(string modelPath, string ep)
+        {
+            byte[] epBytes = string.IsNullOrEmpty(ep) ? null : StringUtils.ToUtf8(ep);
+            Result.VerifySuccess(NativeMethods.OgaCreateModelWithEp(StringUtils.ToUtf8(modelPath), epBytes, out _modelHandle));
+        }
+
         public Model(Config config)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateModelFromConfig(config.Handle, out _modelHandle));
