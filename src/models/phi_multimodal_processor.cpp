@@ -127,25 +127,36 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> image_result;
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner, image_sizes_owner,
+      image_attention_mask_owner, num_img_tokens_owner;
   OrtxTensor *pixel_values{}, *image_sizes{}, *image_attention_mask{}, *num_img_tokens{};
   if (payload.images) {
     CheckResult(OrtxImagePreProcess(image_processor_.get(), payload.images->images_.get(), image_result.ToBeAssigned()));
 
-    CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, &pixel_values));
-    CheckResult(OrtxTensorResultGetAt(image_result.get(), 1, &image_sizes));
-    CheckResult(OrtxTensorResultGetAt(image_result.get(), 2, &image_attention_mask));
-    CheckResult(OrtxTensorResultGetAt(image_result.get(), 3, &num_img_tokens));
+    CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, pixel_values_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(image_result.get(), 1, image_sizes_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(image_result.get(), 2, image_attention_mask_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(image_result.get(), 3, num_img_tokens_owner.ToBeAssigned()));
+    pixel_values = pixel_values_owner.get();
+    image_sizes = image_sizes_owner.get();
+    image_attention_mask = image_attention_mask_owner.get();
+    num_img_tokens = num_img_tokens_owner.get();
   }
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
+  ort_extensions::OrtxObjectPtr<OrtxTensor> audio_embeds_owner, audio_attention_mask_owner, audio_sizes_owner;
   OrtxTensor *audio_embeds{}, *audio_attention_mask{}, *audio_sizes{};
   if (payload.audios) {
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_embeds));
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_attention_mask));
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 2, &audio_sizes));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_embeds_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, audio_attention_mask_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 2, audio_sizes_owner.ToBeAssigned()));
+    audio_embeds = audio_embeds_owner.get();
+    audio_attention_mask = audio_attention_mask_owner.get();
+    audio_sizes = audio_sizes_owner.get();
   }
 
   auto [input_ids, audio_projection_mode] = ProcessImageAudioPrompt(tokenizer, payload.prompt, num_img_tokens, audio_sizes, allocator);
