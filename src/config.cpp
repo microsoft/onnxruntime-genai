@@ -1717,8 +1717,9 @@ void FinalizeConfig(Config& config) {
   }
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+Config::Config(const fs::path& path, std::string_view json_overlay)
+    : config_path{IsModelPackage(path) ? path / "configs" : path} {
+  ParseConfig(config_path / "genai_config.json", json_overlay, *this);
   FinalizeConfig(*this);
 }
 

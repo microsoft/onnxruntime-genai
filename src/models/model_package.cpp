@@ -472,7 +472,41 @@ std::string JsonMergePatch(std::string_view base_json, std::string_view patch_js
   return SerializeJson(result);
 }
 
-// --- EP name to DeviceType mapping ---
+// --- EP name normalization and mapping ---
+
+std::string NormalizeEpName(const std::string& ep_name) {
+  // Accept short aliases (case-insensitive) and map to canonical ORT EP names.
+  std::string lower;
+  lower.reserve(ep_name.size());
+  for (char c : ep_name) lower.push_back(static_cast<char>(std::tolower(c)));
+
+  static const std::unordered_map<std::string, std::string> alias_map = {
+      {"cuda", "CUDAExecutionProvider"},
+      {"cudaexecutionprovider", "CUDAExecutionProvider"},
+      {"cpu", "CPUExecutionProvider"},
+      {"cpuexecutionprovider", "CPUExecutionProvider"},
+      {"dml", "DmlExecutionProvider"},
+      {"dmlexecutionprovider", "DmlExecutionProvider"},
+      {"qnn", "QNNExecutionProvider"},
+      {"qnnexecutionprovider", "QNNExecutionProvider"},
+      {"openvino", "OpenVINOExecutionProvider"},
+      {"openvinoexecutionprovider", "OpenVINOExecutionProvider"},
+      {"webgpu", "WebGpuExecutionProvider"},
+      {"webgpuexecutionprovider", "WebGpuExecutionProvider"},
+      {"nvtensorrtrtx", "NvTensorRtRtxExecutionProvider"},
+      {"nvtensorrtrtxexecutionprovider", "NvTensorRtRtxExecutionProvider"},
+      {"vitisai", "VitisAIExecutionProvider"},
+      {"vitisaiexecutionprovider", "VitisAIExecutionProvider"},
+      {"ryzenai", "RyzenAIExecutionProvider"},
+      {"ryzenaiexecutionprovider", "RyzenAIExecutionProvider"},
+  };
+
+  auto it = alias_map.find(lower);
+  if (it != alias_map.end()) {
+    return it->second;
+  }
+  return ep_name;
+}
 
 DeviceInterface* DeviceFromEpName(const std::string& ep_name) {
   static const std::unordered_map<std::string, DeviceType> ep_device_map = {

@@ -71,6 +71,11 @@ struct ModelPackageState {
 /// Returns the merged JSON string.
 std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json);
 
+/// Normalize an EP name string to its canonical ORT form.
+/// Accepts short aliases (e.g. "cuda") and full names (e.g. "CUDAExecutionProvider").
+/// Returns the canonical name, or the input unchanged if no mapping exists.
+std::string NormalizeEpName(const std::string& ep_name);
+
 /// Map an EP name string to a DeviceInterface*.
 /// Used to determine p_device_ from the resolved EP name in the package path.
 DeviceInterface* DeviceFromEpName(const std::string& ep_name);

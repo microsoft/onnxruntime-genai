@@ -972,7 +972,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     auto pkg_ctx = OrtModelPackageContext::Create(model_path.c_str());
     std::string resolved_ep;
     if (ep && ep[0] != '\0') {
-      resolved_ep = ep;
+      resolved_ep = NormalizeEpName(ep);
     } else {
       resolved_ep = DefaultEpFromPackage(*pkg_ctx);
     }
@@ -980,7 +980,15 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     // Append the resolved EP to session options so SelectComponent picks the right variant.
     // CPU is always available as the default fallback, so no explicit append needed.
     if (resolved_ep != "CPUExecutionProvider") {
-      temp_so->AppendExecutionProvider(resolved_ep, nullptr, nullptr, 0);
+      // CUDA uses a dedicated API (not in ORT's generic AppendExecutionProvider dispatch).
+      // Use default provider options here since this is only for variant selection;
+      // actual session creation with full config happens later via SetProviderSessionOptions.
+      if (resolved_ep == "CUDAExecutionProvider") {
+        auto cuda_opts = OrtCUDAProviderOptionsV2::Create();
+        temp_so->AppendExecutionProvider_CUDA_V2(*cuda_opts);
+      } else {
+        temp_so->AppendExecutionProvider(resolved_ep.c_str(), nullptr, nullptr, 0);
+      }
     }
 
     // Create the package state (opens package, creates options from the EP-configured SO)
