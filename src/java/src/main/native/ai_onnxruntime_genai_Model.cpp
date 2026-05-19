@@ -22,6 +22,19 @@ Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring m
 }
 
 JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Model_createModelWithEp(JNIEnv* env, jobject thiz, jstring model_path, jstring ep) {
+  CString path{env, model_path};
+  CString ep_str{env, ep};
+
+  OgaModel* model = nullptr;
+  if (ThrowIfError(env, OgaCreateModelWithEp(path, ep_str, &model))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(model);
+}
+
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_createModelFromConfig(JNIEnv* env, jobject thiz, jlong config_handle) {
   const OgaConfig* config = reinterpret_cast<const OgaConfig*>(config_handle);
 
