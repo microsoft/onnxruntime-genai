@@ -302,11 +302,26 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     constexpr int64_t kPoolingKernelSize = 3;
     const int64_t actual_patches = static_cast<int64_t>(actual_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
 
-    // Get padded pixel_values shape
+    // Get padded pixel_values shape.
+    // The image processor is expected to produce float32 data; the vision encoder
+    // ONNX model accepts float32 and casts to model dtype internally.
     const float* pv_data{};
     const int64_t* pv_shape{};
     size_t pv_dims;
     CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pv_data), &pv_shape, &pv_dims));
+
+    // Verify the image processor produced float32. The trimming and passthrough
+    // paths below assume sizeof(float) strides. Fail fast if the assumption breaks.
+    {
+      extDataType_t pv_elem_type{};
+      CheckResult(OrtxGetTensorType(pixel_values, &pv_elem_type));
+      if (pv_elem_type != kOrtxFloat) {
+        throw std::runtime_error(
+            "pixel_values from the image processor must be float32 (got element type " +
+            std::to_string(static_cast<int>(pv_elem_type)) +
+            "). The vision encoder ONNX model handles dtype conversion internally.");
+      }
+    }
 
     // Determine the patches dimension and patch_dim based on tensor rank
     // 2D: (num_patches, patch_dim) or 3D: (batch, num_patches, patch_dim)
@@ -320,23 +335,22 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
                                           : std::vector<int64_t>{actual_patches, patch_dim};
 
-      // Respect the model's pixel_values type (float, fp16, or bf16)
-      auto trimmed_pv = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
-      const size_t elem_size = (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 4 : 2;  // float=4, fp16/bf16=2
-      // For 3D with batch > 1, copy each batch slice separately (padded stride differs from trimmed stride).
-      // Use raw byte pointers since the type may be float, fp16, or bf16.
-      auto* dst = static_cast<uint8_t*>(trimmed_pv->GetTensorMutableRawData());
-      const auto* src = reinterpret_cast<const uint8_t*>(pv_data);
-      const size_t src_stride = static_cast<size_t>(num_padded_patches * patch_dim) * elem_size;
-      const size_t dst_stride = static_cast<size_t>(actual_patches * patch_dim) * elem_size;
+      // Image processor returns float32; vision encoder casts to model dtype internally.
+      auto trimmed_pv = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
+      float* dst = trimmed_pv->GetTensorMutableData<float>();
+      const float* src = pv_data;
+      const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
+      const size_t dst_row = static_cast<size_t>(actual_patches * patch_dim);
       for (int64_t b = 0; b < batch; ++b) {
-        std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+        std::memcpy(dst + b * dst_row, src + b * src_row, dst_row * sizeof(float));
       }
 
       named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                              std::make_shared<Tensor>(std::move(trimmed_pv)));
     } else {
-      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
+      // Image processor returns float32; the vision encoder ONNX model
+      // accepts float32 and casts to model dtype internally.
+      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, allocator);
     }
 
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
