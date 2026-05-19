@@ -264,3 +264,51 @@ TEST(ModelPackageE2E, SingleVariantCpuGenerateTokens) {
   // Should have at least the input token plus some generated tokens
   EXPECT_GT(sequence.size(), 1u);
 }
+
+// --- Pipeline (multi-file) package tests ---
+// Tests that a decoder-pipeline model with 3 ONNX files (embeds, transformer, lm_head)
+// loads correctly from a package. Uses tiny dummy models that return zeros.
+
+static const char* kPipelinePkgPath = MODEL_PATH "pipeline-cpu.ortpackage";
+
+TEST(ModelPackageE2E, PipelineMultiFileLoadAndType) {
+  if (!PackageExists(kPipelinePkgPath)) {
+    GTEST_SKIP() << "Pipeline test package not found at " << kPipelinePkgPath;
+  }
+
+  auto model = OgaModel::Create(kPipelinePkgPath);
+  ASSERT_NE(model, nullptr);
+  EXPECT_EQ(std::string(model->GetType().p_), "decoder-pipeline");
+  std::string device_type = model->GetDeviceType().p_;
+  std::transform(device_type.begin(), device_type.end(), device_type.begin(), ::tolower);
+  EXPECT_EQ(device_type, "cpu");
+}
+
+TEST(ModelPackageE2E, PipelineMultiFileGenerateTokens) {
+  if (!PackageExists(kPipelinePkgPath)) {
+    GTEST_SKIP() << "Pipeline test package not found at " << kPipelinePkgPath;
+  }
+
+  auto model = OgaModel::Create(kPipelinePkgPath);
+  ASSERT_NE(model, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 5);
+  params->SetSearchOption("batch_size", 1);
+
+  // BOS token = 1 per the pipeline config
+  std::vector<int32_t> input_ids = {1};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  int tokens_generated = 0;
+  while (!generator->IsDone() && tokens_generated < 3) {
+    generator->GenerateNextToken();
+    tokens_generated++;
+  }
+
+  auto sequence = generator->GetSequence(0);
+  // Should have at least the input token plus generated tokens
+  EXPECT_GT(sequence.size(), 1u);
+}

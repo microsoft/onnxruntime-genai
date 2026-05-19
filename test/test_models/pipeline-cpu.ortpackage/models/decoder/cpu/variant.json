@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "filename": "embeds.onnx"
+    },
+    {
+      "filename": "transformer.onnx"
+    },
+    {
+      "filename": "lm_head.onnx"
+    }
+  ],
+  "consumer_metadata": {}
+}
