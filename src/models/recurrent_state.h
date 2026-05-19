@@ -47,6 +47,8 @@ struct RecurrentState {
 
   std::vector<int64_t> conv_shape_;
   std::vector<int64_t> recurrent_shape_;
+
+  bool past_present_share_buffer_{};
 };
 
 // Factory: returns nullptr if no recurrent layers are found in the session.

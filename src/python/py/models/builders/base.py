@@ -1619,6 +1619,11 @@ class Model:
             root_input = inputs[0]
             skip_input = inputs[1] if skip else None
 
+        # Cast insertion can redirect SkipLayerNorm's fourth output to a casted
+        # value. Pass that redirected name to the primitive so QDQ export does
+        # not register two producers for the same original output_3 value.
+        primitive_output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
+
         if op_type == "SimplifiedLayerNormalization":
             self._make_simplified_layer_norm(
                 name,
@@ -1635,7 +1640,7 @@ class Model:
                 skip_input,
                 weight,
                 outputs[0],
-                output_3,
+                primitive_output_3,
                 new_io_dtype,
                 shape=["batch_size", "sequence_length", self.hidden_size],
             )
@@ -1647,7 +1652,7 @@ class Model:
                 weight,
                 bias,
                 outputs[0],
-                output_3,
+                primitive_output_3,
                 new_io_dtype,
                 shape=["batch_size", "sequence_length", self.hidden_size],
             )
