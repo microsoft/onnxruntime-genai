@@ -1782,7 +1782,24 @@ void LoadFromPackage(Config& config,
   const std::size_t n = ctx->NumComponents();
   for (std::size_t cix = 0; cix < n; ++cix) {
     const std::string cname = ctx->ComponentName(cix);
-    auto cinst_unique = ctx->SelectComponent(cix, options);
+    std::unique_ptr<ComponentInstance> cinst_unique;
+    try {
+      cinst_unique = ctx->SelectComponent(cix, options);
+    } catch (const std::exception& e) {
+      std::ostringstream oss;
+      oss << "v4 model package: ORT model-package selection failed for component '" << cname
+          << "' with execution provider '" << selected_ep << "': " << e.what();
+      auto eps = ctx->EpsCompatibleWith(cix);
+      if (!eps.empty()) {
+        oss << " Compatible EPs for this component: [";
+        for (std::size_t i = 0; i < eps.size(); ++i) {
+          if (i > 0) oss << ", ";
+          oss << eps[i];
+        }
+        oss << "].";
+      }
+      throw std::runtime_error(oss.str());
+    }
     if (!cinst_unique) {
       // SelectComponent returns null when no variant of the component
       // matches the captured EP. Under defaulting this is "defensive"

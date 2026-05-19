@@ -21,11 +21,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
 #include <string>
 #include <string_view>
 
 #include "generators.h"
+#include "json.h"
+#include "models/model_package.h"
+#include "models/onnxruntime_api.h"
 
 namespace Generators::test {
 
@@ -54,11 +58,54 @@ class TempDir {
   std::filesystem::path path_;
 };
 
+bool SafePackagePathFragment(std::string_view value) {
+  return !value.empty() &&
+         value != "." &&
+         value != ".." &&
+         value.find("..") == std::string_view::npos &&
+         value.find('/') == std::string_view::npos &&
+         value.find('\\') == std::string_view::npos &&
+         value.find(':') == std::string_view::npos;
+}
+
+void TouchDeclaredVariantFiles(const std::filesystem::path& variant_json_path,
+                               std::string_view contents) {
+  if (variant_json_path.filename() != "variant.json") return;
+
+  JSON::Document doc;
+  try {
+    doc = JSON::ParseDocument(std::string(contents));
+  } catch (...) {
+    return;
+  }
+  if (!doc.IsObject()) return;
+
+  auto files_it = doc.AsObject().find("files");
+  if (files_it == doc.AsObject().end() || !files_it->second.IsArray()) return;
+
+  for (const auto& file_doc : files_it->second.AsArray()) {
+    if (!file_doc.IsObject()) continue;
+    auto filename_it = file_doc.AsObject().find("filename");
+    if (filename_it == file_doc.AsObject().end() || !filename_it->second.IsString()) continue;
+
+    const std::string& filename = filename_it->second.AsString();
+    if (!SafePackagePathFragment(filename)) continue;
+
+    const std::filesystem::path model_path = variant_json_path.parent_path() / filename;
+    if (std::filesystem::exists(model_path)) continue;
+
+    std::ofstream model_file(model_path, std::ios::binary);
+    ASSERT_TRUE(model_file.is_open()) << "cannot open " << model_path;
+  }
+}
+
 void WriteFile(const std::filesystem::path& p, std::string_view contents) {
   std::filesystem::create_directories(p.parent_path());
   std::ofstream out(p, std::ios::binary);
   ASSERT_TRUE(out.is_open()) << "cannot open " << p;
   out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+  out.close();
+  TouchDeclaredVariantFiles(p, contents);
 }
 
 // Minimal valid genai_config.json the strict streaming parser will accept.
@@ -102,6 +149,8 @@ constexpr std::string_view kBaseGenaiConfig = R"({
   }
 })";
 
+#if ORT_API_VERSION >= 27
+
 // Build a single-component (decoder only) CPU-only package under `root`.
 // `decoder_overlay` is JSON spliced into `consumer_metadata.genai_config_overlay`
 // — pass an empty string for "no overlay".
@@ -114,7 +163,7 @@ void BuildSingleComponentPackage(const std::filesystem::path& root,
 
   WriteFile(root / "configs" / "genai_config.json", kBaseGenaiConfig);
 
-  WriteFile(root / "decoder" / "metadata.json", R"({
+  WriteFile(root / "models" / "decoder" / "metadata.json", R"({
     "variants": {
       "cpu": { "ep_compatibility": [{"ep": "CPUExecutionProvider"}] }
     }
@@ -128,11 +177,47 @@ void BuildSingleComponentPackage(const std::filesystem::path& root,
     variant_json += "}";
   }
   variant_json += "}";
-  WriteFile(root / "decoder" / "cpu" / "variant.json", variant_json);
+  WriteFile(root / "models" / "decoder" / "cpu" / "variant.json", variant_json);
 
   // Empty placeholder so file presence tests aren't surprised.
-  WriteFile(root / "decoder" / "cpu" / "model.onnx", "");
+  WriteFile(root / "models" / "decoder" / "cpu" / "model.onnx", "");
 }
+
+ModelPackageSelectionOptions OnePriority(std::string ep) {
+  ModelPackageSelectionOptions opts;
+  opts.ep_priority.push_back({std::move(ep), std::nullopt});
+  return opts;
+}
+
+bool CanSelectEp(const std::string& ep) {
+  static std::map<std::string, bool> cache;
+  auto it = cache.find(ep);
+  if (it != cache.end()) return it->second;
+
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({"schema_version":1,"components":["decoder"]})");
+  WriteFile(dir.path() / "models" / "decoder" / "metadata.json",
+            std::string{R"({"variants":{"v":{"ep_compatibility":[{"ep":")"} + ep + R"("}]}}}"});
+  WriteFile(dir.path() / "models" / "decoder" / "v" / "variant.json",
+            R"({"files":[{"filename":"m.onnx"}]})");
+
+  bool can_select = false;
+  try {
+    auto ctx = ModelPackageContext::Open(dir.fs_path());
+    can_select = ctx != nullptr && ctx->SelectComponent(0, OnePriority(ep)) != nullptr;
+  } catch (...) {
+    can_select = false;
+  }
+
+  return cache.emplace(ep, can_select).first->second;
+}
+
+#define SKIP_IF_CANNOT_SELECT_EP(ep)          \
+  if (!CanSelectEp(ep)) {                     \
+    GTEST_SKIP() << ep << " is not available for ORT model-package selection in this test build"; \
+  }
+
+#endif  // ORT_API_VERSION >= 27
 
 }  // namespace
 
@@ -155,7 +240,19 @@ TEST(ConfigPackageTest, FlatDirRegressionStillLoads) {
   EXPECT_EQ(config.model.type, "phi3");
 }
 
+#if ORT_API_VERSION < 27
+
+TEST(ConfigPackageTest, PackageMarkerRequiresOrtModelPackageApi) {
+  TempDir dir;
+  WriteFile(dir.path() / "manifest.json", R"({"schema_version":1,"components":["decoder"]})");
+  EXPECT_THROW(Config(dir.fs_path(), ""), std::exception);
+}
+
+#else
+
 TEST(ConfigPackageTest, PackageDetectionPopulatesPackageState) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   TempDir dir;
   BuildSingleComponentPackage(dir.path());
 
@@ -175,6 +272,8 @@ TEST(ConfigPackageTest, PackageDetectionPopulatesPackageState) {
 // ============================================================================
 
 TEST(ConfigPackageTest, OverlayMergesIntoBase) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // Decoder variant ships an overlay that bumps context_length and tags the
   // component name into model.decoder.component. Both fields must be reflected
   // in the resulting Config (proves the merge ran AND the streaming parser
@@ -194,6 +293,8 @@ TEST(ConfigPackageTest, OverlayMergesIntoBase) {
 }
 
 TEST(ConfigPackageTest, OverlayWithoutConsumerMetadataIsNoop) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // When variant.json has no consumer_metadata at all, the base config must
   // load unmodified.
   TempDir dir;
@@ -219,6 +320,8 @@ TEST(ConfigPackageTest, NonObjectGenaiConfigOverlayThrows) {
 // ============================================================================
 
 TEST(ConfigPackageTest, CallerJsonOverlayWinsOverPackageOverlay) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // Package overlay sets head_size=128. Caller overlay (RuntimeSettings /
   // OgaConfigOverlay channel) sets head_size=144 — caller wins.
   TempDir dir;
@@ -253,6 +356,8 @@ TEST(ConfigPackageTest, UnknownRoleComponentReferenceThrows) {
 }
 
 TEST(ConfigPackageTest, EmptyRoleComponentIsAllowed) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // A role without a `component` field must NOT trigger the validator —
   // only non-empty references are checked.
   TempDir dir;
@@ -276,22 +381,22 @@ TEST(ConfigPackageTest, MultiEpIntersectionFailsWithDiagnostic) {
     "components": ["decoder", "embedding"]
   })");
   WriteFile(dir.path() / "configs" / "genai_config.json", kBaseGenaiConfig);
-  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+  WriteFile(dir.path() / "models" / "decoder" / "metadata.json", R"({
     "variants": {
       "cpu":  {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]},
       "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
     }
   })");
-  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
-  WriteFile(dir.path() / "decoder" / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
-  WriteFile(dir.path() / "embedding" / "metadata.json", R"({
+  WriteFile(dir.path() / "models" / "decoder" / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  WriteFile(dir.path() / "models" / "decoder" / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+  WriteFile(dir.path() / "models" / "embedding" / "metadata.json", R"({
     "variants": {
       "cpu":  {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]},
       "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
     }
   })");
-  WriteFile(dir.path() / "embedding" / "cpu" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
-  WriteFile(dir.path() / "embedding" / "cuda" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
+  WriteFile(dir.path() / "models" / "embedding" / "cpu" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
+  WriteFile(dir.path() / "models" / "embedding" / "cuda" / "variant.json", R"({"files":[{"filename":"e.onnx"}]})");
 
   try {
     Config config{dir.fs_path(), ""};
@@ -313,21 +418,23 @@ TEST(ConfigPackageTest, EmptyEpIntersectionFailsWithDiagnostic) {
     "components": ["decoder", "embedding"]
   })");
   WriteFile(dir.path() / "configs" / "genai_config.json", kBaseGenaiConfig);
-  WriteFile(dir.path() / "decoder" / "metadata.json", R"({
+  WriteFile(dir.path() / "models" / "decoder" / "metadata.json", R"({
     "variants": {"cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}}
   })");
-  WriteFile(dir.path() / "decoder" / "cuda" / "variant.json",
+  WriteFile(dir.path() / "models" / "decoder" / "cuda" / "variant.json",
             R"({"files":[{"filename":"m.onnx"}]})");
-  WriteFile(dir.path() / "embedding" / "metadata.json", R"({
+  WriteFile(dir.path() / "models" / "embedding" / "metadata.json", R"({
     "variants": {"cpu": {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]}}
   })");
-  WriteFile(dir.path() / "embedding" / "cpu" / "variant.json",
+  WriteFile(dir.path() / "models" / "embedding" / "cpu" / "variant.json",
             R"({"files":[{"filename":"e.onnx"}]})");
 
   EXPECT_THROW(Config(dir.fs_path(), ""), std::exception);
 }
 
 TEST(ConfigPackageTest, SingleEpIntersectionAutoSelects) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // decoder + embedding both support CPU; only one component is wired but
   // the cross-component intersection is the well-defined set {CPU}, so
   // defaulting must succeed silently.
@@ -342,6 +449,8 @@ TEST(ConfigPackageTest, SingleEpIntersectionAutoSelects) {
 // ============================================================================
 
 TEST(ConfigPackageTest, AllFiveRoleComponentFieldsAreParseable) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // Author a degenerate package whose overlay sets every role's `component`
   // field. The role-validation pass must accept it (each name is wired in
   // the manifest), and the field must land on the corresponding sub-struct.
@@ -354,16 +463,16 @@ TEST(ConfigPackageTest, AllFiveRoleComponentFieldsAreParseable) {
 
   // Five mapped components, all CPU-only.
   for (const auto& cname : {"decoder", "encoder", "vision", "speech", "embedding"}) {
-    WriteFile(dir.path() / cname / "metadata.json", R"({
+    WriteFile(dir.path() / "models" / cname / "metadata.json", R"({
       "variants": {"cpu": {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]}}
     })");
-    WriteFile(dir.path() / cname / "cpu" / "variant.json",
+    WriteFile(dir.path() / "models" / cname / "cpu" / "variant.json",
               R"({"files":[{"filename":"m.onnx"}]})");
   }
 
   // Decoder-only carries the overlay (a single role's overlay can populate
   // the whole config; this is just the path of least JSON resistance).
-  WriteFile(dir.path() / "decoder" / "cpu" / "variant.json", R"({
+  WriteFile(dir.path() / "models" / "decoder" / "cpu" / "variant.json", R"({
     "files":[{"filename":"m.onnx"}],
     "consumer_metadata": {
       "genai_config_overlay": {
@@ -391,6 +500,10 @@ TEST(ConfigPackageTest, AllFiveRoleComponentFieldsAreParseable) {
 // ============================================================================
 
 TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {
+  if (!CanSelectEp("CUDAExecutionProvider") || !CanSelectEp("CPUExecutionProvider")) {
+    GTEST_SKIP() << "CPU/CUDA EPs are not both available for ORT model-package selection in this test build";
+  }
+
   // Two components that both ship CPU and CUDA variants. Defaulting would
   // throw (multi-EP intersection), but a user-supplied `ep` resolves the
   // ambiguity.
@@ -401,14 +514,14 @@ TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {
   })");
   WriteFile(dir.path() / "configs" / "genai_config.json", kBaseGenaiConfig);
   for (const auto& cname : {"decoder", "embedding"}) {
-    WriteFile(dir.path() / cname / "metadata.json", R"({
+    WriteFile(dir.path() / "models" / cname / "metadata.json", R"({
       "variants": {
         "cpu":  {"ep_compatibility":[{"ep":"CPUExecutionProvider"}]},
         "cuda": {"ep_compatibility":[{"ep":"CUDAExecutionProvider"}]}
       }
     })");
-    WriteFile(dir.path() / cname / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
-    WriteFile(dir.path() / cname / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+    WriteFile(dir.path() / "models" / cname / "cpu" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
+    WriteFile(dir.path() / "models" / cname / "cuda" / "variant.json", R"({"files":[{"filename":"m.onnx"}]})");
   }
 
   // Without `ep`, defaulting throws on the multi-EP intersection.
@@ -423,6 +536,8 @@ TEST(ConfigPackageTest, UserEpBypassesDefaultingInPackage) {
 }
 
 TEST(ConfigPackageTest, UserEpThatNoComponentSupportsThrowsWithDiagnostic) {
+  SKIP_IF_CANNOT_SELECT_EP("CUDAExecutionProvider");
+
   // Single-component CPU-only package; user requests CUDA.
   // SelectComponent finds no matching variant and the diagnostic must
   // list the component's compatible EPs.
@@ -441,13 +556,17 @@ TEST(ConfigPackageTest, UserEpThatNoComponentSupportsThrowsWithDiagnostic) {
   }
 }
 
-TEST(ConfigPackageTest, EmptyUserEpFallsBackToDefaulting) {
+TEST(ConfigPackageTest, EmptyUserEpUsesDefaulting) {
+  SKIP_IF_CANNOT_SELECT_EP("CPUExecutionProvider");
+
   // Empty ep should be equivalent to omitting it (defaulting runs).
   TempDir dir;
   BuildSingleComponentPackage(dir.path());
   EXPECT_NO_THROW(Config(dir.fs_path(), "", ""));
   EXPECT_NO_THROW(Config(dir.fs_path(), ""));
 }
+
+#endif  // ORT_API_VERSION < 27
 
 TEST(ConfigPackageTest, UserEpInFlatDirThrows) {
   // Flat-dir mode (no manifest.json). A non-empty `ep` raises a clear error

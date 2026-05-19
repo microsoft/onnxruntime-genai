@@ -17,31 +17,20 @@
 
 namespace Generators {
 
-// GenAI-internal abstraction over the v4 model-package layout. Constructed
-// at Config-time and consumed by the package-vs-flat-dir branch in
-// `Config::Config(path, overlay)` (see `feature/v4-package-w3-...`).
+// GenAI-internal abstraction over ORT's v4 model-package API. Constructed at
+// Config-time and consumed by the package-vs-flat-dir branch in
+// `Config::Config(path, overlay)`.
 //
-// Today the only implementation is a stub directory walker (model_package.cpp)
-// that interprets the on-disk layout described in the ORT v4 model-package
-// proposal. When ORT v4 lands, an alternate implementation will delegate to
-// `OrtModelPackageContext`. Callers see only the abstract surface, so the
-// v4 plumbing change is contained to this file pair.
-//
-// The abstract surface deliberately mirrors the shape of the proposed C API:
-// a context that traverses components and variants, a per-component
-// `SelectComponent` that takes a captured EP-priority list, and a per-instance
-// accessor for the variant folder, file count, opaque consumer metadata blob,
-// and a checksum-keyed shared-weight resolver. Per-file detail (filename,
-// session_options, provider_options, shared_files) is intentionally NOT on
-// `ComponentInstance` — consumers parse `variant.json` directly via
-// `ParseVariantManifest`, matching the v4 contract that ORT does not expose
-// per-file accessors.
+// Detection is conservative: missing package markers return nullptr so the
+// legacy flat-directory path can load. Once a marker is present, package mode
+// must use ORT's model-package API; GenAI does not keep a private package
+// parser.
 
 // One entry from a variant's `metadata.json` `ep_compatibility` list.
 struct EpCompatibilityEntry {
   std::string ep;                          // e.g. "CUDAExecutionProvider"
   std::optional<std::string> device;       // optional discriminator (OpenVINO "GPU" / "NPU")
-  std::vector<std::string> compatibility;  // free-form constraint strings (sm_80, soc_69, ...)
+  std::optional<std::string> compatibility_string;  // EP-owned opaque constraint string (sm_80, soc_69, ...)
 };
 
 // One entry on the caller's prioritized EP list. Mirrors the captured-EP
@@ -53,9 +42,8 @@ struct EpSelection {
   std::optional<std::string> device;
 };
 
-// Inputs to `SelectComponent`. An empty `ep_priority` list is treated as
-// `[{CPUExecutionProvider}]` per spec — callers that didn't append any EP
-// to their session-options template should still get CPU variants.
+// Inputs to `SelectComponent`. Mirrors ORT's current selector: an empty
+// `ep_priority` list has no captured EP, so no variant is selected.
 struct ModelPackageSelectionOptions {
   std::vector<EpSelection> ep_priority;
 };
@@ -64,7 +52,7 @@ struct ComponentInstance {
   virtual ~ComponentInstance() = default;
 
   // Path to the variant folder for the selected variant. Per-component ONNX
-  // files, LoRA adapters, custom-ops libraries are loaded from here.
+  // files, LoRA adapters, and custom-ops libraries are loaded from here.
   virtual fs::path VariantFolderPath() const = 0;
 
   // Number of files declared in the variant's `variant.json`. Single-file
@@ -78,7 +66,7 @@ struct ComponentInstance {
   virtual std::string ConsumerMetadata() const = 0;
 
   // Canonical ORT EP name (e.g. "CUDAExecutionProvider") of the variant
-  // selected for this component. The string mirrors the spec's `ep` field
+  // selected for this component. The string mirrors ORT's `ep` field
   // in `ep_compatibility[]`. Used to plumb the package's chosen EP
   // through the session-creation pipeline. Empty string is reserved for
   // future "no EP captured" cases — `SelectComponent` populates this from
@@ -99,13 +87,11 @@ struct ModelPackageContext {
   // model package. A nullptr return is the caller's signal to fall back
   // to flat-directory mode — it is NOT an error.
   //
-  // Detection rule (intentionally conservative to keep flat-dir fallback
-  // reliable): treat as a v4 package iff EITHER
-  //   * `<path>/manifest.json` exists, OR
-  //   * at least one immediate non-hidden child directory of `<path>`,
-  //     other than `configs/`, contains a `metadata.json`.
-  // The bare presence of `<path>/configs/` is NOT a positive signal — a
-  // flat-dir model could plausibly have such a directory.
+  // Detection rule (intentionally conservative to keep flat-dir loading
+  // reliable): treat as a v4 package iff `<path>/manifest.json` exists, or
+  // `<path>/metadata.json` exists for ORT's single-component-root mode. The
+  // bare presence of `<path>/models/` or `<path>/configs/` is NOT a positive
+  // signal — a flat-dir model could plausibly have such directories.
   //
   // Once the package is recognized, malformed content is a hard error
   // (throws). The two cases are deliberately distinct: a missing package
@@ -114,12 +100,11 @@ struct ModelPackageContext {
   static std::unique_ptr<ModelPackageContext> Open(const fs::path& path);
 
   // Component traversal. Order matches `manifest.json`'s `components`
-  // array when present, otherwise lexicographic order of subdirectories.
+  // array when present, otherwise the discovered `models/` directory order.
   virtual std::size_t NumComponents() const = 0;
   virtual std::string ComponentName(std::size_t cix) const = 0;
 
-  // Variant traversal — order is `metadata.json` declaration order (the
-  // spec's tie-break for selection when the EP preference ABI declines).
+  // Variant traversal order follows ORT's model-package API.
   virtual std::size_t NumVariants(std::size_t cix) const = 0;
   virtual std::string VariantName(std::size_t cix, std::size_t vix) const = 0;
   virtual std::span<const EpCompatibilityEntry> VariantEpCompatibility(
@@ -131,21 +116,9 @@ struct ModelPackageContext {
   // to find the EPs that can load the whole package.
   virtual std::vector<std::string> EpsCompatibleWith(std::size_t cix) const = 0;
 
-  // Pick a variant for a component using the captured EP priority list.
-  //
-  // Algorithm (mirrors the spec's selection algorithm subset that the stub
-  // backend can implement without an EP preference ABI):
-  //   1. Filter variants whose `ep_compatibility[]` has any entry matching
-  //      one of `options.ep_priority` by `ep_name` (and `device` if the
-  //      compat entry pins one).
-  //   2. Score by ordinal position of the matched EP in `ep_priority`
-  //      (lower = better).
-  //   3. Tie-break by `metadata.json` insertion order.
-  //
-  // Returns `nullptr` if no variant of this component is compatible with
-  // any of the requested EPs — this is a recoverable signal callers can
-  // use for diagnostic / fallback purposes (EP defaulting). Throws on
-  // malformed package content.
+  // Pick a variant for a component using ORT's model-package selection API.
+  // Returns `nullptr` when no EP priority was provided. Otherwise ORT owns
+  // compatibility validation and reports selection failures as exceptions.
   virtual std::unique_ptr<ComponentInstance> SelectComponent(
       std::size_t cix, const ModelPackageSelectionOptions& options) const = 0;
 
@@ -157,14 +130,12 @@ struct ModelPackageContext {
 };
 
 // One entry of a variant's `variant.json` `files[]` array. Used by the
-// multi-file pipeline runner. The session_options / provider_options
-// values are kept as a `JSON::Object` (string-keyed map of typed
-// `JSON::Document`) so callers can preserve number/bool typing when
-// applying them through the SetProviderSessionOptions machinery.
+// multi-file pipeline runner. The session_options / provider_options values
+// are scalar-stringified to match ORT's current flat option parser.
 struct VariantFile {
   std::string filename;
-  JSON::Object session_options;
-  JSON::Object provider_options;
+  std::map<std::string, std::string> session_options;
+  std::map<std::string, std::string> provider_options;
   // Map from filename-as-referenced-by-the-onnx-graph to the checksum of a
   // shared-weight blob. Resolve via `ComponentInstance::ResolveSharedWeight`.
   std::map<std::string, std::string> shared_files;
@@ -174,9 +145,8 @@ struct VariantManifest {
   std::vector<VariantFile> files;
 };
 
-// Parse `<variant_folder>/variant.json`. Standalone helper because the v4
-// C API does not expose per-file detail through the `cix` handle: consumers
-// parse `variant.json` directly. Throws on missing file or malformed JSON.
+// Parse `<variant_folder>/variant.json`. Standalone helper used by GenAI's
+// multi-file pipeline runner. Throws on missing file or malformed JSON.
 VariantManifest ParseVariantManifest(const fs::path& variant_folder);
 
 }  // namespace Generators

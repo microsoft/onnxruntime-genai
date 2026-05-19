@@ -3,17 +3,20 @@
 
 #include "../json.h"
 #include "model_package.h"
+#include "onnxruntime_api.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 
 namespace Generators {
+
+OrtEnv& GetOrtEnv();
 
 namespace {
 
@@ -99,10 +102,31 @@ void ValidatePathFragment(std::string_view fragment, std::string_view kind) {
 
 // ---- variant.json parsing ---------------------------------------------------
 
-JSON::Object DocumentToObject(const JSON::Document& d) {
-  if (d.IsObject()) return d.AsObject();
-  if (d.IsNull()) return {};
-  throw std::runtime_error("variant.json: expected object");
+std::string JsonScalarToString(const JSON::Document& d,
+                               std::string_view key_name,
+                               const std::string& parent_key) {
+  if (d.IsString()) return d.AsString();
+  if (d.IsNumber()) return JSON::SerializeDocument(d);
+  if (d.IsBool()) return d.AsBool() ? "true" : "false";
+
+  throw std::runtime_error(
+      "variant.json: '" + std::string(key_name) + "' under '" + parent_key +
+      "' must contain scalar (string/number/bool) values");
+}
+
+std::map<std::string, std::string> ParseFlatOptionsObject(const JSON::Object& parent,
+                                                          std::string_view key_name) {
+  auto it = parent.find(std::string(key_name));
+  if (it == parent.end() || it->second.IsNull()) return {};
+  if (!it->second.IsObject()) {
+    throw std::runtime_error("variant.json: '" + std::string(key_name) + "' must be an object");
+  }
+
+  std::map<std::string, std::string> result;
+  for (const auto& [key, value] : it->second.AsObject()) {
+    result.emplace(key, JsonScalarToString(value, key_name, key));
+  }
+  return result;
 }
 
 VariantManifest ParseVariantManifestFromText(const std::string& json_text,
@@ -127,7 +151,12 @@ VariantManifest ParseVariantManifestFromText(const std::string& json_text,
     throw std::runtime_error("variant.json: 'files' must be an array (" + origin.string() + ")");
   }
   const auto& files_array = files_it->second.AsArray();
+  if (files_array.empty()) {
+    throw std::runtime_error("variant.json: 'files' must contain at least one entry (" + origin.string() + ")");
+  }
+
   result.files.reserve(files_array.size());
+  std::unordered_set<std::string> filenames_seen;
   for (const auto& file_doc : files_array) {
     if (!file_doc.IsObject()) {
       throw std::runtime_error("variant.json: each entry of 'files' must be an object (" + origin.string() + ")");
@@ -142,22 +171,16 @@ VariantManifest ParseVariantManifestFromText(const std::string& json_text,
     }
     vf.filename = fname_it->second.AsString();
     ValidatePathFragment(vf.filename, "variant file filename");
+    if (!filenames_seen.insert(vf.filename).second) {
+      throw std::runtime_error(
+          "variant.json: duplicate file identifier '" + vf.filename + "' (" + origin.string() + ")");
+    }
 
-    if (auto so_it = file_obj.find("session_options"); so_it != file_obj.end()) {
-      vf.session_options = DocumentToObject(so_it->second);
-    }
-    if (auto po_it = file_obj.find("provider_options"); po_it != file_obj.end()) {
-      vf.provider_options = DocumentToObject(po_it->second);
-    }
+    vf.session_options = ParseFlatOptionsObject(file_obj, "session_options");
+    vf.provider_options = ParseFlatOptionsObject(file_obj, "provider_options");
     if (auto sf_it = file_obj.find("shared_files"); sf_it != file_obj.end()) {
-      if (!sf_it->second.IsObject()) {
-        throw std::runtime_error("variant.json: 'shared_files' must be an object (" + origin.string() + ")");
-      }
-      for (const auto& [graph_filename, checksum_doc] : sf_it->second.AsObject()) {
-        if (!checksum_doc.IsString()) {
-          throw std::runtime_error("variant.json: 'shared_files' values must be strings (" + origin.string() + ")");
-        }
-        const std::string& checksum = checksum_doc.AsString();
+      std::map<std::string, std::string> shared_files = ParseFlatOptionsObject(file_obj, "shared_files");
+      for (const auto& [graph_filename, checksum] : shared_files) {
         ValidatePathFragment(checksum, "shared-weight checksum");
         vf.shared_files.emplace(graph_filename, checksum);
       }
@@ -169,342 +192,263 @@ VariantManifest ParseVariantManifestFromText(const std::string& json_text,
   return result;
 }
 
-std::string ExtractConsumerMetadataFromText(const std::string& json_text,
-                                            const std::filesystem::path& origin) {
-  JSON::Document doc;
-  try {
-    doc = JSON::ParseDocument(json_text);
-  } catch (const std::exception& e) {
-    throw std::runtime_error("variant.json: parse error in " + origin.string() + ": " + e.what());
+bool FileExistsStrict(const std::filesystem::path& p) {
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(p, ec);
+  if (ec) {
+    throw std::runtime_error(
+        "model package: cannot stat " + p.string() + ": " + ec.message());
   }
-  if (!doc.IsObject()) {
-    throw std::runtime_error("variant.json: root must be a JSON object (" + origin.string() + ")");
-  }
-  const auto& root = doc.AsObject();
-  auto cm_it = root.find("consumer_metadata");
-  if (cm_it == root.end()) {
-    return {};
-  }
-  return JSON::SerializeDocument(cm_it->second);
+  return exists;
 }
 
-// ---- metadata.json streaming parser (preserves variant declaration order) ---
-//
-// Spec shape:
-//   {
-//     "variants": {
-//       "<name>": {
-//         "ep_compatibility": [
-//           { "ep": "...", "device": "...?", "compatibility": ["..."] }
-//         ]
-//       }
-//     }
-//   }
-//
-// `JSON::Object` is `std::map`, which doesn't preserve insertion order. The
-// streaming parser DOES — `OnObject(name)` fires per key in source order — so
-// we use the streaming Element interface here even though the rest of the
-// model_package code uses the DOM.
+#if ORT_API_VERSION >= 27
 
-struct CompatStrings_Element : JSON::Element {
-  std::vector<std::string>* out = nullptr;
-  void OnValue(std::string_view /*name*/, JSON::Value value) override {
-    out->push_back(std::string(JSON::Get<std::string_view>(value)));
+template <typename T>
+struct OrtReleaser;
+
+template <>
+struct OrtReleaser<OrtSessionOptions> {
+  void operator()(OrtSessionOptions* p) const {
+    if (p != nullptr) Ort::api->ReleaseSessionOptions(p);
   }
 };
 
-struct EpCompatibilityEntry_Element : JSON::Element {
-  EpCompatibilityEntry entry;
-  CompatStrings_Element compat_;
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "ep") {
-      entry.ep = std::string(JSON::Get<std::string_view>(value));
-    } else if (name == "device") {
-      entry.device = std::string(JSON::Get<std::string_view>(value));
-    } else {
-      throw JSON::unknown_value_error{};
-    }
+template <>
+struct OrtReleaser<OrtModelPackageOptions> {
+  explicit OrtReleaser(const OrtModelPackageApi* api = nullptr) : api_{api} {}
+  void operator()(OrtModelPackageOptions* p) const {
+    if (p != nullptr) api_->ReleaseModelPackageOptions(p);
   }
-
-  JSON::Element& OnArray(std::string_view name) override {
-    if (name == "compatibility") {
-      compat_.out = &entry.compatibility;
-      return compat_;
-    }
-    throw JSON::unknown_value_error{};
-  }
+  const OrtModelPackageApi* api_;
 };
 
-struct EpCompatibilityArray_Element : JSON::Element {
-  std::vector<EpCompatibilityEntry>* out = nullptr;
-  std::vector<std::unique_ptr<EpCompatibilityEntry_Element>> sub_;
-
-  JSON::Element& OnObject(std::string_view /*name*/) override {
-    sub_.emplace_back(std::make_unique<EpCompatibilityEntry_Element>());
-    return *sub_.back();
+template <>
+struct OrtReleaser<OrtModelPackageContext> {
+  explicit OrtReleaser(const OrtModelPackageApi* api = nullptr) : api_{api} {}
+  void operator()(OrtModelPackageContext* p) const {
+    if (p != nullptr) api_->ReleaseModelPackageContext(p);
   }
-  void OnComplete(bool /*empty*/) override {
-    out->reserve(sub_.size());
-    for (auto& entry : sub_) {
-      if (entry->entry.ep.empty()) {
-        throw std::runtime_error("metadata.json: ep_compatibility entry missing 'ep'");
-      }
-      out->push_back(std::move(entry->entry));
-    }
-  }
+  const OrtModelPackageApi* api_;
 };
 
-struct VariantEntry_Element : JSON::Element {
-  std::vector<EpCompatibilityEntry> ep_compatibility;
-  EpCompatibilityArray_Element compat_array_;
-
-  JSON::Element& OnArray(std::string_view name) override {
-    if (name == "ep_compatibility") {
-      compat_array_.out = &ep_compatibility;
-      return compat_array_;
-    }
-    throw JSON::unknown_value_error{};
+template <>
+struct OrtReleaser<OrtModelPackageComponentContext> {
+  explicit OrtReleaser(const OrtModelPackageApi* api = nullptr) : api_{api} {}
+  void operator()(OrtModelPackageComponentContext* p) const {
+    if (p != nullptr) api_->ReleaseModelPackageComponentContext(p);
   }
+  const OrtModelPackageApi* api_;
 };
 
-struct ParsedVariantInfo {
-  std::string name;
-  std::vector<EpCompatibilityEntry> ep_compatibility;
-};
+template <typename T>
+using OrtUniquePtr = std::unique_ptr<T, OrtReleaser<T>>;
 
-struct VariantsObject_Element : JSON::Element {
-  std::vector<ParsedVariantInfo>* out = nullptr;
-  std::vector<std::unique_ptr<VariantEntry_Element>> sub_;
-  std::vector<std::string> names_;
-
-  JSON::Element& OnObject(std::string_view name) override {
-    ValidatePathFragment(name, "variant name");
-    sub_.emplace_back(std::make_unique<VariantEntry_Element>());
-    names_.emplace_back(name);
-    return *sub_.back();
+const OrtModelPackageApi* GetModelPackageApiOrThrow() {
+  const OrtModelPackageApi* api = Ort::api->GetModelPackageApi();
+  if (api == nullptr) {
+    throw std::runtime_error(
+        "v4 model package detected, but the loaded ONNX Runtime does not expose "
+        "OrtModelPackageApi. Rebuild/use ONNX Runtime 1.27+ with model-package support.");
   }
-  void OnComplete(bool /*empty*/) override {
-    out->reserve(sub_.size());
-    std::unordered_set<std::string> seen;
-    for (std::size_t i = 0; i < sub_.size(); ++i) {
-      const std::string& nm = names_[i];
-      if (!seen.insert(nm).second) {
-        throw std::runtime_error("metadata.json: duplicate variant name '" + nm + "'");
-      }
-      ParsedVariantInfo info;
-      info.name = nm;
-      info.ep_compatibility = std::move(sub_[i]->ep_compatibility);
-      out->push_back(std::move(info));
-    }
-  }
-};
-
-struct MetadataRoot_Element : JSON::Element {
-  std::vector<ParsedVariantInfo>* out = nullptr;
-  VariantsObject_Element variants_;
-
-  JSON::Element& OnObject(std::string_view name) override {
-    // The streaming parser seeds the root by calling OnObject with an empty
-    // name when the document's top-level value is an object (see json.cpp
-    // Parse_Value); subsequent keys inside that object then arrive as named
-    // OnObject / OnValue calls on the element we return here.
-    if (name.empty()) {
-      return *this;
-    }
-    if (name == "variants") {
-      variants_.out = out;
-      return variants_;
-    }
-    throw JSON::unknown_value_error{};
-  }
-};
-
-std::vector<ParsedVariantInfo> ParseMetadataJson(const std::string& json_text,
-                                                 const std::filesystem::path& origin) {
-  std::vector<ParsedVariantInfo> variants;
-  MetadataRoot_Element root;
-  root.out = &variants;
-  try {
-    JSON::Parse(root, json_text);
-  } catch (const std::exception& e) {
-    throw std::runtime_error("metadata.json: parse error in " + origin.string() + ": " + e.what());
-  }
-  if (variants.empty()) {
-    throw std::runtime_error("metadata.json: 'variants' map is empty or missing (" + origin.string() + ")");
-  }
-  return variants;
+  return api;
 }
 
-// ---- manifest.json parsing --------------------------------------------------
+OrtUniquePtr<OrtSessionOptions> CreateSessionOptionsForEp(const EpSelection& ep) {
+  OrtSessionOptions* raw_options = nullptr;
+  Ort::ThrowOnError(Ort::api->CreateSessionOptions(&raw_options));
+  OrtUniquePtr<OrtSessionOptions> options(raw_options);
 
-struct ParsedManifest {
-  std::optional<std::vector<std::string>> components;  // nullopt if not declared
-};
+  const OrtEpDevice* const* ep_devices = nullptr;
+  size_t ep_device_count = 0;
+  Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &ep_devices, &ep_device_count));
 
-ParsedManifest ParseManifestJson(const std::string& json_text,
-                                 const std::filesystem::path& origin) {
-  JSON::Document doc;
-  try {
-    doc = JSON::ParseDocument(json_text);
-  } catch (const std::exception& e) {
-    throw std::runtime_error("manifest.json: parse error in " + origin.string() + ": " + e.what());
-  }
-  if (!doc.IsObject()) {
-    throw std::runtime_error("manifest.json: root must be a JSON object (" + origin.string() + ")");
-  }
-  const auto& root = doc.AsObject();
-
-  // Reject schema versions we don't recognize. Absent is fine — older
-  // packages simply omit the field. The spec defines `schema_version` as a
-  // string, but historic producers wrote a number; we coerce numbers into
-  // their canonical decimal-string form so both spellings are accepted.
-  if (auto sv_it = root.find("schema_version"); sv_it != root.end()) {
-    std::string sv_str;
-    if (sv_it->second.IsString()) {
-      sv_str = sv_it->second.AsString();
-    } else if (sv_it->second.IsNumber()) {
-      const double n = sv_it->second.AsNumber();
-      // 1 / 1.0 both mean schema v1. Reject anything that isn't an integer
-      // value to keep the recognised set tight.
-      if (std::floor(n) != n || n < 0) {
-        throw std::runtime_error(
-            "manifest.json: unsupported schema_version " + std::to_string(n) +
-            " (this build supports \"1\")");
-      }
-      sv_str = std::to_string(static_cast<long long>(n));
-    } else {
-      throw std::runtime_error(
-          "manifest.json: 'schema_version' must be a string (" + origin.string() + ")");
-    }
-    // Tolerate "1" and "1.0" — both refer to the v1 format.
-    if (sv_str != "1" && sv_str != "1.0") {
-      throw std::runtime_error(
-          "manifest.json: unsupported schema_version \"" + sv_str +
-          "\" (this build supports \"1\")");
+  std::vector<const OrtEpDevice*> matching_devices;
+  for (size_t i = 0; i < ep_device_count; ++i) {
+    const char* ep_name = Ort::api->EpDevice_EpName(ep_devices[i]);
+    if (ep_name != nullptr && ep.ep_name == ep_name) {
+      matching_devices.push_back(ep_devices[i]);
     }
   }
 
-  ParsedManifest result;
-  if (auto comps_it = root.find("components"); comps_it != root.end()) {
-    if (!comps_it->second.IsArray()) {
-      throw std::runtime_error("manifest.json: 'components' must be an array of strings (" + origin.string() + ")");
-    }
-    std::vector<std::string> names;
-    std::unordered_set<std::string> seen;
-    names.reserve(comps_it->second.AsArray().size());
-    for (const auto& comp : comps_it->second.AsArray()) {
-      if (!comp.IsString()) {
-        throw std::runtime_error(
-            "manifest.json: 'components' entries must be strings (e.g. \"decoder\"). "
-            "Object-form entries (e.g. {\"name\":\"decoder\"}) are not supported — "
-            "the on-disk layout is conventional, no per-component metadata path is needed (" +
-            origin.string() + ")");
-      }
-      const std::string& name = comp.AsString();
-      ValidatePathFragment(name, "component name");
-      if (!seen.insert(name).second) {
-        throw std::runtime_error("manifest.json: duplicate component name '" + name + "'");
-      }
-      names.push_back(name);
-    }
-    result.components = std::move(names);
+  if (!matching_devices.empty()) {
+    Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(
+        options.get(), &GetOrtEnv(), matching_devices.data(), matching_devices.size(),
+        nullptr, nullptr, 0));
+    return options;
+  }
+
+  if (ep.ep_name == "CPUExecutionProvider") {
+    return options;
+  }
+
+  const char* const* option_keys = nullptr;
+  const char* const* option_values = nullptr;
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(
+      options.get(), ep.ep_name.c_str(), option_keys, option_values, 0));
+  return options;
+}
+
+OrtUniquePtr<OrtModelPackageOptions> CreatePackageOptionsForEp(
+    const OrtModelPackageApi* api, const EpSelection& ep) {
+  auto session_options = CreateSessionOptionsForEp(ep);
+
+  OrtModelPackageOptions* raw_options = nullptr;
+  Ort::ThrowOnError(api->CreateModelPackageOptionsFromSessionOptions(
+      &GetOrtEnv(), session_options.get(), &raw_options));
+  return OrtUniquePtr<OrtModelPackageOptions>(raw_options, OrtReleaser<OrtModelPackageOptions>(api));
+}
+
+fs::path OrtCharPathToFsPath(const ORTCHAR_T* path) {
+#ifdef _WIN32
+  return fs::path(path);
+#else
+  return fs::path(path == nullptr ? "" : path);
+#endif
+}
+
+std::vector<std::string> CopyStringArray(const char* const* values, size_t count) {
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(values[i] == nullptr ? "" : values[i]);
   }
   return result;
 }
 
-// ---- stub backend -----------------------------------------------------------
+fs::path ResolveSharedWeightFromComponentDir(const fs::path& component_dir,
+                                             std::string_view checksum) {
+  ValidatePathFragment(checksum, "shared-weight checksum");
+  const std::filesystem::path sw_dir =
+      ToStd(component_dir) / "shared_weights" / std::string(checksum);
+  std::error_code ec;
+  if (!std::filesystem::is_directory(sw_dir, ec) || ec) {
+    throw std::runtime_error(
+        "model package: shared-weight directory not found: " + sw_dir.string() +
+        (ec ? (" (" + ec.message() + ")") : std::string{}));
+  }
 
-struct StubVariant {
-  std::string name;
-  fs::path folder;  // <package>/<component>/<variant>
-  std::vector<EpCompatibilityEntry> ep_compatibility;
-  std::size_t file_count = 0;     // from variant.json `files[]`
-  std::string consumer_metadata;  // serialized JSON, "" if absent
-};
-
-struct StubComponent {
-  std::string name;
-  fs::path component_dir;  // <package>/<component>
-  std::vector<StubVariant> variants;
-};
-
-struct StubComponentInstance : ComponentInstance {
-  fs::path component_dir;
-  fs::path variant_folder;
-  std::size_t file_count = 0;
-  std::string consumer_metadata_blob;
-  std::string selected_ep;
-
-  fs::path VariantFolderPath() const override { return variant_folder; }
-  std::size_t FileCount() const override { return file_count; }
-  std::string ConsumerMetadata() const override { return consumer_metadata_blob; }
-  std::string SelectedEp() const override { return selected_ep; }
-
-  fs::path ResolveSharedWeight(std::string_view checksum) const override {
-    ValidatePathFragment(checksum, "shared-weight checksum");
-    const std::filesystem::path sw_dir =
-        ToStd(component_dir) / "shared_weights" / std::string(checksum);
-    std::error_code ec;
-    if (!std::filesystem::is_directory(sw_dir, ec) || ec) {
-      throw std::runtime_error(
-          "model package: shared-weight directory not found: " + sw_dir.string() +
-          (ec ? (" (" + ec.message() + ")") : std::string{}));
-    }
-
-    std::vector<std::filesystem::path> blobs;
-    std::filesystem::directory_iterator it(sw_dir, ec);
+  std::vector<std::filesystem::path> blobs;
+  std::filesystem::directory_iterator it(sw_dir, ec);
+  if (ec) {
+    throw std::runtime_error(
+        "model package: cannot iterate " + sw_dir.string() + ": " + ec.message());
+  }
+  for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
     if (ec) {
       throw std::runtime_error(
-          "model package: cannot iterate " + sw_dir.string() + ": " + ec.message());
+          "model package: error iterating " + sw_dir.string() + ": " + ec.message());
     }
-    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
-      if (ec) {
-        throw std::runtime_error(
-            "model package: error iterating " + sw_dir.string() + ": " + ec.message());
-      }
-      const bool is_regular = it->is_regular_file(ec);
-      if (ec) {
-        throw std::runtime_error(
-            "model package: cannot stat " + it->path().string() + ": " + ec.message());
-      }
-      if (is_regular) {
-        blobs.push_back(it->path());
-      }
-    }
-    if (blobs.empty()) {
+    const bool is_regular = it->is_regular_file(ec);
+    if (ec) {
       throw std::runtime_error(
-          "model package: shared-weight directory contains no blob: " + sw_dir.string());
+          "model package: cannot stat " + it->path().string() + ": " + ec.message());
     }
-    if (blobs.size() > 1) {
-      throw std::runtime_error(
-          "model package: shared-weight directory contains multiple blobs: " + sw_dir.string());
+    if (is_regular) {
+      blobs.push_back(it->path());
     }
-    return FromStd(blobs.front());
   }
+  if (blobs.empty()) {
+    throw std::runtime_error(
+        "model package: shared-weight directory contains no blob: " + sw_dir.string());
+  }
+  if (blobs.size() > 1) {
+    throw std::runtime_error(
+        "model package: shared-weight directory contains multiple blobs: " + sw_dir.string());
+  }
+  return FromStd(blobs.front());
+}
+
+struct OrtApiComponentInstance : ComponentInstance {
+  OrtApiComponentInstance(const OrtModelPackageApi* api,
+                          OrtUniquePtr<OrtModelPackageOptions> options,
+                          OrtModelPackageComponentContext* component_context,
+                          std::string selected_ep)
+      : api_{api},
+        options_{std::move(options)},
+        component_context_{component_context, OrtReleaser<OrtModelPackageComponentContext>(api)},
+        selected_ep_{std::move(selected_ep)} {
+    const ORTCHAR_T* variant_folder_path = nullptr;
+    Ort::ThrowOnError(api_->ModelPackageComponent_GetSelectedVariantFolderPath(
+        component_context_.get(), &variant_folder_path));
+    variant_folder_ = OrtCharPathToFsPath(variant_folder_path);
+    component_dir_ = FromStd(ToStd(variant_folder_).parent_path());
+
+    Ort::ThrowOnError(api_->ModelPackageComponent_GetSelectedVariantFileCount(
+        component_context_.get(), &file_count_));
+
+    const char* consumer_metadata = nullptr;
+    Ort::ThrowOnError(api_->ModelPackageComponent_GetSelectedVariantConsumerMetadata(
+        component_context_.get(), &consumer_metadata));
+    consumer_metadata_ = consumer_metadata == nullptr ? "" : consumer_metadata;
+  }
+
+  fs::path VariantFolderPath() const override { return variant_folder_; }
+  std::size_t FileCount() const override { return file_count_; }
+  std::string ConsumerMetadata() const override { return consumer_metadata_; }
+  std::string SelectedEp() const override { return selected_ep_; }
+
+  fs::path ResolveSharedWeight(std::string_view checksum) const override {
+    return ResolveSharedWeightFromComponentDir(component_dir_, checksum);
+  }
+
+  const OrtModelPackageApi* api_;
+  OrtUniquePtr<OrtModelPackageOptions> options_;
+  OrtUniquePtr<OrtModelPackageComponentContext> component_context_;
+  fs::path component_dir_;
+  fs::path variant_folder_;
+  std::size_t file_count_{};
+  std::string consumer_metadata_;
+  std::string selected_ep_;
 };
 
-struct StubModelPackageContext : ModelPackageContext {
-  fs::path package_root;
-  std::vector<StubComponent> components;
+struct OrtApiModelPackageContext : ModelPackageContext {
+  OrtApiModelPackageContext(const OrtModelPackageApi* api, const fs::path& package_root)
+      : api_{api},
+        package_root_{package_root} {
+    OrtModelPackageContext* raw_context = nullptr;
+    Ort::ThrowOnError(api_->CreateModelPackageContext(package_root.c_str(), &raw_context));
+    context_ = OrtUniquePtr<OrtModelPackageContext>(
+        raw_context, OrtReleaser<OrtModelPackageContext>(api_));
 
-  std::size_t NumComponents() const override { return components.size(); }
-  std::string ComponentName(std::size_t cix) const override { return components.at(cix).name; }
-  std::size_t NumVariants(std::size_t cix) const override { return components.at(cix).variants.size(); }
-  std::string VariantName(std::size_t cix, std::size_t vix) const override {
-    return components.at(cix).variants.at(vix).name;
+    const char* const* names = nullptr;
+    size_t count = 0;
+    Ort::ThrowOnError(api_->ModelPackage_GetComponentNames(context_.get(), &names, &count));
+    component_names_ = CopyStringArray(names, count);
+    variant_names_.resize(component_names_.size());
+    variant_ep_compatibility_.resize(component_names_.size());
+    variants_loaded_.assign(component_names_.size(), false);
   }
+
+  std::size_t NumComponents() const override { return component_names_.size(); }
+
+  std::string ComponentName(std::size_t cix) const override {
+    return component_names_.at(cix);
+  }
+
+  std::size_t NumVariants(std::size_t cix) const override {
+    EnsureVariants(cix);
+    return variant_names_.at(cix).size();
+  }
+
+  std::string VariantName(std::size_t cix, std::size_t vix) const override {
+    EnsureVariants(cix);
+    return variant_names_.at(cix).at(vix);
+  }
+
   std::span<const EpCompatibilityEntry> VariantEpCompatibility(
       std::size_t cix, std::size_t vix) const override {
-    const auto& entries = components.at(cix).variants.at(vix).ep_compatibility;
+    EnsureVariants(cix);
+    const auto& entries = variant_ep_compatibility_.at(cix).at(vix);
     return {entries.data(), entries.size()};
   }
 
   std::vector<std::string> EpsCompatibleWith(std::size_t cix) const override {
+    EnsureVariants(cix);
     std::vector<std::string> result;
     std::unordered_set<std::string> seen;
-    for (const auto& variant : components.at(cix).variants) {
-      for (const auto& entry : variant.ep_compatibility) {
+    for (const auto& variant_entries : variant_ep_compatibility_.at(cix)) {
+      for (const auto& entry : variant_entries) {
         if (seen.insert(entry.ep).second) {
           result.push_back(entry.ep);
         }
@@ -515,137 +459,78 @@ struct StubModelPackageContext : ModelPackageContext {
 
   std::unique_ptr<ComponentInstance> SelectComponent(
       std::size_t cix, const ModelPackageSelectionOptions& options) const override {
-    const StubComponent& component = components.at(cix);
+    if (options.ep_priority.empty()) return nullptr;
 
-    // Spec: empty captured EP list defaults to [{CPUExecutionProvider}].
-    static const std::vector<EpSelection> kCpuFallback = {{"CPUExecutionProvider", std::nullopt}};
-    const std::vector<EpSelection>& priority =
-        options.ep_priority.empty() ? kCpuFallback : options.ep_priority;
+    const EpSelection& ep = options.ep_priority.front();
+    auto package_options = CreatePackageOptionsForEp(api_, ep);
 
-    // Score = (priority index of best matching EP, declaration index of variant).
-    // Smaller score wins.
-    constexpr std::size_t kNoMatch = static_cast<std::size_t>(-1);
-    std::size_t best_priority = kNoMatch;
-    std::size_t best_variant_index = kNoMatch;
+    OrtModelPackageComponentContext* component_context = nullptr;
+    Ort::ThrowOnError(api_->SelectComponent(
+        context_.get(), component_names_.at(cix).c_str(), package_options.get(), &component_context));
 
-    for (std::size_t vix = 0; vix < component.variants.size(); ++vix) {
-      const auto& variant = component.variants[vix];
-      // Find the best (= smallest-index) priority entry that matches any
-      // of this variant's compat entries.
-      std::size_t variant_priority = kNoMatch;
-      for (const auto& compat : variant.ep_compatibility) {
-        for (std::size_t pi = 0; pi < priority.size(); ++pi) {
-          if (priority[pi].ep_name != compat.ep) continue;
-          // If the package pins a device for this entry, the caller must
-          // request the same device. An unpinned caller does NOT match a
-          // device-pinned compat entry — selecting an NPU-only variant
-          // when the caller didn't ask for NPU would be unsafe.
-          if (compat.device.has_value()) {
-            if (!priority[pi].device.has_value() || *compat.device != *priority[pi].device) {
-              continue;
-            }
-          }
-          if (pi < variant_priority) {
-            variant_priority = pi;
-          }
-        }
-      }
-      if (variant_priority == kNoMatch) continue;
-      if (variant_priority < best_priority) {
-        best_priority = variant_priority;
-        best_variant_index = vix;
-      }
-      // Equal priority: tie-break by declaration order, which means we
-      // keep the earlier variant (already in best_variant_index).
-    }
-
-    if (best_variant_index == kNoMatch) return nullptr;
-
-    const auto& chosen = component.variants[best_variant_index];
-    auto inst = std::make_unique<StubComponentInstance>();
-    inst->component_dir = component.component_dir;
-    inst->variant_folder = chosen.folder;
-    inst->file_count = chosen.file_count;
-    inst->consumer_metadata_blob = chosen.consumer_metadata;
-    inst->selected_ep = priority[best_priority].ep_name;
-    return inst;
+    return std::make_unique<OrtApiComponentInstance>(
+        api_, std::move(package_options), component_context, ep.ep_name);
   }
 
   fs::path SharedAssetsPath() const override {
-    return package_root.join("configs");
+    return package_root_.join("configs");
   }
+
+  void EnsureVariants(std::size_t cix) const {
+    (void)component_names_.at(cix);
+    if (variants_loaded_.at(cix)) return;
+
+    const char* const* names = nullptr;
+    size_t count = 0;
+    Ort::ThrowOnError(api_->ModelPackage_GetVariantNames(
+        context_.get(), component_names_[cix].c_str(), &names, &count));
+    variant_names_[cix] = CopyStringArray(names, count);
+
+    auto& component_compatibility = variant_ep_compatibility_[cix];
+    component_compatibility.clear();
+    component_compatibility.resize(variant_names_[cix].size());
+
+    for (size_t vix = 0; vix < variant_names_[cix].size(); ++vix) {
+      size_t compat_count = 0;
+      Ort::ThrowOnError(api_->ModelPackage_GetVariantEpCompatibilityCount(
+          context_.get(), component_names_[cix].c_str(), variant_names_[cix][vix].c_str(),
+          &compat_count));
+
+      auto& entries = component_compatibility[vix];
+      entries.reserve(compat_count);
+      for (size_t eix = 0; eix < compat_count; ++eix) {
+        const char* ep = nullptr;
+        const char* device = nullptr;
+        const char* compatibility_string = nullptr;
+        Ort::ThrowOnError(api_->ModelPackage_GetVariantEpCompatibility(
+            context_.get(), component_names_[cix].c_str(), variant_names_[cix][vix].c_str(), eix,
+            &ep, &device, &compatibility_string));
+
+        EpCompatibilityEntry entry;
+        entry.ep = ep == nullptr ? "" : ep;
+        if (device != nullptr) {
+          entry.device = device;
+        }
+        if (compatibility_string != nullptr) {
+          entry.compatibility_string = compatibility_string;
+        }
+        entries.push_back(std::move(entry));
+      }
+    }
+
+    variants_loaded_[cix] = true;
+  }
+
+  const OrtModelPackageApi* api_;
+  fs::path package_root_;
+  OrtUniquePtr<OrtModelPackageContext> context_{nullptr, OrtReleaser<OrtModelPackageContext>{}};
+  std::vector<std::string> component_names_;
+  mutable std::vector<std::vector<std::string>> variant_names_;
+  mutable std::vector<std::vector<std::vector<EpCompatibilityEntry>>> variant_ep_compatibility_;
+  mutable std::vector<bool> variants_loaded_;
 };
 
-// ---- Open() detection + loading ---------------------------------------------
-
-// Direct child names a v4 package treats as reserved (i.e. NOT components).
-bool IsReservedChild(const std::string& name) {
-  if (name == "configs") return true;
-  if (!name.empty() && (name[0] == '.' || name[0] == '_')) return true;
-  return false;
-}
-
-// Returns the list of immediate child directories of `root`, lexicographically
-// sorted, that are NOT reserved. Surfaces filesystem iteration errors as
-// exceptions (we cannot tell a transient IO error apart from "no candidates"
-// otherwise).
-std::vector<std::filesystem::path> EnumerateComponentCandidates(
-    const std::filesystem::path& root) {
-  std::vector<std::filesystem::path> result;
-  std::error_code ec;
-  std::filesystem::directory_iterator it(root, ec);
-  if (ec) {
-    throw std::runtime_error(
-        "model package: cannot iterate " + root.string() + ": " + ec.message());
-  }
-  for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
-    if (ec) {
-      throw std::runtime_error(
-          "model package: error iterating " + root.string() + ": " + ec.message());
-    }
-    const bool is_dir = it->is_directory(ec);
-    if (ec) {
-      throw std::runtime_error(
-          "model package: cannot stat " + it->path().string() + ": " + ec.message());
-    }
-    if (!is_dir) continue;
-    const std::string fname = it->path().filename().string();
-    if (IsReservedChild(fname)) continue;
-    result.push_back(it->path());
-  }
-  std::sort(result.begin(), result.end());
-  return result;
-}
-
-// True iff at least one immediate non-reserved child of `root` contains a
-// `metadata.json` file. Used as a fallback v4-detection signal when there is
-// no `manifest.json`.
-bool AnyChildHasMetadata(const std::filesystem::path& root) {
-  std::error_code ec;
-  std::filesystem::directory_iterator it(root, ec);
-  if (ec) return false;  // Treat IO error as "not detected" — exists() check below catches real breakage.
-  for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
-    if (ec) return false;
-    bool is_dir = it->is_directory(ec);
-    if (ec || !is_dir) continue;
-    const std::string fname = it->path().filename().string();
-    if (IsReservedChild(fname)) continue;
-    if (std::filesystem::exists(it->path() / "metadata.json", ec) && !ec) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool FileExistsStrict(const std::filesystem::path& p) {
-  std::error_code ec;
-  const bool exists = std::filesystem::exists(p, ec);
-  if (ec) {
-    throw std::runtime_error(
-        "model package: cannot stat " + p.string() + ": " + ec.message());
-  }
-  return exists;
-}
+#endif  // ORT_API_VERSION >= 27
 
 }  // namespace
 
@@ -661,89 +546,25 @@ std::unique_ptr<ModelPackageContext> ModelPackageContext::Open(const fs::path& p
   const std::filesystem::path root = ToStd(path);
 
   // Detection.
+  const std::filesystem::path root_metadata_path = root / "metadata.json";
   const std::filesystem::path manifest_path = root / "manifest.json";
+  const bool has_root_metadata = FileExistsStrict(root_metadata_path);
   const bool has_manifest = FileExistsStrict(manifest_path);
-  const bool has_component_metadata = !has_manifest && AnyChildHasMetadata(root);
-  if (!has_manifest && !has_component_metadata) {
+  if (!has_root_metadata && !has_manifest) {
     return nullptr;
   }
 
-  auto ctx = std::make_unique<StubModelPackageContext>();
-  ctx->package_root = path;
-
-  // Determine the component name list.
-  std::vector<std::string> component_names;
-  if (has_manifest) {
-    ParsedManifest manifest = ParseManifestJson(ReadFile(manifest_path), manifest_path);
-    if (manifest.components) {
-      component_names = std::move(*manifest.components);
-    } else {
-      // Manifest present but components absent — discover by directory scan.
-      for (const auto& child : EnumerateComponentCandidates(root)) {
-        component_names.push_back(child.filename().string());
-      }
-    }
-  } else {
-    for (const auto& child : EnumerateComponentCandidates(root)) {
-      component_names.push_back(child.filename().string());
-    }
-  }
-
-  if (component_names.empty()) {
-    throw std::runtime_error(
-        "model package: package recognized at " + path.string() +
-        " but no components were found");
-  }
-
-  // Load each component.
-  for (const auto& component_name : component_names) {
-    StubComponent component;
-    component.name = component_name;
-    component.component_dir = path.join(component_name);
-
-    const std::filesystem::path component_dir = root / component_name;
-    const std::filesystem::path metadata_path = component_dir / "metadata.json";
-    if (!FileExistsStrict(metadata_path)) {
-      throw std::runtime_error(
-          "model package: component '" + component_name +
-          "' is missing required metadata.json at " + metadata_path.string());
-    }
-
-    std::vector<ParsedVariantInfo> variants =
-        ParseMetadataJson(ReadFile(metadata_path), metadata_path);
-
-    // Validate that every metadata-declared variant has a directory with a
-    // variant.json on disk, and parse it to capture file_count + consumer_metadata.
-    for (auto& parsed : variants) {
-      const std::filesystem::path variant_dir = component_dir / parsed.name;
-      const std::filesystem::path variant_json = variant_dir / "variant.json";
-      if (!FileExistsStrict(variant_json)) {
-        throw std::runtime_error(
-            "model package: variant '" + parsed.name + "' of component '" +
-            component_name + "' is missing variant.json at " + variant_json.string());
-      }
-      const std::string variant_text = ReadFile(variant_json);
-      VariantManifest vm = ParseVariantManifestFromText(variant_text, variant_json);
-      std::string consumer = ExtractConsumerMetadataFromText(variant_text, variant_json);
-
-      StubVariant sv;
-      sv.name = std::move(parsed.name);
-      sv.folder = FromStd(variant_dir);
-      sv.ep_compatibility = std::move(parsed.ep_compatibility);
-      sv.file_count = vm.files.size();
-      sv.consumer_metadata = std::move(consumer);
-      component.variants.push_back(std::move(sv));
-    }
-
-    if (component.variants.empty()) {
-      throw std::runtime_error(
-          "model package: component '" + component_name + "' has no variants");
-    }
-
-    ctx->components.push_back(std::move(component));
-  }
-
-  return ctx;
+#if ORT_API_VERSION >= 27
+  (void)GetOrtEnv();
+  return std::make_unique<OrtApiModelPackageContext>(GetModelPackageApiOrThrow(), path);
+#else
+  throw std::runtime_error(
+      "v4 model package detected, but this ONNX Runtime GenAI build was compiled "
+      "against ONNX Runtime headers without OrtModelPackageApi (requires ORT API "
+      "version 27 / ONNX Runtime 1.27+). GenAI no longer falls back to a private "
+      "model-package parser; rebuild GenAI against an ONNX Runtime that provides "
+      "OrtApi::GetModelPackageApi().");
+#endif
 }
 
 }  // namespace Generators
