@@ -561,12 +561,8 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-
-  if (!config_->IsPackage()) {
-    // For flat-dir models, device roles are known after CreateSessionOptions().
-    // For packages, subclasses call UpdateDeviceRoles() after creating the decoder session.
-    UpdateDeviceRoles();
-  }
+  // p_device_ is now set for both flat-dir and package paths in CreateSessionOptions().
+  UpdateDeviceRoles();
 }
 
 void Model::UpdateDeviceRoles() {

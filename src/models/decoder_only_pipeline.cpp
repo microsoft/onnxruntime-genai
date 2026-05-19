@@ -50,7 +50,6 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
                                  "' which was not found in the package variant");
       }
     }
-    UpdateDeviceRoles();
   } else {
     for (const auto& model : config_->model.decoder.pipeline) {
       sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));

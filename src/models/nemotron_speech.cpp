@@ -135,7 +135,6 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
     const Config::SessionOptions* joi_so = config_->model.joiner.session_options.has_value()
         ? &*config_->model.joiner.session_options : nullptr;
     session_joiner_ = CreateSessionFromPackage(ort_env, joiner_comp, 0, ep, joi_so, true);
-    UpdateDeviceRoles();
   } else {
     // Create session options
     encoder_session_options_ = OrtSessionOptions::Create();

@@ -15,7 +15,6 @@ MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0, ep, enc_so, true);
     session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
                                                 ep, &config_->model.decoder.session_options, false);
-    UpdateDeviceRoles();
   } else {
     encoder_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);

@@ -115,7 +115,6 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     // Decoder session
     decoder_session_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
                                                 ep, &config_->model.decoder.session_options, false);
-    UpdateDeviceRoles();
   } else {
     // Flat-dir path (unchanged)
     // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
