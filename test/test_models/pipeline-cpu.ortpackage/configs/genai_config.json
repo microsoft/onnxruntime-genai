@@ -31,8 +31,8 @@
                             "hidden_states_embed"
                         ]
                     },
-                    "transformer": {
-                        "filename": "transformer.onnx",
+                    "prompt-processor": {
+                        "filename": "transformer_prefill.onnx",
                         "inputs": [
                             "hidden_states_embed",
                             "attention_mask",
@@ -43,7 +43,23 @@
                             "hidden_states",
                             "present.0.key",
                             "present.0.value"
-                        ]
+                        ],
+                        "run_on_token_gen": false
+                    },
+                    "token-generator": {
+                        "filename": "transformer_gen.onnx",
+                        "inputs": [
+                            "hidden_states_embed",
+                            "attention_mask",
+                            "past_key_values.0.key",
+                            "past_key_values.0.value"
+                        ],
+                        "outputs": [
+                            "hidden_states",
+                            "present.0.key",
+                            "present.0.value"
+                        ],
+                        "run_on_prompt": false
                     },
                     "language_model_head": {
                         "filename": "lm_head.onnx",

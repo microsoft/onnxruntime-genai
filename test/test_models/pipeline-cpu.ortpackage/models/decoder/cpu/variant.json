@@ -5,7 +5,10 @@
       "filename": "embeds.onnx"
     },
     {
-      "filename": "transformer.onnx"
+      "filename": "transformer_prefill.onnx"
+    },
+    {
+      "filename": "transformer_gen.onnx"
     },
     {
       "filename": "lm_head.onnx"
