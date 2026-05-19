@@ -929,7 +929,10 @@ class Qwen35TextModel(Model):
         # By default Qwen3.5 is exported as a VL decoder that consumes
         # inputs_embeds. Passing exclude_embeds=false builds a text-only model
         # that consumes input_ids directly.
-        self.is_text_only = extra_options.get("exclude_embeds", None) is False
+        exclude_embeds = extra_options.get("exclude_embeds", None)
+        self.is_text_only = exclude_embeds is False or (
+            isinstance(exclude_embeds, str) and exclude_embeds.lower() in {"false", "0"}
+        )
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
