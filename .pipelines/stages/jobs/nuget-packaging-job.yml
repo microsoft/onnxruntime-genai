@@ -2,8 +2,8 @@ parameters:
 - name: ep
   type: string
 
-- name: enable_win_cpu
-  displayName: 'Whether Windows CPU package is built.'
+- name: enable_win_x64_cpu
+  displayName: 'Whether Windows x64 CPU package is built.'
   type: boolean
   default: false
 
@@ -12,8 +12,8 @@ parameters:
   type: boolean
   default: false
 
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
+- name: enable_linux_x64_cpu
+  displayName: 'Whether Linux x64 CPU package is built.'
   type: boolean
   default: false
 
@@ -130,7 +130,7 @@ jobs:
         ArtifactName: onnxruntime-genai-win-winml-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
+  - ${{ if and(eq(parameters.enable_win_x64_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-cpu-x64 capi Artifacts'
@@ -165,7 +165,7 @@ jobs:
         ArtifactName: onnxruntime-genai-win-directml-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_linux_cpu, true), eq(parameters.ep, 'cpu')) }}:
+  - ${{ if and(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download linux-cpu-x64 capi Artifacts'
@@ -305,9 +305,9 @@ jobs:
 
       # Verify all enabled RIDs produced the expected native library.
       $expected = @{}
-      if ('${{ parameters.enable_win_cpu }}' -eq 'True')        { $expected['win-x64']    = 'onnxruntime-genai.dll' }
+      if ('${{ parameters.enable_win_x64_cpu }}' -eq 'True')        { $expected['win-x64']    = 'onnxruntime-genai.dll' }
       if ('${{ parameters.enable_win_arm64 }}' -eq 'True')      { $expected['win-arm64']  = 'onnxruntime-genai.dll' }
-      if ('${{ parameters.enable_linux_cpu }}' -eq 'True')      { $expected['linux-x64']  = 'libonnxruntime-genai.so' }
+      if ('${{ parameters.enable_linux_x64_cpu }}' -eq 'True')      { $expected['linux-x64']  = 'libonnxruntime-genai.so' }
       if ('${{ parameters.enable_linux_arm64_cpu }}' -eq 'True'){ $expected['linux-arm64']= 'libonnxruntime-genai.so' }
       if ('${{ parameters.enable_macos_cpu }}' -eq 'True')      { $expected['osx-arm64']  = 'libonnxruntime-genai.dylib' }
       foreach ($rid in $expected.Keys) {
