@@ -2112,6 +2112,23 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             for k in keys_to_remove:
                 del algo_config.customized_weight_config[k]
 
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        """Override to emit ``model.type = "qwen3_5_moe"`` in genai_config.json.
+
+        The parent class hardcodes ``Qwen3_5ForConditionalGeneration`` which
+        lowercases to ``qwen3_5``, but the C++ runtime VLM/QwenVLFamily
+        registrations require ``qwen3_5_moe``.
+        """
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        import json
+        from pathlib import Path
+
+        config_path = Path(out_dir) / "genai_config.json"
+        config = json.loads(config_path.read_text())
+        config["model"]["type"] = "qwen3_5_moe"
+        config_path.write_text(json.dumps(config, indent=4))
+
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
         attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
