@@ -1429,8 +1429,14 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 // the EP supports it (DML by default, WebGPU/CUDA when graph capture is enabled
 // in model generation via _test_utils.py), otherwise falls back to the dynamic mask path.
 // Skipped when qwen-2.5 model is not available.
-// TODO: Need to investigate why RewindTo fails on CUDA for qwen-2.5 model with both
-// static mask (graph-capture variant) and non-static mask (baseline variant).
+//
+// CUDA is explicitly disabled: RewindTo(seq_len - 3) — a deep partial rewind near
+// the end of a completed sequence — produces incorrect output on CUDA. This is a
+// pre-existing runtime bug (not model-specific): it reproduces with both
+// qwen-2.5-0.5b-graph and tiny-qwen35-cuda models, and with both static-mask
+// (graph-capture) and dynamic-mask (baseline) code paths. Full rewind (RewindTo(0))
+// and shallow partial rewind (e.g. RewindTo(input_ids.size()-1)) work correctly.
+// TODO: Remove !USE_CUDA once the CUDA partial rewind bug is fixed.
 #if TEST_QWEN_2_5 && !USE_CUDA
 TEST(CAPITests, RewindQwen25CAPI) {
   // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),

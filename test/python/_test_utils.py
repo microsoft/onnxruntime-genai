@@ -140,6 +140,14 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
 
 # Devices that support graph capture. Models with enable_graph_capture=True
 # are only built for these devices.
+#
+# CUDA is intentionally excluded: the Windows CUDA CI consistently fails to
+# download this new model from Hugging Face. Will re-add "cuda" once the
+# CI download issue is resolved.
+#
+# Note: nvtensorrtrtx is included here for model generation but does not have
+# dedicated CI coverage yet — tests using NvTensorRtRtx models are guarded with
+# GTEST_SKIP when the model artifacts are not present.
 _GRAPH_CAPTURE_DEVICES = {"webgpu", "dml", "nvtensorrtrtx"}
 
 
