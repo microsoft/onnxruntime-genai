@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -778,6 +779,8 @@ struct Vision_Element : JSON::Element {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
       v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_visual_tokens") {
+      v_.num_visual_tokens = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "window_size") {
       v_.window_size = static_cast<int>(JSON::Get<double>(value));
     } else {

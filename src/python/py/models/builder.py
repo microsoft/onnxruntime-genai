@@ -3,7 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
@@ -45,6 +46,7 @@ from builders import (
     Qwen25VLTextModel,
     Qwen35TextModel,
     QwenModel,
+    VideoChatFlashQwenModel,
     SmolLM3Model,
     WhisperModel,
 )
@@ -191,7 +193,48 @@ def create_model(
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
     hf_remote = extra_options.get("hf_remote", True)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    # VideoChat-Flash uses custom remote code that imports heavy video libraries
+    # (av, cv2, decord, imageio) even though the LM backbone is standard Qwen2.5.
+    # Load the raw config.json via Qwen2Config to avoid pulling in video deps.
+    _vcf_arch = "VideoChatFlashQwenForCausalLM"
+
+    def _has_vcf_architecture(raw_config: dict[str, Any]) -> bool:
+        architectures = raw_config.get("architectures")
+        if isinstance(architectures, list):
+            return _vcf_arch in architectures
+        if isinstance(architectures, str):
+            return architectures == _vcf_arch
+        return False
+
+    _is_vcf = False
+    try:
+        import json as _json
+        if os.path.isdir(hf_name):
+            _raw_cfg_path = os.path.join(hf_name, "config.json")
+            if os.path.isfile(_raw_cfg_path):
+                with open(_raw_cfg_path) as _f:
+                    _is_vcf = _has_vcf_architecture(_json.load(_f))
+        else:
+            # HF repo: peek at config.json without running custom code
+            from huggingface_hub import hf_hub_download
+            _cfg_file = hf_hub_download(repo_id=hf_name, filename="config.json", token=hf_token, cache_dir=cache_dir)
+            with open(_cfg_file) as _f:
+                _is_vcf = _has_vcf_architecture(_json.load(_f))
+    except Exception:
+        # Best-effort architecture peek: if config.json is unreadable, the
+        # huggingface_hub download fails (offline, private repo without token,
+        # missing file), or the JSON is malformed, fall through to the standard
+        # AutoConfig.from_pretrained() path below, which has richer error
+        # reporting and is the canonical loader for non-VCF models.
+        pass
+
+    if _is_vcf:
+        from transformers import Qwen2Config
+        config = Qwen2Config.from_pretrained(hf_name, token=hf_token, **extra_kwargs)
+        config.architectures = [_vcf_arch]
+        config._name_or_path = hf_name  # ensure load_weights can find the weights
+    else:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
         from peft import PeftConfig
 
@@ -289,6 +332,11 @@ def create_model(
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        if "exclude_embeds" not in extra_options:
+            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+            extra_options["exclude_embeds"] = True
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:

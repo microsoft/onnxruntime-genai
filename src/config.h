@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 
 namespace Generators {
@@ -218,6 +219,7 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
       int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
       int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
                            // 0 = auto-compute as patch_size * spatial_merge_size * 2

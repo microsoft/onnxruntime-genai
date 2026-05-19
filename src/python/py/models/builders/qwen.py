@@ -3,7 +3,10 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 
+import os
 
 import numpy as np
 import onnx_ir as ir
@@ -913,6 +916,83 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         )
 
 
+class VideoChatFlashQwenModel(QwenModel):
+    """
+    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
+
+    The language model backbone is standard Qwen2.5-7B with flat config and
+    standard weight keys (model.layers.*, lm_head.*). The model uses standard
+    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
+
+    This builder exports only the text decoder component. It sets exclude_embeds=True
+    so the decoder receives inputs_embeds from the embedding merger model, which
+    fuses the InternVideo2 visual tokens with text embeddings.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Pre-configure before super().__init__() so the base class (Model)
+        # establishes these attributes on first assignment instead of us
+        # overwriting inherited values.
+        #
+        # The custom remote code requires video libraries (av, cv2, decord,
+        # imageio) which are not needed to export the LM backbone. Force
+        # hf_remote=False so base class helpers (make_genai_config,
+        # save_processing) use standard, non-remote-code paths.
+        extra_options = dict(extra_options) if extra_options else {}
+        extra_options["hf_remote"] = False
+
+        # Model.__init__ sets self.model_type = config.architectures[0]. The
+        # HF architecture string ("VideoChatFlashQwenForCausalLM") has already
+        # served its purpose in the dispatch table in builder.py; swap it for
+        # the runtime identifier expected by genai_config.json and the C++
+        # runtime registration in model.cpp.
+        config.architectures = ["videochat_flash_qwen"]
+
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        # make_genai_config in base.py calls AutoConfig with trust_remote_code,
+        # which triggers the video library imports. Instead, write a clean
+        # Qwen2-compatible config.json to a temp dir and let base class read it.
+        import json as _json
+        import shutil
+        import tempfile
+
+        from transformers import Qwen2Config
+
+        vcf_config = Qwen2Config.from_pretrained(model_name_or_path, token=self.hf_token, **extra_kwargs)
+        vcf_config.architectures = ["VideoChatFlashQwenForCausalLM"]
+        vcf_config.model_type = "videochat_flash_qwen"
+        vcf_config._name_or_path = model_name_or_path
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp_dir, "config.json"), "w") as f:
+                _json.dump(vcf_config.to_dict(), f)
+            super().make_genai_config(tmp_dir, {}, out_dir)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # Restore the correct model type (base class may write "qwen2" from Qwen2Config)
+        gcfg_path = os.path.join(out_dir, "genai_config.json")
+        if os.path.isfile(gcfg_path):
+            with open(gcfg_path) as f:
+                gcfg = _json.load(f)
+            gcfg["model"]["type"] = "videochat_flash_qwen"
+            with open(gcfg_path, "w") as f:
+                _json.dump(gcfg, f, indent=2)
+
+    def load_weights(self, input_path):
+        # The LM backbone is identical to Qwen2ForCausalLM. Load it directly
+        # to avoid the custom remote code (which requires video libraries).
+        from transformers import Qwen2ForCausalLM
+        print("Loading VideoChatFlash model as Qwen2ForCausalLM...")
+        extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
+        return Qwen2ForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            token=self.hf_token,
+            **extra_kwargs,
+        )
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
