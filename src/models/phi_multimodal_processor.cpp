@@ -103,14 +103,9 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
 
 PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
-      attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
-      audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
-      audio_sizes_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_sizes)} {
+      attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)} {
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
-
-  const auto audio_processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
-  CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), audio_processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
 
@@ -118,9 +113,27 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
   config.AddMapping(std::string(Config::Defaults::AttentionMaskName), config.model.vision.inputs.attention_mask);
   config.AddMapping(std::string(Config::Defaults::ImageSizesName), config.model.vision.inputs.image_sizes);
 
-  config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
-  config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
-  config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
+  // Initialize speech/audio processor only when configured. A phi4mm genai_config.json with
+  // the "speech" block cleared (filename + config_filename both empty) loads vision-only and
+  // skip the speech ONNX entirely. Matches the Gemma4 processor's pattern.
+  if (!config.model.speech.config_filename.empty()) {
+    auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
+    if (fs::exists(speech_config_path)) {
+      has_speech_ = true;
+      audio_features_type_ = session_info.GetInputDataType(config.model.speech.inputs.audio_embeds);
+      audio_sizes_type_ = session_info.GetInputDataType(config.model.speech.inputs.audio_sizes);
+
+      CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), speech_config_path.string().c_str()));
+
+      config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
+      config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
+      config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
+    } else if (!config.model.speech.filename.empty()) {
+      throw std::runtime_error("Speech model is configured (speech.filename=" + config.model.speech.filename +
+                               ") but the audio processor config file was not found at: " +
+                               speech_config_path.string());
+    }
+  }
 }
 
 std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
@@ -148,7 +161,12 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
   ort_extensions::OrtxObjectPtr<OrtxTensor> audio_embeds_owner, audio_attention_mask_owner, audio_sizes_owner;
   OrtxTensor *audio_embeds{}, *audio_attention_mask{}, *audio_sizes{};
-  if (payload.audios) {
+  if (payload.audios && !has_speech_) {
+    throw std::runtime_error(
+        "Audio input was provided but audio/speech support is not configured. "
+        "Ensure the genai_config.json has a 'speech' section with both 'filename' and 'config_filename'.");
+  }
+  if (payload.audios && has_speech_) {
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_embeds_owner.ToBeAssigned()));
@@ -192,7 +210,7 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
                            std::make_shared<Tensor>(ProcessTensor<int64_t>(num_img_tokens, allocator)));
   }
 
-  if (payload.audios) {
+  if (payload.audios && has_speech_) {
     if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
                              std::make_shared<Tensor>(ProcessTensor<float>(audio_embeds, allocator)));
