@@ -349,6 +349,14 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
   return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
 }
 
+OgaResult* OGA_API_CALL OgaCreateModelWithEp(const char* config_path, const char* ep, OgaModel** out) {
+  OGA_TRY
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, nullptr, ep);
+  *out = ReturnShared<OgaModel>(model);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out) {
   OGA_TRY
   *out = AllocOgaString(model->config_->model.type.c_str());

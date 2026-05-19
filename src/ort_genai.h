@@ -230,6 +230,11 @@ struct OgaModel : OgaAbstract {
     OgaCheckResult(OgaCreateModel(config_path, &p));
     return std::unique_ptr<OgaModel>(p);
   }
+  static std::unique_ptr<OgaModel> Create(const char* config_path, const char* ep) {
+    OgaModel* p;
+    OgaCheckResult(OgaCreateModelWithEp(config_path, ep, &p));
+    return std::unique_ptr<OgaModel>(p);
+  }
   static std::unique_ptr<OgaModel> Create(const char* config_path, const OgaRuntimeSettings& settings) {
     OgaModel* p;
     OgaCheckResult(OgaCreateModelWithRuntimeSettings(config_path, &settings, &p));

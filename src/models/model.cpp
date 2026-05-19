@@ -916,7 +916,9 @@ bool Model::IsPruned() const {
   return logits_shape[1] == 1;
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
+                                   const RuntimeSettings* settings /*= nullptr*/,
+                                   const char* ep /*= nullptr*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
@@ -942,19 +944,32 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
     }
     file.close();
 
-    // Create temporary session options to capture the EP for package selection.
-    // For now, we use the default (CPU) EP. TODO: accept explicit EP parameter.
+    // Create session options for package selection.
+    // If an EP is explicitly provided, append it. Otherwise, use DefaultEpFromPackage
+    // to determine the EP from the package's component/variant metadata.
     auto temp_so = OrtSessionOptions::Create();
 
-    // Create the package state (opens package, creates options)
+    // We need to open the package context first to resolve the EP
+    auto pkg_ctx = OrtModelPackageContext::Create(model_path.c_str());
+    std::string resolved_ep;
+    if (ep && ep[0] != '\0') {
+      resolved_ep = ep;
+    } else {
+      resolved_ep = DefaultEpFromPackage(*pkg_ctx);
+    }
+
+    // Append the resolved EP to session options so SelectComponent picks the right variant.
+    // CPU is always available as the default fallback, so no explicit append needed.
+    if (resolved_ep != "CPUExecutionProvider") {
+      temp_so->AppendExecutionProvider(resolved_ep, nullptr, nullptr, 0);
+    }
+
+    // Create the package state (opens package, creates options from the EP-configured SO)
     auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so);
 
     // Parse the base config minimally to find component names for each role
-    // The "component" field in each role block maps to a package component.
-    // We need to parse the base JSON to discover which components to select.
     auto temp_config = std::make_unique<Config>();
     temp_config->config_path = configs_path;
-    // Use OverlayConfig-style parsing to populate temp_config from the base JSON
     extern void ParseConfigFromString(std::string_view json, Config& config);
     ParseConfigFromString(base_json, *temp_config);
 
@@ -992,7 +1007,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
     return CreateModel(ort_env, std::move(config));
   }
 
-  // Flat directory path (unchanged)
+  // Flat directory path (unchanged, ep parameter is ignored for flat dirs)
   auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
   return CreateModel(ort_env, std::move(config));
 }

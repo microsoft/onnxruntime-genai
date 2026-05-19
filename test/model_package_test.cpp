@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include "../src/generators.h"
@@ -190,4 +191,76 @@ TEST(ConfigFromPackage, OverlayAppliedBeforeParsing) {
   EXPECT_EQ(config->model.decoder.num_hidden_layers, 32);
   // Overlay should add position_ids input
   EXPECT_EQ(config->model.decoder.inputs.position_ids, "position_ids");
+}
+
+// --- End-to-end model package tests ---
+// These tests load a real phi4 model from a package directory.
+// They require the test_models directory to contain the package fixtures.
+
+#include "ort_genai.h"
+
+static const char* kCpuOnlyPkgPath = MODEL_PATH "phi4-cpu-only.ortpackage";
+static const char* kMultiVariantPkgPath =
+    "/datadisks/jambaykinley/archive/p/packages/phi-4-mini-reasoning.v4.ortpackage";
+
+static bool PackageExists(const char* path) {
+  return fs::exists(fs::path(path) / "manifest.json");
+}
+
+TEST(ModelPackageE2E, SingleVariantCpuAutoDetect) {
+  if (!PackageExists(kCpuOnlyPkgPath)) {
+    GTEST_SKIP() << "CPU-only test package not found at " << kCpuOnlyPkgPath;
+  }
+
+  // Auto-detect should pick CPUExecutionProvider (only EP available)
+  auto model = OgaModel::Create(kCpuOnlyPkgPath);
+  ASSERT_NE(model, nullptr);
+  EXPECT_EQ(std::string(model->GetType().p_), "phi3");
+  // Device type may be uppercase or lowercase depending on the EP
+  std::string device_type = model->GetDeviceType().p_;
+  std::transform(device_type.begin(), device_type.end(), device_type.begin(), ::tolower);
+  EXPECT_EQ(device_type, "cpu");
+}
+
+TEST(ModelPackageE2E, MultiVariantExplicitCpu) {
+  if (!PackageExists(kMultiVariantPkgPath)) {
+    GTEST_SKIP() << "Multi-variant test package not found at " << kMultiVariantPkgPath;
+  }
+
+  // Explicitly select CPU EP from a multi-variant package
+  auto model = OgaModel::Create(kMultiVariantPkgPath, "CPUExecutionProvider");
+  ASSERT_NE(model, nullptr);
+  EXPECT_EQ(std::string(model->GetType().p_), "phi3");
+  std::string device_type = model->GetDeviceType().p_;
+  std::transform(device_type.begin(), device_type.end(), device_type.begin(), ::tolower);
+  EXPECT_EQ(device_type, "cpu");
+}
+
+TEST(ModelPackageE2E, SingleVariantCpuGenerateTokens) {
+  if (!PackageExists(kCpuOnlyPkgPath)) {
+    GTEST_SKIP() << "CPU-only test package not found at " << kCpuOnlyPkgPath;
+  }
+
+  auto model = OgaModel::Create(kCpuOnlyPkgPath);
+  ASSERT_NE(model, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("batch_size", 1);
+
+  // Use raw token IDs (BOS token for phi4 is 199999)
+  std::vector<int32_t> input_ids = {199999};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  int tokens_generated = 0;
+  while (!generator->IsDone() && tokens_generated < 5) {
+    generator->GenerateNextToken();
+    tokens_generated++;
+  }
+
+  auto sequence = generator->GetSequence(0);
+  // Should have at least the input token plus some generated tokens
+  EXPECT_GT(sequence.size(), 1u);
 }
