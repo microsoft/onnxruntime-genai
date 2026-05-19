@@ -154,6 +154,7 @@ jobs:
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
 
   - task: UsePythonVersion@0
+    condition: not(and(eq(variables['os'], 'linux'), eq(variables['arch'], 'arm64')))
     inputs:
       versionSpec: $(PyDotVer)
       addToPath: true
