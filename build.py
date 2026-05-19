@@ -789,9 +789,9 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DNEMOTRON_SPEECH=ON"
     ]
 
-    cmake_prefix_path = str(args.build_dir)
+    cmake_prefix_path = args.build_dir.as_posix()
     if args.ort_home:
-        cmake_prefix_path += ";" + str(args.ort_home / args.config)
+        cmake_prefix_path += ";" + (args.ort_home / args.config).as_posix()
     else:
         ortlib_src_dir = args.build_dir / "_deps" / "ortlib-src"
         ort_include_dir = REPO_ROOT / "ort" / "include"
@@ -800,16 +800,16 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ortlib_runtimes_dir = ortlib_src_dir / "runtimes"
         ort_lib_dir = REPO_ROOT / "ort" / "lib"
         if not ort_lib_dir.exists():
-            if util.is_windows():
-                ort_lib_dir = ortlib_runtimes_dir / "win-x64"
-            elif util.is_windows_arm() or (util.is_windows() and (args.arm64 or args.arm64ec)):
+            if util.is_windows_arm() or (util.is_windows() and (args.arm64 or args.arm64ec)):
                 ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
+            elif util.is_windows():
+                ort_lib_dir = ortlib_runtimes_dir / "win-x64"
             elif args.android:
                 ort_lib_dir = ortlib_runtimes_dir / "android"
-            elif util.is_linux():
-                ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
             elif util.is_linux_arm() or (util.is_linux() and (args.arm64 or args.arm64ec)):
                 ort_lib_dir = ortlib_runtimes_dir / "linux-arm64"
+            elif util.is_linux():
+                ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
             elif util.is_mac() or args.macos:
                 ort_lib_dir = ortlib_runtimes_dir / "osx-arm64"
             elif args.ios:
@@ -817,17 +817,17 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
             elif not util.is_aix():
                 raise RuntimeError("Unsupported operating system to build examples for")
         samples_to_build += [
-            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
-            "-DORT_LIB_DIR=" + str(ort_lib_dir / "native")
+            "-DORT_INCLUDE_DIR=" + ort_include_dir.as_posix(),
+            "-DORT_LIB_DIR=" + (ort_lib_dir / "native").as_posix()
         ]
 
     cmake_command = (
         [
-            str(args.cmake_path),
+            args.cmake_path.as_posix(),
             "-S",
-            str(examples_dir),
+            examples_dir.as_posix(),
             "-B",
-            str(build_dir),
+            build_dir.as_posix(),
             "-G",
             args.cmake_generator,
             "-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
