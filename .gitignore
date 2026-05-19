@@ -8,7 +8,6 @@
 *obj/
 src/csharp/AssemblyInfo.cs
 /ort
-build*/
 /build_*
 build*/
 /test/test_models/*
