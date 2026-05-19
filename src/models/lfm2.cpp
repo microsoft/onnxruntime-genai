@@ -3,12 +3,15 @@
 
 #include "../generators.h"
 #include "lfm2.h"
+#include "model_package.h"
 
 namespace Generators {
 LFM2_Model::LFM2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   if (config_->IsPackage()) {
-    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0);
+    auto ep = config_->package_state_->GetResolvedEpName();
+    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
+                                                ep, &config_->model.decoder.session_options, false);
     UpdateDeviceRoles();
   } else {
     session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());

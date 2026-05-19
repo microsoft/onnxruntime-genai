@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "../logging.h"
+#include "model_package.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
 #include "model_package.h"
@@ -34,10 +35,15 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
       file_map[basename] = i;
     }
 
+    auto resolved_ep = pkg_state->GetResolvedEpName();
     for (const auto& model : config_->model.decoder.pipeline) {
       auto it = file_map.find(model.filename);
       if (it != file_map.end()) {
-        sessions_.emplace_back(CreateSessionFromPackage(ort_env, component_name, it->second));
+        std::string ep = model.run_on_cpu ? "CPUExecutionProvider" : resolved_ep;
+        const Config::SessionOptions* stage_so =
+            model.session_options.has_value() ? &*model.session_options : nullptr;
+        sessions_.emplace_back(CreateSessionFromPackage(ort_env, component_name, it->second,
+                                                        ep, stage_so, false));
       } else {
         throw std::runtime_error("Pipeline stage '" + model.model_id +
                                  "' references file '" + model.filename +

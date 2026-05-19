@@ -752,9 +752,9 @@ void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
   if (config_->IsPackage()) {
-    // For packages, session options are built per-file in CreateSessionFromPackage().
-    // Default to CPU; p_device_ will be updated when the decoder session is created.
-    p_device_ = GetDeviceInterface(DeviceType::CPU);
+    // p_device_ derives from the EP captured for the decoder component.
+    // GenAI already knows this EP from variant selection.
+    p_device_ = DeviceFromEpName(config_->package_state_->GetResolvedEpName());
     return;
   }
 
@@ -810,9 +810,150 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
 }
 
+Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
+    const std::string& component_name,
+    size_t file_index,
+    const std::string& ep_for_file,
+    const Config::SessionOptions* config_session_options) const {
+  auto* pkg_state = config_->package_state_.get();
+  auto* cix = pkg_state->GetComponent(component_name);
+
+  Config::SessionOptions so;
+
+  // Layer 1: Apply variant per-file session options as the base
+  {
+    const char* const* so_keys = nullptr;
+    const char* const* so_values = nullptr;
+    size_t so_count = 0;
+    cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
+
+    for (size_t i = 0; i < so_count; ++i) {
+      std::string key(so_keys[i]);
+      std::string value(so_values[i]);
+
+      if (key == "intra_op_num_threads") {
+        so.intra_op_num_threads = std::stoi(value);
+      } else if (key == "inter_op_num_threads") {
+        so.inter_op_num_threads = std::stoi(value);
+      } else if (key == "enable_cpu_mem_arena") {
+        so.enable_cpu_mem_arena = (value == "1" || value == "true");
+      } else if (key == "enable_mem_pattern") {
+        so.enable_mem_pattern = (value == "1" || value == "true");
+      } else if (key == "log_id") {
+        so.log_id = value;
+      } else if (key == "log_severity_level") {
+        so.log_severity_level = std::stoi(value);
+      } else if (key == "log_verbosity_level") {
+        so.log_verbosity_level = std::stoi(value);
+      } else if (key == "enable_profiling") {
+        so.enable_profiling = value;
+      } else if (key == "graph_optimization_level") {
+        int level = std::stoi(value);
+        so.graph_optimization_level = static_cast<GraphOptimizationLevel>(level);
+      } else if (key == "custom_ops_library") {
+        so.custom_ops_library = value;
+      } else {
+        so.config_entries.emplace_back(key, value);
+      }
+    }
+  }
+
+  // Set up the EP: use the resolved EP for this file (or CPU if run_on_cpu)
+  if (ep_for_file != "CPUExecutionProvider") {
+    Config::ProviderOptions po;
+    po.name = ep_for_file;
+
+    // Attach variant's per-file provider_options as EP config (not the EP identity)
+    const char* const* po_keys = nullptr;
+    const char* const* po_values = nullptr;
+    size_t po_count = 0;
+    cix->GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
+
+    for (size_t i = 0; i < po_count; ++i) {
+      po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
+    }
+
+    so.providers.push_back(ep_for_file);
+    so.provider_options.push_back(std::move(po));
+  }
+  // For CPU: no explicit provider append needed (CPU is implicit default)
+
+  // Layer 2: Merge genai_config session_options on top (config wins on conflicts)
+  if (config_session_options) {
+    const auto& cfg = *config_session_options;
+
+    // Typed fields: config overrides variant
+    if (cfg.intra_op_num_threads.has_value())
+      so.intra_op_num_threads = cfg.intra_op_num_threads;
+    if (cfg.inter_op_num_threads.has_value())
+      so.inter_op_num_threads = cfg.inter_op_num_threads;
+    if (cfg.enable_cpu_mem_arena.has_value())
+      so.enable_cpu_mem_arena = cfg.enable_cpu_mem_arena;
+    if (cfg.enable_mem_pattern.has_value())
+      so.enable_mem_pattern = cfg.enable_mem_pattern;
+    if (cfg.log_id.has_value())
+      so.log_id = cfg.log_id;
+    if (cfg.log_severity_level.has_value())
+      so.log_severity_level = cfg.log_severity_level;
+    if (cfg.log_verbosity_level.has_value())
+      so.log_verbosity_level = cfg.log_verbosity_level;
+    if (cfg.enable_profiling.has_value())
+      so.enable_profiling = cfg.enable_profiling;
+    if (cfg.custom_ops_library.has_value())
+      so.custom_ops_library = cfg.custom_ops_library;
+    if (cfg.graph_optimization_level.has_value())
+      so.graph_optimization_level = cfg.graph_optimization_level;
+
+    // Config entries: config values override same keys, add new ones
+    for (const auto& entry : cfg.config_entries) {
+      auto it = std::find_if(so.config_entries.begin(), so.config_entries.end(),
+                             [&entry](const auto& p) { return p.first == entry.first; });
+      if (it != so.config_entries.end()) {
+        it->second = entry.second;
+      } else {
+        so.config_entries.push_back(entry);
+      }
+    }
+
+    // Providers/provider_options: if config specifies providers, they override
+    if (!cfg.providers.empty()) {
+      so.providers = cfg.providers;
+      so.provider_options = cfg.provider_options;
+    } else if (!cfg.provider_options.empty()) {
+      // Config has provider_options but no explicit providers list
+      for (const auto& cfg_po : cfg.provider_options) {
+        // Find matching EP in the existing list
+        auto it = std::find_if(so.provider_options.begin(), so.provider_options.end(),
+                               [&cfg_po](const auto& p) { return p.name == cfg_po.name; });
+        if (it != so.provider_options.end()) {
+          // Merge: config options override same keys
+          for (const auto& opt : cfg_po.options) {
+            auto opt_it = std::find_if(it->options.begin(), it->options.end(),
+                                       [&opt](const auto& p) { return p.first == opt.first; });
+            if (opt_it != it->options.end()) {
+              opt_it->second = opt.second;
+            } else {
+              it->options.push_back(opt);
+            }
+          }
+        } else {
+          // New EP from config, add it
+          so.providers.push_back(cfg_po.name);
+          so.provider_options.push_back(cfg_po);
+        }
+      }
+    }
+  }
+
+  return so;
+}
+
 std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
                                                              const std::string& component_name,
-                                                             size_t file_index) {
+                                                             size_t file_index,
+                                                             const std::string& ep_for_file,
+                                                             const Config::SessionOptions* config_session_options,
+                                                             bool disable_graph_capture) {
   auto* pkg_state = config_->package_state_.get();
   if (!pkg_state) {
     throw std::runtime_error("CreateSessionFromPackage called but config has no package state");
@@ -826,75 +967,13 @@ std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
   // Get the absolute file path from the package variant
   auto file_path = cix->GetSelectedVariantFilePath(file_index);
 
-  // Create fresh session options for this file
+  // Build merged Config::SessionOptions from variant per-file + genai_config overlay
+  auto merged_so = BuildSessionOptionsForPackageFile(component_name, file_index,
+                                                     ep_for_file, config_session_options);
+
+  // Create OrtSessionOptions and apply all settings through the full pipeline
   auto so = OrtSessionOptions::Create();
-
-  // Layer 1: Apply per-file session options from the package variant
-  {
-    const char* const* so_keys = nullptr;
-    const char* const* so_values = nullptr;
-    size_t so_count = 0;
-    cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
-
-    for (size_t i = 0; i < so_count; ++i) {
-      // Map known session option keys to their OrtSessionOptions setters
-      std::string key(so_keys[i]);
-      std::string value(so_values[i]);
-
-      if (key == "intra_op_num_threads") {
-        so->SetIntraOpNumThreads(std::stoi(value));
-      } else if (key == "inter_op_num_threads") {
-        so->SetInterOpNumThreads(std::stoi(value));
-      } else if (key == "graph_optimization_level") {
-        so->SetGraphOptimizationLevel(static_cast<GraphOptimizationLevel>(std::stoi(value)));
-      } else {
-        // Generic config entry passthrough
-        so->AddConfigEntry(so_keys[i], so_values[i]);
-      }
-    }
-  }
-
-  // Layer 1: Apply per-file provider options from the package variant
-  {
-    const char* const* po_keys = nullptr;
-    const char* const* po_values = nullptr;
-    size_t po_count = 0;
-    cix->GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
-
-    if (po_count > 0) {
-      // The first key/value should be the provider name
-      // Provider options come as flat KV pairs. We pass them through the
-      // existing SetProviderSessionOptions infrastructure (layer 3) which
-      // handles V2/V1 fallback, typed structs, cross-session state, etc.
-
-      // Build a provider_options structure from the flat KV pairs
-      std::vector<Config::NamedString> options;
-      std::string provider_name;
-      for (size_t i = 0; i < po_count; ++i) {
-        std::string key(po_keys[i]);
-        std::string value(po_values[i]);
-        if (key == "provider_name" || key == "name") {
-          provider_name = value;
-        } else {
-          options.emplace_back(key, value);
-        }
-      }
-
-      if (!provider_name.empty()) {
-        Config::ProviderOptions po;
-        po.name = provider_name;
-        po.options = std::move(options);
-        std::vector<std::string> providers = {provider_name};
-        std::vector<Config::ProviderOptions> provider_options = {po};
-
-        auto session_device = SetProviderSessionOptions(*so, providers, provider_options,
-                                                        !p_device_, *config_, false);
-        if (!p_device_ && session_device) {
-          p_device_ = session_device;
-        }
-      }
-    }
-  }
+  CreateSessionOptionsFromConfig(merged_so, *so, false, disable_graph_capture);
 
   // Create the session from the package file path
   return OrtSession::Create(ort_env, fs::path(file_path).c_str(), so.get());
@@ -965,7 +1044,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     }
 
     // Create the package state (opens package, creates options from the EP-configured SO)
-    auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so);
+    auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so, resolved_ep);
 
     // Parse the base config minimally to find component names for each role
     auto temp_config = std::make_unique<Config>();

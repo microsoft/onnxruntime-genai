@@ -29,7 +29,8 @@ std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx);
 /// Holds the model package state for a single model load.
 /// Owns the package context, options, and per-component contexts.
 struct ModelPackageState {
-  ModelPackageState(const fs::path& package_root, OrtEnv& env, const OrtSessionOptions& session_options);
+  ModelPackageState(const fs::path& package_root, OrtEnv& env, const OrtSessionOptions& session_options,
+                   const std::string& resolved_ep_name = "CPUExecutionProvider");
   ~ModelPackageState() = default;
 
   // Non-copyable, movable
@@ -50,6 +51,9 @@ struct ModelPackageState {
   /// Get the package root path
   const fs::path& GetPackageRoot() const { return package_root_; }
 
+  /// Get the resolved EP name used for variant selection
+  const std::string& GetResolvedEpName() const { return resolved_ep_name_; }
+
   /// Get the consumer_metadata overlay JSON for a component.
   /// Returns the genai_config_overlay extracted from consumer_metadata, or empty string.
   std::string GetGenAIConfigOverlay(const std::string& component_name) const;
@@ -57,6 +61,7 @@ struct ModelPackageState {
  private:
   fs::path package_root_;
   fs::path configs_path_;
+  std::string resolved_ep_name_;
   std::unique_ptr<OrtModelPackageContext> pkg_ctx_;
   std::unique_ptr<OrtModelPackageOptions> pkg_opts_;
   std::unordered_map<std::string, std::unique_ptr<OrtModelPackageComponentContext>> component_contexts_;
@@ -65,5 +70,9 @@ struct ModelPackageState {
 /// Apply RFC 7386 JSON Merge Patch: merge patch_json into base_json.
 /// Returns the merged JSON string.
 std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json);
+
+/// Map an EP name string to a DeviceInterface*.
+/// Used to determine p_device_ from the resolved EP name in the package path.
+DeviceInterface* DeviceFromEpName(const std::string& ep_name);
 
 }  // namespace Generators

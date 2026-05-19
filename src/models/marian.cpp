@@ -2,14 +2,19 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "marian.h"
+#include "model_package.h"
 
 namespace Generators {
 
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   if (config_->IsPackage()) {
-    session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0);
-    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0);
+    auto ep = config_->package_state_->GetResolvedEpName();
+    const Config::SessionOptions* enc_so = config_->model.encoder.session_options.has_value()
+        ? &*config_->model.encoder.session_options : nullptr;
+    session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0, ep, enc_so, true);
+    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
+                                                ep, &config_->model.decoder.session_options, false);
     UpdateDeviceRoles();
   } else {
     encoder_session_options_ = OrtSessionOptions::Create();

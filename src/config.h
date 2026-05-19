@@ -391,6 +391,7 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        bool run_on_cpu{false};  // If true, force CPU EP for this stage (used in package mode for mixed-EP pipelines)
         bool is_lm_head{false};
         int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
                                     // This is the index of the session that needs to be reset during the execution of the current session.

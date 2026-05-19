@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include "model_package.h"
 #include <cstring>
 #include <numeric>
 
@@ -95,17 +96,25 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     : Model(std::move(config)) {
   if (config_->IsPackage()) {
     // Package path: create sessions from per-file package accessors
+    auto ep = config_->package_state_->GetResolvedEpName();
     if (vision && !config_->model.vision.component.empty()) {
-      vision_session_ = CreateSessionFromPackage(ort_env, config_->model.vision.component, 0);
+      const Config::SessionOptions* vis_so = config_->model.vision.session_options.has_value()
+          ? &*config_->model.vision.session_options : nullptr;
+      vision_session_ = CreateSessionFromPackage(ort_env, config_->model.vision.component, 0, ep, vis_so, true);
     }
     if (speech && !config_->model.speech.component.empty()) {
-      speech_session_ = CreateSessionFromPackage(ort_env, config_->model.speech.component, 0);
+      const Config::SessionOptions* spe_so = config_->model.speech.session_options.has_value()
+          ? &*config_->model.speech.session_options : nullptr;
+      speech_session_ = CreateSessionFromPackage(ort_env, config_->model.speech.component, 0, ep, spe_so, true);
     }
     if (!config_->model.embedding.component.empty()) {
-      embedding_session_ = CreateSessionFromPackage(ort_env, config_->model.embedding.component, 0);
+      const Config::SessionOptions* emb_so = config_->model.embedding.session_options.has_value()
+          ? &*config_->model.embedding.session_options : nullptr;
+      embedding_session_ = CreateSessionFromPackage(ort_env, config_->model.embedding.component, 0, ep, emb_so, true);
     }
-    // Decoder session: p_device_ is set here (first call with is_primary=true)
-    decoder_session_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0);
+    // Decoder session
+    decoder_session_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
+                                                ep, &config_->model.decoder.session_options, false);
     UpdateDeviceRoles();
   } else {
     // Flat-dir path (unchanged)

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "model_package.h"
 #include "onnxruntime_api.h"
@@ -89,9 +90,11 @@ std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx) {
 // --- ModelPackageState ---
 
 ModelPackageState::ModelPackageState(const fs::path& package_root, OrtEnv& env,
-                                     const OrtSessionOptions& session_options)
+                                     const OrtSessionOptions& session_options,
+                                     const std::string& resolved_ep_name)
     : package_root_(package_root),
-      configs_path_(package_root / "configs") {
+      configs_path_(package_root / "configs"),
+      resolved_ep_name_(resolved_ep_name) {
   pkg_ctx_ = OrtModelPackageContext::Create(package_root.c_str());
   pkg_opts_ = OrtModelPackageOptions::Create(env, session_options);
 }
@@ -467,6 +470,26 @@ std::string JsonMergePatch(std::string_view base_json, std::string_view patch_js
 
   JsonValue result = MergePatch(std::move(base), patch);
   return SerializeJson(result);
+}
+
+// --- EP name to DeviceType mapping ---
+
+DeviceInterface* DeviceFromEpName(const std::string& ep_name) {
+  static const std::unordered_map<std::string, DeviceType> ep_device_map = {
+      {"CUDAExecutionProvider", DeviceType::CUDA},
+      {"DmlExecutionProvider", DeviceType::DML},
+      {"QNNExecutionProvider", DeviceType::QNN},
+      {"NvTensorRtRtxExecutionProvider", DeviceType::NvTensorRtRtx},
+      {"WebGpuExecutionProvider", DeviceType::WEBGPU},
+      {"RyzenAIExecutionProvider", DeviceType::RyzenAI},
+      {"CPUExecutionProvider", DeviceType::CPU},
+  };
+
+  auto it = ep_device_map.find(ep_name);
+  if (it != ep_device_map.end()) {
+    return GetDeviceInterface(it->second);
+  }
+  return GetDeviceInterface(DeviceType::CPU);
 }
 
 }  // namespace Generators
