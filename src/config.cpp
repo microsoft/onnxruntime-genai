@@ -1605,6 +1605,76 @@ void ParseConfigFromString(std::string_view json, Config& config) {
   }
 }
 
+void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options) {
+  SessionOptions_Element element{session_options};
+  try {
+    JSON::Parse(element, json);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error parsing session options JSON: " << message.what();
+    throw std::runtime_error(oss.str());
+  }
+}
+
+void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay) {
+  // Typed fields: overlay wins if set
+  if (overlay.intra_op_num_threads.has_value())
+    base.intra_op_num_threads = overlay.intra_op_num_threads;
+  if (overlay.inter_op_num_threads.has_value())
+    base.inter_op_num_threads = overlay.inter_op_num_threads;
+  if (overlay.enable_cpu_mem_arena.has_value())
+    base.enable_cpu_mem_arena = overlay.enable_cpu_mem_arena;
+  if (overlay.enable_mem_pattern.has_value())
+    base.enable_mem_pattern = overlay.enable_mem_pattern;
+  if (overlay.log_id.has_value())
+    base.log_id = overlay.log_id;
+  if (overlay.log_severity_level.has_value())
+    base.log_severity_level = overlay.log_severity_level;
+  if (overlay.log_verbosity_level.has_value())
+    base.log_verbosity_level = overlay.log_verbosity_level;
+  if (overlay.enable_profiling.has_value())
+    base.enable_profiling = overlay.enable_profiling;
+  if (overlay.custom_ops_library.has_value())
+    base.custom_ops_library = overlay.custom_ops_library;
+  if (overlay.graph_optimization_level.has_value())
+    base.graph_optimization_level = overlay.graph_optimization_level;
+
+  // Config entries: overlay values override same keys, add new ones
+  for (const auto& entry : overlay.config_entries) {
+    auto it = std::find_if(base.config_entries.begin(), base.config_entries.end(),
+                           [&entry](const auto& p) { return p.first == entry.first; });
+    if (it != base.config_entries.end()) {
+      it->second = entry.second;
+    } else {
+      base.config_entries.push_back(entry);
+    }
+  }
+
+  // Providers/provider_options: overlay takes precedence if specified
+  if (!overlay.providers.empty()) {
+    base.providers = overlay.providers;
+    base.provider_options = overlay.provider_options;
+  } else if (!overlay.provider_options.empty()) {
+    for (const auto& overlay_po : overlay.provider_options) {
+      auto it = std::find_if(base.provider_options.begin(), base.provider_options.end(),
+                             [&overlay_po](const auto& p) { return p.name == overlay_po.name; });
+      if (it != base.provider_options.end()) {
+        for (const auto& opt : overlay_po.options) {
+          auto opt_it = std::find_if(it->options.begin(), it->options.end(),
+                                     [&opt](const auto& p) { return p.first == opt.first; });
+          if (opt_it != it->options.end())
+            opt_it->second = opt.second;
+          else
+            it->options.push_back(opt);
+        }
+      } else {
+        base.providers.push_back(overlay_po.name);
+        base.provider_options.push_back(overlay_po);
+      }
+    }
+  }
+}
+
 void FinalizeConfig(Config& config) {
   if (config.model.context_length == 0 && !ModelType::IsRNNT(config.model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

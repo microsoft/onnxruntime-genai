@@ -6,6 +6,7 @@
 #include <climits>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -816,41 +817,41 @@ Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
 
   Config::SessionOptions so;
 
-  // Layer 1: Apply variant per-file session options as the base
+  // Layer 1: Parse variant per-file session options by building a JSON object from
+  // the flat KV pairs and running it through the standard SessionOptions parser.
   {
     const char* const* so_keys = nullptr;
     const char* const* so_values = nullptr;
     size_t so_count = 0;
     cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
 
-    for (size_t i = 0; i < so_count; ++i) {
-      std::string key(so_keys[i]);
-      std::string value(so_values[i]);
-
-      if (key == "intra_op_num_threads") {
-        so.intra_op_num_threads = std::stoi(value);
-      } else if (key == "inter_op_num_threads") {
-        so.inter_op_num_threads = std::stoi(value);
-      } else if (key == "enable_cpu_mem_arena") {
-        so.enable_cpu_mem_arena = (value == "1" || value == "true");
-      } else if (key == "enable_mem_pattern") {
-        so.enable_mem_pattern = (value == "1" || value == "true");
-      } else if (key == "log_id") {
-        so.log_id = value;
-      } else if (key == "log_severity_level") {
-        so.log_severity_level = std::stoi(value);
-      } else if (key == "log_verbosity_level") {
-        so.log_verbosity_level = std::stoi(value);
-      } else if (key == "enable_profiling") {
-        so.enable_profiling = value;
-      } else if (key == "graph_optimization_level") {
-        int level = std::stoi(value);
-        so.graph_optimization_level = static_cast<GraphOptimizationLevel>(level);
-      } else if (key == "custom_ops_library") {
-        so.custom_ops_library = value;
-      } else {
-        so.config_entries.emplace_back(key, value);
+    if (so_count > 0) {
+      // Build a JSON object: {"key1": "val1", "key2": "val2", ...}
+      // Numeric/bool values are stored as strings in variant.json, but the parser
+      // expects JSON types. Detect numeric and bool values to emit them unquoted.
+      std::ostringstream json;
+      json << "{";
+      for (size_t i = 0; i < so_count; ++i) {
+        if (i > 0) json << ",";
+        json << "\"" << so_keys[i] << "\":";
+        std::string val(so_values[i]);
+        // Detect booleans and integers to emit as native JSON types
+        if (val == "true" || val == "false") {
+          json << val;
+        } else {
+          bool is_number = !val.empty() && (val[0] == '-' || std::isdigit(val[0]));
+          if (is_number) {
+            for (size_t c = 1; c < val.size() && is_number; ++c)
+              is_number = std::isdigit(val[c]);
+          }
+          if (is_number)
+            json << val;
+          else
+            json << "\"" << val << "\"";
+        }
       }
+      json << "}";
+      ParseSessionOptionsFromJson(json.str(), so);
     }
   }
 
@@ -872,73 +873,13 @@ Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
     so.providers.push_back(ep_for_file);
     so.provider_options.push_back(std::move(po));
   }
-  // For CPU: no explicit provider append needed (CPU is implicit default)
 
-  // Layer 2: Merge genai_config session_options on top (config wins on conflicts)
+  // Layer 2: Overlay genai_config session_options on top.
+  // The genai_config is already parsed into Config::SessionOptions at load time.
+  // Re-parse would require the raw JSON, so we do a struct-level overlay where
+  // config values (if set) override the variant base.
   if (config_session_options) {
-    const auto& cfg = *config_session_options;
-
-    // Typed fields: config overrides variant
-    if (cfg.intra_op_num_threads.has_value())
-      so.intra_op_num_threads = cfg.intra_op_num_threads;
-    if (cfg.inter_op_num_threads.has_value())
-      so.inter_op_num_threads = cfg.inter_op_num_threads;
-    if (cfg.enable_cpu_mem_arena.has_value())
-      so.enable_cpu_mem_arena = cfg.enable_cpu_mem_arena;
-    if (cfg.enable_mem_pattern.has_value())
-      so.enable_mem_pattern = cfg.enable_mem_pattern;
-    if (cfg.log_id.has_value())
-      so.log_id = cfg.log_id;
-    if (cfg.log_severity_level.has_value())
-      so.log_severity_level = cfg.log_severity_level;
-    if (cfg.log_verbosity_level.has_value())
-      so.log_verbosity_level = cfg.log_verbosity_level;
-    if (cfg.enable_profiling.has_value())
-      so.enable_profiling = cfg.enable_profiling;
-    if (cfg.custom_ops_library.has_value())
-      so.custom_ops_library = cfg.custom_ops_library;
-    if (cfg.graph_optimization_level.has_value())
-      so.graph_optimization_level = cfg.graph_optimization_level;
-
-    // Config entries: config values override same keys, add new ones
-    for (const auto& entry : cfg.config_entries) {
-      auto it = std::find_if(so.config_entries.begin(), so.config_entries.end(),
-                             [&entry](const auto& p) { return p.first == entry.first; });
-      if (it != so.config_entries.end()) {
-        it->second = entry.second;
-      } else {
-        so.config_entries.push_back(entry);
-      }
-    }
-
-    // Providers/provider_options: if config specifies providers, they override
-    if (!cfg.providers.empty()) {
-      so.providers = cfg.providers;
-      so.provider_options = cfg.provider_options;
-    } else if (!cfg.provider_options.empty()) {
-      // Config has provider_options but no explicit providers list
-      for (const auto& cfg_po : cfg.provider_options) {
-        // Find matching EP in the existing list
-        auto it = std::find_if(so.provider_options.begin(), so.provider_options.end(),
-                               [&cfg_po](const auto& p) { return p.name == cfg_po.name; });
-        if (it != so.provider_options.end()) {
-          // Merge: config options override same keys
-          for (const auto& opt : cfg_po.options) {
-            auto opt_it = std::find_if(it->options.begin(), it->options.end(),
-                                       [&opt](const auto& p) { return p.first == opt.first; });
-            if (opt_it != it->options.end()) {
-              opt_it->second = opt.second;
-            } else {
-              it->options.push_back(opt);
-            }
-          }
-        } else {
-          // New EP from config, add it
-          so.providers.push_back(cfg_po.name);
-          so.provider_options.push_back(cfg_po);
-        }
-      }
-    }
+    OverlaySessionOptions(so, *config_session_options);
   }
 
   return so;
