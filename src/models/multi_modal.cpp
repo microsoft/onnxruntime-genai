@@ -94,6 +94,7 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
+#if ORT_HAS_MODEL_PACKAGE
   if (config_->IsPackage()) {
     // Package path: create sessions from per-file package accessors
     auto ep = config_->package_state_->GetResolvedEpName();
@@ -115,7 +116,9 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     // Decoder session
     decoder_session_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
                                                 ep, &config_->model.decoder.session_options, false);
-  } else {
+  } else
+#endif
+  {
     // Flat-dir path (unchanged)
     // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
     if (vision) {

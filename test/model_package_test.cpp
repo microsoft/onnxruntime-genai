@@ -106,6 +106,7 @@ TEST(IsModelPackage, PackageDirectory) {
 
 // --- Config::FromPackage tests ---
 
+#if ORT_HAS_MODEL_PACKAGE
 TEST(ConfigFromPackage, ParsesMergedJsonAndSetsConfigPath) {
   // Test that Config::FromPackage correctly parses a merged JSON string
   // and sets the config_path to the provided path
@@ -312,3 +313,4 @@ TEST(ModelPackageE2E, PipelineMultiFileGenerateTokens) {
   // Should have at least the input token plus generated tokens
   EXPECT_GT(sequence.size(), 1u);
 }
+#endif

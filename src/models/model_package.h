@@ -9,11 +9,19 @@
 #include <vector>
 #include "../filesystem.h"
 
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 27
+#define ORT_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_HAS_MODEL_PACKAGE 0
+#endif
+
 struct OrtEnv;
 struct OrtSessionOptions;
+#if ORT_HAS_MODEL_PACKAGE
 struct OrtModelPackageContext;
 struct OrtModelPackageOptions;
 struct OrtModelPackageComponentContext;
+#endif
 
 namespace Generators {
 
@@ -22,6 +30,7 @@ struct Config;
 /// Detect whether a path is a model package (contains manifest.json) or a flat directory.
 bool IsModelPackage(const fs::path& path);
 
+#if ORT_HAS_MODEL_PACKAGE
 /// Given a model package root, intersect per-component EP sets and return the default EP.
 /// Throws if ambiguous (>1 EP in intersection) or empty intersection.
 std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx);
@@ -66,6 +75,7 @@ struct ModelPackageState {
   std::unique_ptr<OrtModelPackageOptions> pkg_opts_;
   std::unordered_map<std::string, std::unique_ptr<OrtModelPackageComponentContext>> component_contexts_;
 };
+#endif
 
 /// Apply RFC 7386 JSON Merge Patch: merge patch_json into base_json.
 /// Returns the merged JSON string.

@@ -123,6 +123,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+inline int runtime_api_version{};
 
 /// <summary>
 /// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
@@ -137,6 +138,7 @@ inline const OrtModelEditorApi& GetModelEditorApi() {
   return *model_editor_api;
 }
 
+#if ORT_API_VERSION >= 27
 /// <summary>
 /// This returns a reference to the ORT C Model Package API. Used for loading models from model packages.
 /// </summary>
@@ -148,6 +150,7 @@ inline const OrtModelPackageApi& GetModelPackageApi() {
   }
   return *model_package_api;
 }
+#endif
 
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
@@ -206,6 +209,7 @@ inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
     if (api) {
+      runtime_api_version = i;
       LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
@@ -295,6 +299,7 @@ inline void InitApi() {
 #else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
   ort_api_base_fn = &OrtGetApiBase;
   api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
+  runtime_api_version = ORT_API_VERSION;
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
@@ -1469,6 +1474,7 @@ struct OrtLoraAdapter {
   Ort::Abstract make_abstract;
 };
 
+#if ORT_API_VERSION >= 27
 /** \brief Model Package Options
  *
  * Created from an OrtEnv and OrtSessionOptions to capture the EP configuration for variant selection.
@@ -1529,5 +1535,6 @@ struct OrtModelPackageComponentContext {
   static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageComponentContext(reinterpret_cast<OrtModelPackageComponentContext*>(p)); }
   Ort::Abstract make_abstract;
 };
+#endif
 
 #include "onnxruntime_inline.h"

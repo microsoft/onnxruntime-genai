@@ -21,6 +21,7 @@ bool IsModelPackage(const fs::path& path) {
 
 // --- EP defaulting ---
 
+#if ORT_HAS_MODEL_PACKAGE
 std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx) {
   auto component_names = pkg_ctx.GetComponentNames();
   if (component_names.empty()) {
@@ -204,6 +205,7 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
 
   return {};
 }
+#endif
 
 // --- RFC 7386 JSON Merge Patch ---
 //

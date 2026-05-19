@@ -1525,6 +1525,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
+#if ORT_API_VERSION >= 27
 // OrtModelPackageOptions
 inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
                                                                                const OrtSessionOptions& session_options) {
@@ -1648,3 +1649,4 @@ inline std::unique_ptr<OrtSession> OrtModelPackageComponentContext::CreateSessio
   Ort::ThrowOnError(Ort::GetModelPackageApi().CreateSession(&env, this, &session_options, &p));
   return std::unique_ptr<OrtSession>{p};
 }
+#endif

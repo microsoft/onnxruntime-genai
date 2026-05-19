@@ -12,6 +12,7 @@ namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
+#if ORT_HAS_MODEL_PACKAGE
   if (config_->IsPackage()) {
     // Package path: create sessions from per-file package accessors.
     // Pipeline stages reference files by filename. Match each stage to its file index
@@ -49,7 +50,9 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
                                  "' which was not found in the package variant");
       }
     }
-  } else {
+  } else
+#endif
+  {
     for (const auto& model : config_->model.decoder.pipeline) {
       sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
     }

@@ -1725,6 +1725,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay)
   FinalizeConfig(*this);
 }
 
+#if ORT_HAS_MODEL_PACKAGE
 std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
                                              std::string_view merged_json,
                                              std::shared_ptr<ModelPackageState> package_state) {
@@ -1735,6 +1736,7 @@ std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
   FinalizeConfig(*config);
   return config;
 }
+#endif
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
   auto [it, emplaced] = nominal_names_to_graph_names_.emplace(nominal_name, graph_name);

@@ -6,6 +6,7 @@
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
+#include "model_package.h"
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
@@ -159,6 +160,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
+#if ORT_HAS_MODEL_PACKAGE
   // Package-aware session creation: creates a session for a specific file index within
   // a selected component. Uses the per-file path from the package variant.
   // ep_for_file: the EP to append (resolved EP or "CPUExecutionProvider" for run_on_cpu stages)
@@ -170,6 +172,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                                         const std::string& ep_for_file,
                                                         const Config::SessionOptions* config_session_options = nullptr,
                                                         bool disable_graph_capture = false);
+#endif
 
   bool IsPruned() const;
 
@@ -199,6 +202,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
  protected:
   void CreateSessionOptions();
 
+#if ORT_HAS_MODEL_PACKAGE
   // Build a Config::SessionOptions from variant per-file metadata merged with genai_config.
   // Variant per-file is the base; genai_config overlay values win on conflicts.
   Config::SessionOptions BuildSessionOptionsForPackageFile(
@@ -206,6 +210,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
       size_t file_index,
       const std::string& ep_for_file,
       const Config::SessionOptions* config_session_options) const;
+#endif
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

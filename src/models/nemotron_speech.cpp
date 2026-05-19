@@ -122,6 +122,7 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   nemotron_config_ = NemotronConfig{};
   nemotron_config_.PopulateFromConfig(*config_);
 
+#if ORT_HAS_MODEL_PACKAGE
   if (config_->IsPackage()) {
     auto ep = config_->package_state_->GetResolvedEpName();
     const Config::SessionOptions* enc_so = config_->model.encoder.session_options.has_value()
@@ -135,7 +136,9 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
     const Config::SessionOptions* joi_so = config_->model.joiner.session_options.has_value()
         ? &*config_->model.joiner.session_options : nullptr;
     session_joiner_ = CreateSessionFromPackage(ort_env, joiner_comp, 0, ep, joi_so, true);
-  } else {
+  } else
+#endif
+  {
     // Create session options
     encoder_session_options_ = OrtSessionOptions::Create();
     decoder_session_options_ = OrtSessionOptions::Create();

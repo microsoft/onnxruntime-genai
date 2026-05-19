@@ -84,13 +84,16 @@ SileroVad::SileroVad(Model& model)
     : model_{model} {
   auto& vad_config = model.config_->model.vad;
 
+#if ORT_HAS_MODEL_PACKAGE
   if (model.config_->IsPackage() && !vad_config.component.empty()) {
     // Load VAD session from the model package component
     auto ep = model.config_->package_state_->GetResolvedEpName();
     const Config::SessionOptions* vad_so = vad_config.session_options.has_value()
         ? &*vad_config.session_options : nullptr;
     session_ = model.CreateSessionFromPackage(GetOrtEnv(), vad_config.component, 0, ep, vad_so, true);
-  } else {
+  } else
+#endif
+  {
     // Create session options via CreateSessionOptionsFromConfig (public on Model).
     // Falls back to decoder session options if VAD-specific ones aren't provided.
     session_options_ = OrtSessionOptions::Create();

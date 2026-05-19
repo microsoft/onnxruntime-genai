@@ -748,12 +748,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
+#if ORT_HAS_MODEL_PACKAGE
   if (config_->IsPackage()) {
     // p_device_ derives from the EP captured for the decoder component.
     // GenAI already knows this EP from variant selection.
     p_device_ = DeviceFromEpName(config_->package_state_->GetResolvedEpName());
     return;
   }
+#endif
 
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
 
@@ -807,6 +809,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
 }
 
+#if ORT_HAS_MODEL_PACKAGE
 Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
     const std::string& component_name,
     size_t file_index,
@@ -918,6 +921,7 @@ std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
   // Create the session from the package file path
   return OrtSession::Create(ort_env, fs::path(file_path).c_str(), so.get());
 }
+#endif
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
@@ -946,6 +950,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
   fs::path model_path(config_path);
 
   if (IsModelPackage(model_path)) {
+#if ORT_HAS_MODEL_PACKAGE
+    if (Ort::runtime_api_version < 27) {
+      throw std::runtime_error("Model packages require ONNX Runtime API version 27 or newer at runtime");
+    }
+
     // Package path: configs/ holds genai_config.json and tokenizer assets
     fs::path configs_path = model_path / "configs";
 
@@ -1034,6 +1043,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     // Create the final Config from the merged JSON
     auto config = Config::FromPackage(configs_path, merged_json, std::move(package_state));
     return CreateModel(ort_env, std::move(config));
+#else
+    throw std::runtime_error("This build of onnxruntime-genai does not support model packages; rebuild with ONNX Runtime API version 27 or newer");
+#endif
   }
 
   // Flat directory path (unchanged, ep parameter is ignored for flat dirs)
