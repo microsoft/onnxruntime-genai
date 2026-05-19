@@ -257,6 +257,16 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // When that's the case the cache must be allocated to exactly that size and
   // reused as a shared past/present buffer; max_length cannot drive the size
   // because ORT rejects any tensor that doesn't match the model's static dim.
+  //
+  // Limitation: only uniform per-layer static sizes are recognised here —
+  // every past_key layer must declare the same fixed seq_len. Models that
+  // declare *different* static seq_lens per layer (e.g. a mix of full-attention
+  // and sliding-window layers with distinct static caps) fall through to
+  // dynamic handling. Lifting this restriction would extend the existing
+  // layer_shapes_ infrastructure used for per-layer head_dim detection above:
+  // store the per-layer detected seq_len into layer_shapes_[i][2] instead of
+  // a single scalar, and let the share-buffer branch's per-layer loop do the
+  // rest. Deferred until a model in the wild actually needs it.
   int64_t fixed_kv_seq_len = 0;
   {
     bool all_fixed_and_uniform = layer_count_ > 0;
