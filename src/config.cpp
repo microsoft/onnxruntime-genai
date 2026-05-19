@@ -3,6 +3,7 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include "generators.h"
 #include "models/model_type.h"
+#include "models/model_package.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
@@ -537,6 +538,8 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -586,6 +589,8 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -768,6 +773,8 @@ struct Vision_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -869,6 +876,8 @@ struct Speech_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -944,6 +953,8 @@ struct Joiner_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1054,6 +1065,8 @@ struct Embedding_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1578,49 +1591,74 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
+void ParseConfigFromString(std::string_view json, Config& config) {
+  Root_Element root{config};
+  RootObject_Element root_object{root};
+  try {
+    JSON::Parse(root_object, json);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing genai config JSON: " << message.what();
+    throw std::runtime_error(oss.str());
+  }
+}
 
-  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
+void FinalizeConfig(Config& config) {
+  if (config.model.context_length == 0 && !ModelType::IsRNNT(config.model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 
-  if (search.max_length == 0) {
-    search.max_length = model.context_length;
+  if (config.search.max_length == 0) {
+    config.search.max_length = config.model.context_length;
   }
 
-  // If no eos_token_id was set, set it to the pad token id
-  if (model.eos_token_id.empty()) {
-    model.eos_token_id.push_back(model.pad_token_id);
+  if (config.model.eos_token_id.empty()) {
+    config.model.eos_token_id.push_back(config.model.pad_token_id);
   }
 
-  for (const auto& provider_option : model.decoder.session_options.provider_options) {
-    model.decoder.session_options.providers.push_back(provider_option.name);
+  for (const auto& provider_option : config.model.decoder.session_options.provider_options) {
+    config.model.decoder.session_options.providers.push_back(provider_option.name);
   }
 
-  if (model.encoder.session_options.has_value()) {
-    for (const auto& provider_option : model.encoder.session_options->provider_options) {
-      model.encoder.session_options->providers.push_back(provider_option.name);
+  if (config.model.encoder.session_options.has_value()) {
+    for (const auto& provider_option : config.model.encoder.session_options->provider_options) {
+      config.model.encoder.session_options->providers.push_back(provider_option.name);
     }
   }
 
-  if (model.vision.session_options.has_value()) {
-    for (const auto& provider_option : model.vision.session_options->provider_options) {
-      model.vision.session_options->providers.push_back(provider_option.name);
+  if (config.model.vision.session_options.has_value()) {
+    for (const auto& provider_option : config.model.vision.session_options->provider_options) {
+      config.model.vision.session_options->providers.push_back(provider_option.name);
     }
   }
 
-  if (model.speech.session_options.has_value()) {
-    for (const auto& provider_option : model.speech.session_options->provider_options) {
-      model.speech.session_options->providers.push_back(provider_option.name);
+  if (config.model.speech.session_options.has_value()) {
+    for (const auto& provider_option : config.model.speech.session_options->provider_options) {
+      config.model.speech.session_options->providers.push_back(provider_option.name);
     }
   }
 
-  if (model.embedding.session_options.has_value()) {
-    for (const auto& provider_option : model.embedding.session_options->provider_options) {
-      model.embedding.session_options->providers.push_back(provider_option.name);
+  if (config.model.embedding.session_options.has_value()) {
+    for (const auto& provider_option : config.model.embedding.session_options->provider_options) {
+      config.model.embedding.session_options->providers.push_back(provider_option.name);
     }
   }
+}
+
+Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this);
+  FinalizeConfig(*this);
+}
+
+std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
+                                             std::string_view merged_json,
+                                             std::shared_ptr<ModelPackageState> package_state) {
+  auto config = std::make_unique<Config>();
+  config->config_path = config_path;
+  config->package_state_ = std::move(package_state);
+  ParseConfigFromString(merged_json, *config);
+  FinalizeConfig(*config);
+  return config;
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

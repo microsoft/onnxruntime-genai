@@ -7,7 +7,12 @@
 namespace Generators {
 LFM2_Model::LFM2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  if (config_->IsPackage()) {
+    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0);
+    UpdateDeviceRoles();
+  } else {
+    session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  }
   session_info_.Add(*session_decoder_);
 }
 

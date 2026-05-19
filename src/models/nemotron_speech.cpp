@@ -121,41 +121,51 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   nemotron_config_ = NemotronConfig{};
   nemotron_config_.PopulateFromConfig(*config_);
 
-  // Create session options
-  encoder_session_options_ = OrtSessionOptions::Create();
-  decoder_session_options_ = OrtSessionOptions::Create();
-  joiner_session_options_ = OrtSessionOptions::Create();
-
-  if (config_->model.encoder.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
+  if (config_->IsPackage()) {
+    session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0);
+    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0);
+    // Joiner uses the decoder component if no separate joiner component is specified
+    std::string joiner_comp = config_->model.joiner.component;
+    if (joiner_comp.empty()) joiner_comp = config_->model.decoder.component;
+    session_joiner_ = CreateSessionFromPackage(ort_env, joiner_comp, 0);
+    UpdateDeviceRoles();
   } else {
+    // Create session options
+    encoder_session_options_ = OrtSessionOptions::Create();
+    decoder_session_options_ = OrtSessionOptions::Create();
+    joiner_session_options_ = OrtSessionOptions::Create();
+
+    if (config_->model.encoder.session_options.has_value()) {
+      CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
+                                     *encoder_session_options_, true);
+    } else {
+      CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                     *encoder_session_options_, true);
+    }
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
+                                   *decoder_session_options_, true);
+    if (config_->model.joiner.session_options.has_value()) {
+      CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
+                                     *joiner_session_options_, true);
+    } else {
+      CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                     *joiner_session_options_, true);
+    }
+
+    // Load the three ONNX models
+    std::string encoder_filename = config_->model.encoder.filename;
+    if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
+
+    std::string decoder_filename = config_->model.decoder.filename;
+    if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
+
+    std::string joiner_filename = config_->model.joiner.filename;
+    if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
+
+    session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
+    session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
+    session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
   }
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true);
-  if (config_->model.joiner.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true);
-  }
-
-  // Load the three ONNX models
-  std::string encoder_filename = config_->model.encoder.filename;
-  if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
-
-  std::string decoder_filename = config_->model.decoder.filename;
-  if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
-
-  std::string joiner_filename = config_->model.joiner.filename;
-  if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
-
-  session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
-  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
-  session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
 
   session_info_.Add(*session_encoder_);
   session_info_.Add(*session_decoder_);

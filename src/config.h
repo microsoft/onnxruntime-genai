@@ -3,13 +3,24 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include <memory>
+
 namespace Generators {
 
 struct RuntimeSettings;
+struct ModelPackageState;
 
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay);
+
+  // Factory for creating Config from a model package.
+  // config_path: the configs/ directory inside the package
+  // merged_json: the fully merged genai_config JSON string (base + overlays)
+  // package_state: the opened and selected package state
+  static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
+                                              std::string_view merged_json,
+                                              std::shared_ptr<ModelPackageState> package_state);
 
   struct Defaults {
     // Decoder names
@@ -156,6 +167,7 @@ struct Config {
 
     struct Encoder {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -192,6 +204,7 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -208,6 +221,7 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -253,6 +267,7 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -273,6 +288,7 @@ struct Config {
 
     struct Joiner {
       std::string filename;
+      std::string component;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -297,6 +313,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string component;  // package component name for this role
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -430,6 +447,10 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+
+  /// Model package state. Non-null when loading from a .ortpackage directory.
+  std::shared_ptr<ModelPackageState> package_state_;
+  bool IsPackage() const { return package_state_ != nullptr; }
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);

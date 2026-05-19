@@ -137,6 +137,18 @@ inline const OrtModelEditorApi& GetModelEditorApi() {
   return *model_editor_api;
 }
 
+/// <summary>
+/// This returns a reference to the ORT C Model Package API. Used for loading models from model packages.
+/// </summary>
+/// <returns>ORT C Model Package API reference</returns>
+inline const OrtModelPackageApi& GetModelPackageApi() {
+  auto* model_package_api = api->GetModelPackageApi();
+  if (model_package_api == nullptr) {
+    throw std::runtime_error("Model Package API is not available in this build");
+  }
+  return *model_package_api;
+}
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
@@ -1454,6 +1466,67 @@ struct OrtLoraAdapter {
   static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
 
   static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Options
+ *
+ * Created from an OrtEnv and OrtSessionOptions to capture the EP configuration for variant selection.
+ */
+struct OrtModelPackageOptions {
+  static std::unique_ptr<OrtModelPackageOptions> Create(const OrtEnv& env, const OrtSessionOptions& session_options);
+
+  static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageOptions(reinterpret_cast<OrtModelPackageOptions*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Context
+ *
+ * Provides traversal APIs to enumerate components, variants, and EP compatibility,
+ * and to select components for loading.
+ */
+struct OrtModelPackageContext {
+  static std::unique_ptr<OrtModelPackageContext> Create(const ORTCHAR_T* package_root);
+
+  size_t GetComponentCount() const;
+  std::vector<std::string> GetComponentNames() const;
+  size_t GetVariantCount(const char* component_name) const;
+  std::vector<std::string> GetVariantNames(const char* component_name) const;
+
+  size_t GetVariantEpCompatibilityCount(const char* component_name, const char* variant_name) const;
+  void GetVariantEpCompatibility(const char* component_name, const char* variant_name, size_t ep_idx,
+                                 const char** out_ep, const char** out_device, const char** out_compat) const;
+
+  std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(const char* component_name,
+                                                                    const OrtModelPackageOptions& options) const;
+
+  static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageContext(reinterpret_cast<OrtModelPackageContext*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Component Context
+ *
+ * Represents a selected component within a model package. Provides accessors for the
+ * selected variant's folder path, file paths, per-file session/provider options, and consumer metadata.
+ */
+struct OrtModelPackageComponentContext {
+  std::basic_string<ORTCHAR_T> GetSelectedVariantFolderPath() const;
+  size_t GetSelectedVariantFileCount() const;
+  std::basic_string<ORTCHAR_T> GetSelectedVariantFilePath(size_t file_idx) const;
+
+  void GetSelectedVariantFileSessionOptions(size_t file_idx,
+                                            const char* const** keys, const char* const** values,
+                                            size_t* count) const;
+  void GetSelectedVariantFileProviderOptions(size_t file_idx,
+                                             const char* const** keys, const char* const** values,
+                                             size_t* count) const;
+
+  std::string GetSelectedVariantConsumerMetadata() const;
+
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& env);
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& env, const OrtSessionOptions& session_options);
+
+  static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageComponentContext(reinterpret_cast<OrtModelPackageComponentContext*>(p)); }
   Ort::Abstract make_abstract;
 };
 

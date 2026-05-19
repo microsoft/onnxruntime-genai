@@ -5,14 +5,50 @@
 #include "../logging.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
+#include "model_package.h"
 #include "windowed_kv_cache.h"
 
 namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
-  for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
+  if (config_->IsPackage()) {
+    // Package path: create sessions from per-file package accessors.
+    // Pipeline stages reference files by filename. Match each stage to its file index
+    // in the selected component variant.
+    const auto& component_name = config_->model.decoder.component;
+    auto* pkg_state = config_->package_state_.get();
+    auto* cix = pkg_state->GetComponent(component_name);
+    size_t file_count = cix->GetSelectedVariantFileCount();
+
+    // Build a filename-to-index map
+    std::unordered_map<std::string, size_t> file_map;
+    for (size_t i = 0; i < file_count; ++i) {
+      auto path_str = cix->GetSelectedVariantFilePath(i);
+      // Extract basename from the full path
+      std::string basename = path_str;
+      auto last_sep = basename.find_last_of("/\\");
+      if (last_sep != std::string::npos) {
+        basename = basename.substr(last_sep + 1);
+      }
+      file_map[basename] = i;
+    }
+
+    for (const auto& model : config_->model.decoder.pipeline) {
+      auto it = file_map.find(model.filename);
+      if (it != file_map.end()) {
+        sessions_.emplace_back(CreateSessionFromPackage(ort_env, component_name, it->second));
+      } else {
+        throw std::runtime_error("Pipeline stage '" + model.model_id +
+                                 "' references file '" + model.filename +
+                                 "' which was not found in the package variant");
+      }
+    }
+    UpdateDeviceRoles();
+  } else {
+    for (const auto& model : config_->model.decoder.pipeline) {
+      sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
+    }
   }
 
   for (auto& session : sessions_) {

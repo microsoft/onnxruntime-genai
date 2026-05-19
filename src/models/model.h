@@ -159,7 +159,17 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
+  // Package-aware session creation: creates a session for a specific file index within
+  // a selected component. Uses the per-file path from the package variant.
+  std::unique_ptr<OrtSession> CreateSessionFromPackage(OrtEnv& ort_env,
+                                                        const std::string& component_name,
+                                                        size_t file_index);
+
   bool IsPruned() const;
+
+  // Update device role pointers based on p_device_. Called by subclasses after
+  // creating the decoder session from a package (which may change p_device_).
+  void UpdateDeviceRoles();
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
