@@ -926,7 +926,10 @@ class Qwen35TextModel(Model):
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
+        # By default Qwen3.5 is exported as a VL decoder that consumes
+        # inputs_embeds. Passing exclude_embeds=false builds a text-only model
+        # that consumes input_ids directly.
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
@@ -970,8 +973,11 @@ class Qwen35TextModel(Model):
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        if self.is_text_only:
+            self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+        else:
+            # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
+            self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         self.input_names["position_ids"] = "position_ids"
 
         # mRoPE config
@@ -1103,6 +1109,35 @@ class Qwen35TextModel(Model):
         self.input_names["past_key_values.value"] = filtered_value_inputs
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
+
+    def make_inputs_and_outputs(self):
+        super().make_inputs_and_outputs()
+
+        if not self.is_text_only:
+            self._pos_ids_3d = self.input_names["position_ids"]
+            return
+
+        # Text-only Qwen3.5 follows decoder-only OGA convention and accepts
+        # 2D runtime position_ids. Expand once inside the ONNX graph so the
+        # Qwen3.5 mRoPE builder can still consume [3, batch_size, sequence_length].
+        unsqueeze_name = "/model/position_ids_expand/Unsqueeze"
+        unsqueeze_output = f"{unsqueeze_name}/output_0"
+        self.make_unsqueeze(
+            unsqueeze_name,
+            [self.input_names["position_ids"], "/model/constants/INT64/[0]"],
+            ir.DataType.INT64,
+            [1, "batch_size", "sequence_length"],
+        )
+
+        tile_name = "/model/position_ids_expand/Tile"
+        tile_output = f"{tile_name}/output_0"
+        self.make_tile(
+            tile_name,
+            [unsqueeze_output, "/model/constants/INT64/[3, 1, 1]"],
+            ir.DataType.INT64,
+            [3, "batch_size", "sequence_length"],
+        )
+        self._pos_ids_3d = tile_output
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1347,10 +1382,10 @@ class Qwen35TextModel(Model):
     def _make_mrope_cos_sin(self, basename):
         """Build interleaved mRoPE cos/sin from pre-computed cache + position_ids.
 
-        Input: position_ids [3, B, S]
+        Input: expanded position_ids [3, B, S]
         Output: cos [B, S, rdim_half], sin [B, S, rdim_half]
         """
-        pos_ids = self.input_names["position_ids"]
+        pos_ids = self._pos_ids_3d
         cos_cache = "model.rotary_emb.cos_cache"
         sin_cache = "model.rotary_emb.sin_cache"
         h_mask = "model.rotary_emb.h_mask"
@@ -1402,7 +1437,7 @@ class Qwen35TextModel(Model):
     def _make_synthetic_position_ids(self):
         """Build synthetic position_ids [B, S] with values 0 .. B*S-1.
 
-        Derives B and S from the ``position_ids`` model input ``[3, B, S]``
+        Derives B and S from expanded ``position_ids`` ``[3, B, S]``
         instead of using Shape on intermediate Q/K tensors.  This avoids a
         data-dependency on Q/K computation.
 
@@ -1415,7 +1450,7 @@ class Qwen35TextModel(Model):
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
-        pos_ids_input = self.input_names["position_ids"]
+        pos_ids_input = self._pos_ids_3d
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
@@ -2024,7 +2059,7 @@ class Qwen35TextModel(Model):
             "model_type": self.model_type,
         }
         self.num_layers = len(self.layer_types)
-        self.model_type = "Qwen3_5ForConditionalGeneration"
+        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"
