@@ -34,34 +34,20 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     Returns:
         None
     """
-    if not ep_path:
-        return  # No library path specified, skip registration
-
-    print(f"Registering execution provider: {ep}")
 
     if use_winml:
-        # Requies winml.py file
-        # Modified from here: https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/tutorial?tabs=python#acquiring-the-model-and-preprocessing
+        # If use_winml is true, all winml execution providers will be queried and registered.
+        # Please refer to https://pypi.org/project/windowsml/
         try:
             import winml
-
-            print(winml.register_execution_providers(ort=False, ort_genai=True))
-        except ImportError:
-            print("WinML not available, using default execution providers")
+            for ep_name in winml.register_execution_providers():
+                print(f"Registered WinML execution provider: {ep_name}")
         except Exception as e:
             print(f"Failed to register WinML execution providers: {e}")
-    elif ep == "cuda":
-        og.register_execution_provider_library("CUDAExecutionProvider", ep_path)
-    elif ep == "NvTensorRtRtx":
-        og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
-    else:
-        print(f"Warning: EP registration not supported for {ep}")
-        print(
-            "Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries. Use Windows ML via '--use_winml' to register EPs."
-        )
-        return
+    elif ep_path:
+        og.register_execution_provider_library(ep, ep_path)
 
-    print(f"Registered {ep} successfully!")
+        print(f"Registered {ep} from {ep_path} successfully!")
 
 
 def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
@@ -86,14 +72,14 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
             print(f"Setting model to {ep}")
             config.append_provider(ep)
 
-        # Set any EP-specific options
-        for k, v in ep_options.items():
-            if k == "enable_cuda_graph" and ep in {"cuda", "NvTensorRtRtx"} and search_options.get("num_beams", 1) > 1:
-                # Disable CUDA graph if using beam search (num_beams > 1),
-                # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
-                config.set_provider_option(ep, "enable_cuda_graph", "0")
-            else:
-                config.set_provider_option(ep, k, v)
+    # Set any EP-specific options
+    for k, v in ep_options.items():
+        if k in {"enable_cuda_graph", "enableGraphCapture"} and search_options.get("num_beams", 1) > 1:
+            # Disable graph capture if using beam search (num_beams > 1),
+            # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
+            config.set_provider_option(ep, k, "0")
+        else:
+            config.set_provider_option(ep, k, v)
 
     if "chunk_size" in search_options and search_options["chunk_size"] == 0:
         # Remove chunk_size of 0
@@ -551,6 +537,57 @@ def get_guidance(
         raise ValueError("Invalid response format provided")
 
     return guidance_type, guidance_data, json.dumps([asdict(tool) for tool in tools])
+
+
+def get_ep_args(parser: argparse.ArgumentParser) -> None:
+    """
+    Add an argument group for execution providers
+
+    Args:
+        parser (argparse.ArgumentParser): original parser object with existing arguments
+    Returns:
+        None
+    """
+
+    # If --ep_path is provided, the execution provider specified by --execution_provider
+    # is registered with ONNX Runtime. It must match the name ONNX Runtime is expecting,
+    # not the genai canonical ep name.
+    all_eps = [
+        "follow_config",                   # Follow whatever EP is specified in the GenAI config
+        "cpu",                             # CPU EP
+        "cuda",                            # GenAI canonical name for CUDA EP
+        "CUDAExecutionProvider",           # CUDA EP
+        "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
+        "OpenVINOExecutionProvider",       # Intel IHV EP
+        "QNNExecutionProvider",            # Qualcomm IHV EP
+        "VitisAIExecutionProvider",        # AMD IHV EP
+        "WebGpuExecutionProvider",         # WebGPU EP
+    ]
+
+    ep_group = parser.add_argument_group("Execution Providers")
+    ep_group.add_argument(
+        "-e",
+        "--execution_provider",
+        type=str,
+        default="follow_config",
+        choices=all_eps,
+        help="Execution provider to use for inference (default: follow_config)",
+    )
+
+    ep_group.add_argument(
+        "--ep_path",
+        type=str,
+        default="",
+        help="Path to the execution provider plug-in library",
+    )
+
+    # Requires windowsml package being installed.
+    ep_group.add_argument(
+        "--use_winml",
+        action="store_true",
+        default=False,
+        help="Use Windows ML to register execution providers (only applicable on Windows 10 and above)",
+    )
 
 
 def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
