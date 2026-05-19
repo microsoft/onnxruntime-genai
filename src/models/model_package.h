@@ -75,4 +75,9 @@ std::string JsonMergePatch(std::string_view base_json, std::string_view patch_js
 /// Used to determine p_device_ from the resolved EP name in the package path.
 DeviceInterface* DeviceFromEpName(const std::string& ep_name);
 
+/// Map a full ORT EP name (e.g. "CUDAExecutionProvider") to the short name
+/// used in genai_config.json provider_options (e.g. "cuda").
+/// Returns the input unchanged if no mapping exists.
+std::string EpNameToGenAIProviderName(const std::string& ep_name);
+
 }  // namespace Generators

@@ -492,4 +492,23 @@ DeviceInterface* DeviceFromEpName(const std::string& ep_name) {
   return GetDeviceInterface(DeviceType::CPU);
 }
 
+std::string EpNameToGenAIProviderName(const std::string& ep_name) {
+  static const std::unordered_map<std::string, std::string> ep_to_genai = {
+      {"CUDAExecutionProvider", "cuda"},
+      {"DmlExecutionProvider", "DML"},
+      {"QNNExecutionProvider", "QNN"},
+      {"NvTensorRtRtxExecutionProvider", "NvTensorRtRtx"},
+      {"WebGpuExecutionProvider", "WebGPU"},
+      {"RyzenAIExecutionProvider", "RyzenAI"},
+      {"OpenVINOExecutionProvider", "OpenVINO"},
+      {"VitisAIExecutionProvider", "VitisAI"},
+  };
+
+  auto it = ep_to_genai.find(ep_name);
+  if (it != ep_to_genai.end()) {
+    return it->second;
+  }
+  return ep_name;
+}
+
 }  // namespace Generators

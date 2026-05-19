@@ -857,8 +857,11 @@ Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
 
   // Set up the EP: use the resolved EP for this file (or CPU if run_on_cpu)
   if (ep_for_file != "CPUExecutionProvider") {
+    // Map full ORT EP name to the short genai provider name used by the dispatch table
+    std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
+
     Config::ProviderOptions po;
-    po.name = ep_for_file;
+    po.name = genai_provider_name;
 
     // Attach variant's per-file provider_options as EP config (not the EP identity)
     const char* const* po_keys = nullptr;
@@ -870,7 +873,7 @@ Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
       po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
     }
 
-    so.providers.push_back(ep_for_file);
+    so.providers.push_back(genai_provider_name);
     so.provider_options.push_back(std::move(po));
   }
 
