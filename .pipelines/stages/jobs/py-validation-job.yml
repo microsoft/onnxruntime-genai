@@ -30,7 +30,9 @@ jobs:
     ${{ if eq(parameters.ep, 'cuda') }}:
       pool: 'Onnxruntime-Linux-GPU'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
-      pool: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
+      pool:
+        name: 'onnxruntime-linux-ARM64-CPU-2019'
+        hostArchitecture: 'Arm64'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
@@ -155,6 +157,12 @@ jobs:
     displayName: Copy python 3.11.0 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.11'))
 
+  # UsePythonVersion is skipped on linux-arm64. The
+  # 'onnxruntime-linux-ARM64-CPU-2019' self-hosted pool does not provide
+  # Python in the agent tools cache (no arm64 Python is published in the
+  # GitHub Actions python-versions registry). Validation steps below run
+  # inside the manylinux aarch64 Docker image or use the agent's system
+  # python3, so no host Python install is required.
   - task: UsePythonVersion@0
     condition: not(and(eq(variables['os'], 'linux'), eq(variables['arch'], 'arm64')))
     inputs:
