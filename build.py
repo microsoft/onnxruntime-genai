@@ -815,7 +815,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
             elif args.ios:
                 ort_lib_dir = ortlib_runtimes_dir / "ios"
             elif not util.is_aix():
-                raise RuntimeError("Unsupported operating system to build examples for")
+                raise RuntimeError("'{}': unsupported operating system to build examples for".format(sys.platform))
         samples_to_build += [
             "-DORT_INCLUDE_DIR=" + ort_include_dir.as_posix(),
             "-DORT_LIB_DIR=" + (ort_lib_dir / "native").as_posix()
