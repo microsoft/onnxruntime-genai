@@ -996,6 +996,8 @@ struct VAD_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "threshold") {
       v_.threshold = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "silence_duration_ms") {

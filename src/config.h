@@ -304,6 +304,7 @@ struct Config {
 
     struct VAD {
       std::string filename;
+      std::string component;  // package component name for this role
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};

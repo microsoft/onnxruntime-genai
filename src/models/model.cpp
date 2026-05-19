@@ -1013,6 +1013,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     add_component(temp_config->model.vision.component);
     add_component(temp_config->model.speech.component);
     add_component(temp_config->model.embedding.component);
+    add_component(temp_config->model.joiner.component);
+    add_component(temp_config->model.vad.component);
 
     // Select each referenced component and merge overlays
     std::string merged_json = base_json;
