@@ -1147,8 +1147,6 @@ struct Model_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "num_prompts") {
-      v_.num_prompts = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "lang_id") {
       v_.lang_id = static_cast<int>(JSON::Get<double>(value));
     } else {

@@ -40,7 +40,6 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
-  num_prompts = config.model.num_prompts;
   lang_id = config.model.lang_id;
   blank_penalty = config.search.blank_penalty;
 
@@ -217,11 +216,6 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   // builds the one-hot prompt tensor internally.
   has_lang_id_input_ = !cfg.enc_in_lang_id.empty() && model_.session_info_.HasInput(cfg.enc_in_lang_id);
   if (has_lang_id_input_) {
-    if (cfg.num_prompts <= 0)
-      throw std::runtime_error("Encoder has a 'lang_id' input but model.num_prompts is not set in genai_config.json");
-    if (cfg.lang_id < 0 || cfg.lang_id >= cfg.num_prompts)
-      throw std::runtime_error("model.lang_id (" + std::to_string(cfg.lang_id) + ") out of range [0, " + std::to_string(cfg.num_prompts) + ")");
-
     auto lang_id_type = model_.session_info_.GetInputDataType(cfg.enc_in_lang_id);
     if (lang_id_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
       throw std::runtime_error("Encoder lang_id input must be int64");

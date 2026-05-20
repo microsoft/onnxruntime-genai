@@ -43,8 +43,8 @@ struct NemotronConfig {
   // Pre-encode cache
   int pre_encode_cache_size{};
 
-  // Prompt-conditioned encoder (multilingual models). num_prompts==0 disables.
-  int num_prompts{};
+  // Prompt-conditioned encoder (multilingual models). Default language index
+  // passed to the encoder's lang_id input; the graph builds the one-hot internally.
   int lang_id{};
 
   // Encoder I/O names

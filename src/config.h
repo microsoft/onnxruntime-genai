@@ -154,8 +154,7 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
-    int num_prompts{};   // Size of the one-hot prompt vector for multilingual prompt-conditioned encoders (0 = no prompt)
-    int lang_id{};       // Default language/prompt index used when the encoder takes a prompt input
+    int lang_id{};       // Default language/prompt index used when the encoder takes a lang_id input
 
     struct Encoder {
       std::string filename;
