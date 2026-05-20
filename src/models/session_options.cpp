@@ -15,6 +15,7 @@
 #include "../ryzenai/session_options.h"
 #include "../vitisai/session_options.h"
 #include "../webgpu/session_options.h"
+#include "model_package.h"
 
 namespace Generators {
 
@@ -242,6 +243,103 @@ void EnsurePackageProvider(Config::SessionOptions& session_options,
     Config::ProviderOptions po;
     po.name = tag;
     provider_options.push_back(std::move(po));
+  }
+}
+
+namespace {
+
+bool ParseBoolFlag(std::string_view name, std::string_view value) {
+  if (value == "true" || value == "1") return true;
+  if (value == "false" || value == "0") return false;
+  throw std::runtime_error(
+      "variant.json: session_options[\"" + std::string(name) + "\"] must be a boolean (got '" +
+      std::string(value) + "')");
+}
+
+int ParseIntField(std::string_view name, std::string_view value) {
+  try {
+    size_t consumed = 0;
+    int parsed = std::stoi(std::string(value), &consumed);
+    if (consumed != value.size()) throw std::invalid_argument("trailing characters");
+    return parsed;
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        "variant.json: session_options[\"" + std::string(name) + "\"] must be an integer (got '" +
+        std::string(value) + "'): " + e.what());
+  }
+}
+
+GraphOptimizationLevel ParseGraphOptLevel(std::string_view value) {
+  if (value == "ORT_DISABLE_ALL") return ORT_DISABLE_ALL;
+  if (value == "ORT_ENABLE_BASIC") return ORT_ENABLE_BASIC;
+  if (value == "ORT_ENABLE_EXTENDED") return ORT_ENABLE_EXTENDED;
+  if (value == "ORT_ENABLE_ALL") return ORT_ENABLE_ALL;
+  throw std::runtime_error(
+      "variant.json: session_options[\"graph_optimization_level\"] has unrecognized value '" +
+      std::string(value) + "'");
+}
+
+bool ConfigEntriesContains(const std::vector<Config::NamedString>& entries, std::string_view key) {
+  return std::any_of(entries.begin(), entries.end(),
+                     [&](const Config::NamedString& e) { return e.first == key; });
+}
+
+bool ProviderOptionsContains(const std::vector<Config::NamedString>& options, std::string_view key) {
+  return std::any_of(options.begin(), options.end(),
+                     [&](const Config::NamedString& e) { return e.first == key; });
+}
+
+}  // namespace
+
+void ApplyVariantFileDefaults(Config::SessionOptions& so,
+                              const VariantFile& vf,
+                              std::string_view canonical_ep_name) {
+  // Layer 1: per-file session_options fill in unset typed fields and
+  // unseen config_entries. Anything already present on `so` (the
+  // caller-provided layer-2 view) is preserved.
+  for (const auto& [key, value] : vf.session_options) {
+    if (key == "intra_op_num_threads") {
+      if (!so.intra_op_num_threads.has_value()) so.intra_op_num_threads = ParseIntField(key, value);
+    } else if (key == "inter_op_num_threads") {
+      if (!so.inter_op_num_threads.has_value()) so.inter_op_num_threads = ParseIntField(key, value);
+    } else if (key == "log_severity_level") {
+      if (!so.log_severity_level.has_value()) so.log_severity_level = ParseIntField(key, value);
+    } else if (key == "log_verbosity_level") {
+      if (!so.log_verbosity_level.has_value()) so.log_verbosity_level = ParseIntField(key, value);
+    } else if (key == "enable_cpu_mem_arena") {
+      if (!so.enable_cpu_mem_arena.has_value()) so.enable_cpu_mem_arena = ParseBoolFlag(key, value);
+    } else if (key == "enable_mem_pattern") {
+      if (!so.enable_mem_pattern.has_value()) so.enable_mem_pattern = ParseBoolFlag(key, value);
+    } else if (key == "log_id") {
+      if (!so.log_id.has_value()) so.log_id = std::string(value);
+    } else if (key == "enable_profiling") {
+      if (!so.enable_profiling.has_value()) so.enable_profiling = std::string(value);
+    } else if (key == "custom_ops_library") {
+      if (!so.custom_ops_library.has_value()) so.custom_ops_library = std::string(value);
+    } else if (key == "graph_optimization_level") {
+      if (!so.graph_optimization_level.has_value()) so.graph_optimization_level = ParseGraphOptLevel(value);
+    } else {
+      if (!ConfigEntriesContains(so.config_entries, key)) {
+        so.config_entries.emplace_back(key, value);
+      }
+    }
+  }
+
+  // Layer 1: per-file provider_options are merged into the matching
+  // ProviderOptions entry (which must already exist — typical callers
+  // invoke EnsurePackageProvider first). Existing keys on the entry win;
+  // variant-defined keys missing from the entry are appended.
+  const std::string tag = EpNameToProviderTag(canonical_ep_name);
+  if (tag.empty() || vf.provider_options.empty()) return;
+
+  auto poit = std::find_if(so.provider_options.begin(), so.provider_options.end(),
+                           [&](const Config::ProviderOptions& po) { return po.name == tag; });
+  if (poit == so.provider_options.end()) return;
+
+  for (const auto& [k, v] : vf.provider_options) {
+    if (!ProviderOptionsContains(poit->options, k)) {
+      poit->options.emplace_back(k, v);
+    }
   }
 }
 

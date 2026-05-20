@@ -207,6 +207,17 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                         const std::string& filename,
                                         OrtSessionOptions& session_options);
 
+  /// v4 model package: locate the `files[]` entry whose `filename` matches
+  /// the given onnx-graph filename within the component's parsed
+  /// `variant.json`. Lazy-parses and caches the manifest on first lookup.
+  ///
+  /// Returns nullptr in flat-dir mode, when `component_name` is empty or
+  /// not present in `Config::component_instances`, or when no file entry
+  /// matches. The returned pointer is owned by `variant_manifests_` and
+  /// is invalidated only when the owning `Model` is destroyed.
+  const VariantFile* FindVariantFile(const std::string& component_name,
+                                     const std::string& filename) const;
+
  protected:
   void CreateSessionOptions();
 

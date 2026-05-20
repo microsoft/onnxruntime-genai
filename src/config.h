@@ -403,6 +403,11 @@ struct Config {
                                     // This is the index of the session that needs to be reset during the execution of the current session.
                                     // This is a temporary solution until the QNN driver updates are available.
                                     // Once the driver updates are available, this option will be deprecated.
+        // v4-package-only: when true, suppress automatic injection of the package's
+        // selected EP into this stage. Useful for mixed-EP pipelines where one stage
+        // (e.g. an LM-head matmul) is intentionally kept on CPU even though the rest
+        // of the decoder runs on a hardware EP. No effect in flat-dir mode.
+        bool run_on_cpu{false};
       };
 
       std::vector<PipelineModel> pipeline;

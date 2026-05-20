@@ -67,4 +67,34 @@ std::string EpNameToProviderTag(std::string_view canonical_ep_name);
 void EnsurePackageProvider(Config::SessionOptions& session_options,
                            std::string_view canonical_ep_name);
 
+// Forward declaration to avoid pulling model_package.h into every translation
+// unit that includes session_options.h. Definition lives in model_package.h.
+struct VariantFile;
+
+// Apply a v4-package variant.json `files[i]` per-file options block onto
+// `session_options` as layer-1 defaults.
+//
+// Semantics (layered config; existing values in `session_options` win):
+//   * `vf.session_options` (string -> string): for typed keys
+//     (intra_op_num_threads, enable_cpu_mem_arena, graph_optimization_level,
+//     ...) the value is filled in only when the corresponding
+//     `std::optional` field on `session_options` is empty. All other keys
+//     are appended to `config_entries` only when no entry with the same
+//     key already exists. Unrecognised graph_optimization_level values
+//     throw.
+//   * `vf.provider_options` (string -> string): merged into the
+//     `Config::ProviderOptions` entry whose `name` matches the GenAI tag
+//     derived from `canonical_ep_name` (see `EpNameToProviderTag`). If no
+//     matching entry exists, the variant provider_options are dropped:
+//     a typical caller invokes `EnsurePackageProvider` first to ensure
+//     the entry is present. Empty / CPU / unknown `canonical_ep_name`
+//     skips the provider_options merge entirely.
+//
+// Used by the v4-package-aware paths in `Model::CreateSessionOptions` to
+// honor `variant.json` per-file options for the decoder's main session
+// and each pipeline stage.
+void ApplyVariantFileDefaults(Config::SessionOptions& session_options,
+                              const VariantFile& vf,
+                              std::string_view canonical_ep_name);
+
 }  // namespace Generators

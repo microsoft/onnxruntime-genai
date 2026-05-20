@@ -750,25 +750,71 @@ void Model::CreateSessionOptions() {
   // entry) before CreateSessionOptionsFromConfig walks the dispatch
   // table. Empty `decoder.component`, missing instance, or
   // CPU/unrecognised EP -> no-op (the implicit-CPU path still runs).
+  //
+  // After the EP is in place, also apply the decoder's variant.json
+  // per-file `session_options` / `provider_options` as layer-1 defaults.
+  // Layer-2 (`genai_config.json` session_options) values already on
+  // `decoder.session_options` are preserved.
+  std::string decoder_ep;
   if (config_->model_package && !config_->model.decoder.component.empty()) {
     auto it = config_->component_instances.find(config_->model.decoder.component);
     if (it != config_->component_instances.end() && it->second) {
-      EnsurePackageProvider(config_->model.decoder.session_options, it->second->SelectedEp());
+      decoder_ep = it->second->SelectedEp();
+      EnsurePackageProvider(config_->model.decoder.session_options, decoder_ep);
+      if (const VariantFile* vf = FindVariantFile(config_->model.decoder.component,
+                                                  config_->model.decoder.filename)) {
+        ApplyVariantFileDefaults(config_->model.decoder.session_options, *vf, decoder_ep);
+      }
     }
   }
 
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
                                  /*disable_graph_capture=*/false, config_->model.decoder.component);
 
+  // Pipeline stages.
+  //
+  // Flat-dir behavior (unchanged): only stages with a `session_options` block
+  // in genai_config.json get their own OrtSessionOptions; everything else
+  // falls back to the decoder's primary `session_options_` via
+  // GetSessionOptions().
+  //
+  // Package mode: every stage gets its own OrtSessionOptions because the
+  // package's selected EP and the stage's variant.json per-file options
+  // both need to be applied per-stage. `run_on_cpu` on a stage suppresses
+  // the package-EP injection (and the matching provider_options merge),
+  // forcing CPU fallback even when the rest of the decoder runs on a
+  // hardware EP.
+  const bool decoder_in_package = config_->model_package != nullptr &&
+                                  !config_->model.decoder.component.empty();
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
-    if (pipeline_model.session_options.has_value()) {
-      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      // Pipeline sub-models live alongside the decoder under the
-      // decoder's variant folder in v4-package mode, so their custom-ops
-      // resolution should mirror the decoder's component.
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
-                                     /*disable_graph_capture=*/false, config_->model.decoder.component);
+    const bool has_stage_so = pipeline_model.session_options.has_value();
+    if (!has_stage_so && !decoder_in_package) continue;
+
+    if (!has_stage_so) {
+      pipeline_model.session_options.emplace();
     }
+    Config::SessionOptions& stage_so = *pipeline_model.session_options;
+
+    if (decoder_in_package) {
+      if (!pipeline_model.run_on_cpu) {
+        EnsurePackageProvider(stage_so, decoder_ep);
+      }
+      if (const VariantFile* vf = FindVariantFile(config_->model.decoder.component,
+                                                  pipeline_model.filename)) {
+        // When run_on_cpu, pass an empty EP so variant `provider_options`
+        // are not merged into a non-CPU ProviderOptions entry that
+        // wouldn't otherwise exist.
+        const std::string ep_for_merge = pipeline_model.run_on_cpu ? std::string{} : decoder_ep;
+        ApplyVariantFileDefaults(stage_so, *vf, ep_for_merge);
+      }
+    }
+
+    auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+    // Pipeline sub-models live alongside the decoder under the
+    // decoder's variant folder in v4-package mode, so their custom-ops
+    // resolution should mirror the decoder's component.
+    CreateSessionOptionsFromConfig(stage_so, *emplaced.first->second, false,
+                                   /*disable_graph_capture=*/false, config_->model.decoder.component);
   }
 
   // Fallback to CPU if no provider specific interface was set
@@ -786,12 +832,11 @@ fs::path Model::AssetFolder(const std::string& component_name) const {
   return config_->config_path;
 }
 
-void Model::ApplyPackageExternalInitializers(const std::string& component_name,
-                                             const std::string& filename,
-                                             OrtSessionOptions& session_options) {
-  if (component_name.empty() || !config_->model_package) return;
+const VariantFile* Model::FindVariantFile(const std::string& component_name,
+                                          const std::string& filename) const {
+  if (component_name.empty() || !config_->model_package) return nullptr;
   auto cit = config_->component_instances.find(component_name);
-  if (cit == config_->component_instances.end() || !cit->second) return;
+  if (cit == config_->component_instances.end() || !cit->second) return nullptr;
 
   auto mit = variant_manifests_.find(component_name);
   if (mit == variant_manifests_.end()) {
@@ -803,14 +848,20 @@ void Model::ApplyPackageExternalInitializers(const std::string& component_name,
     mit = variant_manifests_.emplace(component_name, std::move(manifest)).first;
   }
 
-  const VariantFile* file_entry = nullptr;
   for (const auto& fe : mit->second.files) {
-    if (fe.filename == filename) {
-      file_entry = &fe;
-      break;
-    }
+    if (fe.filename == filename) return &fe;
   }
+  return nullptr;
+}
+
+void Model::ApplyPackageExternalInitializers(const std::string& component_name,
+                                             const std::string& filename,
+                                             OrtSessionOptions& session_options) {
+  const VariantFile* file_entry = FindVariantFile(component_name, filename);
   if (!file_entry || file_entry->shared_files.empty()) return;
+
+  auto cit = config_->component_instances.find(component_name);
+  // FindVariantFile guarantees the component is in the map when it returns non-null.
 
   std::vector<std::basic_string<ORTCHAR_T>> names;
   std::vector<char*> buffers;
