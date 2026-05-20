@@ -12,6 +12,24 @@
 
 namespace Generators {
 
+namespace {
+// Picks the DeviceInterface that matches the OrtValue's actual memory location.
+// Required because ORT may place outputs on CPU even when the EP is CUDA;
+// wrapping a CPU tensor with a CUDA DeviceInterface causes a sticky
+// cudaErrorInvalidValue at the next CUDA kernel launch.
+DeviceInterface& DeviceFor(const OrtValue& v) {
+  auto& mem = v.GetTensorMemoryInfo();
+  switch (mem.GetDeviceType()) {
+    case OrtMemoryInfoDeviceType_CPU:
+      return *GetDeviceInterface(DeviceType::CPU);
+    case OrtMemoryInfoDeviceType_GPU:
+      return *GetDeviceInterface(DeviceType::CUDA);
+    default:
+      return *GetDeviceInterface(DeviceType::CPU);
+  }
+}
+}  // namespace
+
 void NemotronConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
   const auto& dec = config.model.decoder;
@@ -80,19 +98,21 @@ void NemotronEncoderCache::Initialize(const NemotronConfig& cfg, const SessionIn
   auto cache_time_type = session_info.GetInputDataType(cfg.enc_in_cache_time);
   auto cache_channel_len_type = session_info.GetInputDataType(cfg.enc_in_cache_channel_len);
 
-  // cache_last_channel: [batch, num_layers, left_context, hidden_dim]
+  // cache_last_channel: [batch, num_layers, left_context, hidden_dim] (device memory)
   auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
   cache_last_channel = OrtValue::CreateTensor(allocator, ch_shape, cache_channel_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *cache_last_channel).Zero();
+  ByteWrapTensor(device, *cache_last_channel).Zero();
 
-  // cache_last_time: [batch, num_layers, hidden_dim, conv_context]
+  // cache_last_time: [batch, num_layers, hidden_dim, conv_context] (device memory)
   auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
   cache_last_time = OrtValue::CreateTensor(allocator, tm_shape, cache_time_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *cache_last_time).Zero();
+  ByteWrapTensor(device, *cache_last_time).Zero();
 
-  // cache_last_channel_len: [1]
+  // cache_last_channel_len: [1] int64 scalar; keep on CPU (host-written each step,
+  // ORT will copy to device automatically if the session expects it there).
+  auto& cpu_alloc = GetDeviceInterface(DeviceType::CPU)->GetAllocator();
   auto len_shape = std::array<int64_t, 1>{1};
-  cache_last_channel_len = OrtValue::CreateTensor(allocator, len_shape, cache_channel_len_type);
+  cache_last_channel_len = OrtValue::CreateTensor(cpu_alloc, len_shape, cache_channel_len_type);
   *cache_last_channel_len->GetTensorMutableData<int64_t>() = 0;
 }
 
@@ -104,13 +124,13 @@ void NemotronDecoderState::Initialize(const NemotronConfig& cfg, const SessionIn
   auto lstm_hidden_type = session_info.GetInputDataType(cfg.dec_in_lstm_hidden);
   auto lstm_cell_type = session_info.GetInputDataType(cfg.dec_in_lstm_cell);
 
-  // LSTM states: [lstm_layers, 1, lstm_dim]
+  // LSTM states: [lstm_layers, 1, lstm_dim] (device memory)
   auto state_shape = std::array<int64_t, 3>{cfg.decoder_lstm_layers, 1, cfg.decoder_lstm_dim};
   lstm_hidden_state = OrtValue::CreateTensor(allocator, state_shape, lstm_hidden_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_hidden_state).Zero();
+  ByteWrapTensor(device, *lstm_hidden_state).Zero();
 
   lstm_cell_state = OrtValue::CreateTensor(allocator, state_shape, lstm_cell_type);
-  ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *lstm_cell_state).Zero();
+  ByteWrapTensor(device, *lstm_cell_state).Zero();
 
   last_token = cfg.blank_id;  // Start with blank/SOS token
 }
@@ -174,18 +194,21 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
     : State{params, model},
       model_{model} {
   auto& cfg = model_.nemotron_config_;
-  auto& allocator = model_.allocator_cpu_;
-  auto& device = *model_.p_device_;
+  auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
+  auto& cpu_alloc = cpu_dev.GetAllocator();
+  auto& inf_dev = *model_.p_device_inputs_;
+  auto& inf_alloc = inf_dev.GetAllocator();
 
-  cache_.Initialize(cfg, model_.session_info_, allocator, device);
+  // Allocate cache on inference device so ORT consumes it without an
+  // implicit CPU→device copy on every Run.
+  cache_.Initialize(cfg, model_.session_info_, inf_alloc, inf_dev);
 
   has_length_input_ = model_.session_info_.HasInput(cfg.enc_in_length);
 
-  // Create signal_length tensor if the encoder model expects it
   if (has_length_input_) {
     auto len_type = model_.session_info_.GetInputDataType(cfg.enc_in_length);
     auto len_shape = std::array<int64_t, 1>{1};
-    signal_length_ = OrtValue::CreateTensor(allocator, len_shape, len_type);
+    signal_length_ = OrtValue::CreateTensor(cpu_alloc, len_shape, len_type);
   }
 
   // Register inputs: mel, [length], cache_channel, cache_time, cache_channel_len
@@ -220,7 +243,7 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
     if (lang_id_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
       throw std::runtime_error("Encoder lang_id input must be int64");
     auto lang_id_shape = std::array<int64_t, 1>{1};
-    lang_id_tensor_ = OrtValue::CreateTensor(allocator, lang_id_shape, lang_id_type);
+    lang_id_tensor_ = OrtValue::CreateTensor(cpu_alloc, lang_id_shape, lang_id_type);
     *lang_id_tensor_->GetTensorMutableData<int64_t>() = static_cast<int64_t>(cfg.lang_id);
     lang_id_input_idx_ = inputs_.size();
     input_names_.push_back(cfg.enc_in_lang_id.c_str());
@@ -234,11 +257,27 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   output_names_.push_back(cfg.enc_out_length.c_str());
   outputs_.push_back(nullptr);
 
+  // Pre-allocate cache outputs on the inference device so ORT writes them
+  // there directly. Without pre-allocation, ORT places these outputs on CPU
+  // and feeding them back as inputs on the next chunk triggers a CUDA copy
+  // path that fails inside Transpose (cudaErrorInvalidValue).
+  cache_channel_next_output_idx_ = outputs_.size();
   output_names_.push_back(cfg.enc_out_cache_channel.c_str());
-  outputs_.push_back(nullptr);
+  {
+    auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
+    auto ch_type = model_.session_info_.GetOutputDataType(cfg.enc_out_cache_channel);
+    cache_channel_next_ = OrtValue::CreateTensor(inf_alloc, ch_shape, ch_type);
+  }
+  outputs_.push_back(cache_channel_next_.get());
 
+  cache_time_next_output_idx_ = outputs_.size();
   output_names_.push_back(cfg.enc_out_cache_time.c_str());
-  outputs_.push_back(nullptr);
+  {
+    auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
+    auto tm_type = model_.session_info_.GetOutputDataType(cfg.enc_out_cache_time);
+    cache_time_next_ = OrtValue::CreateTensor(inf_alloc, tm_shape, tm_type);
+  }
+  outputs_.push_back(cache_time_next_.get());
 
   output_names_.push_back(cfg.enc_out_cache_channel_len.c_str());
   outputs_.push_back(nullptr);
@@ -271,15 +310,14 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
     : State{params, model},
       model_{model} {
   auto& cfg = model_.nemotron_config_;
-  auto& allocator = model_.allocator_cpu_;
-  auto& device = *model_.p_device_;
+  auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
+  auto& cpu_alloc = cpu_dev.GetAllocator();
 
-  lstm_state_.Initialize(cfg, model_.session_info_, allocator, device);
+  lstm_state_.Initialize(cfg, model_.session_info_, cpu_alloc, cpu_dev);
 
-  // Create targets tensor
   auto targets_type = model_.session_info_.GetInputDataType(cfg.dec_in_targets);
   auto targets_shape = std::array<int64_t, 2>{1, 1};
-  targets_ = OrtValue::CreateTensor(allocator, targets_shape, targets_type);
+  targets_ = OrtValue::CreateTensor(cpu_alloc, targets_shape, targets_type);
 
   // Register inputs
   targets_input_idx_ = inputs_.size();
@@ -365,7 +403,7 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
   joiner_state_ = std::make_unique<NemotronJoinerSubState>(model, params);
 
-  // Pre-allocate encoder frame for joiner input
+  // Pre-allocate encoder frame for joiner input (CPU; ORT uploads to device if needed).
   auto enc_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
   encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, enc_out_type);
@@ -406,14 +444,16 @@ OrtValue* NemotronSpeechState::GetOutput(const char* name) {
 }
 
 void NemotronSpeechState::ResetStreamingState() {
-  auto& allocator = model_.allocator_cpu_;
-  auto& device = *model_.p_device_;
+  auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
+  auto& cpu_alloc = cpu_dev.GetAllocator();
 
-  encoder_state_->cache_.Reset(nemotron_config_, model_.session_info_, allocator, device);
+  auto& inf_dev = *model_.p_device_inputs_;
+  auto& inf_alloc = inf_dev.GetAllocator();
+  encoder_state_->cache_.Reset(nemotron_config_, model_.session_info_, inf_alloc, inf_dev);
   encoder_state_->UpdateCacheInputs();
   encoder_state_->first_run_ = true;
 
-  prediction_state_->lstm_state_.Reset(nemotron_config_, model_.session_info_, allocator, device);
+  prediction_state_->lstm_state_.Reset(nemotron_config_, model_.session_info_, cpu_alloc, cpu_dev);
   prediction_state_->UpdateInputs();
   prediction_state_->first_run_ = true;
 
@@ -445,15 +485,31 @@ void NemotronSpeechState::RunEncoder() {
   // Grab encoder outputs
   encoded_output_.reset(encoder_state_->outputs_[0]);
   encoder_state_->outputs_[0] = nullptr;
-  encoded_len_ = *encoder_state_->outputs_[1]->GetTensorData<int64_t>();
 
-  // Cache outputs are already moved into encoder_state_->cache_ by Run()
-  // But State::Run uses output pointers differently - the outputs are written to by ORT
-  // We need to take ownership of the cache outputs
-  encoder_state_->cache_.cache_last_channel.reset(encoder_state_->outputs_[2]);
-  encoder_state_->outputs_[2] = nullptr;
-  encoder_state_->cache_.cache_last_time.reset(encoder_state_->outputs_[3]);
-  encoder_state_->outputs_[3] = nullptr;
+  // encoded_len is int64[1]. ORT may place output on device; copy to CPU before reading.
+  std::unique_ptr<OrtValue> encoded_len_owner{encoder_state_->outputs_[1]};
+  encoder_state_->outputs_[1] = nullptr;
+  auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
+  auto& cpu_alloc = cpu_dev.GetAllocator();
+  auto len_shape = std::array<int64_t, 1>{1};
+  auto encoded_len_cpu = OrtValue::CreateTensor(cpu_alloc, len_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  ByteWrapTensor(cpu_dev, *encoded_len_cpu)
+      .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner), *encoded_len_owner));
+  encoded_len_ = *encoded_len_cpu->GetTensorData<int64_t>();
+
+  // Cache outputs were written into our pre-allocated device buffers
+  // (cache_channel_next_/cache_time_next_). Swap them with the input cache
+  // buffers so the next chunk reads the just-produced values and writes
+  // into the now-stale buffer.
+  std::swap(encoder_state_->cache_.cache_last_channel, encoder_state_->cache_channel_next_);
+  std::swap(encoder_state_->cache_.cache_last_time, encoder_state_->cache_time_next_);
+  encoder_state_->outputs_[encoder_state_->cache_channel_next_output_idx_] =
+      encoder_state_->cache_channel_next_.get();
+  encoder_state_->outputs_[encoder_state_->cache_time_next_output_idx_] =
+      encoder_state_->cache_time_next_.get();
+
+  // cache_last_channel_len is a tiny int64[1] scalar; let ORT manage it.
   encoder_state_->cache_.cache_last_channel_len.reset(encoder_state_->outputs_[4]);
   encoder_state_->outputs_[4] = nullptr;
 
@@ -475,9 +531,14 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
   int64_t hidden_dim = enc_shape[2];
   size_t frame_bytes = static_cast<size_t>(hidden_dim) * sizeof(float);
 
-  auto enc_span = ByteWrapTensor(*model_.p_device_, *encoded_output_);
-  auto frame_span = ByteWrapTensor(*model_.p_device_, *encoder_frame_);
-  auto& allocator = model_.allocator_cpu_;
+  auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
+  auto& cpu_alloc_step = cpu_dev.GetAllocator();
+
+  // encoded_output_'s actual device varies (ORT may place it on CPU even with
+  // CUDA EP). Pick the matching DeviceInterface so CopyFrom uses the right
+  // memcpy direction.
+  auto enc_span = ByteWrapTensor(DeviceFor(*encoded_output_), *encoded_output_);
+  auto frame_span = ByteWrapTensor(cpu_dev, *encoder_frame_);
 
   DeviceSpan<int32_t> dummy_tokens;
 
@@ -490,21 +551,29 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     prediction_state_->UpdateInputs();
     prediction_state_->Run(0, dummy_tokens);
 
-    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]
+    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]. Decoder output
+    // is on the EP device; allocate decoder_frame on CPU so the joiner input
+    // matches the CPU-resident encoder_frame_ (ORT will upload both).
     auto dec_out_shape = prediction_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
     auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
     auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
-    auto decoder_frame = OrtValue::CreateTensor(allocator, decoder_frame_shape, dec_out_type);
-    ByteWrapTensor(*model_.p_device_, *decoder_frame)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *prediction_state_->outputs_[0]));
+    auto decoder_frame = OrtValue::CreateTensor(cpu_alloc_step, decoder_frame_shape, dec_out_type);
+    ByteWrapTensor(cpu_dev, *decoder_frame)
+        .CopyFrom(ByteWrapTensor(DeviceFor(*prediction_state_->outputs_[0]), *prediction_state_->outputs_[0]));
 
     // Run joiner
     joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
     joiner_state_->Run(0, dummy_tokens);
 
-    // Argmax over logits
-    const float* logits = joiner_state_->outputs_[0]->GetTensorData<float>();
-    auto logits_shape = joiner_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
+    // Argmax over logits — joiner output may be on EP device. Copy to CPU.
+    std::unique_ptr<OrtValue> joiner_out0_owner{joiner_state_->outputs_[0]};
+    joiner_state_->outputs_[0] = nullptr;
+    auto logits_shape = joiner_out0_owner->GetTensorTypeAndShapeInfo()->GetShape();
+    auto logits_type = joiner_out0_owner->GetTensorTypeAndShapeInfo()->GetElementType();
+    auto logits_cpu = OrtValue::CreateTensor(cpu_alloc_step, logits_shape, logits_type);
+    ByteWrapTensor(cpu_dev, *logits_cpu)
+        .CopyFrom(ByteWrapTensor(DeviceFor(*joiner_out0_owner), *joiner_out0_owner));
+    const float* logits = logits_cpu->GetTensorData<float>();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
 

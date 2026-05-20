@@ -135,6 +135,13 @@ struct NemotronEncoderSubState : State {
   std::unique_ptr<OrtValue> signal_length_;
   std::unique_ptr<OrtValue> lang_id_tensor_;
 
+  // Pre-allocated cache_*_next outputs on the inference device. ORT writes
+  // here directly so the cache stays on device across chunks (otherwise ORT
+  // places outputs on CPU and subsequent runs trigger a CUDA copy-path bug
+  // inside Transpose).
+  std::unique_ptr<OrtValue> cache_channel_next_;
+  std::unique_ptr<OrtValue> cache_time_next_;
+
   // Whether the encoder model has a "length" input
   bool has_length_input_{};
   // Whether the encoder model has a "lang_id" input (prompt-conditioned multilingual model)
@@ -147,6 +154,8 @@ struct NemotronEncoderSubState : State {
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
   size_t lang_id_input_idx_{};
+  size_t cache_channel_next_output_idx_{};
+  size_t cache_time_next_output_idx_{};
 };
 
 /// Sub-state for the RNNT prediction network (decoder LSTM).
