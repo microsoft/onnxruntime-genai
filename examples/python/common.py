@@ -45,15 +45,18 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         except Exception as e:
             print(f"Failed to register WinML execution providers: {e}")
     elif ep_path:
-        if ep == "NvTensorRtRtx":
-            og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
-        else:
-            og.register_execution_provider_library(ep, ep_path)
+        og.register_execution_provider_library(ep, ep_path)
 
         print(f"Registered {ep} from {ep_path} successfully!")
 
 
-def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
+def get_config(
+    path: str,
+    ep: str,
+    ep_options: dict[str, str] = {},
+    search_options: dict[str, int] = {},
+    ep_path: str = "",
+) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it
 
@@ -62,6 +65,8 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
         ep (str): Name of execution provider to set
         ep_options (dict[str, str]): Map of EP-specific option names and their values
         search_options (dict[str, int]): Map of search-specific option names and their values
+        ep_path (str): Path to an external execution provider library. If set, the
+            registered library is used and providers from the GenAI config are preserved.
     Returns:
         og.Config: ORT GenAI config object with all options set
     """
@@ -69,7 +74,7 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     # - If follow_config, then use the default EP stored inside the GenAI config.
     # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
     config = og.Config(path)
-    if ep != "follow_config":
+    if not ep_path and ep != "follow_config":
         config.clear_providers()
         if ep != "cpu":
             print(f"Setting model to {ep}")
@@ -560,7 +565,6 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
         "cpu",                             # CPU EP
         "cuda",                            # GenAI canonical name for CUDA EP
         "CUDAExecutionProvider",           # CUDA EP
-        "NvTensorRtRtx",                   # GenAI canonical name for Nvidia IHV EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
         "OpenVINOExecutionProvider",       # Intel IHV EP
         "QNNExecutionProvider",            # Qualcomm IHV EP

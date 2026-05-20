@@ -32,7 +32,9 @@ def main(args):
             prompts = [text]
     setattr(args, "batch_size", len(prompts))
     search_config = {"batch_size": args.batch_size, "chunk_size": args.chunk_size, "num_beams": args.num_beams}
-    config = get_config(args.model_path, args.execution_provider, ep_options={}, search_options=search_config)
+    config = get_config(
+        args.model_path, args.execution_provider, ep_options={}, search_options=search_config, ep_path=args.ep_path
+    )
 
     model = og.Model(config)
     if args.verbose:
