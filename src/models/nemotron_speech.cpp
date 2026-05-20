@@ -14,19 +14,12 @@ namespace Generators {
 
 namespace {
 // Picks the DeviceInterface that matches the OrtValue's actual memory location.
-// Required because ORT may place outputs on CPU even when the EP is CUDA;
-// wrapping a CPU tensor with a CUDA DeviceInterface causes a sticky
-// cudaErrorInvalidValue at the next CUDA kernel launch.
+// Required because ORT may place outputs on CPU even when the EP is CUDA
+// (e.g. graph contains CPU-only ops); wrapping a CPU tensor with the CUDA
+// DeviceInterface causes a sticky cudaErrorInvalidValue at the next kernel.
 DeviceInterface& DeviceFor(const OrtValue& v) {
-  auto& mem = v.GetTensorMemoryInfo();
-  switch (mem.GetDeviceType()) {
-    case OrtMemoryInfoDeviceType_CPU:
-      return *GetDeviceInterface(DeviceType::CPU);
-    case OrtMemoryInfoDeviceType_GPU:
-      return *GetDeviceInterface(DeviceType::CUDA);
-    default:
-      return *GetDeviceInterface(DeviceType::CPU);
-  }
+  const bool on_gpu = v.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU;
+  return *GetDeviceInterface(on_gpu ? DeviceType::CUDA : DeviceType::CPU);
 }
 }  // namespace
 
