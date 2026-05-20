@@ -14,10 +14,13 @@ namespace Generators {
 
 namespace {
 // Picks the DeviceInterface that matches the OrtValue's actual memory location.
-// Required because ORT may place outputs on CPU even when the EP is CUDA.
-DeviceInterface& DeviceFor(const OrtValue& v) {
-  const bool on_gpu = v.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU;
-  return *GetDeviceInterface(on_gpu ? DeviceType::CUDA : DeviceType::CPU);
+// Required because ORT may place outputs on CPU even when the EP is on a device
+// (e.g. CUDA, DML, QNN). For non-CPU placements we fall back to the model's
+// own input device interface rather than hardcoding a specific EP, so this
+// works across any backend the model was built with.
+DeviceInterface& DeviceFor(const OrtValue& v, DeviceInterface& model_device) {
+  const bool on_cpu = v.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  return on_cpu ? *GetDeviceInterface(DeviceType::CPU) : model_device;
 }
 }  // namespace
 
@@ -471,7 +474,7 @@ void NemotronSpeechState::RunEncoder() {
   auto encoded_len_cpu = OrtValue::CreateTensor(cpu_alloc, len_shape,
                                                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   ByteWrapTensor(cpu_dev, *encoded_len_cpu)
-      .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner), *encoded_len_owner));
+      .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner, *model_.p_device_inputs_), *encoded_len_owner));
   encoded_len_ = *encoded_len_cpu->GetTensorData<int64_t>();
 
   encoder_state_->cache_.cache_last_channel.reset(encoder_state_->outputs_[2]);
@@ -507,7 +510,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
   // encoded_output_'s actual device varies (ORT may place it on CPU even with
   // CUDA EP). Pick the matching DeviceInterface so CopyFrom uses the right
   // memcpy direction.
-  auto enc_span = ByteWrapTensor(DeviceFor(*encoded_output_), *encoded_output_);
+  auto enc_span = ByteWrapTensor(DeviceFor(*encoded_output_, *model_.p_device_inputs_), *encoded_output_);
   auto frame_span = ByteWrapTensor(cpu_dev, *encoder_frame_);
 
   DeviceSpan<int32_t> dummy_tokens;
@@ -531,7 +534,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
     auto decoder_frame = OrtValue::CreateTensor(cpu_alloc_step, decoder_frame_shape, dec_out_type);
     ByteWrapTensor(cpu_dev, *decoder_frame)
-        .CopyFrom(ByteWrapTensor(DeviceFor(*pred_out0_owner), *pred_out0_owner));
+        .CopyFrom(ByteWrapTensor(DeviceFor(*pred_out0_owner, *model_.p_device_inputs_), *pred_out0_owner));
 
     // Run joiner
     joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
@@ -544,7 +547,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     auto logits_type = joiner_out0_owner->GetTensorTypeAndShapeInfo()->GetElementType();
     auto logits_cpu = OrtValue::CreateTensor(cpu_alloc_step, logits_shape, logits_type);
     ByteWrapTensor(cpu_dev, *logits_cpu)
-        .CopyFrom(ByteWrapTensor(DeviceFor(*joiner_out0_owner), *joiner_out0_owner));
+        .CopyFrom(ByteWrapTensor(DeviceFor(*joiner_out0_owner, *model_.p_device_inputs_), *joiner_out0_owner));
     const float* logits = logits_cpu->GetTensorData<float>();
     int total_logits = 1;
     for (auto d : logits_shape) total_logits *= static_cast<int>(d);
