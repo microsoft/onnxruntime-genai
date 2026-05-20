@@ -212,8 +212,8 @@ bool CanSelectEp(const std::string& ep) {
   return cache.emplace(ep, can_select).first->second;
 }
 
-#define SKIP_IF_CANNOT_SELECT_EP(ep)          \
-  if (!CanSelectEp(ep)) {                     \
+#define SKIP_IF_CANNOT_SELECT_EP(ep)                                                              \
+  if (!CanSelectEp(ep)) {                                                                         \
     GTEST_SKIP() << ep << " is not available for ORT model-package selection in this test build"; \
   }
 

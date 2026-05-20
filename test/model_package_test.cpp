@@ -211,8 +211,8 @@ std::size_t FindVariantIndex(const ModelPackageContext& ctx, std::size_t cix, st
   throw std::runtime_error("variant not found: " + std::string(variant_name));
 }
 
-#define SKIP_IF_CANNOT_SELECT_EP(ep)          \
-  if (!CanSelectEp(ep)) {                     \
+#define SKIP_IF_CANNOT_SELECT_EP(ep)                                                              \
+  if (!CanSelectEp(ep)) {                                                                         \
     GTEST_SKIP() << ep << " is not available for ORT model-package selection in this test build"; \
   }
 

@@ -28,8 +28,8 @@ namespace Generators {
 
 // One entry from a variant's `metadata.json` `ep_compatibility` list.
 struct EpCompatibilityEntry {
-  std::string ep;                          // e.g. "CUDAExecutionProvider"
-  std::optional<std::string> device;       // optional discriminator (OpenVINO "GPU" / "NPU")
+  std::string ep;                                   // e.g. "CUDAExecutionProvider"
+  std::optional<std::string> device;                // optional discriminator (OpenVINO "GPU" / "NPU")
   std::optional<std::string> compatibility_string;  // EP-owned opaque constraint string (sm_80, soc_69, ...)
 };
 
