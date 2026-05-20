@@ -37,13 +37,13 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
                               /*stereo_to_mono=*/1,
                               decoded.ToBeAssigned()));
 
-  OrtxTensor* pcm_tensor = nullptr;
-  CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, &pcm_tensor));
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
+  CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
 
   const float* pcm_data{};
   const int64_t* pcm_shape{};
   size_t pcm_dims = 0;
-  CheckResult(OrtxGetTensorData(pcm_tensor, reinterpret_cast<const void**>(&pcm_data),
+  CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm_data),
                                 &pcm_shape, &pcm_dims));
 
   int64_t num_samples = 0;
