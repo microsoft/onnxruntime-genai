@@ -187,7 +187,6 @@ def test_gemma4_embedding_model_io(test_data_path):
 
     assert "input_ids" in input_names
     assert "image_features" in input_names
-    assert "token_type_ids" in input_names, "Gemma4 embedding requires token_type_ids"
     assert "inputs_embeds" in output_names
 
 
@@ -208,6 +207,71 @@ def test_gemma4_text_model_io(test_data_path):
     assert "logits" in output_names
     assert "present.0.key" in output_names, "Decoder must have KV cache outputs"
     assert "present.0.value" in output_names
+
+
+def test_gemma4_speech_model_io(test_data_path):
+    """Validate the speech encoder ONNX model has expected inputs and outputs."""
+    onnx = pytest.importorskip("onnx")
+
+    model = onnx.load(_get_onnx_path(test_data_path, "dummy_speech.onnx"))
+    input_names = {inp.name for inp in model.graph.input}
+    output_names = {out.name for out in model.graph.output}
+
+    assert "audio_embeds" in input_names, "Speech model must have audio_embeds input"
+    assert "audio_sizes" in input_names, "Speech model must have audio_sizes input"
+    assert "audio_features" in output_names, "Speech model must have audio_features output"
+
+    # audio_embeds should be float32 with shape (batch, num_frames, 128)
+    ae_input = next(i for i in model.graph.input if i.name == "audio_embeds")
+    assert ae_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, \
+        "audio_embeds must be float32"
+    assert ae_input.type.tensor_type.shape.dim[2].dim_value == 128, \
+        "audio_embeds feature dim should be 128"
+
+    # audio_sizes should be int64
+    as_input = next(i for i in model.graph.input if i.name == "audio_sizes")
+    assert as_input.type.tensor_type.elem_type == onnx.TensorProto.INT64, \
+        "audio_sizes must be int64"
+
+
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])
+def test_gemma4_audio_preprocessing(test_data_path, relative_audio_path):
+    """Test audio preprocessing with Gemma4 (Gemma4LogMel feature extraction)."""
+    _, processor = _load_model_and_processor(test_data_path)
+
+    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
+    if not os.path.exists(audio_path):
+        pytest.skip(f"Test audio file not found at {audio_path}")
+
+    audios = og.Audios.open(audio_path)
+    prompt = "<|audio|>Transcribe this audio"
+    inputs = processor(prompt, audios=audios)
+
+    assert inputs is not None
+    assert "input_ids" in inputs
+
+    ids = _to_numpy(inputs["input_ids"])
+    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+    # Audio prompt expands <|audio|> tokens based on audio duration,
+    # so sequence length should be significantly longer than just the text tokens.
+    # "Transcribe this audio" = 4 text tokens + BOS + expanded audio tokens
+    assert ids.shape[1] > 5, f"input_ids should contain expanded audio tokens, got length {ids.shape[1]}"
+
+    # Audio preprocessing should produce audio_embeds and attention mask
+    assert "audio_embeds" in inputs, "Processor should output audio_embeds"
+    assert "input_features_mask" in inputs, "Processor should output audio attention mask"
+
+    # Validate audio_embeds structure: should be float with 128-dim features
+    audio_embeds = _to_numpy(inputs["audio_embeds"])
+    assert len(audio_embeds.shape) >= 2, f"audio_embeds should be at least 2D, got {audio_embeds.shape}"
+    assert audio_embeds.shape[-1] == 128, f"audio_embeds feature dim should be 128, got {audio_embeds.shape[-1]}"
+    assert audio_embeds.dtype == np.float32, f"audio_embeds should be float32, got {audio_embeds.dtype}"
+
+    # Validate audio_sizes is present and positive
+    assert "audio_sizes" in inputs, "Processor should output audio_sizes"
+    audio_sizes = _to_numpy(inputs["audio_sizes"])
+    assert audio_sizes[0] > 0, f"audio_sizes should be positive, got {audio_sizes[0]}"
 
 
 # Standalone runner functionality

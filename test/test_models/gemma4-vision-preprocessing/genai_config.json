@@ -61,6 +61,22 @@
                 "log_id": "onnxruntime-genai",
                 "provider_options": []
             }
+        },
+        "speech": {
+            "filename": "dummy_speech.onnx",
+            "config_filename": "audio_feature_extraction.json",
+            "inputs": {
+                "audio_embeds": "audio_embeds",
+                "attention_mask": "input_features_mask",
+                "audio_sizes": "audio_sizes"
+            },
+            "outputs": {
+                "audio_features": "audio_features"
+            },
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            }
         }
     },
     "search": {
