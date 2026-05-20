@@ -437,13 +437,12 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 
 void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  ResetDone();  // Clear any prior EOS/done state so we can append all user tokens
+  ResetDone();
 
   auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
-    // Stop only when the buffer is physically full (not on EOS-driven done_)
     if (sequences_.GetSequenceLength() >= sequences_.max_length_)
       break;
     for (size_t i = 0; i < batch_size; i++) {
@@ -452,8 +451,8 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     AppendNextTokensToSequences();
   }
 
-  // Preserve done_=true if we have filled the buffer; resetting it would allow
-  // a subsequent GenerateNextToken to bypass the !done_ guard and OOB-write.
+  // Only reset done_ if buffer is not full; unconditional ResetDone() would allow
+  // a subsequent GenerateNextToken to write past the buffer (heap overflow).
   if (sequences_.GetSequenceLength() < sequences_.max_length_)
     ResetDone();
 }
