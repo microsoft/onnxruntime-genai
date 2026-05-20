@@ -1,7 +1,7 @@
 parameters:
 - name: enable_winml
   type: boolean
-- name: enable_win_cpu
+- name: enable_win_x64_cpu
   type: boolean
 - name: enable_win_cuda
   type: boolean
@@ -9,8 +9,11 @@ parameters:
   type: boolean
 - name: enable_win_arm64
   type: boolean
-- name: enable_linux_cpu
+- name: enable_linux_x64_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -65,7 +68,7 @@ stages:
         ort_version: ${{ parameters.ort_winml_version }}
         build_config: ${{ parameters.build_config }}
 
-  - ${{ if eq(parameters.enable_win_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
@@ -77,7 +80,7 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cpu, true)) }}:
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_x64_cpu, true)) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'arm64'
@@ -89,7 +92,7 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.enable_win_dml, true)) }}:
+  - ${{ if and(eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_dml, true)) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
@@ -126,10 +129,22 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'

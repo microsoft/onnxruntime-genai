@@ -553,6 +553,9 @@ class Model:
         return (self.ep, self.io_dtype) in valid_packed_attn_configurations
 
     def make_attention_init(self):
+        self.q_size = self.num_attn_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+
         if self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
@@ -565,8 +568,6 @@ class Model:
             self.attention_attrs["use_packed_matmul"] = (
                 self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
                 and not self.extra_options.get("disable_qkv_fusion", False)
             )
 
@@ -1156,6 +1157,11 @@ class Model:
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
         return output
+
+    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1):
+        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
+        for out, dt, shape in zip(outputs, dtypes, shapes):
+            self.make_value(out, dt, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -2494,13 +2500,13 @@ class Model:
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
         q_reshape_2_inputs = [
             q_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.num_attn_heads * self.head_size}]",
+            f"/model/constants/INT64/[0, -1, {self.q_size}]",
         ]
         self.make_reshape(
             q_reshape_2_name,
             q_reshape_2_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
+            shape=["batch_size", "sequence_length", self.q_size],
         )
 
         # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
@@ -2547,13 +2553,13 @@ class Model:
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
         k_reshape_2_inputs = [
             k_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.num_kv_heads * self.head_size}]",
+            f"/model/constants/INT64/[0, -1, {self.kv_size}]",
         ]
         self.make_reshape(
             k_reshape_2_name,
             k_reshape_2_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.num_kv_heads * self.head_size],
+            shape=["batch_size", "sequence_length", self.kv_size],
         )
 
         # Update q_path and k_path now
@@ -2792,13 +2798,13 @@ class Model:
         reshape_4_name = f"{basename}/Reshape_4"
         reshape_4_inputs = [
             f"{transpose_2_name}/output_0",
-            f"/model/constants/INT64/[0, 0, {self.num_attn_heads * self.head_size}]",
+            f"/model/constants/INT64/[0, 0, {self.q_size}]",
         ]
         self.make_reshape(
             reshape_4_name,
             reshape_4_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "total_sequence_length", self.num_attn_heads * self.head_size],
+            shape=["batch_size", "sequence_length", self.q_size],
         )
 
         input_to_attention = f"{reshape_4_name}/output_0"
@@ -3043,6 +3049,42 @@ class Model:
         #                O_MatMul
         #                    |
         #                  O_Add
+        #
+        # GroupQueryAttention with packed QKV (no Q/K norm) example:
+        #
+        #                  root_input
+        #                       |
+        #                  QKV_MatMul                     seqlens_k  total_seq_len  past_key  past_value
+        #                       |                            |            |           |          |
+        #                  QKV_Add (packed)                  +------------+-----------+----------+
+        #                       |                                          |
+        #                  Q_Rotary / K_Rotary (in-attn or external)       |
+        #                       |                                          |
+        #                  GroupQueryAttention----------------------------+
+        #                       |
+        #                   O_MatMul
+        #                       |
+        #                     O_Add
+        #
+        # GroupQueryAttention with packed QKV + Q/K norm example:
+        #
+        #                  root_input
+        #                       |
+        #                  QKV_MatMul
+        #                       |
+        #                  QKV_Add (packed, only if bias exists)
+        #                       |
+        #                     Split  ->  Q, K, V
+        #                  /     |     \
+        #             Q_Norm   K_Norm   V             seqlens_k  total_seq_len  past_key  past_value
+        #                |       |      |                 |            |           |          |
+        #            Q_Rotary  K_Rotary V                 +------------+-----------+----------+
+        #                  \     |     /                                |
+        #                  GroupQueryAttention----------------------------+
+        #                       |
+        #                   O_MatMul
+        #                       |
+        #                     O_Add
         self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
         self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -3134,6 +3176,36 @@ class Model:
                     v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
                     self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                     self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
+
+        # When q_norm/k_norm are present, the packed-QKV path inside GQA cannot be used
+        # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
+        # Placed after the (optional) packed Add so packed bias fusion is preserved.
+        if (
+            self.attention_attrs["use_packed_matmul"]
+            and qkv_dtype_equal
+            and self.attention_attrs["q_norm"]
+            and self.attention_attrs["k_norm"]
+        ):
+            split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
+            split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
+            self.make_split(
+                split_name,
+                inputs=[
+                    self.attention_attrs["q_path"],
+                    f"/model/constants/INT64/[{self.q_size}, {self.kv_size}, {self.kv_size}]",
+                ],
+                outputs=split_outputs,
+                dtypes=[self.io_dtype] * 3,
+                shapes=[
+                    ["batch_size", "sequence_length", self.q_size],
+                    ["batch_size", "sequence_length", self.kv_size],
+                    ["batch_size", "sequence_length", self.kv_size],
+                ],
+                axis=-1,
+            )
+            self.attention_attrs["q_path"] = split_outputs[0]
+            self.attention_attrs["k_path"] = split_outputs[1]
+            self.attention_attrs["v_path"] = split_outputs[2]
 
     def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
         # Make Q/K SimplifiedLayerNorm nodes
@@ -3241,8 +3313,8 @@ class Model:
     def make_attention_unpacked_lora(self, layer_id, attention, qkv_linear, root_input, **kwargs):
         from peft.tuners.lora.layer import LoraLayer
 
-        q_size = self.num_attn_heads * self.head_size
-        kv_size = self.num_kv_heads * self.head_size
+        q_size = self.q_size
+        kv_size = self.kv_size
 
         # Create Q/K/V base layers
         q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
@@ -3305,8 +3377,8 @@ class Model:
         attention.v_proj.scaling = qkv_linear.scaling
 
     def make_attention_unpacked_regular(self, layer_id, attention, qkv_linear, root_input, **kwargs):
-        q_size = self.num_attn_heads * self.head_size
-        kv_size = self.num_kv_heads * self.head_size
+        q_size = self.q_size
+        kv_size = self.kv_size
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
         attention.q_proj.weight = torch.nn.Parameter(qkv_linear.weight[:q_size, :], requires_grad=False)

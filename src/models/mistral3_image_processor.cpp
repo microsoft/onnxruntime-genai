@@ -250,13 +250,16 @@ std::unique_ptr<NamedTensors> Mistral3ImageProcessor::Process(
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(),
                                   result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
   // Tensor 1: image_sizes[N, 2] from PixtralImageSizes (post-resize, pre-padding).
   // Models must be exported with PixtralImageSizes in processor_config.json.
-  OrtxTensor* image_sizes = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &image_sizes));
+  ort_extensions::OrtxObjectPtr<OrtxTensor> image_sizes_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 1, image_sizes_owner.ToBeAssigned()));
+  OrtxTensor* image_sizes = image_sizes_owner.get();
 
   auto [input_ids, num_img_tokens] =
       ProcessPixtralPrompt(tokenizer, prompt, pixel_values, image_sizes, patch_size_,
