@@ -5,84 +5,115 @@
 Unit tests for Gemma4 multimodal model.
 Tests cover model loading, text-only processing, and image understanding.
 
-Usage:
-  pytest test_gemma4_models.py --test_models=test/test_models
+This file can be used in two ways:
+1. As a pytest module: pytest test_gemma4_models.py --test_models=/path/to/test_models
+2. As a standalone runner: python test_gemma4_models.py --cwd test/python --test_models test/test_models
 """
 
+import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 
+import numpy as np
 import onnxruntime_genai as og
 import pytest
+from _test_utils import run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("gemma4-tests")
 
-GEMMA4_MODEL_PATH = Path("gemma4-vision-preprocessing")
+GEMMA4_MODEL_NAME = "gemma4-vision-preprocessing"
 
 
-@pytest.fixture(autouse=True)
-def _skip_if_no_gemma4(test_data_path):
-    model_path = Path(test_data_path) / GEMMA4_MODEL_PATH
-    if not model_path.exists():
+def _get_gemma4_model_path(test_data_path):
+    """Return the Gemma4 model path, skipping if it doesn't exist."""
+    model_path = os.path.join(test_data_path, GEMMA4_MODEL_NAME)
+    if not os.path.exists(model_path):
         pytest.skip(f"Gemma4 test model not found at {model_path}")
+    return model_path
+
+
+def _get_onnx_path(test_data_path, filename):
+    """Return a path to a dummy ONNX file under the Gemma4 model dir, skipping if missing."""
+    path = os.path.join(test_data_path, GEMMA4_MODEL_NAME, filename)
+    if not os.path.exists(path):
+        pytest.skip(f"Gemma4 ONNX file not found at {path}")
+    return path
+
+
+def _load_model_and_processor(test_data_path):
+    """Load the Gemma4 model and create its multimodal processor."""
+    model_path = _get_gemma4_model_path(test_data_path)
+    model = og.Model(model_path)
+    return model, model.create_multimodal_processor()
+
+
+def _to_numpy(tensor):
+    """Convert an onnxruntime-genai tensor to a numpy array."""
+    if hasattr(tensor, "as_numpy"):
+        return tensor.as_numpy()
+    if hasattr(tensor, "numpy"):
+        return tensor.numpy()
+    return np.array(tensor)
 
 
 def test_gemma4_model_load(test_data_path):
     """Test that the Gemma4 model loads successfully."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
+    model_path = _get_gemma4_model_path(test_data_path)
     model = og.Model(model_path)
     assert model is not None
 
 
 def test_gemma4_text_only(test_data_path):
     """Test text-only processing (no images)."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
-    model = og.Model(model_path)
+    _, processor = _load_model_and_processor(test_data_path)
 
-    processor = model.create_multimodal_processor()
-    prompt = "What is the capital of France?"
-    inputs = processor(prompt, images=None)
+    inputs = processor("What is the capital of France?", images=None)
 
     assert inputs is not None
     assert "input_ids" in inputs
+
+    ids = _to_numpy(inputs["input_ids"])
+    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+
+    # Expected: BOS (2) + "What is the capital of France?"
+    expected_ids = [2, 3689, 563, 506, 5279, 529, 7001, 236881]
+    assert list(ids[0]) == expected_ids, f"input_ids mismatch: got {list(ids[0])}, expected {expected_ids}"
 
 
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_gemma4_vision_basic(test_data_path, relative_image_path):
     """Test basic image processing with Gemma4."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
-    model = og.Model(model_path)
-
-    processor = model.create_multimodal_processor()
+    _, processor = _load_model_and_processor(test_data_path)
 
     image_path = os.fspath(Path(test_data_path) / relative_image_path)
     images = og.Images.open(image_path)
 
-    prompt = "<start_of_image>Describe this image"
-    inputs = processor(prompt, images=images)
+    inputs = processor("<|image|>Describe this image", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
     assert "input_ids" in inputs
 
+    ids = _to_numpy(inputs["input_ids"])
+    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+    assert ids.shape[1] > 0, "input_ids should not be empty"
+
 
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "landscape.jpg"])
 def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
     """Test loading images from bytes for Gemma4."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
-    model = og.Model(model_path)
-
-    processor = model.create_multimodal_processor()
+    _, processor = _load_model_and_processor(test_data_path)
 
     image_path = os.fspath(Path(test_data_path) / relative_image_path)
     with open(image_path, "rb") as f:
-        image_bytes = f.read()
-    images = og.Images.open_bytes(image_bytes)
+        images = og.Images.open_bytes(f.read())
 
-    prompt = "<start_of_image>What is shown in this image?"
-    inputs = processor(prompt, images=images)
+    inputs = processor("<|image|>What is shown in this image?", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
@@ -94,86 +125,63 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
 )
 def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
     """Test processing multiple images with Gemma4."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
-    model = og.Model(model_path)
+    _, processor = _load_model_and_processor(test_data_path)
 
-    processor = model.create_multimodal_processor()
-
-    image_paths = [
-        os.fspath(Path(test_data_path) / p) for p in relative_image_paths
-    ]
+    image_paths = [os.fspath(Path(test_data_path) / p) for p in relative_image_paths]
     images = og.Images.open(*image_paths)
 
-    prompt = "<start_of_image><start_of_image>Compare these images"
-    inputs = processor(prompt, images=images)
+    inputs = processor("<|image|><|image|>Compare these images", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
     assert "input_ids" in inputs
 
+    ids = _to_numpy(inputs["input_ids"])
+    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+    assert ids.shape[1] > 0, "input_ids should not be empty"
 
-def test_gemma4_processor_creates_token_type_ids(test_data_path):
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_gemma4_processor_creates_token_type_ids(test_data_path, relative_image_path):
     """Test that Gemma4 processor creates token_type_ids for image prompts."""
-    model_path = os.fspath(Path(test_data_path) / GEMMA4_MODEL_PATH)
-    model = og.Model(model_path)
+    _, processor = _load_model_and_processor(test_data_path)
 
-    processor = model.create_multimodal_processor()
-
-    image_path = os.fspath(Path(test_data_path) / "images" / "australia.jpg")
+    image_path = os.fspath(Path(test_data_path) / relative_image_path)
     images = og.Images.open(image_path)
 
-    prompt = "<start_of_image>Describe this image"
-    inputs = processor(prompt, images=images)
+    inputs = processor("<|image|>Describe this image", images=images)
 
     assert inputs is not None
     assert "token_type_ids" in inputs
 
 
 def test_gemma4_vision_model_io(test_data_path):
-    """Validate the vision ONNX model has expected inputs and outputs.
-
-    Gemma4 vision model requires:
-    - pixel_values (float32, dynamic num_patches)
-    - pixel_position_ids (int64, dynamic num_patches)
-    - image_features output (float32, dynamic num_soft_tokens)
-    """
+    """Validate the vision ONNX model has expected inputs and outputs."""
     onnx = pytest.importorskip("onnx")
 
-    vision_path = os.path.join(
-        test_data_path, "gemma4-vision-preprocessing", "dummy_vision.onnx"
-    )
-    model = onnx.load(vision_path)
-
+    model = onnx.load(_get_onnx_path(test_data_path, "dummy_vision.onnx"))
     input_names = {inp.name for inp in model.graph.input}
     output_names = {out.name for out in model.graph.output}
 
-    assert "pixel_values" in input_names, "Vision model must have pixel_values input"
-    assert "pixel_position_ids" in input_names, "Vision model must have pixel_position_ids input"
-    assert "image_features" in output_names, "Vision model must have image_features output"
+    assert "pixel_values" in input_names
+    assert "pixel_position_ids" in input_names
+    assert "image_features" in output_names
 
-    # pixel_values should be float32
     pv_input = next(i for i in model.graph.input if i.name == "pixel_values")
     assert pv_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, \
         "pixel_values must be float32"
 
-    # pixel_values dim-0 should be dynamic (num_patches)
     dim0 = pv_input.type.tensor_type.shape.dim[0]
     assert dim0.dim_param != "", \
         f"pixel_values dim-0 should be dynamic, got static dim_value={dim0.dim_value}"
 
 
 def test_gemma4_embedding_model_io(test_data_path):
-    """Validate the embedding ONNX model has expected inputs and outputs.
-
-    Gemma4 embedding model requires input_ids, image_features, and token_type_ids.
-    """
+    """Validate the embedding ONNX model has expected inputs and outputs."""
     onnx = pytest.importorskip("onnx")
 
-    emb_path = os.path.join(
-        test_data_path, "gemma4-vision-preprocessing", "dummy_embedding.onnx"
-    )
-    model = onnx.load(emb_path)
-
+    model = onnx.load(_get_onnx_path(test_data_path, "dummy_embedding.onnx"))
     input_names = {inp.name for inp in model.graph.input}
     output_names = {out.name for out in model.graph.output}
 
@@ -184,18 +192,10 @@ def test_gemma4_embedding_model_io(test_data_path):
 
 
 def test_gemma4_text_model_io(test_data_path):
-    """Validate the text/decoder ONNX model has expected inputs and outputs.
-
-    Gemma4 decoder uses inputs_embeds (not input_ids), attention_mask,
-    position_ids, and KV cache inputs/outputs.
-    """
+    """Validate the text/decoder ONNX model has expected inputs and outputs."""
     onnx = pytest.importorskip("onnx")
 
-    text_path = os.path.join(
-        test_data_path, "gemma4-vision-preprocessing", "dummy_text.onnx"
-    )
-    model = onnx.load(text_path)
-
+    model = onnx.load(_get_onnx_path(test_data_path, "dummy_text.onnx"))
     input_names = {inp.name for inp in model.graph.input}
     output_names = {out.name for out in model.graph.output}
 
@@ -208,3 +208,58 @@ def test_gemma4_text_model_io(test_data_path):
     assert "logits" in output_names
     assert "present.0.key" in output_names, "Decoder must have KV cache outputs"
     assert "present.0.value" in output_names
+
+
+# Standalone runner functionality
+def run_gemma4_vision_tests(
+    cwd: str | bytes | os.PathLike,
+    log: logging.Logger,
+    test_models: str | bytes | os.PathLike,
+):
+    """Run the vision model tests using pytest."""
+    log.debug("Running: Gemma4 Vision Model Tests")
+
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-sv",
+        "test_gemma4_models.py",
+        "--test_models",
+        test_models,
+    ]
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
+def parse_arguments():
+    """Parse command line arguments for standalone execution."""
+    parser = argparse.ArgumentParser(description="Test runner for Gemma4 vision models")
+    parser.add_argument(
+        "--cwd",
+        help="Path to the current working directory",
+        default=Path(__file__).parent.resolve().absolute(),
+    )
+    parser.add_argument(
+        "--test_models",
+        help="Path to the test_models directory",
+        default=Path(__file__).parent.parent.resolve().absolute() / "test_models",
+    )
+    return parser.parse_args()
+
+
+def main():
+    """Main entry point for standalone execution."""
+    args = parse_arguments()
+
+    log.info("Running Gemma4 vision model tests")
+    log.info(f"Test models path: {args.test_models}")
+    log.info(f"Working directory: {args.cwd}")
+
+    run_gemma4_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+
+    log.info("All tests completed successfully!")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
