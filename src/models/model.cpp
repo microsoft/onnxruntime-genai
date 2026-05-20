@@ -963,9 +963,9 @@ bool Model::IsPruned() const {
   return logits_shape[1] == 1;
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
-                                   const RuntimeSettings* settings /*= nullptr*/,
-                                   const char* ep /*= nullptr*/) {
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const RuntimeSettings* settings /*= nullptr*/,
+                                     const char* ep /*= nullptr*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
@@ -1091,15 +1091,20 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     }
 
     // Create the final Config from the merged JSON
-    auto config = Config::FromPackage(configs_path, merged_json, std::move(package_state));
-    return CreateModel(ort_env, std::move(config));
+    return Config::FromPackage(configs_path, merged_json, std::move(package_state));
 #else
     throw std::runtime_error("This build of onnxruntime-genai does not support model packages; rebuild with ONNX Runtime API version 27 or newer");
 #endif
   }
 
-  // Flat directory path (unchanged, ep parameter is ignored for flat dirs)
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  // Flat directory path (ep parameter is ignored for flat dirs)
+  return std::make_unique<Config>(fs::path(config_path), config_overlay);
+}
+
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
+                                   const RuntimeSettings* settings /*= nullptr*/,
+                                   const char* ep /*= nullptr*/) {
+  auto config = CreateConfig(ort_env, config_path, settings, ep);
   return CreateModel(ort_env, std::move(config));
 }
 

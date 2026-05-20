@@ -239,6 +239,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
 /**
+ * \brief Creates an OgaConfig from the given configuration directory or package with an explicit execution provider.
+ *        For model packages, the EP is used for component/variant selection and config overlay merging.
+ *        For flat directories, the EP is ignored and this behaves like OgaCreateConfig.
+ * \param[in] config_path The path to the model configuration directory or package. The path is expected to be encoded in UTF-8.
+ * \param[in] ep The execution provider name (e.g. "cuda", "CUDAExecutionProvider"). Can be NULL for auto-detection.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message if the creation of the config failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigWithEp(const char* config_path, const char* ep, OgaConfig** out);
+
+/**
  * \brief Clear the list of providers in the given config
  * \param[in] config The config to clear the providers from.
  * \return OgaResult containing the error message if the clearing of the providers failed.
@@ -379,6 +390,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char*
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithEp(const char* config_path, const char* ep, OgaModel** out);
+
+/**
+ * \brief Creates a model from the given configuration directory with runtime settings and an explicit execution provider.
+ *        For model packages, the EP is used for component/variant selection. For flat directories, the EP is ignored.
+ * \param[in] config_path The path to the model configuration directory or package. The path is expected to be encoded in UTF-8.
+ * \param[in] settings The runtime settings to use for the model. Can be NULL.
+ * \param[in] ep The execution provider name (e.g. "cuda", "CUDAExecutionProvider"). Can be NULL for auto-detection.
+ * \param[out] out The created model.
+ * \return OgaResult containing the error message if the model creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettingsAndEp(const char* config_path, const OgaRuntimeSettings* settings, const char* ep, OgaModel** out);
 
 /**
  * \brief Returns the type of the model.

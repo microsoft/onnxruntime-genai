@@ -232,8 +232,13 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
 }
 
 OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out) {
+  return OgaCreateConfigWithEp(config_path, nullptr, out);
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigWithEp(const char* config_path, const char* ep, OgaConfig** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaConfig>(std::make_unique<Generators::Config>(fs::path(config_path), std::string_view{}));
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path, nullptr, ep);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
   return nullptr;
   OGA_CATCH
 }
@@ -350,8 +355,12 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
 }
 
 OgaResult* OGA_API_CALL OgaCreateModelWithEp(const char* config_path, const char* ep, OgaModel** out) {
+  return OgaCreateModelWithRuntimeSettingsAndEp(config_path, nullptr, ep, out);
+}
+
+OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettingsAndEp(const char* config_path, const OgaRuntimeSettings* settings, const char* ep, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, nullptr, ep);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings, ep);
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
