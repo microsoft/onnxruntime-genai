@@ -171,7 +171,7 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
 
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
