@@ -7,7 +7,7 @@ parameters:
   displayName: Specific Artifact's BuildId
   type: string
   default: '0'
-- name: enable_win_cpu
+- name: enable_win_x64_cpu
   type: boolean
 - name: enable_win_cuda
   type: boolean
@@ -15,8 +15,11 @@ parameters:
   type: boolean
 - name: enable_win_arm64_cpu
   type: boolean
-- name: enable_linux_cpu
+- name: enable_linux_x64_cpu
   type: boolean
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
 - name: enable_linux_cuda
   type: boolean
 - name: enable_macos_cpu
@@ -29,7 +32,7 @@ parameters:
 stages:
 - stage: python_validation
   jobs:
-  - ${{ if eq(parameters.enable_win_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
@@ -78,10 +81,19 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/py-validation-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
