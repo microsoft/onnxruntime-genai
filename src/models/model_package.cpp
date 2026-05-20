@@ -396,20 +396,29 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
   }
 
   // Parse consumer_metadata as a JSON object and extract the "genai_config_overlay" value.
+  // Malformed metadata is a producer error: throw rather than silently ignoring.
+  size_t pos = 0;
+  JsonValue root;
   try {
-    size_t pos = 0;
-    JsonValue root = ParseJsonValue(consumer_metadata, pos);
-    if (!root.is_object()) {
-      return {};
-    }
+    root = ParseJsonValue(consumer_metadata, pos);
+  } catch (const std::exception& e) {
+    throw std::runtime_error(MakeString("Component '", component_name,
+                                        "': consumer_metadata is not valid JSON: ", e.what()));
+  }
 
-    for (const auto& [key, value] : root.obj_members) {
-      if (key == "genai_config_overlay") {
-        return SerializeJson(value);
+  if (!root.is_object()) {
+    throw std::runtime_error(MakeString("Component '", component_name,
+                                        "': consumer_metadata must be a JSON object"));
+  }
+
+  for (const auto& [key, value] : root.obj_members) {
+    if (key == "genai_config_overlay") {
+      if (!value.is_object()) {
+        throw std::runtime_error(MakeString("Component '", component_name,
+                                            "': genai_config_overlay must be a JSON object"));
       }
+      return SerializeJson(value);
     }
-  } catch (const std::exception&) {
-    // If consumer_metadata is not valid JSON, return empty.
   }
 
   return {};

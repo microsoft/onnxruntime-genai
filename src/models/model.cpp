@@ -922,10 +922,12 @@ std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
   // Validate file index
   size_t file_count = cix->GetSelectedVariantFileCount();
   if (file_index >= file_count) {
-    throw std::runtime_error("File index " + std::to_string(file_index) +
-                             " out of range for component '" + component_name +
-                             "' (variant has " + std::to_string(file_count) + " files)");
+    throw std::runtime_error(MakeString("File index ", file_index,
+                                        " out of range for component '", component_name,
+                                        "' (variant has ", file_count, " files)"));
   }
+
+  auto file_path = cix->GetSelectedVariantFilePath(file_index);
 
   // Build effective session options: variant defaults (layer 1) + genai_config (layer 2)
   Config::SessionOptions effective_so;
@@ -941,7 +943,6 @@ std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
   auto so = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(effective_so, *so, false, disable_graph_capture, component_name);
 
-  auto file_path = cix->GetSelectedVariantFilePath(file_index);
   return OrtSession::Create(ort_env, fs::path(file_path).c_str(), so.get());
 }
 #endif
@@ -1072,7 +1073,12 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
 
     std::string merged_json = base_json;
     for (const auto& comp_name : components) {
-      package_state->SelectComponent(comp_name);
+      try {
+        package_state->SelectComponent(comp_name);
+      } catch (const std::exception& e) {
+        throw std::runtime_error(MakeString("Failed to select component '", comp_name,
+                                            "' referenced in genai_config.json: ", e.what()));
+      }
       std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
       if (!overlay.empty()) {
         merged_json = JsonMergePatch(merged_json, overlay);
