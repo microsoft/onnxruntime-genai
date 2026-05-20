@@ -213,12 +213,12 @@ void RunBenchmark(const benchmark::Options& opts) {
     std::random_device rd;
     std::mt19937 rng(rd());
     std::uniform_int_distribution<int32_t> dist(0, 99);
-    std::vector<int32_t> row(num_prompt_tokens);
     for (size_t i = 0; i < opts.batch_size; ++i) {
-      for (size_t j = 0; j < num_prompt_tokens; ++j) {
-        row[j] = dist(rng);
-      }
-      prompt_sequences->Append(row.data(), row.size());
+      std::vector<int32_t> random_tokens(num_prompt_tokens);
+      std::generate(random_tokens.begin(), random_tokens.end(), [&]() {
+        return dist(rng);
+      });
+      prompt_sequences->Append(random_tokens.data(), random_tokens.size());
     }
   } else {
     for (size_t i = 0; i < opts.batch_size; ++i) {
