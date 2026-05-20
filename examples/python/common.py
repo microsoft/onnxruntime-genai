@@ -45,7 +45,10 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         except Exception as e:
             print(f"Failed to register WinML execution providers: {e}")
     elif ep_path:
-        og.register_execution_provider_library(ep, ep_path)
+        if ep == "NvTensorRtRtx":
+            og.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
+        else:
+            og.register_execution_provider_library(ep, ep_path)
 
         print(f"Registered {ep} from {ep_path} successfully!")
 
@@ -557,6 +560,7 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
         "cpu",                             # CPU EP
         "cuda",                            # GenAI canonical name for CUDA EP
         "CUDAExecutionProvider",           # CUDA EP
+        "NvTensorRtRtx",                   # GenAI canonical name for Nvidia IHV EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
         "OpenVINOExecutionProvider",       # Intel IHV EP
         "QNNExecutionProvider",            # Qualcomm IHV EP
