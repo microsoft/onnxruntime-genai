@@ -20,6 +20,9 @@ struct Options {
   size_t num_iterations{5};
   size_t num_warmup_iterations{1};
   int64_t max_length{0};
+  bool prompt_length_specified{};
+  bool prompt_specified{};
+  bool prompt_file_specified{};
   bool verbose{};
   bool reuse_generator{};
   bool use_random_tokens{};
