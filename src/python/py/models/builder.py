@@ -46,8 +46,8 @@ from builders import (
     Qwen25VLTextModel,
     Qwen35TextModel,
     QwenModel,
-    VideoChatFlashQwenModel,
     SmolLM3Model,
+    VideoChatFlashQwenModel,
     WhisperModel,
 )
 from transformers import (
@@ -333,9 +333,9 @@ def create_model(
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        if "exclude_embeds" not in extra_options:
-            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-            extra_options["exclude_embeds"] = True
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        extra_options["hf_remote"] = False
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
