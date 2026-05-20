@@ -8,7 +8,6 @@
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include <algorithm>
-#include <mutex>
 
 namespace Generators {
 
@@ -156,7 +155,7 @@ namespace {
 //   - reject beam search (num_beams != 1),
 //   - force past_present_share_buffer on,
 //   - log info on the detected size,
-//   - warn once per process if search.max_length exceeds the detected size.
+//   - warn if search.max_length exceeds the detected size.
 // Returns the detected static seq_len, or 0 if the model has symbolic
 // kv-cache dims or per-layer static sizes disagree.
 //
@@ -210,16 +209,13 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                     std::to_string(common_seq_len) +
                     "; allocating shared past/present buffer to that size.");
   }
-  if (search.max_length > static_cast<int>(common_seq_len)) {
-    // De-duplicate across repeated Generator constructions (e.g. benchmark loops).
-    static std::once_flag warned_once;
-    std::call_once(warned_once, [&] {
-      Log("warning", "Model has fixed kv-cache seq_len=" +
-                         std::to_string(common_seq_len) +
-                         " but search.max_length=" +
-                         std::to_string(search.max_length) +
-                         "; cache is sized to the model's limit, so generation beyond it will fail.");
-    });
+  if (search.max_length > static_cast<int>(common_seq_len) &&
+      g_log.enabled && g_log.warning) {
+    Log("warning", "Model has fixed kv-cache seq_len=" +
+                       std::to_string(common_seq_len) +
+                       " but search.max_length=" +
+                       std::to_string(search.max_length) +
+                       "; cache is sized to the model's limit, so generation beyond it will fail.");
   }
   return common_seq_len;
 }
