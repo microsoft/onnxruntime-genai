@@ -4,6 +4,16 @@
 #pragma once
 
 #include <memory>
+#include "onnxruntime_c_api.h"
+
+// Must match the definition in models/model_package.h.
+#if !defined(ORT_HAS_MODEL_PACKAGE)
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 27
+#define ORT_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_HAS_MODEL_PACKAGE 0
+#endif
+#endif
 
 namespace Generators {
 
@@ -18,9 +28,11 @@ struct Config {
   // config_path: the configs/ directory inside the package
   // merged_json: the fully merged genai_config JSON string (base + overlays)
   // package_state: the opened and selected package state
+#if ORT_HAS_MODEL_PACKAGE
   static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
                                               std::string_view merged_json,
                                               std::shared_ptr<ModelPackageState> package_state);
+#endif
 
   struct Defaults {
     // Decoder names

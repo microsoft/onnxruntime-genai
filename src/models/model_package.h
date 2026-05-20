@@ -8,11 +8,14 @@
 #include <unordered_set>
 #include <vector>
 #include "../filesystem.h"
+#include "onnxruntime_c_api.h"
 
+#if !defined(ORT_HAS_MODEL_PACKAGE)
 #if defined(ORT_API_VERSION) && ORT_API_VERSION >= 27
 #define ORT_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_HAS_MODEL_PACKAGE 0
+#endif
 #endif
 
 struct OrtEnv;
@@ -32,8 +35,10 @@ bool IsModelPackage(const fs::path& path);
 
 #if ORT_HAS_MODEL_PACKAGE
 /// Given a model package root, intersect per-component EP sets and return the default EP.
+/// If component_names is empty, all components in the package are considered.
 /// Throws if ambiguous (>1 EP in intersection) or empty intersection.
-std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx);
+std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx,
+                                  const std::vector<std::string>& component_names = {});
 
 /// Holds the model package state for a single model load.
 /// Owns the package context, options, and per-component contexts.

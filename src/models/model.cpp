@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include "../generators.h"
 #include "../search.h"
@@ -820,41 +821,43 @@ Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
 
   Config::SessionOptions so;
 
-  // Layer 1: Parse variant per-file session options by building a JSON object from
-  // the flat KV pairs and running it through the standard SessionOptions parser.
+  // Layer 1: Apply variant per-file session options directly to the SessionOptions struct.
+  // Maps known typed keys to their dedicated fields; everything else goes to config_entries.
   {
     const char* const* so_keys = nullptr;
     const char* const* so_values = nullptr;
     size_t so_count = 0;
     cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
 
-    if (so_count > 0) {
-      // Build a JSON object: {"key1": "val1", "key2": "val2", ...}
-      // Numeric/bool values are stored as strings in variant.json, but the parser
-      // expects JSON types. Detect numeric and bool values to emit them unquoted.
-      std::ostringstream json;
-      json << "{";
-      for (size_t i = 0; i < so_count; ++i) {
-        if (i > 0) json << ",";
-        json << "\"" << so_keys[i] << "\":";
-        std::string val(so_values[i]);
-        // Detect booleans and integers to emit as native JSON types
-        if (val == "true" || val == "false") {
-          json << val;
-        } else {
-          bool is_number = !val.empty() && (val[0] == '-' || std::isdigit(val[0]));
-          if (is_number) {
-            for (size_t c = 1; c < val.size() && is_number; ++c)
-              is_number = std::isdigit(val[c]);
-          }
-          if (is_number)
-            json << val;
-          else
-            json << "\"" << val << "\"";
-        }
+    for (size_t i = 0; i < so_count; ++i) {
+      std::string_view key(so_keys[i]);
+      std::string_view val(so_values[i]);
+
+      if (key == "intra_op_num_threads") {
+        so.intra_op_num_threads = std::stoi(std::string(val));
+      } else if (key == "inter_op_num_threads") {
+        so.inter_op_num_threads = std::stoi(std::string(val));
+      } else if (key == "log_severity_level") {
+        so.log_severity_level = std::stoi(std::string(val));
+      } else if (key == "log_verbosity_level") {
+        so.log_verbosity_level = std::stoi(std::string(val));
+      } else if (key == "enable_cpu_mem_arena") {
+        so.enable_cpu_mem_arena = (val == "true" || val == "1");
+      } else if (key == "enable_mem_pattern") {
+        so.enable_mem_pattern = (val == "true" || val == "1");
+      } else if (key == "log_id") {
+        so.log_id = std::string(val);
+      } else if (key == "enable_profiling") {
+        so.enable_profiling = std::string(val);
+      } else if (key == "custom_ops_library") {
+        so.custom_ops_library = std::string(val);
+      } else if (key == "graph_optimization_level") {
+        // Accept the same string values as the JSON parser (ORT_DISABLE_ALL, etc.)
+        // but also common short forms. Store raw for now; the config layer handles mapping.
+        ParseSessionOptionsFromJson("{\"graph_optimization_level\":\"" + std::string(val) + "\"}", so);
+      } else {
+        so.config_entries.emplace_back(std::string(key), std::string(val));
       }
-      json << "}";
-      ParseSessionOptionsFromJson(json.str(), so);
     }
   }
 
@@ -951,6 +954,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
 
   if (IsModelPackage(model_path)) {
 #if ORT_HAS_MODEL_PACKAGE
+    extern void ParseConfigFromString(std::string_view json, Config& config);
+
     if (Ort::runtime_api_version < 27) {
       throw std::runtime_error("Model packages require ONNX Runtime API version 27 or newer at runtime");
     }
@@ -983,7 +988,28 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     if (ep && ep[0] != '\0') {
       resolved_ep = NormalizeEpName(ep);
     } else {
-      resolved_ep = DefaultEpFromPackage(*pkg_ctx);
+      // Parse the base config to find which components the model actually uses,
+      // then scope the EP intersection to only those components.
+      auto pre_config = std::make_unique<Config>();
+      pre_config->config_path = configs_path;
+      ParseConfigFromString(base_json, *pre_config);
+
+      std::vector<std::string> used_components;
+      auto maybe_add = [&](const std::string& comp) {
+        if (!comp.empty() &&
+            std::find(used_components.begin(), used_components.end(), comp) == used_components.end()) {
+          used_components.push_back(comp);
+        }
+      };
+      maybe_add(pre_config->model.decoder.component);
+      maybe_add(pre_config->model.encoder.component);
+      maybe_add(pre_config->model.vision.component);
+      maybe_add(pre_config->model.speech.component);
+      maybe_add(pre_config->model.embedding.component);
+      maybe_add(pre_config->model.joiner.component);
+      maybe_add(pre_config->model.vad.component);
+
+      resolved_ep = DefaultEpFromPackage(*pkg_ctx, used_components);
     }
 
     // Append the resolved EP to session options so SelectComponent picks the right variant.
@@ -1003,35 +1029,45 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     // Create the package state (opens package, creates options from the EP-configured SO)
     auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so, resolved_ep);
 
-    // Parse the base config minimally to find component names for each role
-    auto temp_config = std::make_unique<Config>();
-    temp_config->config_path = configs_path;
-    extern void ParseConfigFromString(std::string_view json, Config& config);
-    ParseConfigFromString(base_json, *temp_config);
-
-    // Collect component names from the role blocks
-    std::vector<std::string> component_names;
-    auto add_component = [&](const std::string& comp) {
-      if (!comp.empty() &&
-          std::find(component_names.begin(), component_names.end(), comp) == component_names.end()) {
-        component_names.push_back(comp);
-      }
-    };
-    add_component(temp_config->model.decoder.component);
-    add_component(temp_config->model.encoder.component);
-    add_component(temp_config->model.vision.component);
-    add_component(temp_config->model.speech.component);
-    add_component(temp_config->model.embedding.component);
-    add_component(temp_config->model.joiner.component);
-    add_component(temp_config->model.vad.component);
-
-    // Select each referenced component and merge overlays
+    // Select each referenced component and merge overlays. Use a fixpoint loop: overlays
+    // from one component may introduce new component references that need their own selection.
     std::string merged_json = base_json;
-    for (const auto& comp_name : component_names) {
-      package_state->SelectComponent(comp_name);
-      std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
-      if (!overlay.empty()) {
-        merged_json = JsonMergePatch(merged_json, overlay);
+    std::unordered_set<std::string> selected_components;
+    bool changed = true;
+    constexpr int kMaxIterations = 10;  // safety bound
+    for (int iteration = 0; changed && iteration < kMaxIterations; ++iteration) {
+      changed = false;
+
+      // Re-parse to discover any newly referenced components
+      auto iter_config = std::make_unique<Config>();
+      iter_config->config_path = configs_path;
+      ParseConfigFromString(merged_json, *iter_config);
+
+      std::vector<std::string> current_components;
+      auto add_component = [&](const std::string& comp) {
+        if (!comp.empty() &&
+            std::find(current_components.begin(), current_components.end(), comp) == current_components.end()) {
+          current_components.push_back(comp);
+        }
+      };
+      add_component(iter_config->model.decoder.component);
+      add_component(iter_config->model.encoder.component);
+      add_component(iter_config->model.vision.component);
+      add_component(iter_config->model.speech.component);
+      add_component(iter_config->model.embedding.component);
+      add_component(iter_config->model.joiner.component);
+      add_component(iter_config->model.vad.component);
+
+      for (const auto& comp_name : current_components) {
+        if (selected_components.count(comp_name)) continue;
+        selected_components.insert(comp_name);
+        changed = true;
+
+        package_state->SelectComponent(comp_name);
+        std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
+        if (!overlay.empty()) {
+          merged_json = JsonMergePatch(merged_json, overlay);
+        }
       }
     }
 

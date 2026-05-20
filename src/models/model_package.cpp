@@ -22,9 +22,21 @@ bool IsModelPackage(const fs::path& path) {
 // --- EP defaulting ---
 
 #if ORT_HAS_MODEL_PACKAGE
-std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx) {
-  auto component_names = pkg_ctx.GetComponentNames();
-  if (component_names.empty()) {
+std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx,
+                                 const std::vector<std::string>& scoped_components) {
+  // Determine which components to consider: if scoped_components is non-empty, use only those;
+  // otherwise, use all components in the package.
+  std::vector<std::string> components_to_check;
+  if (!scoped_components.empty()) {
+    components_to_check = scoped_components;
+  } else {
+    auto all_names = pkg_ctx.GetComponentNames();
+    for (const auto& n : all_names) {
+      components_to_check.push_back(std::string(n));
+    }
+  }
+
+  if (components_to_check.empty()) {
     throw std::runtime_error("Model package has no components");
   }
 
@@ -33,7 +45,7 @@ std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx) {
   std::unordered_set<std::string> intersection;
   bool first_component = true;
 
-  for (const auto& comp_name : component_names) {
+  for (const auto& comp_name : components_to_check) {
     std::unordered_set<std::string> comp_eps;
     auto variant_names = pkg_ctx.GetVariantNames(comp_name.c_str());
 
@@ -117,94 +129,8 @@ OrtModelPackageComponentContext* ModelPackageState::GetComponent(const std::stri
   return (it != component_contexts_.end()) ? it->second.get() : nullptr;
 }
 
-std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& component_name) const {
-  auto* cix = GetComponent(component_name);
-  if (!cix) {
-    return {};
-  }
+// GetGenAIConfigOverlay is defined after the JSON mini-DOM utilities below.
 
-  std::string consumer_metadata = cix->GetSelectedVariantConsumerMetadata();
-  if (consumer_metadata.empty()) {
-    return {};
-  }
-
-  // Extract genai_config_overlay from consumer_metadata JSON.
-  // consumer_metadata is a JSON object. We need to find the "genai_config_overlay" key
-  // and return its value as a JSON string.
-  //
-  // Simple extraction: find "genai_config_overlay" key and extract the object value.
-  // We use a minimal JSON element handler to capture it.
-  struct OverlayExtractor : JSON::Element {
-    std::string overlay_json;
-    bool found = false;
-
-    void OnValue(std::string_view name, JSON::Value value) override {
-      // Ignore non-overlay fields
-      if (name != "genai_config_overlay") {
-        return;
-      }
-    }
-
-    Element& OnObject(std::string_view name) override {
-      if (name == "genai_config_overlay") {
-        found = true;
-        // We can't easily capture a sub-object as a raw JSON string with the SAX parser.
-        // Instead, we'll use a different approach below.
-      }
-      throw JSON::unknown_value_error{};
-    }
-  };
-
-  // Since the SAX parser doesn't easily support extracting a sub-object as a raw JSON string,
-  // we use a simpler approach: find the key "genai_config_overlay" and extract the balanced JSON.
-  const std::string key = "\"genai_config_overlay\"";
-  auto pos = consumer_metadata.find(key);
-  if (pos == std::string::npos) {
-    return {};
-  }
-
-  // Skip past the key and the colon
-  pos += key.size();
-  while (pos < consumer_metadata.size() && (consumer_metadata[pos] == ' ' || consumer_metadata[pos] == ':' ||
-                                              consumer_metadata[pos] == '\t' || consumer_metadata[pos] == '\n' ||
-                                              consumer_metadata[pos] == '\r')) {
-    ++pos;
-  }
-
-  if (pos >= consumer_metadata.size()) {
-    return {};
-  }
-
-  // Extract balanced JSON value starting from pos
-  if (consumer_metadata[pos] == '{') {
-    int depth = 0;
-    bool in_string = false;
-    size_t start = pos;
-    for (size_t i = pos; i < consumer_metadata.size(); ++i) {
-      char c = consumer_metadata[i];
-      if (in_string) {
-        if (c == '\\') {
-          ++i;  // skip escaped char
-        } else if (c == '"') {
-          in_string = false;
-        }
-      } else {
-        if (c == '"') {
-          in_string = true;
-        } else if (c == '{') {
-          ++depth;
-        } else if (c == '}') {
-          --depth;
-          if (depth == 0) {
-            return consumer_metadata.substr(start, i - start + 1);
-          }
-        }
-      }
-    }
-  }
-
-  return {};
-}
 #endif
 
 // --- RFC 7386 JSON Merge Patch ---
@@ -456,6 +382,39 @@ JsonValue MergePatch(JsonValue target, const JsonValue& patch) {
 }
 
 }  // anonymous namespace
+
+#if ORT_HAS_MODEL_PACKAGE
+std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& component_name) const {
+  auto* cix = GetComponent(component_name);
+  if (!cix) {
+    return {};
+  }
+
+  std::string consumer_metadata = cix->GetSelectedVariantConsumerMetadata();
+  if (consumer_metadata.empty()) {
+    return {};
+  }
+
+  // Parse consumer_metadata as a JSON object and extract the "genai_config_overlay" value.
+  try {
+    size_t pos = 0;
+    JsonValue root = ParseJsonValue(consumer_metadata, pos);
+    if (!root.is_object()) {
+      return {};
+    }
+
+    for (const auto& [key, value] : root.obj_members) {
+      if (key == "genai_config_overlay") {
+        return SerializeJson(value);
+      }
+    }
+  } catch (const std::exception&) {
+    // If consumer_metadata is not valid JSON, return empty.
+  }
+
+  return {};
+}
+#endif
 
 std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json) {
   if (patch_json.empty()) {
