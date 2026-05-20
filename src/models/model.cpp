@@ -9,7 +9,6 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <unordered_set>
 
 #include "../generators.h"
 #include "../search.h"
@@ -1040,45 +1039,33 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
     // Create the package state (opens package, creates options from the EP-configured SO)
     auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so, resolved_ep);
 
-    // Select each referenced component and merge overlays. Use a fixpoint loop: overlays
-    // from one component may introduce new component references that need their own selection.
+    // Collect components referenced by the base config, select them, and merge their overlays.
+    // Overlays should not introduce new component references.
+    auto base_config = std::make_unique<Config>();
+    base_config->config_path = configs_path;
+    ParseConfigFromString(base_json, *base_config);
+
+    std::vector<std::string> components;
+    auto add_component = [&](const std::string& comp) {
+      if (!comp.empty() &&
+          std::find(components.begin(), components.end(), comp) == components.end()) {
+        components.push_back(comp);
+      }
+    };
+    add_component(base_config->model.decoder.component);
+    add_component(base_config->model.encoder.component);
+    add_component(base_config->model.vision.component);
+    add_component(base_config->model.speech.component);
+    add_component(base_config->model.embedding.component);
+    add_component(base_config->model.joiner.component);
+    add_component(base_config->model.vad.component);
+
     std::string merged_json = base_json;
-    std::unordered_set<std::string> selected_components;
-    bool changed = true;
-    constexpr int kMaxIterations = 10;  // safety bound
-    for (int iteration = 0; changed && iteration < kMaxIterations; ++iteration) {
-      changed = false;
-
-      // Re-parse to discover any newly referenced components
-      auto iter_config = std::make_unique<Config>();
-      iter_config->config_path = configs_path;
-      ParseConfigFromString(merged_json, *iter_config);
-
-      std::vector<std::string> current_components;
-      auto add_component = [&](const std::string& comp) {
-        if (!comp.empty() &&
-            std::find(current_components.begin(), current_components.end(), comp) == current_components.end()) {
-          current_components.push_back(comp);
-        }
-      };
-      add_component(iter_config->model.decoder.component);
-      add_component(iter_config->model.encoder.component);
-      add_component(iter_config->model.vision.component);
-      add_component(iter_config->model.speech.component);
-      add_component(iter_config->model.embedding.component);
-      add_component(iter_config->model.joiner.component);
-      add_component(iter_config->model.vad.component);
-
-      for (const auto& comp_name : current_components) {
-        if (selected_components.count(comp_name)) continue;
-        selected_components.insert(comp_name);
-        changed = true;
-
-        package_state->SelectComponent(comp_name);
-        std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
-        if (!overlay.empty()) {
-          merged_json = JsonMergePatch(merged_json, overlay);
-        }
+    for (const auto& comp_name : components) {
+      package_state->SelectComponent(comp_name);
+      std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
+      if (!overlay.empty()) {
+        merged_json = JsonMergePatch(merged_json, overlay);
       }
     }
 

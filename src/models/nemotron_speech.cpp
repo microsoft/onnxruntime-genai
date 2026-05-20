@@ -130,42 +130,10 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
     session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0, ep, enc_so, true);
     session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
                                                 ep, &config_->model.decoder.session_options, false);
-    // Joiner: use a dedicated component if specified; otherwise, find the joiner file
-    // within the decoder component by matching the joiner filename.
-    std::string joiner_comp = config_->model.joiner.component;
-    size_t joiner_file_idx = 0;
-    if (joiner_comp.empty()) {
-      joiner_comp = config_->model.decoder.component;
-      // Find the joiner file within the decoder component's variant files.
-      std::string joiner_filename = config_->model.joiner.filename;
-      if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
-
-      auto* dec_cix = config_->package_state_->GetComponent(joiner_comp);
-      if (!dec_cix) {
-        throw std::runtime_error("Decoder component '" + joiner_comp +
-                                 "' not selected; cannot locate joiner file");
-      }
-      size_t file_count = dec_cix->GetSelectedVariantFileCount();
-      bool found = false;
-      for (size_t i = 0; i < file_count; ++i) {
-        auto path_str = dec_cix->GetSelectedVariantFilePath(i);
-        std::string basename(path_str);
-        auto last_sep = basename.find_last_of("/\\");
-        if (last_sep != std::string::npos) basename = basename.substr(last_sep + 1);
-        if (basename == joiner_filename) {
-          joiner_file_idx = i;
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        throw std::runtime_error("Joiner file '" + joiner_filename +
-                                 "' not found in decoder component variant files");
-      }
-    }
+    // Joiner: assume a dedicated joiner component is always specified in packages
     const Config::SessionOptions* joi_so = config_->model.joiner.session_options.has_value()
         ? &*config_->model.joiner.session_options : nullptr;
-    session_joiner_ = CreateSessionFromPackage(ort_env, joiner_comp, joiner_file_idx, ep, joi_so, true);
+    session_joiner_ = CreateSessionFromPackage(ort_env, config_->model.joiner.component, 0, ep, joi_so, true);
   } else
 #endif
   {
