@@ -14,9 +14,7 @@ namespace Generators {
 
 namespace {
 // Picks the DeviceInterface that matches the OrtValue's actual memory location.
-// Required because ORT may place outputs on CPU even when the EP is CUDA
-// (e.g. graph contains CPU-only ops); wrapping a CPU tensor with the CUDA
-// DeviceInterface causes a sticky cudaErrorInvalidValue at the next kernel.
+// Required because ORT may place outputs on CPU even when the EP is CUDA.
 DeviceInterface& DeviceFor(const OrtValue& v) {
   const bool on_gpu = v.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU;
   return *GetDeviceInterface(on_gpu ? DeviceType::CUDA : DeviceType::CPU);
@@ -243,9 +241,6 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
     inputs_.push_back(lang_id_tensor_.get());
   }
 
-  // Register outputs: encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next.
-  // ORT allocates each output on the EP device; we take ownership after Run and
-  // hand the new tensors back as the next chunk's cache inputs in UpdateInputs().
   output_names_.push_back(cfg.enc_out_encoded.c_str());
   outputs_.push_back(nullptr);
 
@@ -382,7 +377,7 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
   joiner_state_ = std::make_unique<NemotronJoinerSubState>(model, params);
 
-  // Pre-allocate encoder frame for joiner input (CPU; ORT uploads to device if needed).
+  // Pre-allocate encoder frame for joiner input
   auto enc_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
   encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, enc_out_type);
@@ -479,8 +474,6 @@ void NemotronSpeechState::RunEncoder() {
       .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner), *encoded_len_owner));
   encoded_len_ = *encoded_len_cpu->GetTensorData<int64_t>();
 
-  // Take ownership of cache outputs; the next chunk's UpdateInputs() will
-  // rebind inputs_[cache_*] to these new buffers.
   encoder_state_->cache_.cache_last_channel.reset(encoder_state_->outputs_[2]);
   encoder_state_->outputs_[2] = nullptr;
   encoder_state_->cache_.cache_last_time.reset(encoder_state_->outputs_[3]);
@@ -528,7 +521,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     prediction_state_->UpdateInputs();
     prediction_state_->Run(0, dummy_tokens);
 
-    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim].
+    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]
     // Take ownership of prediction output[0] so it's released this iteration
     // (the next prediction Run will overwrite the slot and leak the old buffer otherwise).
     std::unique_ptr<OrtValue> pred_out0_owner{prediction_state_->outputs_[0]};
