@@ -67,7 +67,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
-    static constexpr std::string_view PromptName = "prompt";
+    static constexpr std::string_view LangIdName = "lang_id";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -179,7 +179,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
-        std::string prompt{Defaults::PromptName};
+        std::string lang_id{Defaults::LangIdName};
       } inputs;
 
       struct Outputs {

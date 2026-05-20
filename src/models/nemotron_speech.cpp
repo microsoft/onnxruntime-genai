@@ -42,10 +42,6 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   max_symbols_per_step = config.model.max_symbols_per_step;
   num_prompts = config.model.num_prompts;
   lang_id = config.model.lang_id;
-  // chunk_samples / hop_length = mel frames per chunk; divide by subsampling factor for encoded frames.
-  if (hop_length > 0 && subsampling_factor > 0) {
-    chunk_encoded_frames = (chunk_samples / hop_length) / subsampling_factor;
-  }
   blank_penalty = config.search.blank_penalty;
 
   // Vocab size from top-level config
@@ -60,7 +56,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   enc_in_cache_channel = enc.inputs.cache_last_channel;
   enc_in_cache_time = enc.inputs.cache_last_time;
   enc_in_cache_channel_len = enc.inputs.cache_last_channel_len;
-  enc_in_prompt = enc.inputs.prompt;
+  enc_in_lang_id = enc.inputs.lang_id;
   enc_out_length = enc.outputs.output_lengths;
   enc_out_cache_channel = enc.outputs.cache_last_channel_next;
   enc_out_cache_time = enc.outputs.cache_last_time_next;
@@ -216,30 +212,25 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   input_names_.push_back(cfg.enc_in_cache_channel_len.c_str());
   inputs_.push_back(cache_.cache_last_channel_len.get());
 
-  // Optional prompt input (multilingual prompt-conditioned encoder).
-  // Shape: [1, chunk_encoded_frames, num_prompts] one-hot at lang_id.
-  has_prompt_input_ = !cfg.enc_in_prompt.empty() && model_.session_info_.HasInput(cfg.enc_in_prompt);
-  if (has_prompt_input_) {
+  // Optional lang_id input (multilingual prompt-conditioned encoder).
+  // Shape: [1] int64 scalar carrying the language index; the encoder graph
+  // builds the one-hot prompt tensor internally.
+  has_lang_id_input_ = !cfg.enc_in_lang_id.empty() && model_.session_info_.HasInput(cfg.enc_in_lang_id);
+  if (has_lang_id_input_) {
     if (cfg.num_prompts <= 0)
-      throw std::runtime_error("Encoder has a 'prompt' input but model.num_prompts is not set in genai_config.json");
-    if (cfg.chunk_encoded_frames <= 0)
-      throw std::runtime_error("Cannot infer chunk_encoded_frames; check chunk_samples/hop_length/subsampling_factor");
+      throw std::runtime_error("Encoder has a 'lang_id' input but model.num_prompts is not set in genai_config.json");
     if (cfg.lang_id < 0 || cfg.lang_id >= cfg.num_prompts)
       throw std::runtime_error("model.lang_id (" + std::to_string(cfg.lang_id) + ") out of range [0, " + std::to_string(cfg.num_prompts) + ")");
 
-    auto prompt_type = model_.session_info_.GetInputDataType(cfg.enc_in_prompt);
-    if (prompt_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-      throw std::runtime_error("Encoder prompt input must be float32");
-    auto prompt_shape = std::array<int64_t, 3>{1, cfg.chunk_encoded_frames, cfg.num_prompts};
-    prompt_tensor_ = OrtValue::CreateTensor(allocator, prompt_shape, prompt_type);
-    float* p = prompt_tensor_->GetTensorMutableData<float>();
-    std::fill(p, p + cfg.chunk_encoded_frames * cfg.num_prompts, 0.0f);
-    for (int t = 0; t < cfg.chunk_encoded_frames; ++t) {
-      p[t * cfg.num_prompts + cfg.lang_id] = 1.0f;
-    }
-    prompt_input_idx_ = inputs_.size();
-    input_names_.push_back(cfg.enc_in_prompt.c_str());
-    inputs_.push_back(prompt_tensor_.get());
+    auto lang_id_type = model_.session_info_.GetInputDataType(cfg.enc_in_lang_id);
+    if (lang_id_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+      throw std::runtime_error("Encoder lang_id input must be int64");
+    auto lang_id_shape = std::array<int64_t, 1>{1};
+    lang_id_tensor_ = OrtValue::CreateTensor(allocator, lang_id_shape, lang_id_type);
+    *lang_id_tensor_->GetTensorMutableData<int64_t>() = static_cast<int64_t>(cfg.lang_id);
+    lang_id_input_idx_ = inputs_.size();
+    input_names_.push_back(cfg.enc_in_lang_id.c_str());
+    inputs_.push_back(lang_id_tensor_.get());
   }
 
   // Register outputs: encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next
