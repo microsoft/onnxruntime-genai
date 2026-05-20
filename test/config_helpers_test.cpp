@@ -260,8 +260,8 @@ TEST(ApplyVariantFileDefaultsTest, UnknownKeysGoToConfigEntries) {
 
   VariantFile vf;
   vf.session_options = {
-      {"session.use_xnnpack", "1"},          // existing key -> ignored
-      {"session.disable_prepacking", "1"},   // new key -> appended
+      {"session.use_xnnpack", "1"},         // existing key -> ignored
+      {"session.disable_prepacking", "1"},  // new key -> appended
   };
 
   ApplyVariantFileDefaults(so, vf, "");
@@ -286,7 +286,7 @@ TEST(ApplyVariantFileDefaultsTest, MergesProviderOptionsIntoMatchingEntry) {
 
   VariantFile vf;
   vf.provider_options = {
-      {"device_id", "1"},               // existing -> kept as 0
+      {"device_id", "1"},                             // existing -> kept as 0
       {"arena_extend_strategy", "kSameAsRequested"},  // new -> appended
   };
 
