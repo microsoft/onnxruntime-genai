@@ -10,3 +10,5 @@ When generating or reviewing code in the Python Model Builder (`src/python/py/mo
 - [DESIGN.md](../../src/python/py/models/DESIGN.md)
 
 Read both documents to understand the intended usage, supported models, design principles, and architectural constraints before suggesting or reviewing any code changes in this area.
+
+When a node is inserted into the model, prefer using `self.make_op_name` as the wrapper method for `self.make_node` + `self.make_value` calls.

@@ -1,6 +1,6 @@
 parameters:
-- name: enable_win_cpu
-  displayName: 'Whether Windows CPU package is built.'
+- name: enable_win_x64_cpu
+  displayName: 'Whether Windows x64 CPU package is built.'
   type: boolean
   default: true
 
@@ -9,10 +9,15 @@ parameters:
   type: boolean
   default: true
 
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
+- name: enable_linux_x64_cpu
+  displayName: 'Whether Linux x64 CPU package is built.'
   type: boolean
   default: true
+
+- name: enable_linux_arm64_cpu
+  displayName: 'Whether Linux ARM64 CPU package is built.'
+  type: boolean
+  default: false
 
 - name: enable_linux_cuda
   displayName: 'Whether Linux CUDA package is built.'
@@ -78,14 +83,15 @@ stages:
           ort_winml_version: ${{ parameters.ort_winml_version }}
           build_config: ${{ parameters.build_config }}
 
-    - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true), eq(parameters.enable_macos_cpu, true)) }}:
+    - ${{ if or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_macos_cpu, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cpu'
           ort_version: ${{ parameters.ort_version }}
           build_config: ${{ parameters.build_config }}
-          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+          enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
           enable_android: ${{ parameters.enable_android }}

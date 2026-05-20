@@ -200,12 +200,16 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject that the caller owns.
+  // Wrap in OrtxObjectPtr so it's disposed on scope exit (avoids TensorObject leak).
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
-  OrtxTensor* image_grid_thw = nullptr;
+  ort_extensions::OrtxObjectPtr<OrtxTensor> image_grid_thw_owner;
   // Try to get image_grid_thw from processor (second output)
-  auto status = OrtxTensorResultGetAt(result.get(), 1, &image_grid_thw);
+  auto status = OrtxTensorResultGetAt(result.get(), 1, image_grid_thw_owner.ToBeAssigned());
+  OrtxTensor* image_grid_thw = image_grid_thw_owner.get();
 
   // Get pixel_values data and shape
   const float* pixel_values_data{};

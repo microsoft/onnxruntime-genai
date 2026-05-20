@@ -21,6 +21,24 @@ import torch
 from safetensors.torch import load_file
 
 
+def normalize_vlm_weight_name(name):
+    """Normalize a checkpoint tensor key for VLM/Quark conventions.
+
+    Returns None if the tensor should be skipped (vision-tower weights), or
+    the normalized key string otherwise.
+    """
+    # Skip vision tower weights in VLM checkpoints
+    if name.startswith(("model.visual.", "model.vision.", "visual.")):
+        return None
+    # Normalize common VLM prefix so existing LLM regex + parsing keeps working
+    if name.startswith("model.language_model."):
+        name = "model." + name[len("model.language_model."):]
+    # Normalize Quark weight_quantizer.* naming to flat weight_* naming
+    name = name.replace(".weight_quantizer.scale", ".weight_scale")
+    name = name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
+    return name
+
+
 class QuantizedTensorModule:
     def __init__(self):
         self.qweight = None
@@ -218,7 +236,11 @@ class QuantizedModel:
                 weights = load_file(os.path.join(input_path, weight_file))
 
                 # Map weights to modules
-                for name, tensor in weights.items():
+                for raw_name, tensor in weights.items():
+                    name = normalize_vlm_weight_name(raw_name)
+                    if name is None:
+                        continue
+
                     # Per-layer quantization support
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
