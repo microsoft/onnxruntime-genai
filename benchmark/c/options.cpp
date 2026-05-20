@@ -40,6 +40,10 @@ namespace {
     << "        Prompt text to use. Default: See --prompt_length.\n"
     << "      --prompt_file <file containing prompt text>\n"
     << "        Path to file containing prompt text to use. Default: See --prompt_length.\n"
+    << "      --use_random_tokens\n"
+    << "        Use random token IDs in [0, 99] per position instead of generating or encoding\n"
+    << "        a text prompt. Requires -l/--prompt_length (cannot be used with --prompt or\n"
+    << "        --prompt_file).\n"
     << "      Note: --prompt_length, --prompt, and --prompt_file are mutually exclusive.\n"
     << "    -g,--generation_length <number>\n"
     << "      Number of tokens to generate. Default: " << defaults.num_tokens_to_generate << "\n"
@@ -95,6 +99,11 @@ void VerifyOptions(const Options& opts) {
     throw std::runtime_error("ONNX model directory path must be provided.");
   }
 
+  if (opts.use_random_tokens && !std::holds_alternative<size_t>(opts.prompt_num_tokens_or_content)) {
+    throw std::runtime_error(
+        "--use_random_tokens requires -l/--prompt_length and cannot be used with --prompt or --prompt_file.");
+  }
+
   // validate execution provider since it has a valid value
   ValidateExecutionProvider(opts.execution_provider);
 }
@@ -140,6 +149,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.max_length = ParseNumber<int64_t>(next_arg(i));
       } else if (arg == "--reuse_generator") {
         opts.reuse_generator = true;
+      } else if (arg == "--use_random_tokens") {
+        opts.use_random_tokens = true;
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
       } else if (arg == "-h" || arg == "--help") {
