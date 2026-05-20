@@ -14,41 +14,23 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     : Model{std::move(config)}, ort_env_{ort_env} {
 #if ORT_HAS_MODEL_PACKAGE
   if (config_->IsPackage()) {
-    // Package path: create sessions from per-file package accessors.
-    // Pipeline stages reference files by filename. Match each stage to its file index
-    // in the selected component variant.
+    // Package path: session options are already built by CreateSessionOptions().
+    // We just need to resolve each stage's filename to its file path and create the session.
     const auto& component_name = config_->model.decoder.component;
     auto* pkg_state = config_->package_state_.get();
+    auto file_map = pkg_state->BuildFileIndexMap(component_name);
     auto* cix = pkg_state->GetComponent(component_name);
-    size_t file_count = cix->GetSelectedVariantFileCount();
 
-    // Build a filename-to-index map
-    std::unordered_map<std::string, size_t> file_map;
-    for (size_t i = 0; i < file_count; ++i) {
-      auto path_str = cix->GetSelectedVariantFilePath(i);
-      // Extract basename from the full path
-      std::string basename = path_str;
-      auto last_sep = basename.find_last_of("/\\");
-      if (last_sep != std::string::npos) {
-        basename = basename.substr(last_sep + 1);
-      }
-      file_map[basename] = i;
-    }
-
-    auto resolved_ep = pkg_state->GetResolvedEpName();
     for (const auto& model : config_->model.decoder.pipeline) {
       auto it = file_map.find(model.filename);
-      if (it != file_map.end()) {
-        std::string ep = model.run_on_cpu ? "CPUExecutionProvider" : resolved_ep;
-        const Config::SessionOptions* stage_so =
-            model.session_options.has_value() ? &*model.session_options : nullptr;
-        sessions_.emplace_back(CreateSessionFromPackage(ort_env, component_name, it->second,
-                                                        ep, stage_so, false));
-      } else {
+      if (it == file_map.end()) {
         throw std::runtime_error("Pipeline stage '" + model.model_id +
                                  "' references file '" + model.filename +
                                  "' which was not found in the package variant");
       }
+      auto file_path = cix->GetSelectedVariantFilePath(it->second);
+      sessions_.emplace_back(OrtSession::Create(ort_env, fs::path(file_path).c_str(),
+                                                GetSessionOptions(model.model_id)));
     }
   } else
 #endif
@@ -113,42 +95,18 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
   if (!model_.sessions_[id_]) {
 #if ORT_HAS_MODEL_PACKAGE
     if (model_.config_->package_state_) {
-      // Re-create from package: find the file index for this pipeline stage.
+      // Re-create from package: session options were built at init time,
+      // just resolve the file path and create the session.
       auto* pkg_state = model_.config_->package_state_.get();
       const auto& component_name = model_.config_->model.decoder.component;
-      auto* cix = pkg_state->GetComponent(component_name);
-      if (!cix) {
-        throw std::runtime_error(MakeString("Component '", component_name,
-                                            "' not selected in package state during session re-creation"));
-      }
-
       const auto& target_filename = model_.config_->model.decoder.pipeline[id_].filename;
-      size_t file_count = cix->GetSelectedVariantFileCount();
-      size_t file_idx = SIZE_MAX;
-      for (size_t i = 0; i < file_count; ++i) {
-        auto path_str = cix->GetSelectedVariantFilePath(i);
-        std::string basename(path_str);
-        auto last_sep = basename.find_last_of("/\\");
-        if (last_sep != std::string::npos) basename = basename.substr(last_sep + 1);
-        if (basename == target_filename) {
-          file_idx = i;
-          break;
-        }
-      }
+      size_t file_idx = pkg_state->ResolveFileIndex(component_name, target_filename);
+      auto* cix = pkg_state->GetComponent(component_name);
+      auto file_path = cix->GetSelectedVariantFilePath(file_idx);
 
-      if (file_idx == SIZE_MAX) {
-        throw std::runtime_error(MakeString("Pipeline stage '", model_.config_->model.decoder.pipeline[id_].model_id,
-                                            "' file not found in package variant during session re-creation"));
-      }
-
-      auto resolved_ep = pkg_state->GetResolvedEpName();
-      std::string ep = model_.config_->model.decoder.pipeline[id_].run_on_cpu ? "CPUExecutionProvider" : resolved_ep;
-      const Config::SessionOptions* stage_so =
-          model_.config_->model.decoder.pipeline[id_].session_options.has_value()
-              ? &*model_.config_->model.decoder.pipeline[id_].session_options
-              : nullptr;
       const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
-          const_cast<DecoderOnlyPipelineModel&>(model_).CreateSessionFromPackage(model_.ort_env_, component_name, file_idx, ep, stage_so, false);
+          OrtSession::Create(model_.ort_env_, fs::path(file_path).c_str(),
+                             model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
     } else
 #endif
     {
