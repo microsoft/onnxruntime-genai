@@ -76,7 +76,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
         if language not in LANG_TO_ID:
             raise ValueError(f"Unknown language '{language}'. Known: {sorted(LANG_TO_ID)}")
         lang_id = LANG_TO_ID[language]
-        config.overlay(json.dumps({"model": {"lang_id": int(lang_id)}}))
+        config.overlay(json.dumps({"model": {"default_lang_id": int(lang_id)}}))
         print(f"  Language: {language} (lang_id={lang_id})")
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
@@ -143,7 +143,7 @@ def main():
                         help="Override VAD setting from genai_config.json (true/false).")
     parser.add_argument("--language", "-l", type=str, default=None,
                         help="Language code for the multilingual encoder (e.g. en, de, es, fr, nl, pl, hr). "
-                             "Overrides model.lang_id from genai_config.json.")
+                             "Overrides model.default_lang_id from genai_config.json.")
     parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
                         choices=["cpu", "cuda", "dml", "follow_config"],
                         help="Execution provider to run with. Defaults to follow_config.")

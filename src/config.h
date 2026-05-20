@@ -154,7 +154,7 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
-    int lang_id{};       // Default language/prompt index used when the encoder takes a lang_id input
+    int default_lang_id{};  // Default language/prompt index fed to the encoder's lang_id input
 
     struct Encoder {
       std::string filename;

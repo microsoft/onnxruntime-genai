@@ -58,7 +58,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
-  lang_id = config.model.lang_id;
+  lang_id = config.model.default_lang_id;
   blank_penalty = config.search.blank_penalty;
 
   // Vocab size from top-level config
