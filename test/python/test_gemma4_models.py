@@ -90,6 +90,8 @@ def test_gemma4_vision_basic(test_data_path, relative_image_path):
     _, processor = _load_model_and_processor(test_data_path)
 
     image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
 
     inputs = processor("<|image|>Describe this image", images=images)
@@ -110,6 +112,8 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
     _, processor = _load_model_and_processor(test_data_path)
 
     image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found at {image_path}")
     with open(image_path, "rb") as f:
         images = og.Images.open_bytes(f.read())
 
@@ -128,6 +132,9 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
     _, processor = _load_model_and_processor(test_data_path)
 
     image_paths = [os.fspath(Path(test_data_path) / p) for p in relative_image_paths]
+    for p in image_paths:
+        if not os.path.exists(p):
+            pytest.skip(f"Test image not found at {p}")
     images = og.Images.open(*image_paths)
 
     inputs = processor("<|image|><|image|>Compare these images", images=images)
@@ -148,6 +155,8 @@ def test_gemma4_processor_creates_token_type_ids(test_data_path, relative_image_
     _, processor = _load_model_and_processor(test_data_path)
 
     image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
 
     inputs = processor("<|image|>Describe this image", images=images)
