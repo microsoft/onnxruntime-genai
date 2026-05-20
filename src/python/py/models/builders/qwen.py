@@ -1087,9 +1087,7 @@ class Qwen35TextModel(Model):
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
 
-    def make_inputs_and_outputs(self):
-        super().make_inputs_and_outputs()
-
+    def make_position_ids_reformatting(self):
         if self.is_text_only:
             # The graph input is 2D position_ids [B, S].
             # Expand to 3D [3, B, S] for mRoPE by stacking 3 copies.
@@ -1110,11 +1108,12 @@ class Qwen35TextModel(Model):
                 ir.DataType.INT64,
                 [3, "batch_size", "sequence_length"],
             )
-            # Store the 3D position_ids name for mRoPE usage
-            # Keep self.input_names["position_ids"] as "position_ids" for genai_config
-            self._pos_ids_3d = tile_output
-        else:
-            self._pos_ids_3d = self.input_names["position_ids"]
+            return tile_output
+        return self.input_names["position_ids"]
+
+    def make_preprocessing_nodes(self):
+        super().make_preprocessing_nodes()
+        self.position_ids_reformatted = self.make_position_ids_reformatting()
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1359,10 +1358,10 @@ class Qwen35TextModel(Model):
     def _make_mrope_cos_sin(self, basename):
         """Build interleaved mRoPE cos/sin from pre-computed cache + position_ids.
 
-        Input: position_ids [3, B, S] (from self._pos_ids_3d)
+        Input: position_ids [3, B, S] (from self.position_ids_reformatted)
         Output: cos [B, S, rdim_half], sin [B, S, rdim_half]
         """
-        pos_ids = self._pos_ids_3d
+        pos_ids = self.position_ids_reformatted
         cos_cache = "model.rotary_emb.cos_cache"
         sin_cache = "model.rotary_emb.sin_cache"
         h_mask = "model.rotary_emb.h_mask"
@@ -1427,7 +1426,7 @@ class Qwen35TextModel(Model):
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
-        pos_ids_input = self._pos_ids_3d
+        pos_ids_input = self.position_ids_reformatted
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
