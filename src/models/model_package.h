@@ -72,6 +72,10 @@ struct ModelPackageState {
   /// Returns the genai_config_overlay extracted from consumer_metadata, or empty string.
   std::string GetGenAIConfigOverlay(const std::string& component_name) const;
 
+  /// Get the selected variant's directory path for a component.
+  /// Returns empty path if the component hasn't been selected.
+  fs::path GetVariantDir(const std::string& component_name) const;
+
  private:
   fs::path package_root_;
   fs::path configs_path_;

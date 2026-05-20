@@ -744,11 +744,27 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();
+    auto adapter_file = fs::path(*model_.config_->model.vision.adapter_filename);
+    auto lora_adapter = (model_.config_->config_path / adapter_file).string();
+#if ORT_HAS_MODEL_PACKAGE
+    if (!fs::exists(lora_adapter) && model_.config_->IsPackage()) {
+      auto vdir = model_.config_->package_state_->GetVariantDir(model_.config_->model.vision.component);
+      if (!vdir.string().empty() && fs::exists(vdir / adapter_file))
+        lora_adapter = (vdir / adapter_file).string();
+    }
+#endif
     adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
   } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
-    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename)).string();
+    auto adapter_file = fs::path(*model_.config_->model.speech.adapter_filename);
+    auto lora_adapter = (model_.config_->config_path / adapter_file).string();
+#if ORT_HAS_MODEL_PACKAGE
+    if (!fs::exists(lora_adapter) && model_.config_->IsPackage()) {
+      auto vdir = model_.config_->package_state_->GetVariantDir(model_.config_->model.speech.component);
+      if (!vdir.string().empty() && fs::exists(vdir / adapter_file))
+        lora_adapter = (vdir / adapter_file).string();
+    }
+#endif
     adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }

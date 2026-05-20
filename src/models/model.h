@@ -197,7 +197,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      const fs::path& variant_dir = {});
 
  protected:
   void CreateSessionOptions();

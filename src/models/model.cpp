@@ -610,7 +610,8 @@ Model::~Model() {
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           const fs::path& variant_dir) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -683,7 +684,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         resolved = true;
       }
 
-      // Second try: resolve relative to EP library directory (for system-wide installations)
+      // Second try: resolve relative to the selected variant directory (package mode)
+      if (!resolved && !variant_dir.string().empty()) {
+        fs::path variant_relative_path = variant_dir / custom_library_path.string();
+        if (fs::exists(variant_relative_path)) {
+          custom_library_file_prefix = variant_relative_path.string();
+          resolved = true;
+        }
+      }
+
+      // Third try: resolve relative to EP library directory (for system-wide installations)
       if (!resolved) {
         size_t num_devices = 0;
         const OrtEpDevice* const* device_ptrs = nullptr;
@@ -712,7 +722,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
       }
 
-      // Third try: resolve relative to current working directory (for development/portable apps)
+      // Fourth try: resolve relative to current working directory (for development/portable apps)
       if (!resolved) {
         char cwd_buffer[PATH_MAX];
         if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
@@ -919,7 +929,8 @@ std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
 
   // Create OrtSessionOptions and apply all settings through the full pipeline
   auto so = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(merged_so, *so, false, disable_graph_capture);
+  CreateSessionOptionsFromConfig(merged_so, *so, false, disable_graph_capture,
+                                  pkg_state->GetVariantDir(component_name));
 
   // Create the session from the package file path
   return OrtSession::Create(ort_env, fs::path(file_path).c_str(), so.get());

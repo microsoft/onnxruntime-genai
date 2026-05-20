@@ -414,6 +414,15 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
 
   return {};
 }
+
+fs::path ModelPackageState::GetVariantDir(const std::string& component_name) const {
+  auto* cix = GetComponent(component_name);
+  if (!cix) {
+    return {};
+  }
+  auto folder = cix->GetSelectedVariantFolderPath();
+  return fs::path(folder);
+}
 #endif
 
 std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json) {
