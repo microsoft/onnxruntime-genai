@@ -147,29 +147,10 @@ jobs:
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
-          function Invoke-WithHeartbeat {
-            param(
-              [Parameter(Mandatory = $true)][string]$Command,
-              [int]$HeartbeatSeconds = 60
-            )
-
-            Write-Host "Running: $Command"
-            $process = Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", $Command -NoNewWindow -PassThru
-            while (-not $process.HasExited) {
-              Start-Sleep -Seconds $HeartbeatSeconds
-              if (-not $process.HasExited) {
-                Write-Host "Heartbeat: waiting for command to complete at $(Get-Date -Format o)"
-              }
-            }
-            if ($process.ExitCode -ne 0) {
-              throw "Command failed with exit code $($process.ExitCode): $Command"
-            }
-          }
-
-          Invoke-WithHeartbeat "python -m pip install -r test\python\requirements.txt"
-          Invoke-WithHeartbeat "python -m pip install -r test\python\cuda\torch\requirements.txt"
-          Invoke-WithHeartbeat "python -m pip install -r test\python\cuda\ort\requirements.txt"
-          Invoke-WithHeartbeat "python -m pip install (Get-ChildItem (`"$env:binaryDir\wheel\*.whl`")) --no-deps"
+          python -m pip install -r test\python\requirements.txt
+          python -m pip install -r test\python\cuda\torch\requirements.txt
+          python -m pip install -r test\python\cuda\ort\requirements.txt
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the Java tests
         run: |
@@ -177,26 +158,7 @@ jobs:
 
       - name: Run the Python Tests
         run: |
-          function Invoke-WithHeartbeat {
-            param(
-              [Parameter(Mandatory = $true)][string]$Command,
-              [int]$HeartbeatSeconds = 60
-            )
-
-            Write-Host "Running: $Command"
-            $process = Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", $Command -NoNewWindow -PassThru
-            while (-not $process.HasExited) {
-              Start-Sleep -Seconds $HeartbeatSeconds
-              if (-not $process.HasExited) {
-                Write-Host "Heartbeat: waiting for command to complete at $(Get-Date -Format o)"
-              }
-            }
-            if ($process.ExitCode -ne 0) {
-              throw "Command failed with exit code $($process.ExitCode): $Command"
-            }
-          }
-
-          Invoke-WithHeartbeat 'python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e'
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
 
       - name: Verify Build Artifacts
         if: always()
