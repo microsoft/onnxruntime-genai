@@ -51,8 +51,6 @@ class HunyuanDenseV1Model(Model):
             if "position_ids" not in self.input_names:
                 self.input_names["position_ids"] = "position_ids"
 
-        self.model_type = "hunyuandensev1"
-
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
