@@ -243,34 +243,20 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
     inputs_.push_back(lang_id_tensor_.get());
   }
 
-  // Register outputs: encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next
+  // Register outputs: encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next.
+  // ORT allocates each output on the EP device; we take ownership after Run and
+  // hand the new tensors back as the next chunk's cache inputs in UpdateInputs().
   output_names_.push_back(cfg.enc_out_encoded.c_str());
   outputs_.push_back(nullptr);
 
   output_names_.push_back(cfg.enc_out_length.c_str());
   outputs_.push_back(nullptr);
 
-  // Pre-allocate cache outputs on the inference device so ORT writes them
-  // there directly. Without pre-allocation, ORT places these outputs on CPU
-  // and feeding them back as inputs on the next chunk triggers a CUDA copy
-  // path that fails inside Transpose (cudaErrorInvalidValue).
-  cache_channel_next_output_idx_ = outputs_.size();
   output_names_.push_back(cfg.enc_out_cache_channel.c_str());
-  {
-    auto ch_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.left_context, cfg.hidden_dim};
-    auto ch_type = model_.session_info_.GetOutputDataType(cfg.enc_out_cache_channel);
-    cache_channel_next_ = OrtValue::CreateTensor(inf_alloc, ch_shape, ch_type);
-  }
-  outputs_.push_back(cache_channel_next_.get());
+  outputs_.push_back(nullptr);
 
-  cache_time_next_output_idx_ = outputs_.size();
   output_names_.push_back(cfg.enc_out_cache_time.c_str());
-  {
-    auto tm_shape = std::array<int64_t, 4>{1, cfg.num_encoder_layers, cfg.hidden_dim, cfg.conv_context};
-    auto tm_type = model_.session_info_.GetOutputDataType(cfg.enc_out_cache_time);
-    cache_time_next_ = OrtValue::CreateTensor(inf_alloc, tm_shape, tm_type);
-  }
-  outputs_.push_back(cache_time_next_.get());
+  outputs_.push_back(nullptr);
 
   output_names_.push_back(cfg.enc_out_cache_channel_len.c_str());
   outputs_.push_back(nullptr);
@@ -488,21 +474,17 @@ void NemotronSpeechState::RunEncoder() {
   auto& cpu_alloc = cpu_dev.GetAllocator();
   auto len_shape = std::array<int64_t, 1>{1};
   auto encoded_len_cpu = OrtValue::CreateTensor(cpu_alloc, len_shape,
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+                                                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   ByteWrapTensor(cpu_dev, *encoded_len_cpu)
       .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner), *encoded_len_owner));
   encoded_len_ = *encoded_len_cpu->GetTensorData<int64_t>();
 
-  // Cache outputs were written into our pre-allocated device buffers
-  // (cache_channel_next_/cache_time_next_). Swap them with the input cache
-  // buffers so the next chunk reads the just-produced values and writes
-  // into the now-stale buffer.
-  std::swap(encoder_state_->cache_.cache_last_channel, encoder_state_->cache_channel_next_);
-  std::swap(encoder_state_->cache_.cache_last_time, encoder_state_->cache_time_next_);
-  encoder_state_->outputs_[encoder_state_->cache_channel_next_output_idx_] =
-      encoder_state_->cache_channel_next_.get();
-  encoder_state_->outputs_[encoder_state_->cache_time_next_output_idx_] =
-      encoder_state_->cache_time_next_.get();
+  // Take ownership of cache outputs; the next chunk's UpdateInputs() will
+  // rebind inputs_[cache_*] to these new buffers.
+  encoder_state_->cache_.cache_last_channel.reset(encoder_state_->outputs_[2]);
+  encoder_state_->outputs_[2] = nullptr;
+  encoder_state_->cache_.cache_last_time.reset(encoder_state_->outputs_[3]);
+  encoder_state_->outputs_[3] = nullptr;
 
   // cache_last_channel_len is a tiny int64[1] scalar; let ORT manage it.
   encoder_state_->cache_.cache_last_channel_len.reset(encoder_state_->outputs_[4]);
