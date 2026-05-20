@@ -135,10 +135,6 @@ struct NemotronEncoderSubState : State {
   std::unique_ptr<OrtValue> signal_length_;
   std::unique_ptr<OrtValue> lang_id_tensor_;
 
-  // Pre-allocated cache_*_next outputs on the inference device. ORT writes
-  // here directly so the cache stays on device across chunks (otherwise ORT
-  // places outputs on CPU and subsequent runs trigger a CUDA copy-path bug
-  // inside Transpose).
   std::unique_ptr<OrtValue> cache_channel_next_;
   std::unique_ptr<OrtValue> cache_time_next_;
 

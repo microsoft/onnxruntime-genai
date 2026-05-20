@@ -546,9 +546,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     prediction_state_->UpdateInputs();
     prediction_state_->Run(0, dummy_tokens);
 
-    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]. Decoder output
-    // is on the EP device; allocate decoder_frame on CPU so the joiner input
-    // matches the CPU-resident encoder_frame_ (ORT will upload both).
+    // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim].
     // Take ownership of prediction output[0] so it's released this iteration
     // (the next prediction Run will overwrite the slot and leak the old buffer otherwise).
     std::unique_ptr<OrtValue> pred_out0_owner{prediction_state_->outputs_[0]};
@@ -564,9 +562,7 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
     joiner_state_->Run(0, dummy_tokens);
 
-    // Argmax over logits. Take ownership of joiner output[0] so it's released this iteration
-    // (the next joiner Run would otherwise overwrite the slot and leak the old buffer).
-    // The buffer may live on the EP device, so copy to CPU before reading.
+    // Argmax over logits. Take ownership of joiner output[0] so it's released this iteration.
     std::unique_ptr<OrtValue> joiner_out0_owner{joiner_state_->outputs_[0]};
     joiner_state_->outputs_[0] = nullptr;
     auto logits_shape = joiner_out0_owner->GetTensorTypeAndShapeInfo()->GetShape();
