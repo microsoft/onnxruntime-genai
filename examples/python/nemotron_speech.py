@@ -10,22 +10,47 @@ import numpy as np
 import onnxruntime_genai as og
 from common import get_config
 
-# Maps short language codes / locale tags to the encoder lang_id index used by
-# the multilingual Nemotron prompt. Mirrors the upstream NeMo prompt schema.
+# Maps short language codes / locale tags to (lang_id, human-readable name).
+# Mirrors the upstream NeMo multilingual Nemotron prompt schema.
 LANG_TO_ID = {
-    "en": 0, "en-US": 0, "en-GB": 1,
-    "es-ES": 2, "es": 3, "es-US": 3,
-    "zh-CN": 4, "zh-TW": 5,
-    "hi": 6, "ar": 7,
-    "fr": 8, "fr-FR": 8, "fr-CA": 100,
-    "de": 9, "de-DE": 9,
-    "it": 10, "ru": 11,
-    "pt-BR": 12, "pt": 13, "pt-PT": 13,
-    "ja": 14, "ko": 15, "nl": 16,
-    "pl": 17, "tr": 18, "uk": 19, "ro": 20, "el": 21, "cs": 22,
-    "hu": 23, "sv": 24, "da": 25, "fi": 26, "no": 27, "sk": 28,
-    "hr": 29, "bg": 30,
-    "auto": 101,
+    "en":    (0,   "English (default / US)"),
+    "en-US": (0,   "English (United States)"),
+    "en-GB": (1,   "English (United Kingdom)"),
+    "es-ES": (2,   "Spanish (Spain)"),
+    "es":    (3,   "Spanish (default / Latin America)"),
+    "es-US": (3,   "Spanish (US Latin American)"),
+    "zh-CN": (4,   "Chinese (Simplified, Mainland)"),
+    "zh-TW": (5,   "Chinese (Traditional, Taiwan)"),
+    "hi":    (6,   "Hindi"),
+    "ar":    (7,   "Arabic"),
+    "fr":    (8,   "French (default / France)"),
+    "fr-FR": (8,   "French (France)"),
+    "fr-CA": (100, "French (Canada)"),
+    "de":    (9,   "German"),
+    "de-DE": (9,   "German (Germany)"),
+    "it":    (10,  "Italian"),
+    "ru":    (11,  "Russian"),
+    "pt-BR": (12,  "Portuguese (Brazil)"),
+    "pt":    (13,  "Portuguese (default / Portugal)"),
+    "pt-PT": (13,  "Portuguese (Portugal)"),
+    "ja":    (14,  "Japanese"),
+    "ko":    (15,  "Korean"),
+    "nl":    (16,  "Dutch"),
+    "pl":    (17,  "Polish"),
+    "tr":    (18,  "Turkish"),
+    "uk":    (19,  "Ukrainian"),
+    "ro":    (20,  "Romanian"),
+    "el":    (21,  "Greek"),
+    "cs":    (22,  "Czech"),
+    "hu":    (23,  "Hungarian"),
+    "sv":    (24,  "Swedish"),
+    "da":    (25,  "Danish"),
+    "fi":    (26,  "Finnish"),
+    "no":    (27,  "Norwegian"),
+    "sk":    (28,  "Slovak"),
+    "hr":    (29,  "Croatian"),
+    "bg":    (30,  "Bulgarian"),
+    "auto":  (101, "Auto-detect"),
 }
 
 
@@ -75,9 +100,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     if language is not None:
         if language not in LANG_TO_ID:
             raise ValueError(f"Unknown language '{language}'. Known: {sorted(LANG_TO_ID)}")
-        lang_id = LANG_TO_ID[language]
+        lang_id, lang_name = LANG_TO_ID[language]
         config.overlay(json.dumps({"model": {"default_lang_id": int(lang_id)}}))
-        print(f"  Language: {language} (lang_id={lang_id})")
+        print(f"  Language: {language} -> {lang_name} (lang_id={lang_id})")
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
 
@@ -136,14 +161,18 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
     parser.add_argument("--use_vad", type=str, choices=["true", "false"], default=None,
                         help="Override VAD setting from genai_config.json (true/false).")
-    parser.add_argument("--language", "-l", type=str, default=None,
-                        help="Language code for the multilingual encoder (e.g. en, de, es, fr, nl, pl, hr). "
-                             "Overrides model.default_lang_id from genai_config.json.")
+    lang_help = "Language / locale code for the multilingual encoder. " \
+                "Overrides model.default_lang_id from genai_config.json. " \
+                "Use a bare ISO 639-1 code (e.g. 'de', 'fr', 'pt') for the default locale, " \
+                "or a BCP-47 locale tag for region-specific variants. " \
+                "Pass 'auto' to let the model detect the language. Supported codes:\n" \
+                + "\n".join(f"  {code:<7} {name}" for code, (_, name) in sorted(LANG_TO_ID.items()))
+    parser.add_argument("--language", "-l", type=str, default=None, help=lang_help)
     parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
                         choices=["cpu", "cuda", "dml", "follow_config"],
                         help="Execution provider to run with. Defaults to follow_config.")
