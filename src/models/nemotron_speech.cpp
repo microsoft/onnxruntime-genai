@@ -475,7 +475,9 @@ void NemotronSpeechState::RunEncoder() {
   DeviceSpan<int32_t> dummy_tokens;
   encoder_state_->Run(0, dummy_tokens);
 
-  // Grab encoder outputs
+  // Grab encoder outputs. Each session.Run allocates a fresh OrtValue per output slot,
+  // so the State owns them and must release every slot it doesn't otherwise move out
+  // (otherwise the next Run overwrites the pointer and leaks the previous tensor).
   encoded_output_.reset(encoder_state_->outputs_[0]);
   encoder_state_->outputs_[0] = nullptr;
 
@@ -547,18 +549,24 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     // Reshape decoder output for joiner: [1, dim] -> [1, 1, dim]. Decoder output
     // is on the EP device; allocate decoder_frame on CPU so the joiner input
     // matches the CPU-resident encoder_frame_ (ORT will upload both).
-    auto dec_out_shape = prediction_state_->outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape();
+    // Take ownership of prediction output[0] so it's released this iteration
+    // (the next prediction Run will overwrite the slot and leak the old buffer otherwise).
+    std::unique_ptr<OrtValue> pred_out0_owner{prediction_state_->outputs_[0]};
+    prediction_state_->outputs_[0] = nullptr;
+    auto dec_out_shape = pred_out0_owner->GetTensorTypeAndShapeInfo()->GetShape();
     auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
     auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
     auto decoder_frame = OrtValue::CreateTensor(cpu_alloc_step, decoder_frame_shape, dec_out_type);
     ByteWrapTensor(cpu_dev, *decoder_frame)
-        .CopyFrom(ByteWrapTensor(DeviceFor(*prediction_state_->outputs_[0]), *prediction_state_->outputs_[0]));
+        .CopyFrom(ByteWrapTensor(DeviceFor(*pred_out0_owner), *pred_out0_owner));
 
     // Run joiner
     joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
     joiner_state_->Run(0, dummy_tokens);
 
-    // Argmax over logits — joiner output may be on EP device. Copy to CPU.
+    // Argmax over logits. Take ownership of joiner output[0] so it's released this iteration
+    // (the next joiner Run would otherwise overwrite the slot and leak the old buffer).
+    // The buffer may live on the EP device, so copy to CPU before reading.
     std::unique_ptr<OrtValue> joiner_out0_owner{joiner_state_->outputs_[0]};
     joiner_state_->outputs_[0] = nullptr;
     auto logits_shape = joiner_out0_owner->GetTensorTypeAndShapeInfo()->GetShape();
@@ -582,6 +590,14 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     }
 
     if (best_token == nemotron_config_.blank_id) {
+      // Discard the prediction-network LSTM outputs from this step; the prior
+      // lstm_state_ is kept because no token was emitted. Without this the
+      // next prediction Run overwrites the slots and leaks these tensors.
+      std::unique_ptr<OrtValue>{prediction_state_->outputs_[1]}.reset();
+      prediction_state_->outputs_[1] = nullptr;
+      std::unique_ptr<OrtValue>{prediction_state_->outputs_[2]}.reset();
+      prediction_state_->outputs_[2] = nullptr;
+
       time_step_++;
       symbol_step_ = 0;
       continue;

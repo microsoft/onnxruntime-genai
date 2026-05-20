@@ -418,12 +418,8 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 // Currently triggered by:
 //   - DML (always uses graph capture, see IsGraphCaptureEnabled in config.cpp)
 //   - WebGPU with enableGraphCapture=1 in provider options
+//   - CUDA with enable_cuda_graph=1 in provider options
 //   - NvTensorRtRtx with past-present shared buffers
-// Not yet using this path:
-//   - CUDA: graph capture is currently disabled in GenAI due to bugs
-//     (IsGraphCaptureEnabled throws for CUDA). Once re-enabled, RewindMask's
-//     static path will work for CUDA as well since it uses device-agnostic
-//     CpuSpan/CopyCpuToDevice.
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
          (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&

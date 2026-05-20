@@ -64,7 +64,12 @@ steps:
 - bash: |
     set -e -x
     python3 -m pip install requests
-    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+    if [ "$(arch)" = "arm64" ]; then
+      dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_aarch64"
+    else
+      dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)"
+    fi
+    python3 tools/ci_build/get_docker_image.py --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \

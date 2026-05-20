@@ -109,14 +109,18 @@ std::unique_ptr<NamedTensors> PhiImageProcessor::Process(const Tokenizer& tokeni
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
-  OrtxTensor* image_sizes = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &image_sizes));
+  ort_extensions::OrtxObjectPtr<OrtxTensor> image_sizes_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 1, image_sizes_owner.ToBeAssigned()));
+  OrtxTensor* image_sizes = image_sizes_owner.get();
 
-  OrtxTensor* num_img_tokens = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 2, &num_img_tokens));
+  ort_extensions::OrtxObjectPtr<OrtxTensor> num_img_tokens_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 2, num_img_tokens_owner.ToBeAssigned()));
+  OrtxTensor* num_img_tokens = num_img_tokens_owner.get();
 
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
                          std::make_shared<Tensor>(ProcessImagePrompt(tokenizer, prompt, num_img_tokens, allocator)));
