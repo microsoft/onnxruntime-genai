@@ -1002,6 +1002,8 @@ class Qwen35TextModel(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
+
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
         # SkipSimplifiedLayerNormalization can be used directly.
@@ -2051,7 +2053,6 @@ class Qwen35TextModel(Model):
             "model_type": self.model_type,
         }
         self.num_layers = len(self.layer_types)
-        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"
@@ -2094,6 +2095,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        self.model_type = "Qwen3_5_MoeForConditionalGeneration"
+
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
@@ -2111,23 +2114,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
                 del algo_config.customized_weight_config[k]
-
-    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        """Override to emit ``model.type = "qwen3_5_moe"`` in genai_config.json.
-
-        The parent class hardcodes ``Qwen3_5ForConditionalGeneration`` which
-        lowercases to ``qwen3_5``, but the C++ runtime VLM/QwenVLFamily
-        registrations require ``qwen3_5_moe``.
-        """
-        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
-
-        import json
-        from pathlib import Path
-
-        config_path = Path(out_dir) / "genai_config.json"
-        config = json.loads(config_path.read_text())
-        config["model"]["type"] = "qwen3_5_moe"
-        config_path.write_text(json.dumps(config, indent=4))
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
