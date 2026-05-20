@@ -40,6 +40,8 @@ examples/csharp/ModelChat/models
 !test/test_models/qwen35-hybrid-preprocessing/
 !test/test_models/qwen35-hybrid-preprocessing/*.onnx
 !test/test_models/mistral3-vision-preprocessing/
+!test/test_models/gemma4-vision-preprocessing/
+!test/test_models/gemma4-vision-preprocessing/*.onnx
 
 .ipynb_checkpoints/
 /src/java/.gradle
