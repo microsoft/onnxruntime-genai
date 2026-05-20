@@ -167,6 +167,7 @@ jobs:
       addToPath: true
       architecture: $(arch)
   - task: PythonScript@0
+    condition: not(and(eq(variables['os'], 'linux'), eq(variables['arch'], 'arm64')))
     inputs:
       scriptSource: inline
       script: |
