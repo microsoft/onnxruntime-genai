@@ -557,7 +557,6 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
         "cpu",                             # CPU EP
         "cuda",                            # GenAI canonical name for CUDA EP
         "CUDAExecutionProvider",           # CUDA EP
-        "NvTensorRtRtx",                   # GenAI canonical name for Nvidia IHV EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
         "OpenVINOExecutionProvider",       # Intel IHV EP
         "QNNExecutionProvider",            # Qualcomm IHV EP
