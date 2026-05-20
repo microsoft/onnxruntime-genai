@@ -2105,16 +2105,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
 
-        # Override the INT8 node list for linear-attention layers: MoE layers
-        # use the MoE/QMoE op for the MLP, not individual MatMul nodes.
-        # Remove the MLP MatMul INT8 overrides that the parent class added
-        # since those node names don't exist in MoE layers.
-        algo_config = self.quant_attrs["int4"].get("algo_config")
-        if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-            keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
-            for k in keys_to_remove:
-                del algo_config.customized_weight_config[k]
-
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
         attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
@@ -2133,157 +2123,14 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             simple=self.layernorm_attrs["simple"],
             location="post_attention",
         )
-        self.make_moe(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+        self.make_fused_moe(
+            layer_id,
+            layer.mlp,
+            root_input=self.layernorm_attrs["output_0"],
+            shared_expert=layer.mlp.shared_expert,
+            shared_expert_gate=layer.mlp.shared_expert_gate,
+        )
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
             self.layernorm_attrs["last_layernorm"] = True
-
-    def make_moe(self, layer_id, mlp, root_input):
-        """Build the MoE + shared expert subgraph for one decoder layer.
-
-        Structure:
-            root_input ──┬── router(gate) ──┐
-                         │                  v
-                         ├──────────> MoE/QMoE (routed experts)
-                         │                  │
-                         ├── shared_expert ──┤
-                         │       │          │
-                         │  shared_gate ────┤
-                         │                  v
-                         └──────────> Add (moe_out + gated_shared_out)
-        """
-        if self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
-            self._make_moe_fused(layer_id, mlp, root_input)
-        else:
-            raise NotImplementedError(
-                f"MoE export for EP '{self.ep}' is not yet supported for Qwen3.5-MoE. "
-                f"Supported EPs: cpu, cuda, trt-rtx, webgpu."
-            )
-
-    def _make_moe_fused(self, layer_id, mlp, root_input):
-        basename = f"/model/layers.{layer_id}/moe"
-        op_type = self.moe_attrs["op_type"]
-        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
-
-        # --- Router (gate) ---
-        # Qwen3.5-MoE uses mlp.gate (no bias), unlike GPTOSS mlp.router (with bias)
-        router_basename = f"{basename}/router/MatMul"
-        router_matmul_name = self.make_matmul(mlp.gate, router_basename, root_input)
-        router_reshape_name = f"{basename}/router/Reshape"
-        router_reshape_inputs = [
-            f"{router_matmul_name}/output_0",
-            f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
-        ]
-        self.make_reshape(
-            router_reshape_name,
-            router_reshape_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
-        )
-
-        # --- Routed expert weights ---
-        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
-        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
-        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
-        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
-        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-
-        # Repack gate_up_proj from HF concatenated [gate|up] to ORT interleaved
-        # format [g0,u0,g1,u1,...] required by swiglu_fusion=1.
-        # HF layout: [E, 2*inter, hidden] where rows 0..inter-1 = gate, inter..2*inter-1 = up
-        # ORT layout: [E, 2*inter, hidden] where row 2i = gate[i], row 2i+1 = up[i]
-        raw_gate_up = mlp.experts.gate_up_proj  # [E, 2*inter, hidden]
-        half = raw_gate_up.shape[1] // 2
-        gate_part = raw_gate_up[:, :half, :]     # [E, inter, hidden]
-        up_part = raw_gate_up[:, half:, :]       # [E, inter, hidden]
-        interleaved_gate_up = torch.stack([gate_part, up_part], dim=2).reshape_as(raw_gate_up)
-        # down_proj stays as-is: [E, hidden, inter]
-
-        if op_type == "MoE":
-            self.make_initializer(interleaved_gate_up, gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
-        else:
-            # QMoE: quantize each expert
-            gate_up_qw_list, gate_up_sc_list = [], []
-            down_qw_list, down_sc_list = [], []
-
-            for i in range(self.moe_attrs["num_experts"]):
-                qw1, sc1 = self.make_qmoe_weights(interleaved_gate_up[i])
-                gate_up_qw_list.append(qw1)
-                gate_up_sc_list.append(sc1)
-                qw2, sc2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
-                down_qw_list.append(qw2)
-                down_sc_list.append(sc2)
-
-            gate_up_qw = torch.stack(gate_up_qw_list, dim=0).to(torch.uint8)
-            gate_up_sc = torch.stack(gate_up_sc_list, dim=0)
-            down_qw = torch.stack(down_qw_list, dim=0).to(torch.uint8)
-            down_sc = torch.stack(down_sc_list, dim=0)
-
-            self.make_initializer(gate_up_qw, gate_up_proj_weight)
-            self.make_initializer(down_qw, down_proj_weight)
-            self.make_initializer(gate_up_sc, gate_up_proj_scales, to=self.io_dtype)
-            self.make_initializer(down_sc, down_proj_scales, to=self.io_dtype)
-
-        # Zero biases for routed experts
-        num_e = self.moe_attrs["num_experts"]
-        self.make_initializer(
-            torch.zeros(num_e, 2 * self.moe_intermediate_size),
-            gate_up_proj_bias, to=self.io_dtype,
-        )
-        self.make_initializer(
-            torch.zeros(num_e, self.hidden_size),
-            down_proj_bias, to=self.io_dtype,
-        )
-
-        # --- MoE op (routed experts only) ---
-        moe_name = f"{basename}/{op_type}"
-        self.make_moe_op(
-            moe_name,
-            root_input=root_input,
-            router_probs=f"{router_reshape_name}/output_0",
-            weight1=gate_up_proj_weight,
-            scales1=gate_up_proj_scales if op_type == "QMoE" else "",
-            bias1=gate_up_proj_bias,
-            weight2=down_proj_weight,
-            scales2=down_proj_scales if op_type == "QMoE" else "",
-            bias2=down_proj_bias,
-        )
-
-        # --- Shared expert ---
-        shared_basename = f"/model/layers.{layer_id}/shared_expert"
-
-        gate_matmul = self.make_matmul(mlp.shared_expert.gate_proj, f"{shared_basename}/gate_proj/MatMul", root_input)
-        up_matmul = self.make_matmul(mlp.shared_expert.up_proj, f"{shared_basename}/up_proj/MatMul", root_input)
-
-        # SiLU(gate) * up
-        silu_name = f"{shared_basename}/gate_proj/Sigmoid"
-        self.make_node("Sigmoid", inputs=[f"{gate_matmul}/output_0"], outputs=[f"{silu_name}/output_0"], name=silu_name)
-        self.make_value(f"{silu_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
-
-        mul_gate_name = f"{shared_basename}/gate_proj/Mul"
-        self.make_node("Mul", inputs=[f"{gate_matmul}/output_0", f"{silu_name}/output_0"], outputs=[f"{mul_gate_name}/output_0"], name=mul_gate_name)
-        self.make_value(f"{mul_gate_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
-
-        mul_up_name = f"{shared_basename}/Mul"
-        self.make_node("Mul", inputs=[f"{mul_gate_name}/output_0", f"{up_matmul}/output_0"], outputs=[f"{mul_up_name}/output_0"], name=mul_up_name)
-        self.make_value(f"{mul_up_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
-
-        down_matmul = self.make_matmul(mlp.shared_expert.down_proj, f"{shared_basename}/down_proj/MatMul", f"{mul_up_name}/output_0")
-
-        shared_gate_matmul = self.make_matmul(mlp.shared_expert_gate, f"{shared_basename}_gate/MatMul", root_input)
-        shared_gate_sigmoid = f"{shared_basename}_gate/Sigmoid"
-        self.make_node("Sigmoid", inputs=[f"{shared_gate_matmul}/output_0"], outputs=[f"{shared_gate_sigmoid}/output_0"], name=shared_gate_sigmoid)
-        self.make_value(f"{shared_gate_sigmoid}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1])
-
-        gated_shared_name = f"{shared_basename}/GatedMul"
-        self.make_node("Mul", inputs=[f"{down_matmul}/output_0", f"{shared_gate_sigmoid}/output_0"], outputs=[f"{gated_shared_name}/output_0"], name=gated_shared_name)
-        self.make_value(f"{gated_shared_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
-
-        combine_name = f"{basename}/Add"
-        self.make_node("Add", inputs=[f"{moe_name}/output_0", f"{gated_shared_name}/output_0"], outputs=[f"{combine_name}/output_0"], name=combine_name)
-        self.make_value(f"{combine_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
-
-        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
