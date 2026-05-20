@@ -102,8 +102,10 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
   auto [input_ids, token_type_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, allocator);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));

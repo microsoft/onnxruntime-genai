@@ -211,27 +211,28 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   }
 
   // Process images if present
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> image_result;
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner, pixel_position_ids_owner, num_soft_tokens_owner;
   OrtxTensor* pixel_values = nullptr;
   OrtxTensor* pixel_position_ids = nullptr;
   size_t actual_soft_tokens = vision_soft_tokens_per_image_;
   if (payload.images) {
     CheckResult(OrtxImagePreProcess(image_processor_.get(), payload.images->images_.get(), image_result.ToBeAssigned()));
-    CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, &pixel_values));
+    CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, pixel_values_owner.ToBeAssigned()));
+    pixel_values = pixel_values_owner.get();
 
     // pixel_position_ids is the second output from the Gemma4 image preprocessor
-    OrtxTensor* temp_tensor = nullptr;
-    if (OrtxTensorResultGetAt(image_result.get(), 1, &temp_tensor) == kOrtxOK && temp_tensor) {
-      pixel_position_ids = temp_tensor;
+    if (OrtxTensorResultGetAt(image_result.get(), 1, pixel_position_ids_owner.ToBeAssigned()) == kOrtxOK && pixel_position_ids_owner.get()) {
+      pixel_position_ids = pixel_position_ids_owner.get();
     }
 
     // num_soft_tokens is the third output — the actual number of vision tokens after pooling
-    OrtxTensor* num_soft_tokens_tensor = nullptr;
-    if (OrtxTensorResultGetAt(image_result.get(), 2, &num_soft_tokens_tensor) == kOrtxOK && num_soft_tokens_tensor) {
+    if (OrtxTensorResultGetAt(image_result.get(), 2, num_soft_tokens_owner.ToBeAssigned()) == kOrtxOK && num_soft_tokens_owner.get()) {
       const int64_t* nst_data{};
       const int64_t* nst_shape{};
       size_t nst_dims;
-      CheckResult(OrtxGetTensorData(num_soft_tokens_tensor, reinterpret_cast<const void**>(&nst_data),
+      CheckResult(OrtxGetTensorData(num_soft_tokens_owner.get(), reinterpret_cast<const void**>(&nst_data),
                                     &nst_shape, &nst_dims));
       if (nst_data && nst_data[0] > 0) {
         actual_soft_tokens = static_cast<size_t>(nst_data[0]);
@@ -251,8 +252,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
-    OrtxTensor* audio_features = nullptr;
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_features));
+    // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_features_owner;
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_features_owner.ToBeAssigned()));
+    OrtxTensor* audio_features = audio_features_owner.get();
 
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 

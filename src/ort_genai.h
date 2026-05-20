@@ -108,13 +108,13 @@ struct OgaString {
 };
 
 struct OgaStringArray {
-  std::unique_ptr<OgaStringArray> Create() {
+  static std::unique_ptr<OgaStringArray> Create() {
     OgaStringArray* p;
     OgaCheckResult(OgaCreateStringArray(&p));
     return std::unique_ptr<OgaStringArray>(p);
   }
 
-  std::unique_ptr<OgaStringArray> Create(const char** strings, size_t count) {
+  static std::unique_ptr<OgaStringArray> Create(const char* const* strings, size_t count) {
     OgaStringArray* p;
     OgaCheckResult(OgaCreateStringArrayFromStrings(strings, count, &p));
     return std::unique_ptr<OgaStringArray>(p);
@@ -618,20 +618,16 @@ struct OgaTensor : OgaAbstract {
 struct OgaImages : OgaAbstract {
   static std::unique_ptr<OgaImages> Load(const std::vector<const char*>& image_paths) {
     OgaImages* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
-    OgaCheckResult(OgaLoadImages(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(image_paths.data(), image_paths.size());
+    OgaCheckResult(OgaLoadImages(strs.get(), &p));
     return std::unique_ptr<OgaImages>(p);
   }
 
 #if OGA_USE_SPAN
   static std::unique_ptr<OgaImages> Load(std::span<const char* const> image_paths) {
     OgaImages* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
-    OgaCheckResult(OgaLoadImages(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(image_paths.data(), image_paths.size());
+    OgaCheckResult(OgaLoadImages(strs.get(), &p));
     return std::unique_ptr<OgaImages>(p);
   }
 #endif
@@ -648,20 +644,16 @@ struct OgaImages : OgaAbstract {
 struct OgaAudios : OgaAbstract {
   static std::unique_ptr<OgaAudios> Load(const std::vector<const char*>& audio_paths) {
     OgaAudios* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
-    OgaCheckResult(OgaLoadAudios(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(audio_paths.data(), audio_paths.size());
+    OgaCheckResult(OgaLoadAudios(strs.get(), &p));
     return std::unique_ptr<OgaAudios>(p);
   }
 
 #if OGA_USE_SPAN
   static std::unique_ptr<OgaAudios> Load(std::span<const char* const> audio_paths) {
     OgaAudios* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
-    OgaCheckResult(OgaLoadAudios(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(audio_paths.data(), audio_paths.size());
+    OgaCheckResult(OgaLoadAudios(strs.get(), &p));
     return std::unique_ptr<OgaAudios>(p);
   }
 #endif
@@ -726,9 +718,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessImages(const std::vector<const char*>& prompts, const OgaImages* images = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs, images, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs.get(), images, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -740,9 +731,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessAudios(const std::vector<const char*>& prompts, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs, audios, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs.get(), audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -754,9 +744,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const std::vector<const char*>& prompts, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs, images, audios, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs.get(), images, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 

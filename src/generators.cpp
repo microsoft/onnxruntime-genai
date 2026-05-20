@@ -87,11 +87,28 @@ GetOrtGlobals() {
   return globals;
 }
 
-// Used by Shutdown() to display the counts and types of any leaked objects
+// Used by Shutdown() to display the counts and types of any leaked objects.
+// Leak reporting is gated to debug builds or when logging is enabled, since
+// consuming applications often cannot guarantee model teardown before process
+// exit, and there is little they can do in response at that point.
+static bool ShouldReportLeaks() {
+#if !defined(NDEBUG)
+  return true;
+#else
+  return g_log.enabled;
+#endif
+}
+
 template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
-  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
-  return ((LeakChecked<Types>::Count() != 0) || ...);
+  const bool report = ShouldReportLeaks();
+  bool any_leaked = false;
+  ((LeakChecked<Types>::Count() != 0
+        ? (any_leaked = true,
+           report ? (std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl, 0) : 0)
+        : 0),
+   ...);
+  return any_leaked && report;
 }
 
 void Shutdown() {
@@ -660,7 +677,7 @@ void Generator::GenerateNextToken() {
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline")
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

@@ -689,10 +689,17 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
-  // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds
-  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.input_ids)) {
-    decoder_input_ids_ = std::make_unique<DefaultInputIDs>(*this);
-    decoder_input_ids_->Add();
+  // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds.
+  // Use a decoder-only SessionInfo to avoid false positives: the combined session_info_
+  // includes embedding session inputs (which always has input_ids), causing this check
+  // to incorrectly fire for models like mistral3 whose decoder has no input_ids input.
+  {
+    SessionInfo decoder_only_info;
+    decoder_only_info.Add(*model_.decoder_session_);
+    if (decoder_only_info.HasInput(model_.config_->model.decoder.inputs.input_ids)) {
+      decoder_input_ids_ = std::make_unique<DefaultInputIDs>(*this);
+      decoder_input_ids_->Add();
+    }
   }
 
   position_inputs_->Add();
