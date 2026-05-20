@@ -239,11 +239,8 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     }
 
     // Image too small to form any patches — skip patching entirely.
-    // The downstream code will use the original (unpatched) pixel_values.
-    if (height_patches <= 0 || width_patches <= 0) {
-      // Fall through: patched_pixel_values remains null, so the else branch
-      // (non-patched pixel_values path) handles it.
-    } else {
+    // patched_pixel_values remains null, so the non-patched pixel_values path handles it.
+    if (height_patches > 0 && width_patches > 0) {
       // Check overflow for total_patches = height_patches * width_patches
       if (height_patches > std::numeric_limits<int64_t>::max() / width_patches) {
         throw std::runtime_error("Integer overflow computing total_patches: height_patches=" +
@@ -328,7 +325,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
         computed_grid_data = grid_data;
         computed_grid_num_images = 1;
       }
-    }  // end else (image large enough to patch)
+    }
   }
 
   auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
