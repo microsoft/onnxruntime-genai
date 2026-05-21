@@ -604,8 +604,7 @@ Model::~Model() {
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture,
-                                           const fs::path& asset_dir) {
+                                           bool disable_graph_capture) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -678,16 +677,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         resolved = true;
       }
 
-      // Second try: resolve relative to the per-role asset directory (package mode)
-      if (!resolved && !asset_dir.string().empty()) {
-        fs::path asset_relative_path = asset_dir / custom_library_path.string();
-        if (fs::exists(asset_relative_path)) {
-          custom_library_file_prefix = asset_relative_path.string();
-          resolved = true;
-        }
-      }
-
-      // Third try: resolve relative to EP library directory (for system-wide installations)
+      // Second try: resolve relative to EP library directory (for system-wide installations)
       if (!resolved) {
         size_t num_devices = 0;
         const OrtEpDevice* const* device_ptrs = nullptr;
@@ -716,7 +706,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
       }
 
-      // Fourth try: resolve relative to current working directory (for development/portable apps)
+      // Third try: resolve relative to current working directory (for development/portable apps)
       if (!resolved) {
         char cwd_buffer[PATH_MAX];
         if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
@@ -753,16 +743,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  // In package mode the normalization pass populates decoder.session_options with the resolved
-  // EP entry (and per-pipeline-element SOs likewise), so this flat-dir path covers both.
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
-                                 /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
-                                     /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
     }
   }
 
@@ -782,8 +768,7 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
-                                                 OrtSessionOptions* session_options,
-                                                 const fs::path& asset_dir /*= {}*/) {
+                                                 OrtSessionOptions* session_options) {
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -807,16 +792,15 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     return session;
   }
 
-  // Otherwise, load the model from the file system. Use asset_dir if provided (package mode where
-  // ONNX files live in a per-role variant directory), else fall back to config_path (flat-dir mode).
-  fs::path base = asset_dir.string().empty() ? config_->config_path : asset_dir;
-  return OrtSession::Create(ort_env, (base / fs::path(model_filename)).c_str(), session_options);
+  // Otherwise, load the model from the file system. Absolute paths (e.g. those written by the
+  // package normalization pass) are used as-is; relative paths resolve against config_path.
+  fs::path model_path(model_filename);
+  if (!model_path.is_relative()) {
+    return OrtSession::Create(ort_env, model_path.c_str(), session_options);
+  }
+  fs::path base = config_->config_path;
+  return OrtSession::Create(ort_env, (base / model_path).c_str(), session_options);
 }
-
-// Package-mode session creation no longer needs a dedicated path: normalization at load time
-// populates per-role filename/asset_dir/session_options so the flat-dir CreateSession path
-// handles both modes uniformly. The old CreateSessionFromPackage / BuildSessionOptionsForPackageFile
-// helpers were removed in favor of model_package.cpp's NormalizePackageIntoConfig.
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);

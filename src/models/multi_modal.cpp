@@ -93,36 +93,29 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-  // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them.
-  // asset_dir is empty in flat-dir mode (sessions resolve relative to config_path) and populated
-  // in package mode to the per-role variant folder.
+  // The non-decoder models don't support graph capture because of control flow nodes, so disable
+  // graph capture for them. Filenames are absolute in package mode (set by normalization) and
+  // relative in flat-dir mode; Model::CreateSession handles both.
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options),
-                                   *vision_session_options_, true, /*disable_graph_capture=*/true,
-                                   config_->model.vision.asset_dir);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get(),
-                                    config_->model.vision.asset_dir);
+                                   *vision_session_options_, true, /*disable_graph_capture=*/true);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
   }
 
   if (speech) {
     speech_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options),
-                                   *speech_session_options_, true, /*disable_graph_capture=*/true,
-                                   config_->model.speech.asset_dir);
-    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get(),
-                                    config_->model.speech.asset_dir);
+                                   *speech_session_options_, true, /*disable_graph_capture=*/true);
+    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
   }
 
   embedding_session_options_ = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options),
-                                 *embedding_session_options_, true, /*disable_graph_capture=*/true,
-                                 config_->model.embedding.asset_dir);
+                                 *embedding_session_options_, true, /*disable_graph_capture=*/true);
 
-  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get(),
-                                     config_->model.embedding.asset_dir);
-  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(),
-                                   config_->model.decoder.asset_dir);
+  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
+  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
@@ -727,26 +720,22 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
-  // Resolve a per-role LoRA adapter against the role's asset_dir first (populated
-  // for packages by Config::FromPackage), falling back to config_path. asset_dir
-  // is empty for flat-dir models, so this collapses to the legacy lookup.
-  auto resolve_adapter = [&](fs::path asset_dir, const std::string& adapter_filename) {
-    fs::path adapter_file(adapter_filename);
-    if (!asset_dir.string().empty()) {
-      auto candidate = asset_dir / adapter_file;
-      if (fs::exists(candidate)) return candidate.string();
-    }
-    return (model_.config_->config_path / adapter_file).string();
+  // Resolve a per-role LoRA adapter. If adapter_filename is absolute (e.g. set by package
+  // normalization when the LoRA lives in the variant folder), use it as-is. Otherwise treat
+  // it as relative to config_path, matching legacy flat-dir behavior.
+  auto resolve_adapter = [&](const std::string& adapter_filename) {
+    fs::path adapter_path(adapter_filename);
+    if (!adapter_path.is_relative()) return adapter_path.string();
+    fs::path base = model_.config_->config_path;
+    return (base / adapter_path).string();
   };
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
-    auto lora_adapter = resolve_adapter(model_.config_->model.vision.asset_dir,
-                                        *model_.config_->model.vision.adapter_filename);
+    auto lora_adapter = resolve_adapter(*model_.config_->model.vision.adapter_filename);
     adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
   } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
-    auto lora_adapter = resolve_adapter(model_.config_->model.speech.asset_dir,
-                                        *model_.config_->model.speech.adapter_filename);
+    auto lora_adapter = resolve_adapter(*model_.config_->model.speech.adapter_filename);
     adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }

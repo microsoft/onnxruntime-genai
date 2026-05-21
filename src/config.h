@@ -26,8 +26,8 @@ struct Config {
   // Factory for creating Config from a model package's pre-merged genai_config JSON.
   // config_path is the configs/ directory inside the package. After this returns,
   // model_package.cpp's NormalizePackageIntoConfig materializes per-role variant data
-  // (filename, asset_dir, session_options) into the Config so the rest of the codebase
-  // can treat it as a flat-dir Config with no further package awareness.
+  // (absolute filename, merged session_options) into the Config so the rest of the
+  // codebase can treat it as a flat-dir Config with no further package awareness.
 #if ORT_HAS_MODEL_PACKAGE
   static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
                                               std::string_view merged_json);
@@ -179,7 +179,6 @@ struct Config {
     struct Encoder {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir holding ONNX + assets; flat-dir: empty (config_path is used)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -217,7 +216,6 @@ struct Config {
     struct Embedding {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -235,7 +233,6 @@ struct Config {
     struct Vision {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -282,7 +279,6 @@ struct Config {
     struct Speech {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -304,7 +300,6 @@ struct Config {
     struct Joiner {
       std::string filename;
       std::string component;
-      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -321,7 +316,6 @@ struct Config {
     struct VAD {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};
@@ -332,7 +326,6 @@ struct Config {
     struct Decoder {
       std::string filename;
       std::string component;  // package component name for this role
-      fs::path asset_dir;     // package-mode: variant dir holding ONNX + assets (shared by pipeline elements); flat-dir: empty
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 

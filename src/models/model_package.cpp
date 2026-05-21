@@ -634,9 +634,25 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
 void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   const std::string& resolved_ep = pkg_state.GetResolvedEpName();
 
-  auto basename_of = [](std::string_view path) {
-    auto sep = path.find_last_of("/\\");
-    return std::string(sep == std::string_view::npos ? path : path.substr(sep + 1));
+  // Make a path that is intended as <asset_dir>/<rel> directly accessible. Bypasses the
+  // custom fs::path's non-const operator/ (which can't be called on a const path&).
+  auto join_path = [](const fs::path& dir, const fs::path& tail) {
+    fs::path copy = dir;
+    return copy / tail;
+  };
+
+  // If `rel_or_abs` is a relative path AND <asset_dir>/<rel_or_abs> exists on disk, rewrite
+  // it to that absolute path. Otherwise leave it untouched so the existing flat-dir-style
+  // fallback chain (config_path → EP lib dir → cwd) can resolve it at session-creation time.
+  auto resolve_against_asset_dir = [&](std::optional<std::string>& path_opt,
+                                       const fs::path& asset_dir) {
+    if (!path_opt.has_value() || path_opt->empty()) return;
+    fs::path p(*path_opt);
+    if (!p.is_relative()) return;
+    fs::path candidate = join_path(asset_dir, p);
+    if (fs::exists(candidate)) {
+      *path_opt = candidate.string();
+    }
   };
 
   // Reject components introduced by overlays. The base-config component set was used to drive
@@ -656,9 +672,11 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
 
   // Normalize an optional-SO role. session_options is treated as the genai_config-derived
   // receiver; variant data fills gaps and back-fills missing EP provider_options keys.
+  // filename is rewritten to the absolute variant-file path. custom_ops_library, if it points
+  // at a file inside the asset dir, is rewritten to absolute too — otherwise it stays relative
+  // so the existing fallback chain (config_path / EP lib / cwd) can still resolve it.
   auto normalize_single_optional = [&](const std::string& component,
                                        std::string& filename_slot,
-                                       fs::path& asset_dir_slot,
                                        std::optional<Config::SessionOptions>& so_slot) {
     auto* cix = require_selected(component);
     if (!cix) return;
@@ -666,12 +684,13 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
       throw std::runtime_error("Component '" + component +
                                "' has no files in the selected variant");
     }
-    filename_slot = basename_of(cix->GetSelectedVariantFilePath(0));
-    asset_dir_slot = fs::path(cix->GetSelectedVariantFolderPath());
+    fs::path variant_dir(cix->GetSelectedVariantFolderPath());
+    filename_slot = std::string(cix->GetSelectedVariantFilePath(0));
 
     Config::SessionOptions merged = so_slot.has_value() ? std::move(*so_slot) : Config::SessionOptions{};
     ApplyVariantFileOptions(merged, *cix, 0, resolved_ep);
     RebuildProvidersFromProviderOptions(merged);
+    resolve_against_asset_dir(merged.custom_ops_library, variant_dir);
     so_slot = std::move(merged);
   };
 
@@ -680,6 +699,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   if (!dec.component.empty()) {
     auto* cix = require_selected(dec.component);
     auto file_count = cix->GetSelectedVariantFileCount();
+    fs::path dec_dir(cix->GetSelectedVariantFolderPath());
 
     if (dec.pipeline.empty()) {
       // Single-file decoder.
@@ -687,11 +707,10 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
         throw std::runtime_error("Decoder component '" + dec.component +
                                  "' has no files in the selected variant");
       }
-      dec.filename = basename_of(cix->GetSelectedVariantFilePath(0));
-      dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
-
+      dec.filename = std::string(cix->GetSelectedVariantFilePath(0));
       ApplyVariantFileOptions(dec.session_options, *cix, 0, resolved_ep);
       RebuildProvidersFromProviderOptions(dec.session_options);
+      resolve_against_asset_dir(dec.session_options.custom_ops_library, dec_dir);
     } else {
       // Pipeline: each element maps positionally to variant.files[i].
       if (dec.pipeline.size() != file_count) {
@@ -701,7 +720,6 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
             std::to_string(file_count) +
             " files; positional mapping requires equal counts");
       }
-      dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
       // Decoder-level SessionOptions in pipeline mode is consulted by
       // Model::CreateSessionOptions() to derive p_device_. Reset to a clean SO carrying just
       // the resolved EP entry — per-file detail belongs on each pipeline stage's own SO.
@@ -711,7 +729,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
 
       for (size_t i = 0; i < dec.pipeline.size(); ++i) {
         auto& pipe = dec.pipeline[i];
-        pipe.filename = basename_of(cix->GetSelectedVariantFilePath(i));
+        pipe.filename = std::string(cix->GetSelectedVariantFilePath(i));
         const std::string& ep = pipe.run_on_cpu ? std::string{} : resolved_ep;
 
         Config::SessionOptions merged = pipe.session_options.has_value()
@@ -719,23 +737,39 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
                                             : Config::SessionOptions{};
         ApplyVariantFileOptions(merged, *cix, i, ep);
         RebuildProvidersFromProviderOptions(merged);
+        resolve_against_asset_dir(merged.custom_ops_library, dec_dir);
         pipe.session_options = std::move(merged);
       }
     }
   }
 
+  // Vision / Speech carry adapter_filename (LoRA). Resolve to absolute if present in the
+  // variant folder; otherwise leave relative for the LoRA loader's config_path fallback.
+  auto normalize_with_adapter = [&](const std::string& component,
+                                    std::string& filename_slot,
+                                    std::optional<Config::SessionOptions>& so_slot,
+                                    std::optional<std::string>& adapter_slot) {
+    auto* cix = require_selected(component);
+    if (!cix) return;
+    normalize_single_optional(component, filename_slot, so_slot);
+    if (cix) {
+      fs::path variant_dir(cix->GetSelectedVariantFolderPath());
+      resolve_against_asset_dir(adapter_slot, variant_dir);
+    }
+  };
+
   normalize_single_optional(config.model.encoder.component, config.model.encoder.filename,
-                            config.model.encoder.asset_dir, config.model.encoder.session_options);
-  normalize_single_optional(config.model.vision.component, config.model.vision.filename,
-                            config.model.vision.asset_dir, config.model.vision.session_options);
-  normalize_single_optional(config.model.speech.component, config.model.speech.filename,
-                            config.model.speech.asset_dir, config.model.speech.session_options);
+                            config.model.encoder.session_options);
+  normalize_with_adapter(config.model.vision.component, config.model.vision.filename,
+                         config.model.vision.session_options, config.model.vision.adapter_filename);
+  normalize_with_adapter(config.model.speech.component, config.model.speech.filename,
+                         config.model.speech.session_options, config.model.speech.adapter_filename);
   normalize_single_optional(config.model.embedding.component, config.model.embedding.filename,
-                            config.model.embedding.asset_dir, config.model.embedding.session_options);
+                            config.model.embedding.session_options);
   normalize_single_optional(config.model.joiner.component, config.model.joiner.filename,
-                            config.model.joiner.asset_dir, config.model.joiner.session_options);
+                            config.model.joiner.session_options);
   normalize_single_optional(config.model.vad.component, config.model.vad.filename,
-                            config.model.vad.asset_dir, config.model.vad.session_options);
+                            config.model.vad.session_options);
 }
 
 #endif  // ORT_HAS_MODEL_PACKAGE

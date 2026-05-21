@@ -158,12 +158,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  // Open a session against an ONNX file. asset_dir, when non-empty, is used as the directory
-  // prefix instead of config_->config_path — set by package mode where each role's ONNX file
-  // lives under its component's variant folder. asset_dir defaults to empty for flat-dir loads.
+  // Open a session against an ONNX file. Absolute filenames (e.g. those written by the package
+  // normalization pass) are used as-is; relative filenames resolve against config_->config_path.
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
-                                            OrtSessionOptions* session_options,
-                                            const fs::path& asset_dir = {});
+                                            OrtSessionOptions* session_options);
 
   bool IsPruned() const;
 
@@ -181,13 +179,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.
-  /// asset_dir, when non-empty, is used as an extra search root for relative-path assets
-  /// (currently: custom_ops_library). In package mode it is the role's variant folder.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false,
-                                      const fs::path& asset_dir = {});
+                                      bool disable_graph_capture = false);
 
  protected:
   void CreateSessionOptions();

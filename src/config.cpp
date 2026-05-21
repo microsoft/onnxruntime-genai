@@ -1733,7 +1733,8 @@ std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
   ParseConfigFromString(merged_json, *config);
   FinalizeConfig(*config);
   // Caller is expected to follow up with NormalizePackageIntoConfig (in model_package.cpp)
-  // to materialize per-role variant data (filename, asset_dir, session_options).
+  // to materialize per-role variant data (absolute filename, merged session_options) into
+  // the Config so downstream code can treat it as a flat-dir Config.
   return config;
 }
 #endif

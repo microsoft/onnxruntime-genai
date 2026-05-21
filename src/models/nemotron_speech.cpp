@@ -126,14 +126,11 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   joiner_session_options_ = OrtSessionOptions::Create();
 
   CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.encoder.session_options),
-                                 *encoder_session_options_, true, /*disable_graph_capture=*/false,
-                                 config_->model.encoder.asset_dir);
+                                 *encoder_session_options_, true);
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true, /*disable_graph_capture=*/false,
-                                 config_->model.decoder.asset_dir);
+                                 *decoder_session_options_, true);
   CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.joiner.session_options),
-                                 *joiner_session_options_, true, /*disable_graph_capture=*/false,
-                                 config_->model.joiner.asset_dir);
+                                 *joiner_session_options_, true);
 
   // Defaults if the flat-dir config omits a filename. Package mode always populates filenames
   // via normalization, so the defaults only matter for legacy flat-dir loads.
@@ -144,12 +141,9 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   std::string joiner_filename = config_->model.joiner.filename;
   if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
 
-  session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get(),
-                                   config_->model.encoder.asset_dir);
-  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get(),
-                                   config_->model.decoder.asset_dir);
-  session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get(),
-                                  config_->model.joiner.asset_dir);
+  session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
+  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
+  session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
 
   session_info_.Add(*session_encoder_);
   session_info_.Add(*session_decoder_);

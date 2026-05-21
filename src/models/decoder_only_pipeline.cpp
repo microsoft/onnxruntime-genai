@@ -11,11 +11,10 @@ namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
-  // Pipeline stages: each element's filename is normalized to a basename and resolved against
-  // the decoder's asset_dir (empty for flat-dir; the variant folder for packages).
+  // Pipeline stage filenames are absolute in package mode (set by normalization) and relative
+  // in flat-dir mode; Model::CreateSession handles both.
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id),
-                                         config_->model.decoder.asset_dir));
+    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
   }
 
   for (auto& session : sessions_) {
@@ -71,14 +70,11 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
-    // Re-create the session via Model::CreateSession so package mode (which sets asset_dir on
-    // the decoder) and flat-dir mode share one path.
     auto& mutable_model = const_cast<DecoderOnlyPipelineModel&>(model_);
     mutable_model.sessions_[id_] = mutable_model.CreateSession(
         model_.ort_env_,
         model_.config_->model.decoder.pipeline[id_].filename,
-        model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id),
-        model_.config_->model.decoder.asset_dir);
+        model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
 
   if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {
