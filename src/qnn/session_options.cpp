@@ -34,7 +34,7 @@ static bool IsQNNGPUSharedAllocatorAvailable() {
     auto session_options = OrtSessionOptions::Create();
     Config::ProviderOptions provider_options = Config::ProviderOptions{
         "QNN",
-        {},
+        { {"enable_dx12_shared_memory_allocator", "1"} },
         Config::DeviceFilteringOptions{OrtHardwareDeviceType_GPU}
     };
 

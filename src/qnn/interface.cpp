@@ -63,6 +63,7 @@ struct InterfaceImpl : DeviceInterface {
     // Otherwise, a conflict could arise between the allocator session and the main inference session (e.g. HTP
     // allocations provided to a GPU session).
     if (Generators::IsQNNGPUBackend(config)) {
+      provider_options.options.emplace_back("enable_dx12_shared_memory_allocator", "1");
       provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_GPU };
     } else {
       // For the HTP backend, thea allocator for QnnHtpShared is only made available when the provider option
