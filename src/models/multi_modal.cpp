@@ -3,7 +3,6 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
-#include "model_package.h"
 #include <cstring>
 #include <numeric>
 
@@ -94,51 +93,36 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-#if ORT_HAS_MODEL_PACKAGE
-  if (config_->IsPackage()) {
-    // Package path: create sessions from per-file package accessors
-    auto ep = config_->package_state_->GetResolvedEpName();
-    if (vision && !config_->model.vision.component.empty()) {
-      const Config::SessionOptions* vis_so = config_->model.vision.session_options.has_value()
-          ? &*config_->model.vision.session_options : nullptr;
-      vision_session_ = CreateSessionFromPackage(ort_env, config_->model.vision.component, 0, ep, vis_so, true);
-    }
-    if (speech && !config_->model.speech.component.empty()) {
-      const Config::SessionOptions* spe_so = config_->model.speech.session_options.has_value()
-          ? &*config_->model.speech.session_options : nullptr;
-      speech_session_ = CreateSessionFromPackage(ort_env, config_->model.speech.component, 0, ep, spe_so, true);
-    }
-    if (!config_->model.embedding.component.empty()) {
-      const Config::SessionOptions* emb_so = config_->model.embedding.session_options.has_value()
-          ? &*config_->model.embedding.session_options : nullptr;
-      embedding_session_ = CreateSessionFromPackage(ort_env, config_->model.embedding.component, 0, ep, emb_so, true);
-    }
-    // Decoder session
-    decoder_session_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
-                                                ep, &config_->model.decoder.session_options, false);
-  } else
-#endif
-  {
-    // Flat-dir path (unchanged)
-    // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
-    if (vision) {
-      vision_session_options_ = OrtSessionOptions::Create();
-      CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options), *vision_session_options_, true, /*disable_graph_capture=*/true);
-      vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
-    }
-
-    if (speech) {
-      speech_session_options_ = OrtSessionOptions::Create();
-      CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options), *speech_session_options_, true, /*disable_graph_capture=*/true);
-      speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
-    }
-
-    embedding_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options), *embedding_session_options_, true, /*disable_graph_capture=*/true);
-
-    embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
-    decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them.
+  // asset_dir is empty in flat-dir mode (sessions resolve relative to config_path) and populated
+  // in package mode to the per-role variant folder.
+  if (vision) {
+    vision_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.vision.session_options),
+                                   *vision_session_options_, true, /*disable_graph_capture=*/true,
+                                   config_->model.vision.asset_dir);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get(),
+                                    config_->model.vision.asset_dir);
   }
+
+  if (speech) {
+    speech_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.speech.session_options),
+                                   *speech_session_options_, true, /*disable_graph_capture=*/true,
+                                   config_->model.speech.asset_dir);
+    speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get(),
+                                    config_->model.speech.asset_dir);
+  }
+
+  embedding_session_options_ = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.embedding.session_options),
+                                 *embedding_session_options_, true, /*disable_graph_capture=*/true,
+                                 config_->model.embedding.asset_dir);
+
+  embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get(),
+                                     config_->model.embedding.asset_dir);
+  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(),
+                                   config_->model.decoder.asset_dir);
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);

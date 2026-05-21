@@ -562,11 +562,6 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  // p_device_ is now set for both flat-dir and package paths in CreateSessionOptions().
-  UpdateDeviceRoles();
-}
-
-void Model::UpdateDeviceRoles() {
   EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
@@ -610,7 +605,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture,
-                                           const fs::path& variant_dir) {
+                                           const fs::path& asset_dir) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -683,11 +678,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         resolved = true;
       }
 
-      // Second try: resolve relative to the selected variant directory (package mode)
-      if (!resolved && !variant_dir.string().empty()) {
-        fs::path variant_relative_path = variant_dir / custom_library_path.string();
-        if (fs::exists(variant_relative_path)) {
-          custom_library_file_prefix = variant_relative_path.string();
+      // Second try: resolve relative to the per-role asset directory (package mode)
+      if (!resolved && !asset_dir.string().empty()) {
+        fs::path asset_relative_path = asset_dir / custom_library_path.string();
+        if (fs::exists(asset_relative_path)) {
+          custom_library_file_prefix = asset_relative_path.string();
           resolved = true;
         }
       }
@@ -758,21 +753,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-#if ORT_HAS_MODEL_PACKAGE
-  if (config_->IsPackage()) {
-    // p_device_ derives from the EP captured for the decoder component.
-    // GenAI already knows this EP from variant selection.
-    p_device_ = DeviceFromEpName(config_->package_state_->GetResolvedEpName());
-    return;
-  }
-#endif
-
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  // In package mode the normalization pass populates decoder.session_options with the resolved
+  // EP entry (and per-pipeline-element SOs likewise), so this flat-dir path covers both.
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
+                                 /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
+                                     /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
     }
   }
 
@@ -791,7 +781,9 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options,
+                                                 const fs::path& asset_dir /*= {}*/) {
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -815,186 +807,16 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     return session;
   }
 
-  // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  // Otherwise, load the model from the file system. Use asset_dir if provided (package mode where
+  // ONNX files live in a per-role variant directory), else fall back to config_path (flat-dir mode).
+  fs::path base = asset_dir.string().empty() ? config_->config_path : asset_dir;
+  return OrtSession::Create(ort_env, (base / fs::path(model_filename)).c_str(), session_options);
 }
 
-#if ORT_HAS_MODEL_PACKAGE
-
-namespace {
-
-bool ParseVariantBool(std::string_view key, std::string_view value) {
-  if (value == "true" || value == "1") return true;
-  if (value == "false" || value == "0") return false;
-  throw std::runtime_error(
-      "variant session_options[\"" + std::string(key) +
-      "\"] must be a boolean (got '" + std::string(value) + "')");
-}
-
-int ParseVariantInt(std::string_view key, std::string_view value) {
-  try {
-    size_t consumed = 0;
-    int parsed = std::stoi(std::string(value), &consumed);
-    if (consumed != value.size()) throw std::invalid_argument("trailing characters");
-    return parsed;
-  } catch (const std::exception& e) {
-    throw std::runtime_error(
-        "variant session_options[\"" + std::string(key) +
-        "\"] must be an integer (got '" + std::string(value) + "'): " + e.what());
-  }
-}
-
-GraphOptimizationLevel ParseVariantGraphOptLevel(std::string_view value) {
-  if (value == "ORT_DISABLE_ALL") return ORT_DISABLE_ALL;
-  if (value == "ORT_ENABLE_BASIC") return ORT_ENABLE_BASIC;
-  if (value == "ORT_ENABLE_EXTENDED") return ORT_ENABLE_EXTENDED;
-  if (value == "ORT_ENABLE_ALL") return ORT_ENABLE_ALL;
-  throw std::runtime_error(
-      "variant session_options[\"graph_optimization_level\"] has unrecognized value '" +
-      std::string(value) + "'");
-}
-
-}  // namespace
-
-Config::SessionOptions Model::BuildSessionOptionsForPackageFile(
-    const std::string& component_name,
-    size_t file_index,
-    const std::string& ep_for_file,
-    const Config::SessionOptions* config_session_options) const {
-  auto* pkg_state = config_->package_state_.get();
-  auto* cix = pkg_state->GetComponent(component_name);
-
-  Config::SessionOptions so;
-
-  // Layer 1: Apply variant per-file session options directly to the SessionOptions struct.
-  // Maps known typed keys to their dedicated fields; everything else goes to config_entries.
-  {
-    const char* const* so_keys = nullptr;
-    const char* const* so_values = nullptr;
-    size_t so_count = 0;
-    cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
-
-    for (size_t i = 0; i < so_count; ++i) {
-      std::string_view key(so_keys[i]);
-      std::string_view val(so_values[i]);
-
-      if (key == "intra_op_num_threads") {
-        so.intra_op_num_threads = ParseVariantInt(key, val);
-      } else if (key == "inter_op_num_threads") {
-        so.inter_op_num_threads = ParseVariantInt(key, val);
-      } else if (key == "log_severity_level") {
-        so.log_severity_level = ParseVariantInt(key, val);
-      } else if (key == "log_verbosity_level") {
-        so.log_verbosity_level = ParseVariantInt(key, val);
-      } else if (key == "enable_cpu_mem_arena") {
-        so.enable_cpu_mem_arena = ParseVariantBool(key, val);
-      } else if (key == "enable_mem_pattern") {
-        so.enable_mem_pattern = ParseVariantBool(key, val);
-      } else if (key == "log_id") {
-        so.log_id = std::string(val);
-      } else if (key == "enable_profiling") {
-        so.enable_profiling = std::string(val);
-      } else if (key == "custom_ops_library") {
-        so.custom_ops_library = std::string(val);
-      } else if (key == "graph_optimization_level") {
-        so.graph_optimization_level = ParseVariantGraphOptLevel(val);
-      } else {
-        so.config_entries.emplace_back(std::string(key), std::string(val));
-      }
-    }
-  }
-
-  // Set up the EP: use the resolved EP for this file (or CPU if run_on_cpu)
-  if (ep_for_file != "CPUExecutionProvider") {
-    // Map full ORT EP name to the short genai provider name used by the dispatch table
-    std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
-
-    Config::ProviderOptions po;
-    po.name = genai_provider_name;
-
-    // Attach variant's per-file provider_options as EP config (not the EP identity)
-    const char* const* po_keys = nullptr;
-    const char* const* po_values = nullptr;
-    size_t po_count = 0;
-    cix->GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
-
-    for (size_t i = 0; i < po_count; ++i) {
-      po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
-    }
-
-    so.providers.push_back(genai_provider_name);
-    so.provider_options.push_back(std::move(po));
-  }
-
-  // Layer 2: Overlay genai_config session_options on top.
-  // The genai_config is already parsed into Config::SessionOptions at load time.
-  // Re-parse would require the raw JSON, so we do a struct-level overlay where
-  // config values (if set) override the variant base.
-  if (config_session_options) {
-    // Save variant provider_options before overlay (OverlaySessionOptions replaces
-    // providers + provider_options entirely when the overlay has a non-empty providers
-    // list, which FinalizeConfig always populates from provider_options entries).
-    std::vector<Config::ProviderOptions> variant_po;
-    if (ep_for_file != "CPUExecutionProvider") {
-      variant_po = so.provider_options;
-    }
-
-    OverlaySessionOptions(so, *config_session_options);
-
-    // Back-fill: for matching EP entries, add variant provider_options keys that
-    // the genai_config did not explicitly set. This preserves variant-specified
-    // defaults (e.g. quantization flags) that the genai_config author did not
-    // need to repeat.
-    for (const auto& vpo : variant_po) {
-      auto it = std::find_if(so.provider_options.begin(), so.provider_options.end(),
-                             [&](const Config::ProviderOptions& p) { return p.name == vpo.name; });
-      if (it != so.provider_options.end()) {
-        for (const auto& [k, v] : vpo.options) {
-          bool exists = std::any_of(it->options.begin(), it->options.end(),
-                                    [&](const auto& e) { return e.first == k; });
-          if (!exists) {
-            it->options.emplace_back(k, v);
-          }
-        }
-      }
-    }
-  }
-
-  return so;
-}
-
-std::unique_ptr<OrtSession> Model::CreateSessionFromPackage(OrtEnv& ort_env,
-                                                             const std::string& component_name,
-                                                             size_t file_index,
-                                                             const std::string& ep_for_file,
-                                                             const Config::SessionOptions* config_session_options,
-                                                             bool disable_graph_capture) {
-  auto* pkg_state = config_->package_state_.get();
-  if (!pkg_state) {
-    throw std::runtime_error("CreateSessionFromPackage called but config has no package state");
-  }
-
-  auto* cix = pkg_state->GetComponent(component_name);
-  if (!cix) {
-    throw std::runtime_error("Component '" + component_name + "' was not selected from the package");
-  }
-
-  // Get the absolute file path from the package variant
-  auto file_path = cix->GetSelectedVariantFilePath(file_index);
-
-  // Build merged Config::SessionOptions from variant per-file + genai_config overlay
-  auto merged_so = BuildSessionOptionsForPackageFile(component_name, file_index,
-                                                     ep_for_file, config_session_options);
-
-  // Create OrtSessionOptions and apply all settings through the full pipeline
-  auto so = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(merged_so, *so, false, disable_graph_capture,
-                                  pkg_state->GetVariantDir(component_name));
-
-  // Create the session from the package file path
-  return OrtSession::Create(ort_env, fs::path(file_path).c_str(), so.get());
-}
-#endif
+// Package-mode session creation no longer needs a dedicated path: normalization at load time
+// populates per-role filename/asset_dir/session_options so the flat-dir CreateSession path
+// handles both modes uniformly. The old CreateSessionFromPackage / BuildSessionOptionsForPackageFile
+// helpers were removed in favor of model_package.cpp's NormalizePackageIntoConfig.
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
@@ -1079,13 +901,9 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
 
   if (IsModelPackage(model_path)) {
 #if ORT_HAS_MODEL_PACKAGE
-    extern void ParseConfigFromString(std::string_view json, Config& config);
-
-    if (Ort::runtime_api_version < 27) {
-      throw std::runtime_error("Model packages require ONNX Runtime API version 27 or newer at runtime");
-    }
-
     fs::path configs_path = model_path / "configs";
+
+    // Read base genai_config.json
     fs::path base_config_file = configs_path / "genai_config.json";
     std::ifstream file = base_config_file.open(std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -1099,63 +917,35 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
     }
     file.close();
 
-    auto temp_so = OrtSessionOptions::Create();
-    auto pkg_ctx = OrtModelPackageContext::Create(model_path.c_str());
+    // Open the package, resolve EP, and build a ModelPackageState. The temp
+    // OrtSessionOptions and CUDA V2 special case live inside the helper.
     std::string resolved_ep;
-    if (ep && ep[0] != '\0') {
-      resolved_ep = NormalizeEpName(ep);
-    } else {
-      auto pre_config = std::make_unique<Config>();
-      pre_config->config_path = configs_path;
-      ParseConfigFromString(base_json, *pre_config);
+    std::string explicit_ep = (ep && ep[0] != '\0') ? std::string(ep) : std::string{};
+    auto package_state = OpenAndPrepareModelPackage(ort_env, model_path, base_json,
+                                                    explicit_ep, resolved_ep);
 
-      std::vector<std::string> used_components;
-      auto maybe_add = [&](const std::string& comp) {
-        if (!comp.empty() &&
-            std::find(used_components.begin(), used_components.end(), comp) == used_components.end()) {
-          used_components.push_back(comp);
-        }
-      };
-      maybe_add(pre_config->model.decoder.component);
-      maybe_add(pre_config->model.encoder.component);
-      maybe_add(pre_config->model.vision.component);
-      maybe_add(pre_config->model.speech.component);
-      maybe_add(pre_config->model.embedding.component);
-      maybe_add(pre_config->model.joiner.component);
-      maybe_add(pre_config->model.vad.component);
-
-      resolved_ep = DefaultEpFromPackage(*pkg_ctx, used_components);
-    }
-
-    if (resolved_ep != "CPUExecutionProvider") {
-      if (resolved_ep == "CUDAExecutionProvider") {
-        auto cuda_opts = OrtCUDAProviderOptionsV2::Create();
-        temp_so->AppendExecutionProvider_CUDA_V2(*cuda_opts);
-      } else {
-        temp_so->AppendExecutionProvider(resolved_ep.c_str(), nullptr, nullptr, 0);
-      }
-    }
-
-    auto package_state = std::make_shared<ModelPackageState>(model_path, ort_env, *temp_so, resolved_ep);
-
+    // Parse the base config to discover which components are referenced. Select each one and
+    // collect its genai_config_overlay before parsing the final merged config.
+    extern void ParseConfigFromString(std::string_view json, Config& config);
     auto base_config = std::make_unique<Config>();
     base_config->config_path = configs_path;
     ParseConfigFromString(base_json, *base_config);
 
-    std::vector<std::string> components;
-    auto add_component = [&](const std::string& comp) {
-      if (!comp.empty() &&
-          std::find(components.begin(), components.end(), comp) == components.end()) {
-        components.push_back(comp);
-      }
+    auto collect_components = [](const Config& c) {
+      std::vector<std::string> v;
+      auto add = [&](const std::string& comp) {
+        if (!comp.empty() && std::find(v.begin(), v.end(), comp) == v.end()) v.push_back(comp);
+      };
+      add(c.model.decoder.component);
+      add(c.model.encoder.component);
+      add(c.model.vision.component);
+      add(c.model.speech.component);
+      add(c.model.embedding.component);
+      add(c.model.joiner.component);
+      add(c.model.vad.component);
+      return v;
     };
-    add_component(base_config->model.decoder.component);
-    add_component(base_config->model.encoder.component);
-    add_component(base_config->model.vision.component);
-    add_component(base_config->model.speech.component);
-    add_component(base_config->model.embedding.component);
-    add_component(base_config->model.joiner.component);
-    add_component(base_config->model.vad.component);
+    auto components = collect_components(*base_config);
 
     std::string merged_json = base_json;
     for (const auto& comp_name : components) {
@@ -1175,7 +965,9 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
       merged_json = JsonMergePatch(merged_json, config_overlay);
     }
 
-    return Config::FromPackage(configs_path, merged_json, std::move(package_state));
+    auto config = Config::FromPackage(configs_path, merged_json, std::move(package_state));
+    NormalizePackageIntoConfig(*config);
+    return config;
 #else
     throw std::runtime_error("This build of onnxruntime-genai does not support model packages; rebuild with ONNX Runtime API version 27 or newer");
 #endif

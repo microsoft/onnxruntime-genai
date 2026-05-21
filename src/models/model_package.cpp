@@ -489,7 +489,311 @@ size_t ModelPackageState::ResolveFileIndex(const std::string& component_name,
                            component_name + "'");
 }
 
-#endif
+// --- Helpers extracted from Model::BuildSessionOptionsForPackageFile ---
+
+namespace {
+
+bool ParseVariantBool(std::string_view key, std::string_view value) {
+  if (value == "true" || value == "1") return true;
+  if (value == "false" || value == "0") return false;
+  throw std::runtime_error(
+      "variant session_options[\"" + std::string(key) +
+      "\"] must be a boolean (got '" + std::string(value) + "')");
+}
+
+int ParseVariantInt(std::string_view key, std::string_view value) {
+  try {
+    size_t consumed = 0;
+    int parsed = std::stoi(std::string(value), &consumed);
+    if (consumed != value.size()) throw std::invalid_argument("trailing characters");
+    return parsed;
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        "variant session_options[\"" + std::string(key) +
+        "\"] must be an integer (got '" + std::string(value) + "'): " + e.what());
+  }
+}
+
+GraphOptimizationLevel ParseVariantGraphOptLevel(std::string_view value) {
+  if (value == "ORT_DISABLE_ALL") return ORT_DISABLE_ALL;
+  if (value == "ORT_ENABLE_BASIC") return ORT_ENABLE_BASIC;
+  if (value == "ORT_ENABLE_EXTENDED") return ORT_ENABLE_EXTENDED;
+  if (value == "ORT_ENABLE_ALL") return ORT_ENABLE_ALL;
+  throw std::runtime_error(
+      "variant session_options[\"graph_optimization_level\"] has unrecognized value '" +
+      std::string(value) + "'");
+}
+
+// Build a Config::SessionOptions from a variant file's per-file metadata.
+// If ep_for_file is "CPUExecutionProvider" (or empty), no EP entry is injected (CPU is implicit).
+// Otherwise, the resolved EP is added as a provider entry with the variant's provider_options.
+Config::SessionOptions BuildVariantBaseSO(OrtModelPackageComponentContext& cix,
+                                          size_t file_index,
+                                          const std::string& ep_for_file) {
+  Config::SessionOptions so;
+
+  // Layer 1: variant per-file session_options keyed by typed setters.
+  const char* const* so_keys = nullptr;
+  const char* const* so_values = nullptr;
+  size_t so_count = 0;
+  cix.GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
+
+  for (size_t i = 0; i < so_count; ++i) {
+    std::string_view key(so_keys[i]);
+    std::string_view val(so_values[i]);
+
+    if (key == "intra_op_num_threads") {
+      so.intra_op_num_threads = ParseVariantInt(key, val);
+    } else if (key == "inter_op_num_threads") {
+      so.inter_op_num_threads = ParseVariantInt(key, val);
+    } else if (key == "log_severity_level") {
+      so.log_severity_level = ParseVariantInt(key, val);
+    } else if (key == "log_verbosity_level") {
+      so.log_verbosity_level = ParseVariantInt(key, val);
+    } else if (key == "enable_cpu_mem_arena") {
+      so.enable_cpu_mem_arena = ParseVariantBool(key, val);
+    } else if (key == "enable_mem_pattern") {
+      so.enable_mem_pattern = ParseVariantBool(key, val);
+    } else if (key == "log_id") {
+      so.log_id = std::string(val);
+    } else if (key == "enable_profiling") {
+      so.enable_profiling = std::string(val);
+    } else if (key == "custom_ops_library") {
+      so.custom_ops_library = std::string(val);
+    } else if (key == "graph_optimization_level") {
+      so.graph_optimization_level = ParseVariantGraphOptLevel(val);
+    } else {
+      so.config_entries.emplace_back(std::string(key), std::string(val));
+    }
+  }
+
+  // EP provider entry. CPU is implicit (no entry).
+  if (!ep_for_file.empty() && ep_for_file != "CPUExecutionProvider") {
+    std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
+
+    Config::ProviderOptions po;
+    po.name = genai_provider_name;
+
+    const char* const* po_keys = nullptr;
+    const char* const* po_values = nullptr;
+    size_t po_count = 0;
+    cix.GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
+
+    for (size_t i = 0; i < po_count; ++i) {
+      po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
+    }
+
+    so.providers.push_back(genai_provider_name);
+    so.provider_options.push_back(std::move(po));
+  }
+
+  return so;
+}
+
+// Apply genai_config role SO on top of variant_base, back-filling provider_options entries
+// that genai_config didn't explicitly override (preserves variant-supplied defaults like
+// quantization flags). Mirrors the layered semantics from the deprecated
+// Model::BuildSessionOptionsForPackageFile.
+void OverlayGenAISessionOptions(Config::SessionOptions& variant_base,
+                                const Config::SessionOptions& genai_so) {
+  std::vector<Config::ProviderOptions> variant_po_snapshot = variant_base.provider_options;
+  OverlaySessionOptions(variant_base, genai_so);
+
+  for (const auto& vpo : variant_po_snapshot) {
+    auto it = std::find_if(variant_base.provider_options.begin(),
+                            variant_base.provider_options.end(),
+                            [&](const Config::ProviderOptions& p) { return p.name == vpo.name; });
+    if (it == variant_base.provider_options.end()) continue;
+    for (const auto& [k, v] : vpo.options) {
+      bool exists = std::any_of(it->options.begin(), it->options.end(),
+                                [&](const auto& e) { return e.first == k; });
+      if (!exists) it->options.emplace_back(k, v);
+    }
+  }
+}
+
+// Rebuild providers list from provider_options. Used after wholesale SO replacement so we
+// don't have to re-run the heavier FinalizeConfig (which would also re-append duplicates).
+void RebuildProvidersFromProviderOptions(Config::SessionOptions& so) {
+  so.providers.clear();
+  so.providers.reserve(so.provider_options.size());
+  for (const auto& po : so.provider_options) {
+    so.providers.push_back(po.name);
+  }
+}
+
+// Collect every component name referenced by the Config's role fields, in declaration order.
+std::vector<std::string> ReferencedComponents(const Config& config) {
+  std::vector<std::string> components;
+  auto add = [&](const std::string& comp) {
+    if (!comp.empty() &&
+        std::find(components.begin(), components.end(), comp) == components.end()) {
+      components.push_back(comp);
+    }
+  };
+  add(config.model.decoder.component);
+  add(config.model.encoder.component);
+  add(config.model.vision.component);
+  add(config.model.speech.component);
+  add(config.model.embedding.component);
+  add(config.model.joiner.component);
+  add(config.model.vad.component);
+  return components;
+}
+
+}  // namespace
+
+std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
+    OrtEnv& env,
+    const fs::path& package_root,
+    std::string_view base_json,
+    const std::string& explicit_ep,
+    std::string& out_resolved_ep) {
+  if (Ort::runtime_api_version < 27) {
+    throw std::runtime_error("Model packages require ONNX Runtime API version 27 or newer at runtime");
+  }
+
+  auto pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
+
+  if (!explicit_ep.empty()) {
+    out_resolved_ep = NormalizeEpName(explicit_ep);
+  } else {
+    // Parse the base config to scope EP auto-detect to the components the model actually uses.
+    extern void ParseConfigFromString(std::string_view json, Config& config);
+    auto pre_config = std::make_unique<Config>();
+    ParseConfigFromString(base_json, *pre_config);
+    out_resolved_ep = DefaultEpFromPackage(*pkg_ctx, ReferencedComponents(*pre_config));
+  }
+
+  // Build a selection-time OrtSessionOptions with the resolved EP appended. CUDA needs the
+  // dedicated V2 path; everything else goes through the generic AppendExecutionProvider.
+  // This SO is consumed by CreateModelPackageOptionsFromSessionOptions which snapshots the EP
+  // list, so we can let it go out of scope after constructing the state.
+  auto temp_so = OrtSessionOptions::Create();
+  if (out_resolved_ep != "CPUExecutionProvider") {
+    if (out_resolved_ep == "CUDAExecutionProvider") {
+      auto cuda_opts = OrtCUDAProviderOptionsV2::Create();
+      temp_so->AppendExecutionProvider_CUDA_V2(*cuda_opts);
+    } else {
+      temp_so->AppendExecutionProvider(out_resolved_ep.c_str(), nullptr, nullptr, 0);
+    }
+  }
+
+  return std::make_shared<ModelPackageState>(package_root, env, *temp_so, out_resolved_ep);
+}
+
+void NormalizePackageIntoConfig(Config& config) {
+  if (!config.package_state_) return;
+  auto& pkg_state = *config.package_state_;
+  const std::string& resolved_ep = pkg_state.GetResolvedEpName();
+
+  auto basename_of = [](std::string_view path) {
+    auto sep = path.find_last_of("/\\");
+    return std::string(sep == std::string_view::npos ? path : path.substr(sep + 1));
+  };
+
+  // Reject components introduced by overlays. The base-config component set was used to drive
+  // SelectComponent calls; anything that surfaces in the merged Config but wasn't in the base
+  // is a contract violation (overlays may not introduce new components).
+  auto require_selected = [&](const std::string& component) -> OrtModelPackageComponentContext* {
+    if (component.empty()) return nullptr;
+    auto* cix = pkg_state.GetComponent(component);
+    if (!cix) {
+      throw std::runtime_error(
+          "Model package: component '" + component +
+          "' is referenced in the final config but was not present in the base genai_config.json. "
+          "Overlays (variant or runtime) may not introduce new component references.");
+    }
+    return cix;
+  };
+
+  // Normalize an optional-SO role: filename is set to the variant file basename, asset_dir to
+  // the variant folder, session_options to the merged (variant + genai role SO + back-fill).
+  auto normalize_single_optional = [&](const std::string& component,
+                                       std::string& filename_slot,
+                                       fs::path& asset_dir_slot,
+                                       std::optional<Config::SessionOptions>& so_slot) {
+    auto* cix = require_selected(component);
+    if (!cix) return;
+    if (cix->GetSelectedVariantFileCount() == 0) {
+      throw std::runtime_error("Component '" + component +
+                               "' has no files in the selected variant");
+    }
+    filename_slot = basename_of(cix->GetSelectedVariantFilePath(0));
+    asset_dir_slot = fs::path(cix->GetSelectedVariantFolderPath());
+
+    Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, 0, resolved_ep);
+    if (so_slot.has_value()) {
+      OverlayGenAISessionOptions(variant_base, *so_slot);
+    }
+    RebuildProvidersFromProviderOptions(variant_base);
+    so_slot = std::move(variant_base);
+  };
+
+  // Decoder: SessionOptions is non-optional and may carry a pipeline.
+  auto& dec = config.model.decoder;
+  if (!dec.component.empty()) {
+    auto* cix = require_selected(dec.component);
+    auto file_count = cix->GetSelectedVariantFileCount();
+
+    if (dec.pipeline.empty()) {
+      // Single-file decoder.
+      if (file_count == 0) {
+        throw std::runtime_error("Decoder component '" + dec.component +
+                                 "' has no files in the selected variant");
+      }
+      dec.filename = basename_of(cix->GetSelectedVariantFilePath(0));
+      dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
+
+      Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, 0, resolved_ep);
+      OverlayGenAISessionOptions(variant_base, dec.session_options);
+      RebuildProvidersFromProviderOptions(variant_base);
+      dec.session_options = std::move(variant_base);
+    } else {
+      // Pipeline: each element maps positionally to variant.files[i].
+      if (dec.pipeline.size() != file_count) {
+        throw std::runtime_error(
+            "Decoder pipeline has " + std::to_string(dec.pipeline.size()) +
+            " stages but selected variant for component '" + dec.component + "' has " +
+            std::to_string(file_count) +
+            " files; positional mapping requires equal counts");
+      }
+      dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
+      // Decoder-level SessionOptions in pipeline mode: keep the resolved EP visible (so
+      // Model::CreateSessionOptions can derive p_device_) but don't overlay per-file detail —
+      // that belongs on each pipeline stage.
+      dec.session_options = BuildVariantBaseSO(*cix, 0, resolved_ep);
+      RebuildProvidersFromProviderOptions(dec.session_options);
+
+      for (size_t i = 0; i < dec.pipeline.size(); ++i) {
+        auto& pipe = dec.pipeline[i];
+        pipe.filename = basename_of(cix->GetSelectedVariantFilePath(i));
+        const std::string& ep = pipe.run_on_cpu ? std::string{} : resolved_ep;
+        Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, i, ep);
+        if (pipe.session_options.has_value()) {
+          OverlayGenAISessionOptions(variant_base, *pipe.session_options);
+        }
+        RebuildProvidersFromProviderOptions(variant_base);
+        pipe.session_options = std::move(variant_base);
+      }
+    }
+  }
+
+  normalize_single_optional(config.model.encoder.component, config.model.encoder.filename,
+                            config.model.encoder.asset_dir, config.model.encoder.session_options);
+  normalize_single_optional(config.model.vision.component, config.model.vision.filename,
+                            config.model.vision.asset_dir, config.model.vision.session_options);
+  normalize_single_optional(config.model.speech.component, config.model.speech.filename,
+                            config.model.speech.asset_dir, config.model.speech.session_options);
+  normalize_single_optional(config.model.embedding.component, config.model.embedding.filename,
+                            config.model.embedding.asset_dir, config.model.embedding.session_options);
+  normalize_single_optional(config.model.joiner.component, config.model.joiner.filename,
+                            config.model.joiner.asset_dir, config.model.joiner.session_options);
+  normalize_single_optional(config.model.vad.component, config.model.vad.filename,
+                            config.model.vad.asset_dir, config.model.vad.session_options);
+}
+
+#endif  // ORT_HAS_MODEL_PACKAGE
 
 std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json) {
   if (patch_json.empty()) {

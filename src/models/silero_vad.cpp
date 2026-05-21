@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "../generators.h"
-#include "model_package.h"
 #include "silero_vad.h"
 
 namespace Generators {
@@ -84,32 +83,18 @@ SileroVad::SileroVad(Model& model)
     : model_{model} {
   auto& vad_config = model.config_->model.vad;
 
-#if ORT_HAS_MODEL_PACKAGE
-  if (model.config_->IsPackage() && !vad_config.component.empty()) {
-    // Load VAD session from the model package component
-    auto ep = model.config_->package_state_->GetResolvedEpName();
-    const Config::SessionOptions* vad_so = vad_config.session_options.has_value()
-        ? &*vad_config.session_options : nullptr;
-    session_ = model.CreateSessionFromPackage(GetOrtEnv(), vad_config.component, 0, ep, vad_so, true);
-  } else
-#endif
-  {
-    // Create session options via CreateSessionOptionsFromConfig (public on Model).
-    // Falls back to decoder session options if VAD-specific ones aren't provided.
-    session_options_ = OrtSessionOptions::Create();
-    model.CreateSessionOptionsFromConfig(
-        vad_config.session_options.has_value()
-            ? vad_config.session_options.value()
-            : model.config_->model.decoder.session_options,
-        *session_options_, false, true);
+  // VAD session: in package mode vad_config.asset_dir is the variant folder; in flat-dir mode
+  // it is empty and the model loads relative to config_path.
+  session_options_ = OrtSessionOptions::Create();
+  model.CreateSessionOptionsFromConfig(
+      EffectiveSessionOptions(*model.config_, vad_config.session_options),
+      *session_options_, false, /*disable_graph_capture=*/true, vad_config.asset_dir);
 
-    // Load session through Model::CreateSession
-    std::string filename = vad_config.filename;
-    if (filename.empty()) {
-      throw std::runtime_error("VAD filename must be specified in genai_config.json");
-    }
-    session_ = model.CreateSession(GetOrtEnv(), filename, session_options_.get());
+  std::string filename = vad_config.filename;
+  if (filename.empty()) {
+    throw std::runtime_error("VAD filename must be specified in genai_config.json");
   }
+  session_ = model.CreateSession(GetOrtEnv(), filename, session_options_.get(), vad_config.asset_dir);
 
   Initialize(model.config_->model.sample_rate, vad_config.threshold);
 }

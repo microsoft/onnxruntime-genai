@@ -1734,24 +1734,10 @@ std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
   config->package_state_ = std::move(package_state);
   ParseConfigFromString(merged_json, *config);
   FinalizeConfig(*config);
-
-  // Populate per-role asset_dir from the package's selected variant folders.
-  // Phase-2 bridge: in Phase 3 this moves into the normalization pass alongside
-  // filename and session_options materialization.
-  if (config->package_state_) {
-    auto populate_asset_dir = [&](const std::string& component, fs::path& slot) {
-      if (component.empty()) return;
-      slot = config->package_state_->GetVariantDir(component);
-    };
-    populate_asset_dir(config->model.decoder.component, config->model.decoder.asset_dir);
-    populate_asset_dir(config->model.encoder.component, config->model.encoder.asset_dir);
-    populate_asset_dir(config->model.vision.component, config->model.vision.asset_dir);
-    populate_asset_dir(config->model.speech.component, config->model.speech.asset_dir);
-    populate_asset_dir(config->model.embedding.component, config->model.embedding.asset_dir);
-    populate_asset_dir(config->model.joiner.component, config->model.joiner.asset_dir);
-    populate_asset_dir(config->model.vad.component, config->model.vad.asset_dir);
-  }
-
+  // asset_dir, filename, and per-role session_options are populated by
+  // NormalizePackageIntoConfig in model_package.cpp after this function returns,
+  // so callers that construct the Config through CreateConfig get the fully
+  // normalized state.
   return config;
 }
 #endif

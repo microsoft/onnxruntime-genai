@@ -40,6 +40,31 @@ bool IsModelPackage(const fs::path& path);
 std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx,
                                   const std::vector<std::string>& component_names = {});
 
+/// Open a model package and prepare it for component selection.
+/// Resolves the EP (from `explicit_ep` if non-empty, else auto-detected via
+/// DefaultEpFromPackage scoped to the components referenced by `base_json`), builds an
+/// OrtSessionOptions with that EP appended (encapsulating the CUDA V2 special case), and
+/// constructs a ModelPackageState. Returns the state; the resolved EP is written to
+/// `out_resolved_ep` and is also accessible via state->GetResolvedEpName().
+std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
+    OrtEnv& env,
+    const fs::path& package_root,
+    std::string_view base_json,
+    const std::string& explicit_ep,
+    std::string& out_resolved_ep);
+
+/// Walk the Config's referenced components and materialize variant data into the Config so
+/// downstream code can treat it as a flat-dir Config:
+///   - role.filename = absolute path from GetSelectedVariantFilePath(0) (single-file role) or
+///     per-pipeline-element from GetSelectedVariantFilePath(i) (pipeline, positional).
+///   - role.session_options (and per-pipeline-element session_options) = variant per-file SO
+///     overlaid with the genai_config role SO, with back-fill to keep variant provider_options
+///     that genai_config didn't override.
+///   - For run_on_cpu pipeline stages, no EP is injected (CPU is implicit).
+/// Throws if a referenced component is not selected or if pipeline.size() doesn't match the
+/// selected variant's file count.
+void NormalizePackageIntoConfig(Config& config);
+
 /// Holds the model package state for a single model load.
 /// Owns the package context, options, and per-component contexts.
 struct ModelPackageState {

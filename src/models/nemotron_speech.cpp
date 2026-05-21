@@ -8,7 +8,6 @@
 #include "../generators.h"
 #include "nemo_mel_spectrogram.h"
 #include "nemotron_speech.h"
-#include "model_package.h"
 
 namespace Generators {
 
@@ -122,57 +121,35 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   nemotron_config_ = NemotronConfig{};
   nemotron_config_.PopulateFromConfig(*config_);
 
-#if ORT_HAS_MODEL_PACKAGE
-  if (config_->IsPackage()) {
-    auto ep = config_->package_state_->GetResolvedEpName();
-    const Config::SessionOptions* enc_so = config_->model.encoder.session_options.has_value()
-        ? &*config_->model.encoder.session_options : nullptr;
-    session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0, ep, enc_so, true);
-    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
-                                                ep, &config_->model.decoder.session_options, false);
-    // Joiner: assume a dedicated joiner component is always specified in packages
-    const Config::SessionOptions* joi_so = config_->model.joiner.session_options.has_value()
-        ? &*config_->model.joiner.session_options : nullptr;
-    session_joiner_ = CreateSessionFromPackage(ort_env, config_->model.joiner.component, 0, ep, joi_so, true);
-  } else
-#endif
-  {
-    // Create session options
-    encoder_session_options_ = OrtSessionOptions::Create();
-    decoder_session_options_ = OrtSessionOptions::Create();
-    joiner_session_options_ = OrtSessionOptions::Create();
+  encoder_session_options_ = OrtSessionOptions::Create();
+  decoder_session_options_ = OrtSessionOptions::Create();
+  joiner_session_options_ = OrtSessionOptions::Create();
 
-    if (config_->model.encoder.session_options.has_value()) {
-      CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                     *encoder_session_options_, true);
-    } else {
-      CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                     *encoder_session_options_, true);
-    }
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *decoder_session_options_, true);
-    if (config_->model.joiner.session_options.has_value()) {
-      CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                     *joiner_session_options_, true);
-    } else {
-      CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                     *joiner_session_options_, true);
-    }
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.encoder.session_options),
+                                 *encoder_session_options_, true, /*disable_graph_capture=*/false,
+                                 config_->model.encoder.asset_dir);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                 *decoder_session_options_, true, /*disable_graph_capture=*/false,
+                                 config_->model.decoder.asset_dir);
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.joiner.session_options),
+                                 *joiner_session_options_, true, /*disable_graph_capture=*/false,
+                                 config_->model.joiner.asset_dir);
 
-    // Load the three ONNX models
-    std::string encoder_filename = config_->model.encoder.filename;
-    if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
+  // Defaults if the flat-dir config omits a filename. Package mode always populates filenames
+  // via normalization, so the defaults only matter for legacy flat-dir loads.
+  std::string encoder_filename = config_->model.encoder.filename;
+  if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
+  std::string decoder_filename = config_->model.decoder.filename;
+  if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
+  std::string joiner_filename = config_->model.joiner.filename;
+  if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
 
-    std::string decoder_filename = config_->model.decoder.filename;
-    if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
-
-    std::string joiner_filename = config_->model.joiner.filename;
-    if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
-
-    session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
-    session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
-    session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get());
-  }
+  session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get(),
+                                   config_->model.encoder.asset_dir);
+  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get(),
+                                   config_->model.decoder.asset_dir);
+  session_joiner_ = CreateSession(ort_env, joiner_filename, joiner_session_options_.get(),
+                                  config_->model.joiner.asset_dir);
 
   session_info_.Add(*session_encoder_);
   session_info_.Add(*session_decoder_);

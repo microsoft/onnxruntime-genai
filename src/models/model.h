@@ -158,27 +158,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
-
-#if ORT_HAS_MODEL_PACKAGE
-  // Package-aware session creation: creates a session for a specific file index within
-  // a selected component. Uses the per-file path from the package variant.
-  // ep_for_file: the EP to append (resolved EP or "CPUExecutionProvider" for run_on_cpu stages)
-  // config_session_options: optional genai_config session_options to merge on top of variant per-file options
-  // disable_graph_capture: true for non-decoder sessions (vision, speech, embedding, encoder)
-  std::unique_ptr<OrtSession> CreateSessionFromPackage(OrtEnv& ort_env,
-                                                        const std::string& component_name,
-                                                        size_t file_index,
-                                                        const std::string& ep_for_file,
-                                                        const Config::SessionOptions* config_session_options = nullptr,
-                                                        bool disable_graph_capture = false);
-#endif
+  // Open a session against an ONNX file. asset_dir, when non-empty, is used as the directory
+  // prefix instead of config_->config_path — set by package mode where each role's ONNX file
+  // lives under its component's variant folder. asset_dir defaults to empty for flat-dir loads.
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                            OrtSessionOptions* session_options,
+                                            const fs::path& asset_dir = {});
 
   bool IsPruned() const;
-
-  // Update device role pointers based on p_device_. Called by subclasses after
-  // creating the decoder session from a package (which may change p_device_).
-  void UpdateDeviceRoles();
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -194,24 +181,16 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.
+  /// asset_dir, when non-empty, is used as an extra search root for relative-path assets
+  /// (currently: custom_ops_library). In package mode it is the role's variant folder.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
                                       bool disable_graph_capture = false,
-                                      const fs::path& variant_dir = {});
+                                      const fs::path& asset_dir = {});
 
  protected:
   void CreateSessionOptions();
-
-#if ORT_HAS_MODEL_PACKAGE
-  // Build a Config::SessionOptions from variant per-file metadata merged with genai_config.
-  // Variant per-file is the base; genai_config overlay values win on conflicts.
-  Config::SessionOptions BuildSessionOptionsForPackageFile(
-      const std::string& component_name,
-      size_t file_index,
-      const std::string& ep_for_file,
-      const Config::SessionOptions* config_session_options) const;
-#endif
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
