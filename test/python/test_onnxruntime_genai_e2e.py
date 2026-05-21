@@ -54,7 +54,8 @@ def run_whisper():
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
         built_model = os.path.join(cwd, "..", "test_models", f"whisper-tiny-{precision}-{execution_provider}")
-        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision, device=execution_provider, one_layer=False)
+        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision,
+                       device=execution_provider, one_layer=False, enable_graph_capture=False)
 
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
