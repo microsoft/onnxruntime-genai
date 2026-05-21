@@ -139,17 +139,25 @@ std::unique_ptr<NamedTensors> VideoChatFlashProcessor::Process(const Tokenizer& 
     // CHW: [C, H, W] vs HWC: [H, W, C] — channel dim is the small one
     is_hwc = (pv_shape[2] < pv_shape[0]);
     if (is_hwc) {
-      height = pv_shape[0]; width = pv_shape[1]; channels = pv_shape[2];
+      height = pv_shape[0];
+      width = pv_shape[1];
+      channels = pv_shape[2];
     } else {
-      channels = pv_shape[0]; height = pv_shape[1]; width = pv_shape[2];
+      channels = pv_shape[0];
+      height = pv_shape[1];
+      width = pv_shape[2];
     }
   } else if (pv_ndims == 4) {
     num_imgs = pv_shape[0];
     is_hwc = (pv_shape[3] < pv_shape[1]);
     if (is_hwc) {
-      height = pv_shape[1]; width = pv_shape[2]; channels = pv_shape[3];
+      height = pv_shape[1];
+      width = pv_shape[2];
+      channels = pv_shape[3];
     } else {
-      channels = pv_shape[1]; height = pv_shape[2]; width = pv_shape[3];
+      channels = pv_shape[1];
+      height = pv_shape[2];
+      width = pv_shape[3];
     }
   } else {
     throw std::runtime_error("VideoChatFlashProcessor: unexpected pixel_values rank " +
