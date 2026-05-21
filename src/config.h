@@ -3,13 +3,36 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include <memory>
+#include "onnxruntime_c_api.h"
+
+// Must match the definition in models/model_package.h.
+#if !defined(ORT_HAS_MODEL_PACKAGE)
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 27
+#define ORT_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_HAS_MODEL_PACKAGE 0
+#endif
+#endif
+
 namespace Generators {
 
 struct RuntimeSettings;
+struct ModelPackageState;
 
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay);
+
+  // Factory for creating Config from a model package.
+  // config_path: the configs/ directory inside the package
+  // merged_json: the fully merged genai_config JSON string (base + overlays)
+  // package_state: the opened and selected package state
+#if ORT_HAS_MODEL_PACKAGE
+  static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
+                                              std::string_view merged_json,
+                                              std::shared_ptr<ModelPackageState> package_state);
+#endif
 
   struct Defaults {
     // Decoder names
@@ -156,6 +179,7 @@ struct Config {
 
     struct Encoder {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -192,6 +216,7 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -208,6 +233,7 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -253,6 +279,7 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::string component;  // package component name for this role
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -273,6 +300,7 @@ struct Config {
 
     struct Joiner {
       std::string filename;
+      std::string component;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -288,6 +316,7 @@ struct Config {
 
     struct VAD {
       std::string filename;
+      std::string component;  // package component name for this role
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};
@@ -297,6 +326,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string component;  // package component name for this role
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -374,6 +404,7 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        bool run_on_cpu{false};  // If true, force CPU EP for this stage (used in package mode for mixed-EP pipelines)
         bool is_lm_head{false};
         int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
                                     // This is the index of the session that needs to be reset during the execution of the current session.
@@ -430,6 +461,10 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+
+  /// Model package state. Non-null when loading from a .ortpackage directory.
+  std::shared_ptr<ModelPackageState> package_state_;
+  bool IsPackage() const { return package_state_ != nullptr; }
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
@@ -437,6 +472,8 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options);
+void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 

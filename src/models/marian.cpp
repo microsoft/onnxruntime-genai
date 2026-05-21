@@ -2,16 +2,29 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "marian.h"
+#include "model_package.h"
 
 namespace Generators {
 
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);
+#if ORT_HAS_MODEL_PACKAGE
+  if (config_->IsPackage()) {
+    auto ep = config_->package_state_->GetResolvedEpName();
+    const Config::SessionOptions* enc_so = config_->model.encoder.session_options.has_value()
+        ? &*config_->model.encoder.session_options : nullptr;
+    session_encoder_ = CreateSessionFromPackage(ort_env, config_->model.encoder.component, 0, ep, enc_so, true);
+    session_decoder_ = CreateSessionFromPackage(ort_env, config_->model.decoder.component, 0,
+                                                ep, &config_->model.decoder.session_options, false);
+  } else
+#endif
+  {
+    encoder_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);
 
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
-  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+    session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
+    session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  }
 
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);

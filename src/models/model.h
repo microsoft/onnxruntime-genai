@@ -6,6 +6,7 @@
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
+#include "model_package.h"
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
@@ -159,7 +160,25 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
 
+#if ORT_HAS_MODEL_PACKAGE
+  // Package-aware session creation: creates a session for a specific file index within
+  // a selected component. Uses the per-file path from the package variant.
+  // ep_for_file: the EP to append (resolved EP or "CPUExecutionProvider" for run_on_cpu stages)
+  // config_session_options: optional genai_config session_options to merge on top of variant per-file options
+  // disable_graph_capture: true for non-decoder sessions (vision, speech, embedding, encoder)
+  std::unique_ptr<OrtSession> CreateSessionFromPackage(OrtEnv& ort_env,
+                                                        const std::string& component_name,
+                                                        size_t file_index,
+                                                        const std::string& ep_for_file,
+                                                        const Config::SessionOptions* config_session_options = nullptr,
+                                                        bool disable_graph_capture = false);
+#endif
+
   bool IsPruned() const;
+
+  // Update device role pointers based on p_device_. Called by subclasses after
+  // creating the decoder session from a package (which may change p_device_).
+  void UpdateDeviceRoles();
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -178,10 +197,21 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      const fs::path& variant_dir = {});
 
  protected:
   void CreateSessionOptions();
+
+#if ORT_HAS_MODEL_PACKAGE
+  // Build a Config::SessionOptions from variant per-file metadata merged with genai_config.
+  // Variant per-file is the base; genai_config overlay values win on conflicts.
+  Config::SessionOptions BuildSessionOptionsForPackageFile(
+      const std::string& component_name,
+      size_t file_index,
+      const std::string& ep_for_file,
+      const Config::SessionOptions* config_session_options) const;
+#endif
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

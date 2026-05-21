@@ -54,3 +54,4 @@ examples/csharp/ModelChat/models
 /src/java/build
 /src/java/CMakeFiles
 /src/java/CMakeCache.txt
+ort_local/

@@ -3,6 +3,7 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include "generators.h"
 #include "models/model_type.h"
+#include "models/model_package.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
@@ -427,6 +428,8 @@ struct PipelineModel_Element : JSON::Element {
       v_.run_on_token_gen = JSON::Get<bool>(value);
     } else if (name == "is_lm_head") {
       v_.is_lm_head = JSON::Get<bool>(value);
+    } else if (name == "run_on_cpu") {
+      v_.run_on_cpu = JSON::Get<bool>(value);
     } else if (name == "reset_session_idx") {
       v_.reset_session_idx = static_cast<int>(JSON::Get<double>(value));
     } else {
@@ -537,6 +540,8 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -586,6 +591,8 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
       v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_attention_heads") {
@@ -768,6 +775,8 @@ struct Vision_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -869,6 +878,8 @@ struct Speech_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "config_filename") {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
@@ -944,6 +955,8 @@ struct Joiner_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -983,6 +996,8 @@ struct VAD_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else if (name == "threshold") {
       v_.threshold = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "silence_duration_ms") {
@@ -1054,6 +1069,8 @@ struct Embedding_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "component") {
+      v_.component = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1578,50 +1595,148 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", json_overlay, *this);
-
-  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
-    throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+void ParseConfigFromString(std::string_view json, Config& config) {
+  Root_Element root{config};
+  RootObject_Element root_object{root};
+  try {
+    JSON::Parse(root_object, json);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing genai config JSON: " << message.what();
+    throw std::runtime_error(oss.str());
   }
+}
 
-  if (search.max_length == 0) {
-    search.max_length = model.context_length;
+void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options) {
+  SessionOptions_Element element{session_options};
+  try {
+    JSON::Parse(element, json);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error parsing session options JSON: " << message.what();
+    throw std::runtime_error(oss.str());
   }
+}
 
-  // If no eos_token_id was set, set it to the pad token id
-  if (model.eos_token_id.empty()) {
-    model.eos_token_id.push_back(model.pad_token_id);
-  }
+void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay) {
+  // Typed fields: overlay wins if set
+  if (overlay.intra_op_num_threads.has_value())
+    base.intra_op_num_threads = overlay.intra_op_num_threads;
+  if (overlay.inter_op_num_threads.has_value())
+    base.inter_op_num_threads = overlay.inter_op_num_threads;
+  if (overlay.enable_cpu_mem_arena.has_value())
+    base.enable_cpu_mem_arena = overlay.enable_cpu_mem_arena;
+  if (overlay.enable_mem_pattern.has_value())
+    base.enable_mem_pattern = overlay.enable_mem_pattern;
+  if (overlay.log_id.has_value())
+    base.log_id = overlay.log_id;
+  if (overlay.log_severity_level.has_value())
+    base.log_severity_level = overlay.log_severity_level;
+  if (overlay.log_verbosity_level.has_value())
+    base.log_verbosity_level = overlay.log_verbosity_level;
+  if (overlay.enable_profiling.has_value())
+    base.enable_profiling = overlay.enable_profiling;
+  if (overlay.custom_ops_library.has_value())
+    base.custom_ops_library = overlay.custom_ops_library;
+  if (overlay.graph_optimization_level.has_value())
+    base.graph_optimization_level = overlay.graph_optimization_level;
 
-  for (const auto& provider_option : model.decoder.session_options.provider_options) {
-    model.decoder.session_options.providers.push_back(provider_option.name);
-  }
-
-  if (model.encoder.session_options.has_value()) {
-    for (const auto& provider_option : model.encoder.session_options->provider_options) {
-      model.encoder.session_options->providers.push_back(provider_option.name);
+  // Config entries: overlay values override same keys, add new ones
+  for (const auto& entry : overlay.config_entries) {
+    auto it = std::find_if(base.config_entries.begin(), base.config_entries.end(),
+                           [&entry](const auto& p) { return p.first == entry.first; });
+    if (it != base.config_entries.end()) {
+      it->second = entry.second;
+    } else {
+      base.config_entries.push_back(entry);
     }
   }
 
-  if (model.vision.session_options.has_value()) {
-    for (const auto& provider_option : model.vision.session_options->provider_options) {
-      model.vision.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.speech.session_options.has_value()) {
-    for (const auto& provider_option : model.speech.session_options->provider_options) {
-      model.speech.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.embedding.session_options.has_value()) {
-    for (const auto& provider_option : model.embedding.session_options->provider_options) {
-      model.embedding.session_options->providers.push_back(provider_option.name);
+  // Providers/provider_options: overlay takes precedence if specified
+  if (!overlay.providers.empty()) {
+    base.providers = overlay.providers;
+    base.provider_options = overlay.provider_options;
+  } else if (!overlay.provider_options.empty()) {
+    for (const auto& overlay_po : overlay.provider_options) {
+      auto it = std::find_if(base.provider_options.begin(), base.provider_options.end(),
+                             [&overlay_po](const auto& p) { return p.name == overlay_po.name; });
+      if (it != base.provider_options.end()) {
+        for (const auto& opt : overlay_po.options) {
+          auto opt_it = std::find_if(it->options.begin(), it->options.end(),
+                                     [&opt](const auto& p) { return p.first == opt.first; });
+          if (opt_it != it->options.end())
+            opt_it->second = opt.second;
+          else
+            it->options.push_back(opt);
+        }
+      } else {
+        base.providers.push_back(overlay_po.name);
+        base.provider_options.push_back(overlay_po);
+      }
     }
   }
 }
+
+void FinalizeConfig(Config& config) {
+  if (config.model.context_length == 0 && !ModelType::IsRNNT(config.model.type)) {
+    throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+  }
+
+  if (config.search.max_length == 0) {
+    config.search.max_length = config.model.context_length;
+  }
+
+  if (config.model.eos_token_id.empty()) {
+    config.model.eos_token_id.push_back(config.model.pad_token_id);
+  }
+
+  for (const auto& provider_option : config.model.decoder.session_options.provider_options) {
+    config.model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  if (config.model.encoder.session_options.has_value()) {
+    for (const auto& provider_option : config.model.encoder.session_options->provider_options) {
+      config.model.encoder.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (config.model.vision.session_options.has_value()) {
+    for (const auto& provider_option : config.model.vision.session_options->provider_options) {
+      config.model.vision.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (config.model.speech.session_options.has_value()) {
+    for (const auto& provider_option : config.model.speech.session_options->provider_options) {
+      config.model.speech.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (config.model.embedding.session_options.has_value()) {
+    for (const auto& provider_option : config.model.embedding.session_options->provider_options) {
+      config.model.embedding.session_options->providers.push_back(provider_option.name);
+    }
+  }
+}
+
+Config::Config(const fs::path& path, std::string_view json_overlay)
+    : config_path{IsModelPackage(path) ? path / "configs" : path} {
+  ParseConfig(config_path / "genai_config.json", json_overlay, *this);
+  FinalizeConfig(*this);
+}
+
+#if ORT_HAS_MODEL_PACKAGE
+std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
+                                             std::string_view merged_json,
+                                             std::shared_ptr<ModelPackageState> package_state) {
+  auto config = std::make_unique<Config>();
+  config->config_path = config_path;
+  config->package_state_ = std::move(package_state);
+  ParseConfigFromString(merged_json, *config);
+  FinalizeConfig(*config);
+  return config;
+}
+#endif
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
   auto [it, emplaced] = nominal_names_to_graph_names_.emplace(nominal_name, graph_name);

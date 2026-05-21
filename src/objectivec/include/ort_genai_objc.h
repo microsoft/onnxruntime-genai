@@ -121,6 +121,17 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
+ * Creates a model with an execution provider.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @param ep The execution provider to use (e.g. "cuda", "cpu", "dml").
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                   ep:(NSString*)ep
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
  * Creates a model.
  *
  * @param config The OGAConfig object

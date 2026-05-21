@@ -16,6 +16,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
+        public Model(string modelPath, string ep)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateModelWithEp(StringUtils.ToUtf8(modelPath), StringUtils.ToUtf8(ep), out _modelHandle));
+        }
+
         public Model(Config config)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateModelFromConfig(config.Handle, out _modelHandle));
