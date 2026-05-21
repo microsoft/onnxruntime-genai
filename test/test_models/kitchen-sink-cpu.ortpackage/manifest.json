@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "package_name": "kitchen-sink-cpu",
+  "package_version": "1.0",
+  "description": "Drift-detection fixture: one variant SO file with every typed session_options field set, used by ModelPackageSessionOptionsDrift tests.",
+  "components": ["decoder"],
+  "configs_dir": "configs"
+}
