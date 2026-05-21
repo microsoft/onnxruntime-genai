@@ -86,10 +86,13 @@ if(BUILD_WHEEL)
   endif()
 
   if(MANYLINUX)
+    # auditwheel produces a wheel tagged with the platform (e.g. linux_x86_64
+    # or linux_aarch64) — use a glob that matches all Linux platform tags so
+    # this target works on every supported manylinux architecture.
     add_custom_target(PyPackageBuild
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
-      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
+      COMMAND auditwheel repair onnxruntime_genai*linux_*.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
       EXCLUDE_FROM_ALL
