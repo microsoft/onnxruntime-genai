@@ -71,6 +71,27 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& package_state
 /// The key is part of the ORT-GenAI consumer contract; ORT itself does not interpret it.
 inline constexpr std::string_view kGenAIConfigOverlayKey = "genai_config_overlay";
 
+/// Apply a variant file's per-file session_options and resolved-EP provider_options to
+/// `target` as layered defaults. Semantics:
+///   - target's existing typed fields win; variant fills only when the std::optional is empty.
+///   - target's existing config_entries win; variant entries are appended only when the key
+///     isn't already present.
+///   - target's existing provider_options entry for ep_for_file wins on per-key conflicts;
+///     variant entries back-fill missing keys. If no same-named entry exists, the variant
+///     entry is appended.
+/// CPU is implicit in ORT (no GenAI provider tag), so an ep_for_file of "CPUExecutionProvider"
+/// or empty skips the provider entry. A variant declaring non-empty provider_options under
+/// such a file is a producer error and throws.
+///
+/// Exposed in the header so tests can drive it directly without needing a real
+/// OrtModelPackageComponentContext. NormalizePackageIntoConfig calls this internally with
+/// data read from the ORT package API.
+void ApplyVariantFileSessionOptions(
+    Config::SessionOptions& target,
+    const std::vector<std::pair<std::string, std::string>>& variant_session_options,
+    const std::vector<std::pair<std::string, std::string>>& variant_provider_options,
+    const std::string& ep_for_file);
+
 /// Holds the lifetime state for a single model-package load. Constructed by
 /// OpenAndPrepareModelPackage; consumed by component selection, genai_config_overlay
 /// extraction, and NormalizePackageIntoConfig. Not stored on Config — once normalization

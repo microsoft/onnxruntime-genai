@@ -81,6 +81,259 @@ TEST(JsonMergePatch, BoolAndNullValues) {
   EXPECT_NE(result.find("\"c\":\"restored\""), std::string::npos);
 }
 
+// --- RFC 7386 JSON Merge Patch: additional edge cases ---
+
+TEST(JsonMergePatch, DeepNestedMerge) {
+  std::string base = R"({"a":{"b":{"c":1,"d":2}}})";
+  std::string patch = R"({"a":{"b":{"c":99,"e":3}}})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("99"), std::string::npos);
+  EXPECT_NE(result.find("\"d\":2"), std::string::npos);
+  EXPECT_NE(result.find("\"e\":3"), std::string::npos);
+  EXPECT_EQ(result.find("\"c\":1"), std::string::npos);
+}
+
+TEST(JsonMergePatch, NullPatchDeletesNestedKey) {
+  std::string base = R"({"model":{"decoder":{"hidden_size":768,"num_heads":12}}})";
+  std::string patch = R"({"model":{"decoder":{"num_heads":null}}})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("768"), std::string::npos);
+  EXPECT_EQ(result.find("num_heads"), std::string::npos);
+}
+
+TEST(JsonMergePatch, ScalarPatchReplacesObject) {
+  std::string base = R"({"a":{"nested":true}})";
+  std::string patch = R"({"a":"scalar"})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("\"a\":\"scalar\""), std::string::npos);
+  EXPECT_EQ(result.find("nested"), std::string::npos);
+}
+
+TEST(JsonMergePatch, ObjectPatchReplacesScalar) {
+  std::string base = R"({"a":"scalar"})";
+  std::string patch = R"({"a":{"nested":true}})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("\"nested\":true"), std::string::npos);
+  EXPECT_EQ(result.find("\"scalar\""), std::string::npos);
+}
+
+TEST(JsonMergePatch, DeleteMissingKeyIsNoop) {
+  std::string base = R"({"a":1})";
+  std::string patch = R"({"nonexistent":null})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("\"a\":1"), std::string::npos);
+  EXPECT_EQ(result.find("nonexistent"), std::string::npos);
+}
+
+TEST(JsonMergePatch, EmptyObjectPatchIsNoop) {
+  std::string base = R"({"a":1,"b":2})";
+  std::string patch = R"({})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("\"a\":1"), std::string::npos);
+  EXPECT_NE(result.find("\"b\":2"), std::string::npos);
+}
+
+TEST(JsonMergePatch, NullPatchReplacesObject) {
+  std::string base = R"({"a":1})";
+  std::string patch = R"(null)";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_EQ(result, "null");
+}
+
+TEST(JsonMergePatch, ArrayPatchReplacesArray) {
+  std::string base = R"({"eos":[1,2]})";
+  std::string patch = R"({"eos":[3]})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("[3]"), std::string::npos);
+  EXPECT_EQ(result.find("[1,2]"), std::string::npos);
+}
+
+TEST(JsonMergePatch, StringPatchReplacesObject) {
+  std::string base = R"({"a":{"b":1}})";
+  std::string patch = R"("hello")";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_EQ(result, "\"hello\"");
+}
+
+// --- EP name normalization tests ---
+
+TEST(NormalizeEpName, ShortAliasesAreCaseInsensitive) {
+  EXPECT_EQ(Generators::NormalizeEpName("cuda"), "CUDAExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("CUDA"), "CUDAExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("Cuda"), "CUDAExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("cpu"), "CPUExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("dml"), "DmlExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("qnn"), "QNNExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("webgpu"), "WebGpuExecutionProvider");
+}
+
+TEST(NormalizeEpName, FullNamePassesThrough) {
+  EXPECT_EQ(Generators::NormalizeEpName("CUDAExecutionProvider"), "CUDAExecutionProvider");
+  EXPECT_EQ(Generators::NormalizeEpName("CPUExecutionProvider"), "CPUExecutionProvider");
+}
+
+TEST(NormalizeEpName, UnknownReturnsInput) {
+  EXPECT_EQ(Generators::NormalizeEpName("UnknownProvider"), "UnknownProvider");
+}
+
+// --- EpNameToGenAIProviderName tests ---
+
+TEST(EpNameToGenAIProviderName, MapsKnownEps) {
+  EXPECT_EQ(Generators::EpNameToGenAIProviderName("CUDAExecutionProvider"), "cuda");
+  EXPECT_EQ(Generators::EpNameToGenAIProviderName("DmlExecutionProvider"), "DML");
+  EXPECT_EQ(Generators::EpNameToGenAIProviderName("QNNExecutionProvider"), "QNN");
+}
+
+TEST(EpNameToGenAIProviderName, UnknownReturnsInput) {
+  EXPECT_EQ(Generators::EpNameToGenAIProviderName("UnknownEP"), "UnknownEP");
+}
+
+// --- EffectiveSessionOptions tests ---
+
+TEST(EffectiveSessionOptions, ReturnsRoleSoWhenSet) {
+  Generators::Config config;
+  config.model.decoder.session_options.intra_op_num_threads = 16;
+  std::optional<Generators::Config::SessionOptions> role_so;
+  role_so.emplace();
+  role_so->intra_op_num_threads = 4;
+  const auto& result = Generators::EffectiveSessionOptions(config, role_so);
+  EXPECT_EQ(result.intra_op_num_threads.value_or(-1), 4);
+}
+
+TEST(EffectiveSessionOptions, FallsBackToDecoderWhenEmpty) {
+  Generators::Config config;
+  config.model.decoder.session_options.intra_op_num_threads = 16;
+  std::optional<Generators::Config::SessionOptions> role_so;
+  const auto& result = Generators::EffectiveSessionOptions(config, role_so);
+  EXPECT_EQ(result.intra_op_num_threads.value_or(-1), 16);
+}
+
+// --- ApplyVariantFileSessionOptions unit tests ---
+
+#if ORT_HAS_MODEL_PACKAGE
+using KV = std::pair<std::string, std::string>;
+using KVList = std::vector<KV>;
+
+TEST(ApplyVariantFileSessionOptions, FillsUnsetTypedFields) {
+  Generators::Config::SessionOptions so;
+  KVList variant_so = {
+      {"intra_op_num_threads", "4"},
+      {"inter_op_num_threads", "2"},
+      {"log_severity_level", "3"},
+      {"log_verbosity_level", "1"},
+      {"enable_cpu_mem_arena", "false"},
+      {"enable_mem_pattern", "true"},
+      {"log_id", "test"},
+      {"enable_profiling", "/tmp/p"},
+      {"custom_ops_library", "libfoo.so"},
+      {"graph_optimization_level", "ORT_ENABLE_BASIC"},
+  };
+  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
+  EXPECT_EQ(*so.intra_op_num_threads, 4);
+  EXPECT_EQ(*so.inter_op_num_threads, 2);
+  EXPECT_EQ(*so.log_severity_level, 3);
+  EXPECT_EQ(*so.log_verbosity_level, 1);
+  EXPECT_FALSE(*so.enable_cpu_mem_arena);
+  EXPECT_TRUE(*so.enable_mem_pattern);
+  EXPECT_EQ(*so.log_id, "test");
+  EXPECT_EQ(*so.enable_profiling, "/tmp/p");
+  EXPECT_EQ(*so.custom_ops_library, "libfoo.so");
+  EXPECT_EQ(*so.graph_optimization_level, ORT_ENABLE_BASIC);
+}
+
+TEST(ApplyVariantFileSessionOptions, ExistingValuesWin) {
+  Generators::Config::SessionOptions so;
+  so.intra_op_num_threads = 99;
+  so.enable_cpu_mem_arena = true;
+  so.log_id = "existing";
+  so.graph_optimization_level = ORT_ENABLE_ALL;
+  KVList variant_so = {
+      {"intra_op_num_threads", "4"},
+      {"enable_cpu_mem_arena", "false"},
+      {"log_id", "variant"},
+      {"graph_optimization_level", "ORT_ENABLE_BASIC"},
+  };
+  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
+  EXPECT_EQ(*so.intra_op_num_threads, 99);
+  EXPECT_TRUE(*so.enable_cpu_mem_arena);
+  EXPECT_EQ(*so.log_id, "existing");
+  EXPECT_EQ(*so.graph_optimization_level, ORT_ENABLE_ALL);
+}
+
+TEST(ApplyVariantFileSessionOptions, UnknownKeysGoToConfigEntries) {
+  Generators::Config::SessionOptions so;
+  KVList variant_so = {{"session.custom_key", "val"}};
+  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
+  ASSERT_EQ(so.config_entries.size(), 1u);
+  EXPECT_EQ(so.config_entries[0].first, "session.custom_key");
+  EXPECT_EQ(so.config_entries[0].second, "val");
+}
+
+TEST(ApplyVariantFileSessionOptions, ExistingConfigEntryWins) {
+  Generators::Config::SessionOptions so;
+  so.config_entries.emplace_back("session.key", "existing");
+  KVList variant_so = {{"session.key", "variant"}};
+  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
+  EXPECT_EQ(so.config_entries[0].second, "existing");
+  EXPECT_EQ(so.config_entries.size(), 1u);
+}
+
+TEST(ApplyVariantFileSessionOptions, InvalidGraphOptLevelThrows) {
+  Generators::Config::SessionOptions so;
+  KVList variant_so = {{"graph_optimization_level", "INVALID"}};
+  EXPECT_THROW(
+      Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, ""),
+      std::runtime_error);
+}
+
+TEST(ApplyVariantFileSessionOptions, CpuEpSkipsProviderOptions) {
+  Generators::Config::SessionOptions so;
+  Generators::ApplyVariantFileSessionOptions(so, {}, {}, "CPUExecutionProvider");
+  EXPECT_TRUE(so.provider_options.empty());
+}
+
+TEST(ApplyVariantFileSessionOptions, CpuEpWithProviderOptionsThrows) {
+  Generators::Config::SessionOptions so;
+  KVList po = {{"device_id", "0"}};
+  EXPECT_THROW(
+      Generators::ApplyVariantFileSessionOptions(so, {}, po, "CPUExecutionProvider"),
+      std::runtime_error);
+}
+
+TEST(ApplyVariantFileSessionOptions, EmptyEpSkipsProviderOptions) {
+  Generators::Config::SessionOptions so;
+  Generators::ApplyVariantFileSessionOptions(so, {}, {}, "");
+  EXPECT_TRUE(so.provider_options.empty());
+}
+
+TEST(ApplyVariantFileSessionOptions, AppendsNewProviderEntry) {
+  Generators::Config::SessionOptions so;
+  KVList po = {{"htp_mode", "burst"}, {"soc_model", "60"}};
+  Generators::ApplyVariantFileSessionOptions(so, {}, po, "CUDAExecutionProvider");
+  ASSERT_EQ(so.provider_options.size(), 1u);
+  EXPECT_EQ(so.provider_options[0].name, "cuda");
+  EXPECT_EQ(so.provider_options[0].options.size(), 2u);
+}
+
+TEST(ApplyVariantFileSessionOptions, BackfillsMissingProviderOptionKeys) {
+  Generators::Config::SessionOptions so;
+  Generators::Config::ProviderOptions existing;
+  existing.name = "cuda";
+  existing.options.emplace_back("device_id", "1");
+  so.provider_options.push_back(existing);
+  KVList po = {{"device_id", "0"}, {"new_key", "val"}};
+  Generators::ApplyVariantFileSessionOptions(so, {}, po, "CUDAExecutionProvider");
+  ASSERT_EQ(so.provider_options.size(), 1u);
+  EXPECT_EQ(so.provider_options[0].options[0].second, "1");  // existing wins
+  EXPECT_EQ(so.provider_options[0].options.size(), 2u);       // new_key added
+  auto new_key_it = std::find_if(so.provider_options[0].options.begin(),
+                                  so.provider_options[0].options.end(),
+                                  [](const auto& p) { return p.first == "new_key"; });
+  ASSERT_NE(new_key_it, so.provider_options[0].options.end());
+  EXPECT_EQ(new_key_it->second, "val");
+}
+#endif  // ORT_HAS_MODEL_PACKAGE (ApplyVariantFileSessionOptions tests)
+
 // --- Package detection tests ---
 
 TEST(IsModelPackage, NonExistentPath) {

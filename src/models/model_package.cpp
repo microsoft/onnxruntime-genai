@@ -481,83 +481,32 @@ GraphOptimizationLevel ParseVariantGraphOptLevel(std::string_view value) {
 //   - CPU is implicit in ORT (no provider tag), so CPU/empty ep_for_file skips the provider
 //     entry. A variant that declares non-empty provider_options under a CPU-only file is a
 //     producer error and throws.
+// Internal entry point that reads variant per-file SO/PO from ORT and forwards to the
+// public ApplyVariantFileSessionOptions helper. Kept thin so the public helper can be
+// unit-tested without needing a real OrtModelPackageComponentContext.
 void ApplyVariantFileOptions(Config::SessionOptions& target,
                              OrtModelPackageComponentContext& cix,
                              size_t file_index,
                              const std::string& ep_for_file) {
-  // Variant per-file session_options as defaults.
-  const char* const* so_keys = nullptr;
-  const char* const* so_values = nullptr;
-  size_t so_count = 0;
-  cix.GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
-
-  for (size_t i = 0; i < so_count; ++i) {
-    std::string_view key(so_keys[i]);
-    std::string_view val(so_values[i]);
-
-    if (key == "intra_op_num_threads") {
-      if (!target.intra_op_num_threads.has_value()) target.intra_op_num_threads = ParseVariantInt(key, val);
-    } else if (key == "inter_op_num_threads") {
-      if (!target.inter_op_num_threads.has_value()) target.inter_op_num_threads = ParseVariantInt(key, val);
-    } else if (key == "log_severity_level") {
-      if (!target.log_severity_level.has_value()) target.log_severity_level = ParseVariantInt(key, val);
-    } else if (key == "log_verbosity_level") {
-      if (!target.log_verbosity_level.has_value()) target.log_verbosity_level = ParseVariantInt(key, val);
-    } else if (key == "enable_cpu_mem_arena") {
-      if (!target.enable_cpu_mem_arena.has_value()) target.enable_cpu_mem_arena = ParseVariantBool(key, val);
-    } else if (key == "enable_mem_pattern") {
-      if (!target.enable_mem_pattern.has_value()) target.enable_mem_pattern = ParseVariantBool(key, val);
-    } else if (key == "log_id") {
-      if (!target.log_id.has_value()) target.log_id = std::string(val);
-    } else if (key == "enable_profiling") {
-      if (!target.enable_profiling.has_value()) target.enable_profiling = std::string(val);
-    } else if (key == "custom_ops_library") {
-      if (!target.custom_ops_library.has_value()) target.custom_ops_library = std::string(val);
-    } else if (key == "graph_optimization_level") {
-      if (!target.graph_optimization_level.has_value()) target.graph_optimization_level = ParseVariantGraphOptLevel(val);
-    } else {
-      bool exists = std::any_of(target.config_entries.begin(), target.config_entries.end(),
-                                [&](const auto& e) { return e.first == key; });
-      if (!exists) target.config_entries.emplace_back(std::string(key), std::string(val));
-    }
+  std::vector<std::pair<std::string, std::string>> so_kvs;
+  std::vector<std::pair<std::string, std::string>> po_kvs;
+  {
+    const char* const* keys = nullptr;
+    const char* const* values = nullptr;
+    size_t count = 0;
+    cix.GetSelectedVariantFileSessionOptions(file_index, &keys, &values, &count);
+    so_kvs.reserve(count);
+    for (size_t i = 0; i < count; ++i) so_kvs.emplace_back(keys[i], values[i]);
   }
-
-  // Variant per-file provider_options.
-  const char* const* po_keys = nullptr;
-  const char* const* po_values = nullptr;
-  size_t po_count = 0;
-  cix.GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
-
-  const bool ep_is_cpu = ep_for_file.empty() || ep_for_file == "CPUExecutionProvider";
-  if (ep_is_cpu) {
-    if (po_count != 0) {
-      throw std::runtime_error(
-          "variant declares provider_options under a CPU-only file; CPU has no provider tag "
-          "in GenAI's dispatch so these options would be silently dropped");
-    }
-    return;
+  {
+    const char* const* keys = nullptr;
+    const char* const* values = nullptr;
+    size_t count = 0;
+    cix.GetSelectedVariantFileProviderOptions(file_index, &keys, &values, &count);
+    po_kvs.reserve(count);
+    for (size_t i = 0; i < count; ++i) po_kvs.emplace_back(keys[i], values[i]);
   }
-
-  std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
-  auto it = std::find_if(target.provider_options.begin(), target.provider_options.end(),
-                         [&](const Config::ProviderOptions& p) { return p.name == genai_provider_name; });
-  if (it == target.provider_options.end()) {
-    // No matching entry in genai_config: append the variant's entry verbatim.
-    Config::ProviderOptions po;
-    po.name = genai_provider_name;
-    for (size_t i = 0; i < po_count; ++i) {
-      po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
-    }
-    target.provider_options.push_back(std::move(po));
-  } else {
-    // Back-fill: target's existing keys win; variant supplies anything else.
-    for (size_t i = 0; i < po_count; ++i) {
-      std::string_view k(po_keys[i]);
-      bool exists = std::any_of(it->options.begin(), it->options.end(),
-                                [&](const auto& e) { return e.first == k; });
-      if (!exists) it->options.emplace_back(std::string(k), std::string(po_values[i]));
-    }
-  }
+  ApplyVariantFileSessionOptions(target, so_kvs, po_kvs, ep_for_file);
 }
 
 // Rebuild providers list from provider_options. Keeps the two in sync after we materialize
@@ -629,6 +578,68 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
   }
 
   return std::make_shared<ModelPackageState>(package_root, env, *temp_so, out_resolved_ep);
+}
+
+void ApplyVariantFileSessionOptions(
+    Config::SessionOptions& target,
+    const std::vector<std::pair<std::string, std::string>>& variant_session_options,
+    const std::vector<std::pair<std::string, std::string>>& variant_provider_options,
+    const std::string& ep_for_file) {
+  // Typed session option fields as defaults (target's existing values win).
+  for (const auto& [key, val] : variant_session_options) {
+    if (key == "intra_op_num_threads") {
+      if (!target.intra_op_num_threads.has_value()) target.intra_op_num_threads = ParseVariantInt(key, val);
+    } else if (key == "inter_op_num_threads") {
+      if (!target.inter_op_num_threads.has_value()) target.inter_op_num_threads = ParseVariantInt(key, val);
+    } else if (key == "log_severity_level") {
+      if (!target.log_severity_level.has_value()) target.log_severity_level = ParseVariantInt(key, val);
+    } else if (key == "log_verbosity_level") {
+      if (!target.log_verbosity_level.has_value()) target.log_verbosity_level = ParseVariantInt(key, val);
+    } else if (key == "enable_cpu_mem_arena") {
+      if (!target.enable_cpu_mem_arena.has_value()) target.enable_cpu_mem_arena = ParseVariantBool(key, val);
+    } else if (key == "enable_mem_pattern") {
+      if (!target.enable_mem_pattern.has_value()) target.enable_mem_pattern = ParseVariantBool(key, val);
+    } else if (key == "log_id") {
+      if (!target.log_id.has_value()) target.log_id = val;
+    } else if (key == "enable_profiling") {
+      if (!target.enable_profiling.has_value()) target.enable_profiling = val;
+    } else if (key == "custom_ops_library") {
+      if (!target.custom_ops_library.has_value()) target.custom_ops_library = val;
+    } else if (key == "graph_optimization_level") {
+      if (!target.graph_optimization_level.has_value()) target.graph_optimization_level = ParseVariantGraphOptLevel(val);
+    } else {
+      bool exists = std::any_of(target.config_entries.begin(), target.config_entries.end(),
+                                [&](const auto& e) { return e.first == key; });
+      if (!exists) target.config_entries.emplace_back(key, val);
+    }
+  }
+
+  // Provider options.
+  const bool ep_is_cpu = ep_for_file.empty() || ep_for_file == "CPUExecutionProvider";
+  if (ep_is_cpu) {
+    if (!variant_provider_options.empty()) {
+      throw std::runtime_error(
+          "variant declares provider_options under a CPU-only file; CPU has no provider tag "
+          "in GenAI's dispatch so these options would be silently dropped");
+    }
+    return;
+  }
+
+  std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
+  auto it = std::find_if(target.provider_options.begin(), target.provider_options.end(),
+                         [&](const Config::ProviderOptions& p) { return p.name == genai_provider_name; });
+  if (it == target.provider_options.end()) {
+    Config::ProviderOptions po;
+    po.name = genai_provider_name;
+    po.options.insert(po.options.end(), variant_provider_options.begin(), variant_provider_options.end());
+    target.provider_options.push_back(std::move(po));
+  } else {
+    for (const auto& [k, v] : variant_provider_options) {
+      bool exists = std::any_of(it->options.begin(), it->options.end(),
+                                [&](const auto& e) { return e.first == k; });
+      if (!exists) it->options.emplace_back(k, v);
+    }
+  }
 }
 
 void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
