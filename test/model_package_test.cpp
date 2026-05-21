@@ -135,7 +135,7 @@ TEST(ConfigFromPackage, ParsesMergedJsonAndSetsConfigPath) {
   })";
 
   auto config = Generators::Config::FromPackage(
-      fs::path("/tmp/fake_package/configs"), merged_json, nullptr);
+      fs::path("/tmp/fake_package/configs"), merged_json);
 
   EXPECT_EQ(config->model.type, "phi3");
   EXPECT_EQ(config->model.context_length, 4096);
@@ -146,7 +146,6 @@ TEST(ConfigFromPackage, ParsesMergedJsonAndSetsConfigPath) {
   EXPECT_EQ(config->model.decoder.num_hidden_layers, 32);
   EXPECT_EQ(config->search.max_length, 4096);
   EXPECT_EQ(config->config_path.string(), "/tmp/fake_package/configs");
-  EXPECT_FALSE(config->IsPackage());  // no package_state passed
 }
 
 TEST(ConfigFromPackage, OverlayAppliedBeforeParsing) {
@@ -184,7 +183,7 @@ TEST(ConfigFromPackage, OverlayAppliedBeforeParsing) {
 
   std::string merged = Generators::JsonMergePatch(base_json, overlay);
   auto config = Generators::Config::FromPackage(
-      fs::path("/tmp/fake_package/configs"), merged, nullptr);
+      fs::path("/tmp/fake_package/configs"), merged);
 
   EXPECT_EQ(config->model.context_length, 4096);
   EXPECT_EQ(config->search.max_length, 4096);

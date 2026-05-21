@@ -18,20 +18,19 @@
 namespace Generators {
 
 struct RuntimeSettings;
-struct ModelPackageState;
 
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay);
 
-  // Factory for creating Config from a model package.
-  // config_path: the configs/ directory inside the package
-  // merged_json: the fully merged genai_config JSON string (base + overlays)
-  // package_state: the opened and selected package state
+  // Factory for creating Config from a model package's pre-merged genai_config JSON.
+  // config_path is the configs/ directory inside the package. After this returns,
+  // model_package.cpp's NormalizePackageIntoConfig materializes per-role variant data
+  // (filename, asset_dir, session_options) into the Config so the rest of the codebase
+  // can treat it as a flat-dir Config with no further package awareness.
 #if ORT_HAS_MODEL_PACKAGE
   static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
-                                              std::string_view merged_json,
-                                              std::shared_ptr<ModelPackageState> package_state);
+                                              std::string_view merged_json);
 #endif
 
   struct Defaults {
@@ -468,10 +467,6 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
-
-  /// Model package state. Non-null when loading from a .ortpackage directory.
-  std::shared_ptr<ModelPackageState> package_state_;
-  bool IsPackage() const { return package_state_ != nullptr; }
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);

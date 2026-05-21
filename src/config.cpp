@@ -1727,17 +1727,13 @@ Config::Config(const fs::path& path, std::string_view json_overlay)
 
 #if ORT_HAS_MODEL_PACKAGE
 std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
-                                             std::string_view merged_json,
-                                             std::shared_ptr<ModelPackageState> package_state) {
+                                             std::string_view merged_json) {
   auto config = std::make_unique<Config>();
   config->config_path = config_path;
-  config->package_state_ = std::move(package_state);
   ParseConfigFromString(merged_json, *config);
   FinalizeConfig(*config);
-  // asset_dir, filename, and per-role session_options are populated by
-  // NormalizePackageIntoConfig in model_package.cpp after this function returns,
-  // so callers that construct the Config through CreateConfig get the fully
-  // normalized state.
+  // Caller is expected to follow up with NormalizePackageIntoConfig (in model_package.cpp)
+  // to materialize per-role variant data (filename, asset_dir, session_options).
   return config;
 }
 #endif

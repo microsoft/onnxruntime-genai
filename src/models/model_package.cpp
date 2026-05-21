@@ -106,7 +106,6 @@ ModelPackageState::ModelPackageState(const fs::path& package_root, OrtEnv& env,
                                      const OrtSessionOptions& session_options,
                                      const std::string& resolved_ep_name)
     : package_root_(package_root),
-      configs_path_(package_root / "configs"),
       resolved_ep_name_(resolved_ep_name) {
   pkg_ctx_ = OrtModelPackageContext::Create(package_root.c_str());
   pkg_opts_ = OrtModelPackageOptions::Create(env, session_options);
@@ -395,7 +394,7 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
     return {};
   }
 
-  // Parse consumer_metadata as a JSON object and extract the "genai_config_overlay" value.
+  // Parse consumer_metadata as a JSON object and extract the kGenAIConfigOverlayKey value.
   // Malformed metadata is a producer error: throw rather than silently ignoring.
   size_t pos = 0;
   JsonValue root;
@@ -412,81 +411,21 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
   }
 
   for (const auto& [key, value] : root.obj_members) {
-    if (key == "genai_config_overlay") {
+    if (key == kGenAIConfigOverlayKey) {
       // null means "no overlay" (not an error)
       if (value.is_null()) {
         return {};
       }
       if (!value.is_object()) {
         throw std::runtime_error(MakeString("Component '", component_name,
-                                            "': genai_config_overlay must be a JSON object or null"));
+                                            "': ", kGenAIConfigOverlayKey,
+                                            " must be a JSON object or null"));
       }
       return SerializeJson(value);
     }
   }
 
   return {};
-}
-
-fs::path ModelPackageState::GetVariantDir(const std::string& component_name) const {
-  auto* cix = GetComponent(component_name);
-  if (!cix) {
-    return {};
-  }
-  auto folder = cix->GetSelectedVariantFolderPath();
-  return fs::path(folder);
-}
-
-std::unordered_map<std::string, size_t> ModelPackageState::BuildFileIndexMap(
-    const std::string& component_name) const {
-  auto* cix = GetComponent(component_name);
-  if (!cix) {
-    throw std::runtime_error("Component '" + component_name +
-                             "' was not selected from the package");
-  }
-
-  size_t file_count = cix->GetSelectedVariantFileCount();
-  std::unordered_map<std::string, size_t> file_map;
-  file_map.reserve(file_count);
-
-  for (size_t i = 0; i < file_count; ++i) {
-    auto path_str = cix->GetSelectedVariantFilePath(i);
-    std::string basename(path_str);
-    auto last_sep = basename.find_last_of("/\\");
-    if (last_sep != std::string::npos) {
-      basename = basename.substr(last_sep + 1);
-    }
-    if (!file_map.emplace(basename, i).second) {
-      throw std::runtime_error(
-          "Package variant for component '" + component_name +
-          "' has duplicate file basename '" + basename + "'");
-    }
-  }
-  return file_map;
-}
-
-size_t ModelPackageState::ResolveFileIndex(const std::string& component_name,
-                                           const std::string& filename) const {
-  auto* cix = GetComponent(component_name);
-  if (!cix) {
-    throw std::runtime_error("Component '" + component_name +
-                             "' was not selected from the package");
-  }
-
-  size_t file_count = cix->GetSelectedVariantFileCount();
-  for (size_t i = 0; i < file_count; ++i) {
-    auto path_str = cix->GetSelectedVariantFilePath(i);
-    std::string basename(path_str);
-    auto last_sep = basename.find_last_of("/\\");
-    if (last_sep != std::string::npos) {
-      basename = basename.substr(last_sep + 1);
-    }
-    if (basename == filename) {
-      return i;
-    }
-  }
-  throw std::runtime_error("File '" + filename + "' not found in package variant for component '" +
-                           component_name + "'");
 }
 
 // --- Helpers extracted from Model::BuildSessionOptionsForPackageFile ---
@@ -682,9 +621,7 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
   return std::make_shared<ModelPackageState>(package_root, env, *temp_so, out_resolved_ep);
 }
 
-void NormalizePackageIntoConfig(Config& config) {
-  if (!config.package_state_) return;
-  auto& pkg_state = *config.package_state_;
+void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   const std::string& resolved_ep = pkg_state.GetResolvedEpName();
 
   auto basename_of = [](std::string_view path) {

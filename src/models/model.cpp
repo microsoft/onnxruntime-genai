@@ -965,8 +965,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
       merged_json = JsonMergePatch(merged_json, config_overlay);
     }
 
-    auto config = Config::FromPackage(configs_path, merged_json, std::move(package_state));
-    NormalizePackageIntoConfig(*config);
+    auto config = Config::FromPackage(configs_path, merged_json);
+    NormalizePackageIntoConfig(*config, *package_state);
     return config;
 #else
     throw std::runtime_error("This build of onnxruntime-genai does not support model packages; rebuild with ONNX Runtime API version 27 or newer");
