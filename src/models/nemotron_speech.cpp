@@ -52,7 +52,6 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
-  lang_id = config.model.default_lang_id;
   blank_penalty = config.search.blank_penalty;
 
   // Vocab size from top-level config
@@ -238,7 +237,9 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
       throw std::runtime_error("Encoder lang_id input must be int64");
     auto lang_id_shape = std::array<int64_t, 1>{1};
     lang_id_tensor_ = OrtValue::CreateTensor(cpu_alloc, lang_id_shape, lang_id_type);
-    *lang_id_tensor_->GetTensorMutableData<int64_t>() = static_cast<int64_t>(cfg.lang_id);
+    // Default to language index 0; callers can change it per-generator at runtime
+    // via OgaGenerator_SetRuntimeOption(gen, "lang_id", "<int>").
+    *lang_id_tensor_->GetTensorMutableData<int64_t>() = 0;
     lang_id_input_idx_ = inputs_.size();
     input_names_.push_back(cfg.enc_in_lang_id.c_str());
     inputs_.push_back(lang_id_tensor_.get());
@@ -276,6 +277,11 @@ void NemotronEncoderSubState::UpdateCacheInputs() {
   inputs_[cache_channel_input_idx_] = cache_.cache_last_channel.get();
   inputs_[cache_time_input_idx_] = cache_.cache_last_time.get();
   inputs_[cache_channel_len_input_idx_] = cache_.cache_last_channel_len.get();
+}
+
+void NemotronEncoderSubState::SetLangId(int lang_id) {
+  if (!has_lang_id_input_ || !lang_id_tensor_) return;
+  *lang_id_tensor_->GetTensorMutableData<int64_t>() = static_cast<int64_t>(lang_id);
 }
 
 DeviceSpan<float> NemotronEncoderSubState::Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/, DeviceSpan<int32_t> /*next_indices*/) {
@@ -418,6 +424,15 @@ OrtValue* NemotronSpeechState::GetOutput(const char* name) {
   if (auto* val = prediction_state_->GetOutput(name)) return val;
   if (auto* val = joiner_state_->GetOutput(name)) return val;
   return State::GetOutput(name);
+}
+
+void NemotronSpeechState::SetLangId(int lang_id) {
+  if (!encoder_state_->HasLangIdInput()) {
+    throw std::runtime_error(
+        "Cannot set lang_id: encoder graph has no lang_id input "
+        "(this model is not a prompt-conditioned multilingual model).");
+  }
+  encoder_state_->SetLangId(lang_id);
 }
 
 void NemotronSpeechState::ResetStreamingState() {

@@ -43,10 +43,6 @@ struct NemotronConfig {
   // Pre-encode cache
   int pre_encode_cache_size{};
 
-  // Prompt-conditioned encoder (multilingual models). Default language index
-  // passed to the encoder's lang_id input; the graph builds the one-hot internally.
-  int lang_id{};
-
   // Encoder I/O names
   std::string enc_in_audio;
   std::string enc_in_length;
@@ -127,6 +123,10 @@ struct NemotronEncoderSubState : State {
   /// Update registered input pointers after cache is modified.
   void UpdateCacheInputs();
 
+  void SetLangId(int lang_id);
+
+  bool HasLangIdInput() const { return has_lang_id_input_; }
+
  private:
   friend struct NemotronSpeechState;
 
@@ -205,6 +205,8 @@ struct NemotronSpeechState : State {
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
   size_t TokenCount() const { return token_count_; }
   void ResetStreamingState();
+
+  void SetLangId(int lang_id);
 
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;

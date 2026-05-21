@@ -97,11 +97,12 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     duration = len(audio) / sample_rate
 
     config = get_config(model_path, execution_provider)
+    selected_lang = None
     if language is not None:
         if language not in LANG_TO_ID:
             raise ValueError(f"Unknown language '{language}'. Known: {sorted(LANG_TO_ID)}")
-        lang_id, lang_name = LANG_TO_ID[language]
-        config.overlay(json.dumps({"model": {"default_lang_id": int(lang_id)}}))
+        selected_lang = LANG_TO_ID[language]
+        lang_id, lang_name = selected_lang
         print(f"  Language: {language} -> {lang_name} (lang_id={lang_id})")
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
@@ -122,6 +123,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
+    # Per-generator language selection
+    if selected_lang is not None:
+        generator.set_runtime_option("lang_id", str(int(selected_lang[0])))
 
     print("-" * 60)
     stream_start = time.perf_counter()
