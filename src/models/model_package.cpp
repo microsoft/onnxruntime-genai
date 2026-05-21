@@ -634,6 +634,23 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
 void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   const std::string& resolved_ep = pkg_state.GetResolvedEpName();
 
+  // ORTCHAR_T is wchar_t on Windows and char on Linux. ORT package APIs return paths as
+  // basic_string<ORTCHAR_T>, so on Windows we need to UTF-8 encode before stashing into the
+  // (narrow std::string) Config fields. On Linux the conversion is a no-op copy.
+  auto ort_path_to_utf8 = [](const std::basic_string<ORTCHAR_T>& s) -> std::string {
+#ifdef _WIN32
+    if (s.empty()) return {};
+    int needed = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                     nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                        out.data(), needed, nullptr, nullptr);
+    return out;
+#else
+    return std::string(s);
+#endif
+  };
+
   // Make a path that is intended as <asset_dir>/<rel> directly accessible. Bypasses the
   // custom fs::path's non-const operator/ (which can't be called on a const path&).
   auto join_path = [](const fs::path& dir, const fs::path& tail) {
@@ -684,8 +701,8 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
       throw std::runtime_error("Component '" + component +
                                "' has no files in the selected variant");
     }
-    fs::path variant_dir(cix->GetSelectedVariantFolderPath());
-    filename_slot = std::string(cix->GetSelectedVariantFilePath(0));
+    fs::path variant_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
+    filename_slot = ort_path_to_utf8(cix->GetSelectedVariantFilePath(0));
 
     Config::SessionOptions merged = so_slot.has_value() ? std::move(*so_slot) : Config::SessionOptions{};
     ApplyVariantFileOptions(merged, *cix, 0, resolved_ep);
@@ -699,7 +716,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   if (!dec.component.empty()) {
     auto* cix = require_selected(dec.component);
     auto file_count = cix->GetSelectedVariantFileCount();
-    fs::path dec_dir(cix->GetSelectedVariantFolderPath());
+    fs::path dec_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
 
     if (dec.pipeline.empty()) {
       // Single-file decoder.
@@ -707,7 +724,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
         throw std::runtime_error("Decoder component '" + dec.component +
                                  "' has no files in the selected variant");
       }
-      dec.filename = std::string(cix->GetSelectedVariantFilePath(0));
+      dec.filename = ort_path_to_utf8(cix->GetSelectedVariantFilePath(0));
       ApplyVariantFileOptions(dec.session_options, *cix, 0, resolved_ep);
       RebuildProvidersFromProviderOptions(dec.session_options);
       resolve_against_asset_dir(dec.session_options.custom_ops_library, dec_dir);
@@ -729,7 +746,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
 
       for (size_t i = 0; i < dec.pipeline.size(); ++i) {
         auto& pipe = dec.pipeline[i];
-        pipe.filename = std::string(cix->GetSelectedVariantFilePath(i));
+        pipe.filename = ort_path_to_utf8(cix->GetSelectedVariantFilePath(i));
         const std::string& ep = pipe.run_on_cpu ? std::string{} : resolved_ep;
 
         Config::SessionOptions merged = pipe.session_options.has_value()
@@ -753,7 +770,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
     if (!cix) return;
     normalize_single_optional(component, filename_slot, so_slot);
     if (cix) {
-      fs::path variant_dir(cix->GetSelectedVariantFolderPath());
+      fs::path variant_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
       resolve_against_asset_dir(adapter_slot, variant_dir);
     }
   };
