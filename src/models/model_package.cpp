@@ -463,15 +463,29 @@ GraphOptimizationLevel ParseVariantGraphOptLevel(std::string_view value) {
       std::string(value) + "'");
 }
 
-// Build a Config::SessionOptions from a variant file's per-file metadata.
-// If ep_for_file is "CPUExecutionProvider" (or empty), no EP entry is injected (CPU is implicit).
-// Otherwise, the resolved EP is added as a provider entry with the variant's provider_options.
-Config::SessionOptions BuildVariantBaseSO(OrtModelPackageComponentContext& cix,
-                                          size_t file_index,
-                                          const std::string& ep_for_file) {
-  Config::SessionOptions so;
-
-  // Layer 1: variant per-file session_options keyed by typed setters.
+// Apply a variant file's per-file session_options and resolved-EP provider_options into
+// `target` as layered defaults: target's existing values win on conflicts, the variant fills
+// gaps. Used by NormalizePackageIntoConfig to merge variant data into the genai_config role
+// SO without losing either side's information.
+//
+// Session-options handling:
+//   - Typed fields (intra_op_num_threads, enable_cpu_mem_arena, graph_optimization_level, ...)
+//     are filled only when target's std::optional is empty.
+//   - Other keys go into config_entries only when no entry with the same key already exists.
+//
+// Provider-options handling:
+//   - For non-CPU/non-empty ep_for_file, the resolved EP becomes a provider_options entry
+//     keyed by its GenAI tag (e.g. "cuda"). If target already has a same-named entry, the
+//     variant's options back-fill missing keys (target's existing keys win). Otherwise the
+//     entry is appended verbatim.
+//   - CPU is implicit in ORT (no provider tag), so CPU/empty ep_for_file skips the provider
+//     entry. A variant that declares non-empty provider_options under a CPU-only file is a
+//     producer error and throws.
+void ApplyVariantFileOptions(Config::SessionOptions& target,
+                             OrtModelPackageComponentContext& cix,
+                             size_t file_index,
+                             const std::string& ep_for_file) {
+  // Variant per-file session_options as defaults.
   const char* const* so_keys = nullptr;
   const char* const* so_values = nullptr;
   size_t so_count = 0;
@@ -482,77 +496,73 @@ Config::SessionOptions BuildVariantBaseSO(OrtModelPackageComponentContext& cix,
     std::string_view val(so_values[i]);
 
     if (key == "intra_op_num_threads") {
-      so.intra_op_num_threads = ParseVariantInt(key, val);
+      if (!target.intra_op_num_threads.has_value()) target.intra_op_num_threads = ParseVariantInt(key, val);
     } else if (key == "inter_op_num_threads") {
-      so.inter_op_num_threads = ParseVariantInt(key, val);
+      if (!target.inter_op_num_threads.has_value()) target.inter_op_num_threads = ParseVariantInt(key, val);
     } else if (key == "log_severity_level") {
-      so.log_severity_level = ParseVariantInt(key, val);
+      if (!target.log_severity_level.has_value()) target.log_severity_level = ParseVariantInt(key, val);
     } else if (key == "log_verbosity_level") {
-      so.log_verbosity_level = ParseVariantInt(key, val);
+      if (!target.log_verbosity_level.has_value()) target.log_verbosity_level = ParseVariantInt(key, val);
     } else if (key == "enable_cpu_mem_arena") {
-      so.enable_cpu_mem_arena = ParseVariantBool(key, val);
+      if (!target.enable_cpu_mem_arena.has_value()) target.enable_cpu_mem_arena = ParseVariantBool(key, val);
     } else if (key == "enable_mem_pattern") {
-      so.enable_mem_pattern = ParseVariantBool(key, val);
+      if (!target.enable_mem_pattern.has_value()) target.enable_mem_pattern = ParseVariantBool(key, val);
     } else if (key == "log_id") {
-      so.log_id = std::string(val);
+      if (!target.log_id.has_value()) target.log_id = std::string(val);
     } else if (key == "enable_profiling") {
-      so.enable_profiling = std::string(val);
+      if (!target.enable_profiling.has_value()) target.enable_profiling = std::string(val);
     } else if (key == "custom_ops_library") {
-      so.custom_ops_library = std::string(val);
+      if (!target.custom_ops_library.has_value()) target.custom_ops_library = std::string(val);
     } else if (key == "graph_optimization_level") {
-      so.graph_optimization_level = ParseVariantGraphOptLevel(val);
+      if (!target.graph_optimization_level.has_value()) target.graph_optimization_level = ParseVariantGraphOptLevel(val);
     } else {
-      so.config_entries.emplace_back(std::string(key), std::string(val));
+      bool exists = std::any_of(target.config_entries.begin(), target.config_entries.end(),
+                                [&](const auto& e) { return e.first == key; });
+      if (!exists) target.config_entries.emplace_back(std::string(key), std::string(val));
     }
   }
 
-  // EP provider entry. CPU is implicit (no entry).
-  if (!ep_for_file.empty() && ep_for_file != "CPUExecutionProvider") {
-    std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
+  // Variant per-file provider_options.
+  const char* const* po_keys = nullptr;
+  const char* const* po_values = nullptr;
+  size_t po_count = 0;
+  cix.GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
 
+  const bool ep_is_cpu = ep_for_file.empty() || ep_for_file == "CPUExecutionProvider";
+  if (ep_is_cpu) {
+    if (po_count != 0) {
+      throw std::runtime_error(
+          "variant declares provider_options under a CPU-only file; CPU has no provider tag "
+          "in GenAI's dispatch so these options would be silently dropped");
+    }
+    return;
+  }
+
+  std::string genai_provider_name = EpNameToGenAIProviderName(ep_for_file);
+  auto it = std::find_if(target.provider_options.begin(), target.provider_options.end(),
+                         [&](const Config::ProviderOptions& p) { return p.name == genai_provider_name; });
+  if (it == target.provider_options.end()) {
+    // No matching entry in genai_config: append the variant's entry verbatim.
     Config::ProviderOptions po;
     po.name = genai_provider_name;
-
-    const char* const* po_keys = nullptr;
-    const char* const* po_values = nullptr;
-    size_t po_count = 0;
-    cix.GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
-
     for (size_t i = 0; i < po_count; ++i) {
       po.options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
     }
-
-    so.providers.push_back(genai_provider_name);
-    so.provider_options.push_back(std::move(po));
-  }
-
-  return so;
-}
-
-// Apply genai_config role SO on top of variant_base, back-filling provider_options entries
-// that genai_config didn't explicitly override (preserves variant-supplied defaults like
-// quantization flags). Mirrors the layered semantics from the deprecated
-// Model::BuildSessionOptionsForPackageFile.
-void OverlayGenAISessionOptions(Config::SessionOptions& variant_base,
-                                const Config::SessionOptions& genai_so) {
-  std::vector<Config::ProviderOptions> variant_po_snapshot = variant_base.provider_options;
-  OverlaySessionOptions(variant_base, genai_so);
-
-  for (const auto& vpo : variant_po_snapshot) {
-    auto it = std::find_if(variant_base.provider_options.begin(),
-                            variant_base.provider_options.end(),
-                            [&](const Config::ProviderOptions& p) { return p.name == vpo.name; });
-    if (it == variant_base.provider_options.end()) continue;
-    for (const auto& [k, v] : vpo.options) {
+    target.provider_options.push_back(std::move(po));
+  } else {
+    // Back-fill: target's existing keys win; variant supplies anything else.
+    for (size_t i = 0; i < po_count; ++i) {
+      std::string_view k(po_keys[i]);
       bool exists = std::any_of(it->options.begin(), it->options.end(),
                                 [&](const auto& e) { return e.first == k; });
-      if (!exists) it->options.emplace_back(k, v);
+      if (!exists) it->options.emplace_back(std::string(k), std::string(po_values[i]));
     }
   }
 }
 
-// Rebuild providers list from provider_options. Used after wholesale SO replacement so we
-// don't have to re-run the heavier FinalizeConfig (which would also re-append duplicates).
+// Rebuild providers list from provider_options. Keeps the two in sync after we materialize
+// variant data without re-running the heavier FinalizeConfig (which would also re-append
+// duplicates).
 void RebuildProvidersFromProviderOptions(Config::SessionOptions& so) {
   so.providers.clear();
   so.providers.reserve(so.provider_options.size());
@@ -644,8 +654,8 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
     return cix;
   };
 
-  // Normalize an optional-SO role: filename is set to the variant file basename, asset_dir to
-  // the variant folder, session_options to the merged (variant + genai role SO + back-fill).
+  // Normalize an optional-SO role. session_options is treated as the genai_config-derived
+  // receiver; variant data fills gaps and back-fills missing EP provider_options keys.
   auto normalize_single_optional = [&](const std::string& component,
                                        std::string& filename_slot,
                                        fs::path& asset_dir_slot,
@@ -659,12 +669,10 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
     filename_slot = basename_of(cix->GetSelectedVariantFilePath(0));
     asset_dir_slot = fs::path(cix->GetSelectedVariantFolderPath());
 
-    Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, 0, resolved_ep);
-    if (so_slot.has_value()) {
-      OverlayGenAISessionOptions(variant_base, *so_slot);
-    }
-    RebuildProvidersFromProviderOptions(variant_base);
-    so_slot = std::move(variant_base);
+    Config::SessionOptions merged = so_slot.has_value() ? std::move(*so_slot) : Config::SessionOptions{};
+    ApplyVariantFileOptions(merged, *cix, 0, resolved_ep);
+    RebuildProvidersFromProviderOptions(merged);
+    so_slot = std::move(merged);
   };
 
   // Decoder: SessionOptions is non-optional and may carry a pipeline.
@@ -682,10 +690,8 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
       dec.filename = basename_of(cix->GetSelectedVariantFilePath(0));
       dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
 
-      Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, 0, resolved_ep);
-      OverlayGenAISessionOptions(variant_base, dec.session_options);
-      RebuildProvidersFromProviderOptions(variant_base);
-      dec.session_options = std::move(variant_base);
+      ApplyVariantFileOptions(dec.session_options, *cix, 0, resolved_ep);
+      RebuildProvidersFromProviderOptions(dec.session_options);
     } else {
       // Pipeline: each element maps positionally to variant.files[i].
       if (dec.pipeline.size() != file_count) {
@@ -696,22 +702,24 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
             " files; positional mapping requires equal counts");
       }
       dec.asset_dir = fs::path(cix->GetSelectedVariantFolderPath());
-      // Decoder-level SessionOptions in pipeline mode: keep the resolved EP visible (so
-      // Model::CreateSessionOptions can derive p_device_) but don't overlay per-file detail —
-      // that belongs on each pipeline stage.
-      dec.session_options = BuildVariantBaseSO(*cix, 0, resolved_ep);
+      // Decoder-level SessionOptions in pipeline mode is consulted by
+      // Model::CreateSessionOptions() to derive p_device_. Reset to a clean SO carrying just
+      // the resolved EP entry — per-file detail belongs on each pipeline stage's own SO.
+      dec.session_options = Config::SessionOptions{};
+      ApplyVariantFileOptions(dec.session_options, *cix, 0, resolved_ep);
       RebuildProvidersFromProviderOptions(dec.session_options);
 
       for (size_t i = 0; i < dec.pipeline.size(); ++i) {
         auto& pipe = dec.pipeline[i];
         pipe.filename = basename_of(cix->GetSelectedVariantFilePath(i));
         const std::string& ep = pipe.run_on_cpu ? std::string{} : resolved_ep;
-        Config::SessionOptions variant_base = BuildVariantBaseSO(*cix, i, ep);
-        if (pipe.session_options.has_value()) {
-          OverlayGenAISessionOptions(variant_base, *pipe.session_options);
-        }
-        RebuildProvidersFromProviderOptions(variant_base);
-        pipe.session_options = std::move(variant_base);
+
+        Config::SessionOptions merged = pipe.session_options.has_value()
+                                            ? std::move(*pipe.session_options)
+                                            : Config::SessionOptions{};
+        ApplyVariantFileOptions(merged, *cix, i, ep);
+        RebuildProvidersFromProviderOptions(merged);
+        pipe.session_options = std::move(merged);
       }
     }
   }
