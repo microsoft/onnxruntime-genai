@@ -40,4 +40,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const Config& config,
                                            bool disable_graph_capture = false);
 
+
+// Gets a trivial ONNX model that just returns a single float constant.
+std::span<const uint8_t> GetTrivialModel();
 }  // namespace Generators

@@ -58,19 +58,21 @@ struct InterfaceImpl : DeviceInterface {
   Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& config) const override {
     auto provider_options = Config::ProviderOptions{"QNN", {}};
 
-    // QNN has separate allocators for NPU and GPU, and chooses which one to use based on the selected backend.
-    // So, we must use device_filtering_options to ensure the allocator session is created with the correct device.
-    // Otherwise, a conflict could arise between the allocator session and the main inference session (e.g. HTP
-    // allocations provided to a GPU session).
-    if (Generators::IsQNNGPUBackend(config)) {
-      provider_options.options.emplace_back("enable_dx12_shared_memory_allocator", "1");
-      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_GPU };
-    } else {
-      // For the HTP backend, thea allocator for QnnHtpShared is only made available when the provider option
-      // 'enable_htp_shared_memory_allocator' is set to 1.
-      provider_options.options.emplace_back("enable_htp_shared_memory_allocator", "1");
-      provider_options.device_filtering_options = Config::DeviceFilteringOptions { OrtHardwareDeviceType_NPU };
+    const auto& config_providers = config.model.decoder.session_options.providers;
+    const auto& config_provider_options = config.model.decoder.session_options.provider_options;
+
+    // Copy the config QNN provider options to the allocator session.
+    // Certain options (e.g. "enable_htp_shared_memory_allocator") are required for QNN EP to expose an allocator.
+    auto it = std::find_if(config_providers.begin(), config_providers.end(), [](const std::string& p) { return p == "QNN"; });
+    if (it != config_providers.end()) {
+      const auto i = std::distance(config_providers.begin(), it);
+      if (config_provider_options.size() > static_cast<size_t>(i)) {
+        for (const auto& pair : config_provider_options[i].options) {
+          provider_options.options.emplace_back(pair);
+        }
+      }
     }
+
     return provider_options;
   }
 
