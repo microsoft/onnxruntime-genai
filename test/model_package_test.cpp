@@ -343,4 +343,86 @@ TEST(ModelPackageE2E, CreateConfigWithEpNullFallsBackToAutoDetect) {
   ASSERT_NE(model, nullptr);
   EXPECT_EQ(std::string(model->GetType().p_), "phi3");
 }
+
+// --- Targeted regression tests for the package-load error paths and merge logic ---
+//
+// Each test loads a small fixture that exercises one branch of NormalizePackageIntoConfig
+// or ApplyVariantFileOptions. The fixtures live alongside the existing package fixtures.
+
+static const char* kKitchenSinkPkgPath = MODEL_PATH "kitchen-sink-cpu.ortpackage";
+static const char* kBadPipelineMismatchPkgPath = MODEL_PATH "bad-pipeline-mismatch.ortpackage";
+static const char* kBadOverlayComponentPkgPath = MODEL_PATH "bad-overlay-component.ortpackage";
+static const char* kBadCpuPoPkgPath = MODEL_PATH "bad-cpu-po.ortpackage";
+
+TEST(ModelPackageNormalize, MergesVariantSoAndGenAIOverlay) {
+  if (!PackageExists(kKitchenSinkPkgPath)) {
+    GTEST_SKIP() << "Kitchen-sink test package not found at " << kKitchenSinkPkgPath;
+  }
+  // The fixture's variant.json declares every typed SO field; its
+  // consumer_metadata.genai_config_overlay re-sets a subset. One load exercises both
+  // halves of the merge contract:
+  //   * overlay-set fields carry the genai_config value (genai wins on conflict),
+  //   * variant-only fields carry the variant value (variant fills gaps).
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), kKitchenSinkPkgPath,
+                                          /*settings=*/nullptr, /*ep=*/nullptr);
+  ASSERT_NE(config, nullptr);
+  const auto& so = config->model.decoder.session_options;
+
+  // Fields the overlay re-sets: genai_config wins.
+  EXPECT_EQ(so.intra_op_num_threads.value_or(-1), 99);
+  EXPECT_TRUE(so.enable_cpu_mem_arena.value_or(false));
+  EXPECT_EQ(so.log_id.value_or(""), "genai-log-id");
+  EXPECT_EQ(so.graph_optimization_level.value_or(ORT_DISABLE_ALL), ORT_ENABLE_ALL);
+
+  // Fields only the variant sets: variant fills the gap.
+  EXPECT_EQ(so.inter_op_num_threads.value_or(-1), 2);
+  EXPECT_EQ(so.log_severity_level.value_or(-1), 3);
+  EXPECT_EQ(so.log_verbosity_level.value_or(-1), 1);
+  EXPECT_TRUE(so.enable_mem_pattern.value_or(false));
+  EXPECT_EQ(so.enable_profiling.value_or(""), "/tmp/variant-profile");
+  EXPECT_EQ(so.custom_ops_library.value_or(""), "libcustomops.so");
+
+  // Unknown-key fallback for arbitrary entries.
+  auto entry = std::find_if(so.config_entries.begin(), so.config_entries.end(),
+                            [](const auto& p) { return p.first == "session.disable_prepacking"; });
+  ASSERT_NE(entry, so.config_entries.end());
+  EXPECT_EQ(entry->second, "1");
+}
+
+TEST(ModelPackageNormalize, PipelineSizeMismatchThrows) {
+  if (!PackageExists(kBadPipelineMismatchPkgPath)) {
+    GTEST_SKIP() << "bad-pipeline-mismatch fixture not found";
+  }
+  // Pipeline declares 2 stages, variant has 1 file. NormalizePackageIntoConfig requires
+  // equal counts for positional mapping.
+  EXPECT_THROW(
+      Generators::CreateConfig(Generators::GetOrtEnv(), kBadPipelineMismatchPkgPath,
+                                /*settings=*/nullptr, /*ep=*/nullptr),
+      std::runtime_error);
+}
+
+TEST(ModelPackageNormalize, OverlayIntroducedComponentThrows) {
+  if (!PackageExists(kBadOverlayComponentPkgPath)) {
+    GTEST_SKIP() << "bad-overlay-component fixture not found";
+  }
+  // The variant's consumer_metadata overlay introduces model.vision.component =
+  // "vision-not-in-package". Selection happened against the base config (decoder only), so
+  // the new component reference must be rejected.
+  EXPECT_THROW(
+      Generators::CreateConfig(Generators::GetOrtEnv(), kBadOverlayComponentPkgPath,
+                                /*settings=*/nullptr, /*ep=*/nullptr),
+      std::runtime_error);
+}
+
+TEST(ModelPackageNormalize, CpuVariantWithProviderOptionsThrows) {
+  if (!PackageExists(kBadCpuPoPkgPath)) {
+    GTEST_SKIP() << "bad-cpu-po fixture not found";
+  }
+  // CPU has no GenAI provider tag, so non-empty variant provider_options under a CPU file
+  // would be silently dropped. ApplyVariantFileOptions rejects that as a producer error.
+  EXPECT_THROW(
+      Generators::CreateConfig(Generators::GetOrtEnv(), kBadCpuPoPkgPath,
+                                /*settings=*/nullptr, /*ep=*/nullptr),
+      std::runtime_error);
+}
 #endif

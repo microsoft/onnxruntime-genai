@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "filename": "model.onnx",
+      "provider_options": {
+        "device_id": "0"
+      }
+    }
+  ]
+}

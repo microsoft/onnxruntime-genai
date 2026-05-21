@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "package_name": "bad-pipeline-mismatch",
+  "package_version": "1.0",
+  "description": "Pipeline declares 2 stages, variant declares 1 file -> NormalizePackageIntoConfig must throw.",
+  "components": ["decoder"],
+  "configs_dir": "configs"
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "files": [
+    { "filename": "model.onnx" }
+  ],
+  "consumer_metadata": {
+    "genai_config_overlay": {
+      "model": {
+        "vision": {
+          "component": "vision-not-in-package",
+          "filename": "vision.onnx"
+        }
+      }
+    }
+  }
+}
