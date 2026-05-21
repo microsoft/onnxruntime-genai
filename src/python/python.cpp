@@ -434,7 +434,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("create_stream", [](const OgaTokenizer& t) { return OgaTokenizerStream::Create(t); });
 
   pybind11::class_<OgaConfig>(m, "Config")
-      .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
+      .def(pybind11::init([](const std::string& config_path, pybind11::object ep) {
+             if (ep.is_none()) {
+               return OgaConfig::Create(config_path.c_str());
+             }
+             return OgaConfig::Create(config_path.c_str(), pybind11::cast<std::string>(ep).c_str());
+           }),
+           pybind11::arg("config_path"), pybind11::arg("ep") = pybind11::none())
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders)

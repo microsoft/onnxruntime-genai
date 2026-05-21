@@ -14,6 +14,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
         }
 
+        public Config(string modelPath, string ep)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateConfigWithEp(StringUtils.ToUtf8(modelPath), StringUtils.ToUtf8(ep), out _configHandle));
+        }
+
         internal IntPtr Handle { get { return _configHandle; } }
         public void ClearProviders()
         {

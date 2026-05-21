@@ -20,6 +20,18 @@ public final class Config implements AutoCloseable {
     nativeHandle = createConfig(modelPath);
   }
 
+  /**
+   * Construct a Config from folder path with an execution provider.
+   *
+   * @param modelPath The path of the GenAI model.
+   * @param ep The execution provider to use (e.g. "cuda", "cpu", "dml"). For model packages this
+   *     drives variant selection; for flat-dir models this argument is ignored.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Config(String modelPath, String ep) throws GenAIException {
+    nativeHandle = createConfigWithEp(modelPath, ep);
+  }
+
   /** Clear the list of providers in the config */
   public void clearProviders() {
     if (nativeHandle == 0) {
@@ -88,6 +100,8 @@ public final class Config implements AutoCloseable {
   }
 
   private native long createConfig(String modelPath) throws GenAIException;
+
+  private native long createConfigWithEp(String modelPath, String ep) throws GenAIException;
 
   private native void destroyConfig(long configHandle);
 
