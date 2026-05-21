@@ -40,7 +40,12 @@ namespace {
     << "        Prompt text to use. Default: See --prompt_length.\n"
     << "      --prompt_file <file containing prompt text>\n"
     << "        Path to file containing prompt text to use. Default: See --prompt_length.\n"
-    << "      Note: --prompt_length, --prompt, and --prompt_file are mutually exclusive.\n"
+    << "      --use_random_tokens\n"
+    << "        Use random token IDs in [0, 99] per position instead of generating or encoding\n"
+    << "        a text prompt. Requires -l/--prompt_length (cannot be used with --prompt or\n"
+    << "        --prompt_file).\n"
+    << "      Note: --prompt, --prompt_file, and --use_random_tokens are mutually exclusive;\n"
+    << "        --use_random_tokens requires --prompt_length.\n"
     << "    -g,--generation_length <number>\n"
     << "      Number of tokens to generate. Default: " << defaults.num_tokens_to_generate << "\n"
     << "    -r,--repetitions <number>\n"
@@ -125,10 +130,16 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "--prompt") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = std::string{next_arg(i)};
       } else if (arg == "--prompt_file") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = ReadFileContent(next_arg(i));
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
@@ -140,6 +151,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.max_length = ParseNumber<int64_t>(next_arg(i));
       } else if (arg == "--reuse_generator") {
         opts.reuse_generator = true;
+      } else if (arg == "--use_random_tokens") {
+        opts.use_random_tokens = true;
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
       } else if (arg == "-h" || arg == "--help") {
@@ -151,6 +164,15 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
 
     if (prompt_num_tokens_or_content.has_value()) {
       opts.prompt_num_tokens_or_content = std::move(*prompt_num_tokens_or_content);
+    }
+
+    if (opts.use_random_tokens) {
+      if (!prompt_num_tokens_or_content.has_value() ||
+          !std::holds_alternative<size_t>(*prompt_num_tokens_or_content)) {
+        throw std::runtime_error(!prompt_num_tokens_or_content.has_value()
+                                     ? "--use_random_tokens requires -l/--prompt_length."
+                                     : "--use_random_tokens cannot be used with --prompt or --prompt_file.");
+      }
     }
 
     VerifyOptions(opts);

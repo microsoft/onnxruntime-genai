@@ -899,7 +899,11 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         return flat_cos, flat_sin
 
     def load_weights(self, input_path):
-        # Load the Hugging Face model
+        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
+        # which loads weights directly via QuantModel
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
         print("Loading Qwen3VLForConditionalGeneration model...")
         return Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
@@ -926,6 +930,8 @@ class Qwen35TextModel(Model):
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
+        # When exclude_embeds is explicitly set to False, build as a standalone LLM.
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
@@ -969,8 +975,14 @@ class Qwen35TextModel(Model):
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        # Position IDs input.
+        # In text-only mode the runtime provides standard 2D [B, S] position_ids.
+        # We expand them to 3D [3, B, S] inside the graph so mRoPE works unchanged.
+        # In VL mode the pipeline provides 3D position_ids directly.
+        if self.is_text_only:
+            self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+        else:
+            self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         self.input_names["position_ids"] = "position_ids"
 
         # mRoPE config
@@ -1076,6 +1088,34 @@ class Qwen35TextModel(Model):
         self.input_names["past_key_values.value"] = filtered_value_inputs
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
+
+    def make_position_ids_reformatting(self):
+        if self.is_text_only:
+            # The graph input is 2D position_ids [B, S].
+            # Expand to 3D [3, B, S] for mRoPE by stacking 3 copies.
+            pos_2d = "position_ids"
+            unsq_name = "/model/position_ids_expand/Unsqueeze"
+            unsq_output = f"{unsq_name}/output_0"
+            self.make_unsqueeze(
+                unsq_name,
+                [pos_2d, "/model/constants/INT64/[0]"],
+                ir.DataType.INT64,
+                [1, "batch_size", "sequence_length"],
+            )
+            tile_name = "/model/position_ids_expand/Tile"
+            tile_output = f"{tile_name}/output_0"
+            self.make_tile(
+                tile_name,
+                [unsq_output, "/model/constants/INT64/[3, 1, 1]"],
+                ir.DataType.INT64,
+                [3, "batch_size", "sequence_length"],
+            )
+            return tile_output
+        return self.input_names["position_ids"]
+
+    def make_preprocessing_nodes(self):
+        super().make_preprocessing_nodes()
+        self.position_ids_reformatted = self.make_position_ids_reformatting()
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1320,10 +1360,10 @@ class Qwen35TextModel(Model):
     def _make_mrope_cos_sin(self, basename):
         """Build interleaved mRoPE cos/sin from pre-computed cache + position_ids.
 
-        Input: position_ids [3, B, S]
+        Input: position_ids [3, B, S] (from self.position_ids_reformatted)
         Output: cos [B, S, rdim_half], sin [B, S, rdim_half]
         """
-        pos_ids = self.input_names["position_ids"]
+        pos_ids = self.position_ids_reformatted
         cos_cache = "model.rotary_emb.cos_cache"
         sin_cache = "model.rotary_emb.sin_cache"
         h_mask = "model.rotary_emb.h_mask"
@@ -1388,7 +1428,7 @@ class Qwen35TextModel(Model):
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
-        pos_ids_input = self.input_names["position_ids"]
+        pos_ids_input = self.position_ids_reformatted
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
@@ -1854,38 +1894,20 @@ class Qwen35TextModel(Model):
         return unflat_out
 
     def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
-        """L2-normalize along last dimension: x * rsqrt(sum(x^2) + eps)
+        """L2-normalize along last dimension via ORT's LpNormalization(p=2).
 
-        Matches the FLA library's l2norm used by the PyTorch reference:
-            inv_norm = rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
-            return x * inv_norm
+        Replaces the 5-node Square+ReduceSum+Add(eps)+Rsqrt+Mul subgraph with
+        a single LpNormalization op (natively supported by the WebGPU EP and
+        others). The +eps term is dropped; q/k come from RMSNorm+Proj so
+        magnitudes far exceed 1e-6, keeping any divergence within fp16 noise.
         """
         if leading_dims is None:
             leading_dims = ["batch_size", "sequence_length"]
         full_shape = [*leading_dims, last_dim]
-        reduced_shape = [*leading_dims, 1]
 
-        # sum(x^2, dim=-1, keepdim=True)
-        sq_name = f"{basename}/Square/Mul"
-        self.make_mul(sq_name, [input_name, input_name], self.io_dtype, full_shape)
-
-        sum_name = f"{basename}/SumSq/ReduceSum"
-        self.make_reduce_sum(sum_name, [f"{sq_name}/output_0", "/model/constants/INT64/[-1]"],
-                             self.io_dtype, reduced_shape, keepdims=True)
-
-        # sum(x^2) + eps
-        eps_name = self._get_shared_l2_eps()
-        add_eps_name = f"{basename}/AddEps/Add"
-        self.make_add(add_eps_name, [f"{sum_name}/output_0", eps_name], self.io_dtype, reduced_shape)
-
-        # x * rsqrt(sum(x^2) + eps)
-        rsqrt_name = f"{basename}/Rsqrt"
-        self.make_rsqrt(rsqrt_name, [f"{add_eps_name}/output_0"], self.io_dtype, reduced_shape)
-
-        norm_name = f"{basename}/Normalize/Mul"
-        self.make_mul(norm_name, [input_name, f"{rsqrt_name}/output_0"], self.io_dtype, full_shape)
-
-        return f"{norm_name}/output_0"
+        node_name = f"{basename}/LpNormalization"
+        self.make_lp_normalization(node_name, input_name, self.io_dtype, full_shape, axis=-1, p=2)
+        return f"{node_name}/output_0"
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).
@@ -1997,7 +2019,7 @@ class Qwen35TextModel(Model):
             "model_type": self.model_type,
         }
         self.num_layers = len(self.layer_types)
-        self.model_type = "Qwen3_5ForConditionalGeneration"
+        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"

@@ -4,11 +4,14 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <random>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "ort_genai.h"
@@ -158,7 +161,10 @@ void RunBenchmark(const benchmark::Options& opts) {
   bool need_generate_prompt = false;
   std::string prompt;
 
-  if (const size_t* npt = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
+  if (opts.use_random_tokens) {
+    num_prompt_tokens = std::get<size_t>(opts.prompt_num_tokens_or_content);
+    need_generate_prompt = false;
+  } else if (const size_t* npt = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
     num_prompt_tokens = *npt;
     need_generate_prompt = true;
   } else {
@@ -203,8 +209,21 @@ void RunBenchmark(const benchmark::Options& opts) {
   }
 
   auto prompt_sequences = OgaSequences::Create();
-  for (size_t i = 0; i < opts.batch_size; ++i) {
-    tokenizer->Encode(prompt.c_str(), *prompt_sequences);
+  if (opts.use_random_tokens) {
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_int_distribution<int32_t> dist(0, 99);
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      std::vector<int32_t> random_tokens(num_prompt_tokens);
+      std::generate(random_tokens.begin(), random_tokens.end(), [&]() {
+        return dist(rng);
+      });
+      prompt_sequences->Append(random_tokens.data(), random_tokens.size());
+    }
+  } else {
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      tokenizer->Encode(prompt.c_str(), *prompt_sequences);
+    }
   }
 
   // warmup
@@ -226,7 +245,12 @@ void RunBenchmark(const benchmark::Options& opts) {
 
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
-      std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+      if (opts.use_random_tokens) {
+        std::cout << "[PROMPT] random token IDs in [0, 99], batch_size=" << opts.batch_size
+                  << ", tokens per sequence=" << num_prompt_tokens << "\n";
+      } else {
+        std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+      }
       const auto output_sequence_length = gen->TokenCount();
       const auto* output_sequence_data = gen->GetSequenceData(0);
       const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
