@@ -3,6 +3,9 @@
 
 #include "../generators.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -16,7 +19,32 @@ namespace Generators {
 // --- Package detection ---
 
 bool IsModelPackage(const fs::path& path) {
-  return fs::exists(path / "manifest.json");
+  // Fast path: an explicit top-level manifest.json marks a v4 package.
+  if (fs::exists(path / "manifest.json"))
+    return true;
+
+  // Per the v4 spec, manifest.json is optional. A path is still a model package when any
+  // non-reserved immediate child directory contains a metadata.json (i.e. a component dir).
+  // The only reserved top-level directory name in v4 is "configs/".
+  //
+  // Use std::filesystem here because the in-tree fs:: wrapper does not provide directory
+  // iteration. The platform-correct path string (UTF-16 on Windows, UTF-8 on POSIX) is
+  // pulled from fs::path::c_str().
+  std::filesystem::path root(path.c_str());
+  std::error_code ec;
+  if (!std::filesystem::is_directory(root, ec) || ec)
+    return false;
+
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (ec) break;
+    std::error_code ec_dir;
+    if (!entry.is_directory(ec_dir) || ec_dir) continue;
+    if (entry.path().filename() == "configs") continue;  // reserved
+    std::error_code ec_meta;
+    if (std::filesystem::exists(entry.path() / "metadata.json", ec_meta) && !ec_meta)
+      return true;
+  }
+  return false;
 }
 
 // --- EP defaulting ---
@@ -179,11 +207,50 @@ std::string ParseJsonString(std::string_view s, size_t& pos) {
         case 'r': result += '\r'; break;
         case 't': result += '\t'; break;
         case 'u': {
-          // 4 hex digits, just pass through
           if (pos + 4 > s.size()) throw std::runtime_error("Invalid unicode escape");
-          result += "\\u";
-          result += s.substr(pos, 4);
+          auto parse_hex4 = [&](size_t p) -> uint32_t {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; ++i) {
+              char ch = s[p + i];
+              uint32_t d;
+              if (ch >= '0' && ch <= '9') d = static_cast<uint32_t>(ch - '0');
+              else if (ch >= 'a' && ch <= 'f') d = static_cast<uint32_t>(ch - 'a' + 10);
+              else if (ch >= 'A' && ch <= 'F') d = static_cast<uint32_t>(ch - 'A' + 10);
+              else throw std::runtime_error("Invalid hex digit in \\u escape");
+              v = (v << 4) | d;
+            }
+            return v;
+          };
+          uint32_t cp = parse_hex4(pos);
           pos += 4;
+          // Handle UTF-16 surrogate pair: a high surrogate must be followed by \uXXXX with a low surrogate.
+          if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (pos + 6 > s.size() || s[pos] != '\\' || s[pos + 1] != 'u')
+              throw std::runtime_error("Expected low surrogate after high surrogate in \\u escape");
+            uint32_t lo = parse_hex4(pos + 2);
+            if (lo < 0xDC00 || lo > 0xDFFF)
+              throw std::runtime_error("Invalid low surrogate in \\u escape");
+            cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+            pos += 6;
+          } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            throw std::runtime_error("Unexpected low surrogate in \\u escape");
+          }
+          // Encode the codepoint as UTF-8 so SerializeJson can pass it through unchanged.
+          if (cp < 0x80) {
+            result += static_cast<char>(cp);
+          } else if (cp < 0x800) {
+            result += static_cast<char>(0xC0 | (cp >> 6));
+            result += static_cast<char>(0x80 | (cp & 0x3F));
+          } else if (cp < 0x10000) {
+            result += static_cast<char>(0xE0 | (cp >> 12));
+            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (cp & 0x3F));
+          } else {
+            result += static_cast<char>(0xF0 | (cp >> 18));
+            result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (cp & 0x3F));
+          }
           break;
         }
         default: result += esc; break;
@@ -310,7 +377,7 @@ std::string SerializeJson(const JsonValue& val) {
       return val.raw;
     case JsonValue::String: {
       std::string result = "\"";
-      for (char c : val.str_val) {
+      for (unsigned char c : val.str_val) {
         switch (c) {
           case '"': result += "\\\""; break;
           case '\\': result += "\\\\"; break;
@@ -319,7 +386,18 @@ std::string SerializeJson(const JsonValue& val) {
           case '\n': result += "\\n"; break;
           case '\r': result += "\\r"; break;
           case '\t': result += "\\t"; break;
-          default: result += c; break;
+          default:
+            if (c < 0x20) {
+              // Other control characters must be escaped as \u00XX to produce valid JSON.
+              static constexpr char kHex[] = "0123456789abcdef";
+              result += "\\u00";
+              result += kHex[(c >> 4) & 0xF];
+              result += kHex[c & 0xF];
+            } else {
+              // UTF-8 bytes (>= 0x80) and printable ASCII pass through unchanged.
+              result += static_cast<char>(c);
+            }
+            break;
         }
       }
       result += "\"";
@@ -557,7 +635,6 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
     out_resolved_ep = NormalizeEpName(explicit_ep);
   } else {
     // Parse the base config to scope EP auto-detect to the components the model actually uses.
-    extern void ParseConfigFromString(std::string_view json, Config& config);
     auto pre_config = std::make_unique<Config>();
     ParseConfigFromString(base_json, *pre_config);
     out_resolved_ep = DefaultEpFromPackage(*pkg_ctx, ReferencedComponents(*pre_config));
@@ -651,30 +728,23 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   // Additionally, if the user opened the package with a relative path, ORT returns paths
   // relative to CWD. We canonicalize to absolute so Model::CreateSession can use them as-is.
   auto ort_path_to_string = [](const std::basic_string<ORTCHAR_T>& s) -> std::string {
-#ifdef _WIN32
     if (s.empty()) return {};
-    // Resolve to absolute on Windows using the wide API, then UTF-8 encode.
-    wchar_t abs_buf[MAX_PATH];
-    DWORD len = GetFullPathNameW(s.c_str(), MAX_PATH, abs_buf, nullptr);
-    std::wstring abs_w = (len > 0 && len < MAX_PATH) ? std::wstring(abs_buf, len) : s;
-    int needed = WideCharToMultiByte(CP_UTF8, 0, abs_w.data(), static_cast<int>(abs_w.size()),
-                                     nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<size_t>(needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, abs_w.data(), static_cast<int>(abs_w.size()),
-                        out.data(), needed, nullptr, nullptr);
-    return out;
-#else
-    if (s.empty()) return {};
-    // Resolve to absolute so Model::CreateSession can use the path as-is regardless of
-    // whether the user opened the package with a relative or absolute path.
-    char resolved[PATH_MAX];
-    if (realpath(s.c_str(), resolved)) {
-      return std::string(resolved);
+    // std::filesystem::path handles wchar_t (Windows) and char (POSIX) inputs uniformly.
+    std::filesystem::path p(s);
+    std::error_code ec;
+    // weakly_canonical resolves the path even when it doesn't (yet) exist; absolute is the
+    // fallback if the implementation cannot resolve symlinks. Either way the result is an
+    // absolute path suitable for direct use by Model::CreateSession.
+    std::filesystem::path abs = std::filesystem::weakly_canonical(p, ec);
+    if (ec || abs.empty()) {
+      ec.clear();
+      abs = std::filesystem::absolute(p, ec);
+      if (ec) abs = p;  // last-resort: pass through unchanged
     }
-    // realpath fails if file doesn't exist yet (shouldn't happen for selected variant files,
-    // but fall through gracefully).
-    return std::string(s);
-#endif
+    // u8string() returns UTF-8 in both C++17 and C++20. Reinterpret to std::string for storage
+    // in the (narrow) Config fields; the bytes are still well-formed UTF-8.
+    auto u8 = abs.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
   };
 
   // Make a path that is intended as <asset_dir>/<rel> directly accessible. Bypasses the
@@ -840,7 +910,8 @@ std::string NormalizeEpName(const std::string& ep_name) {
   // Accept short aliases (case-insensitive) and map to canonical ORT EP names.
   std::string lower;
   lower.reserve(ep_name.size());
-  for (char c : ep_name) lower.push_back(static_cast<char>(std::tolower(c)));
+  for (char c : ep_name)
+    lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
 
   static const std::unordered_map<std::string, std::string> alias_map = {
       {"cuda", "CUDAExecutionProvider"},

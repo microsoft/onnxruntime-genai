@@ -135,8 +135,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * Creates a model with an execution provider.
  *
- * @param path The path to the ONNX GenAI model folder.
- * @param ep The execution provider to use (e.g. "cuda", "cpu", "dml").
+ * @param path The path to the ONNX GenAI model folder or .ortpackage directory.
+ * @param ep The execution provider to use (e.g. "cuda", "cpu", "dml"). For model packages this
+ *   drives variant selection; for flat-dir models this argument is ignored.
  * @return The instance, or nil if an error occurs.
  */
 - (nullable instancetype)initWithPath:(NSString*)path

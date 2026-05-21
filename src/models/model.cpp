@@ -910,7 +910,6 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
 
     // Parse the base config to discover which components are referenced. Select each one and
     // collect its genai_config_overlay before parsing the final merged config.
-    extern void ParseConfigFromString(std::string_view json, Config& config);
     auto base_config = std::make_unique<Config>();
     base_config->config_path = configs_path;
     ParseConfigFromString(base_json, *base_config);

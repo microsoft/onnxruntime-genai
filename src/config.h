@@ -470,6 +470,11 @@ void OverlayConfig(Config& config, std::string_view json);
 void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options);
 void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay);
 
+// Parse a JSON document (read from disk by the caller) into `config`. The caller is
+// responsible for any pre-merging of overlays. Used by both the flat-dir Config constructor
+// (in config.cpp) and the package-aware loaders in model.cpp and models/model_package.cpp.
+void ParseConfigFromString(std::string_view json, Config& config);
+
 // Returns role_so->value() if set, else config.model.decoder.session_options. Centralizes the
 // "use this role's SO if specified, fall back to the decoder's" pattern that recurs across
 // Marian, Whisper, NemotronSpeech, MultiModal, and SileroVad.

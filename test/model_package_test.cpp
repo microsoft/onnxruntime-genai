@@ -3,11 +3,55 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
+#include <thread>
 #include "../src/generators.h"
 #include "../src/config.h"
 #include "../src/models/model_package.h"
+
+namespace {
+
+// RAII helper: create a fresh unique temp directory and remove it on scope exit so tests are
+// portable (no POSIX-only `mkdir -p`/`rm -rf` shelling out) and isolated from each other.
+class ScopedTempDir {
+ public:
+  explicit ScopedTempDir(const std::string& tag) {
+    auto base = std::filesystem::temp_directory_path();
+    // Use a per-process+per-test-tag suffix to keep parallel ctest invocations safe.
+    auto pid = std::to_string(static_cast<unsigned long long>(
+        std::hash<std::string>{}(tag) ^
+        std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    path_ = base / ("genai_test_" + tag + "_" + pid);
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+    std::filesystem::create_directories(path_);
+  }
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+  ScopedTempDir(const ScopedTempDir&) = delete;
+  ScopedTempDir& operator=(const ScopedTempDir&) = delete;
+
+  const std::filesystem::path& path() const { return path_; }
+  std::string string() const { return path_.string(); }
+  std::filesystem::path operator/(const std::string& tail) const { return path_ / tail; }
+
+  // Create an empty file at <root>/<rel>, creating any intermediate directories.
+  void touch(const std::string& rel) const {
+    auto target = path_ / rel;
+    std::filesystem::create_directories(target.parent_path());
+    std::ofstream(target).close();
+  }
+
+ private:
+  std::filesystem::path path_;
+};
+
+}  // namespace
 
 // --- JSON Merge Patch (RFC 7386) tests ---
 
@@ -79,6 +123,33 @@ TEST(JsonMergePatch, BoolAndNullValues) {
   std::string result = Generators::JsonMergePatch(base, patch);
   EXPECT_NE(result.find("\"a\":false"), std::string::npos);
   EXPECT_NE(result.find("\"c\":\"restored\""), std::string::npos);
+}
+
+TEST(JsonMergePatch, UnicodeEscapeRoundTrip) {
+  // Regression: parsing \uXXXX and re-serializing must not double-escape the backslash.
+  // Inputs use \u0041 ('A'), \u00E9 ('é'), and a surrogate pair for U+1F600 ("😀").
+  std::string base = R"({"keep":"x"})";
+  std::string patch = R"({"a":"\u0041","b":"caf\u00e9","c":"\uD83D\uDE00"})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  // The literal "\u" sequence must not survive (it would be invalid JSON when re-parsed by ORT)
+  // and must definitely not have been double-escaped to "\\u".
+  EXPECT_EQ(result.find("\\\\u"), std::string::npos);
+  // The decoded characters should appear as UTF-8 bytes in the output.
+  EXPECT_NE(result.find("\"a\":\"A\""), std::string::npos);
+  EXPECT_NE(result.find("caf\xc3\xa9"), std::string::npos);    // 'é' = 0xC3 0xA9
+  EXPECT_NE(result.find("\xf0\x9f\x98\x80"), std::string::npos);  // U+1F600 = 0xF0 0x9F 0x98 0x80
+  EXPECT_NE(result.find("\"keep\":\"x\""), std::string::npos);
+}
+
+TEST(JsonMergePatch, EscapesControlCharactersOnOutput) {
+  // Parsing \u0001 into a raw 0x01 byte and emitting it raw would produce invalid JSON.
+  // The serializer must escape U+0000..U+001F that don't have a short escape back to \u00XX.
+  std::string base = R"({})";
+  std::string patch = R"({"ctl":"a\u0001b"})";
+  std::string result = Generators::JsonMergePatch(base, patch);
+  EXPECT_NE(result.find("\\u0001"), std::string::npos);
+  // The raw 0x01 byte must not appear in the serialized output.
+  EXPECT_EQ(result.find('\x01'), std::string::npos);
 }
 
 // --- RFC 7386 JSON Merge Patch: additional edge cases ---
@@ -337,24 +408,42 @@ TEST(ApplyVariantFileSessionOptions, BackfillsMissingProviderOptionKeys) {
 // --- Package detection tests ---
 
 TEST(IsModelPackage, NonExistentPath) {
-  EXPECT_FALSE(Generators::IsModelPackage(fs::path("/tmp/nonexistent_model_package_test_path_12345")));
+  // A path that does not exist should never be flagged as a model package, regardless of OS.
+  auto missing = std::filesystem::temp_directory_path() /
+                 "genai_test_nonexistent_model_package_path_12345";
+  std::error_code ec;
+  std::filesystem::remove_all(missing, ec);
+  EXPECT_FALSE(Generators::IsModelPackage(fs::path(missing.string())));
 }
 
 TEST(IsModelPackage, FlatDirectory) {
-  // A temp dir without manifest.json should not be detected as a package
-  std::string tmp_dir = "/tmp/genai_test_flat_dir";
-  std::system(("mkdir -p " + tmp_dir).c_str());
-  EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp_dir)));
-  std::system(("rm -rf " + tmp_dir).c_str());
+  // A temp dir without manifest.json and without any component-shaped child is not a package.
+  ScopedTempDir tmp("flat_dir");
+  EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp.string())));
 }
 
-TEST(IsModelPackage, PackageDirectory) {
-  // A temp dir with manifest.json should be detected as a package
-  std::string tmp_dir = "/tmp/genai_test_package_dir";
-  std::system(("mkdir -p " + tmp_dir).c_str());
-  std::system(("touch " + tmp_dir + "/manifest.json").c_str());
-  EXPECT_TRUE(Generators::IsModelPackage(fs::path(tmp_dir)));
-  std::system(("rm -rf " + tmp_dir).c_str());
+TEST(IsModelPackage, PackageDirectoryWithManifest) {
+  // A temp dir with a top-level manifest.json is detected as a package.
+  ScopedTempDir tmp("package_with_manifest");
+  tmp.touch("manifest.json");
+  EXPECT_TRUE(Generators::IsModelPackage(fs::path(tmp.string())));
+}
+
+TEST(IsModelPackage, ManifestlessPackageWithComponentMetadata) {
+  // v4 spec: manifest.json is optional. A directory is still a package when a non-reserved
+  // child dir contains a metadata.json (i.e. it's a component dir).
+  ScopedTempDir tmp("manifestless_package");
+  tmp.touch("decoder/metadata.json");
+  EXPECT_TRUE(Generators::IsModelPackage(fs::path(tmp.string())));
+}
+
+TEST(IsModelPackage, ConfigsOnlyIsNotPackage) {
+  // configs/ is the one reserved top-level dir. A directory containing only configs/ (no
+  // component dir, no manifest) must NOT be flagged as a package — that would shadow
+  // legitimate flat-dir layouts that happen to ship a configs/ subdir.
+  ScopedTempDir tmp("configs_only");
+  tmp.touch("configs/genai_config.json");
+  EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp.string())));
 }
 
 // --- Config::FromPackage tests ---
