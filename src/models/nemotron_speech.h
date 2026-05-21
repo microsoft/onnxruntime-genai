@@ -120,12 +120,24 @@ struct NemotronEncoderSubState : State {
   /// Set mel input and update registered input pointers.
   void SetMelInput(OrtValue* mel_tensor, int64_t total_mel_frames);
 
-  /// Update registered input pointers after cache is modified.
+  /// After a Run, the new cache lives in the pre-allocated *_next_ buffers.
+  /// Swap them with the input cache buffers so the next Run consumes them,
+  /// then re-register both input and output pointers on the session.
+  void RotateCaches();
+
+  /// Re-register cache input pointers (called after RotateCaches or external resets).
   void UpdateCacheInputs();
+
+  /// Re-register pre-allocated output pointers (called after RotateCaches).
+  void UpdateOutputs();
 
   void SetLangId(int lang_id);
 
   bool HasLangIdInput() const { return has_lang_id_input_; }
+
+  /// Accessors for pre-allocated outputs (filled in by ORT after Run).
+  OrtValue* EncodedOutput() const { return encoded_out_.get(); }
+  int64_t EncodedLength() const { return *output_length_->GetTensorData<int64_t>(); }
 
  private:
   friend struct NemotronSpeechState;
@@ -134,6 +146,16 @@ struct NemotronEncoderSubState : State {
   NemotronEncoderCache cache_;
   std::unique_ptr<OrtValue> signal_length_;
   std::unique_ptr<OrtValue> lang_id_tensor_;
+
+  // Pre-allocated encoder outputs: encoded ([1,T,D] on device), output_length
+  // ([1] on CPU), and the "next" cache tensors that will be swapped into the
+  // input slots after each Run. Pre-allocating these avoids ORT falling back
+  // to CPU placement when output slots are left null.
+  std::unique_ptr<OrtValue> encoded_out_;
+  std::unique_ptr<OrtValue> output_length_;
+  std::unique_ptr<OrtValue> cache_last_channel_next_;
+  std::unique_ptr<OrtValue> cache_last_time_next_;
+  std::unique_ptr<OrtValue> cache_last_channel_len_next_;
 
   // Whether the encoder model has a "length" input
   bool has_length_input_{};
@@ -147,6 +169,13 @@ struct NemotronEncoderSubState : State {
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
   size_t lang_id_input_idx_{};
+
+  // Output slot indices (encoded, length, cache_channel_next, cache_time_next, cache_channel_len_next)
+  size_t encoded_output_idx_{};
+  size_t length_output_idx_{};
+  size_t cache_channel_output_idx_{};
+  size_t cache_time_output_idx_{};
+  size_t cache_channel_len_output_idx_{};
 };
 
 /// Sub-state for the RNNT prediction network (decoder LSTM).
@@ -159,6 +188,16 @@ struct NemotronPredictionSubState : State {
   /// Update LSTM state input pointers before each run.
   void UpdateInputs();
 
+  /// Re-register pre-allocated output pointers (called after RotateLstmState).
+  void UpdateOutputs();
+
+  /// Swap the pre-allocated *_next_ LSTM state buffers into the input slots
+  /// (called after Run when the emitted token was non-blank so the new LSTM
+  /// state should persist).
+  void RotateLstmState();
+
+  OrtValue* DecoderOutput() const { return dec_output_.get(); }
+
  private:
   friend struct NemotronSpeechState;
 
@@ -166,9 +205,20 @@ struct NemotronPredictionSubState : State {
   NemotronDecoderState lstm_state_;
   std::unique_ptr<OrtValue> targets_;
 
+  // Pre-allocated prediction-net outputs. `dec_output_` holds the decoder's
+  // [1, lstm_dim] hidden vector; the *_next_ buffers form a ping-pong pair
+  // with `lstm_state_` so ORT writes the new LSTM state directly to device.
+  std::unique_ptr<OrtValue> dec_output_;
+  std::unique_ptr<OrtValue> lstm_hidden_next_;
+  std::unique_ptr<OrtValue> lstm_cell_next_;
+
   size_t targets_input_idx_{};
   size_t lstm_hidden_input_idx_{};
   size_t lstm_cell_input_idx_{};
+
+  size_t dec_output_idx_{};
+  size_t lstm_hidden_output_idx_{};
+  size_t lstm_cell_output_idx_{};
 };
 
 /// Sub-state for the joiner network.
@@ -181,13 +231,20 @@ struct NemotronJoinerSubState : State {
   /// Update encoder/decoder frame input pointers before each run.
   void SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame);
 
+  OrtValue* LogitsOutput() const { return logits_.get(); }
+
  private:
   friend struct NemotronSpeechState;
 
   const NemotronSpeechModel& model_;
 
+  // Pre-allocated logits output on the inference device so ORT writes there
+  // directly (and we know the source device for the CPU copy in argmax).
+  std::unique_ptr<OrtValue> logits_;
+
   size_t encoder_input_idx_{};
   size_t decoder_input_idx_{};
+  size_t logits_output_idx_{};
 };
 
 /// Orchestrator state for the full RNNT pipeline.
@@ -222,8 +279,8 @@ struct NemotronSpeechState : State {
   // Current mel input
   std::shared_ptr<Tensor> current_mel_;
 
-  // Encoder output persisted across StepToken calls
-  std::unique_ptr<OrtValue> encoded_output_;
+  // Encoder produces `encoded_len_` valid frames into encoder_state_'s
+  // pre-allocated `encoded_out_` buffer; we just track the length here.
   int64_t encoded_len_{0};
 
   // Pre-allocated encoder frame for joiner input
