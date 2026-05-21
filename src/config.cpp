@@ -1734,9 +1734,32 @@ std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
   config->package_state_ = std::move(package_state);
   ParseConfigFromString(merged_json, *config);
   FinalizeConfig(*config);
+
+  // Populate per-role asset_dir from the package's selected variant folders.
+  // Phase-2 bridge: in Phase 3 this moves into the normalization pass alongside
+  // filename and session_options materialization.
+  if (config->package_state_) {
+    auto populate_asset_dir = [&](const std::string& component, fs::path& slot) {
+      if (component.empty()) return;
+      slot = config->package_state_->GetVariantDir(component);
+    };
+    populate_asset_dir(config->model.decoder.component, config->model.decoder.asset_dir);
+    populate_asset_dir(config->model.encoder.component, config->model.encoder.asset_dir);
+    populate_asset_dir(config->model.vision.component, config->model.vision.asset_dir);
+    populate_asset_dir(config->model.speech.component, config->model.speech.asset_dir);
+    populate_asset_dir(config->model.embedding.component, config->model.embedding.asset_dir);
+    populate_asset_dir(config->model.joiner.component, config->model.joiner.asset_dir);
+    populate_asset_dir(config->model.vad.component, config->model.vad.asset_dir);
+  }
+
   return config;
 }
 #endif
+
+const Config::SessionOptions& EffectiveSessionOptions(const Config& config,
+                                                      const std::optional<Config::SessionOptions>& role_so) {
+  return role_so.has_value() ? *role_so : config.model.decoder.session_options;
+}
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
   auto [it, emplaced] = nominal_names_to_graph_names_.emplace(nominal_name, graph_name);

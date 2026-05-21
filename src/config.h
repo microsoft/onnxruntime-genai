@@ -180,6 +180,7 @@ struct Config {
     struct Encoder {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir holding ONNX + assets; flat-dir: empty (config_path is used)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -217,6 +218,7 @@ struct Config {
     struct Embedding {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -234,6 +236,7 @@ struct Config {
     struct Vision {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -280,6 +283,7 @@ struct Config {
     struct Speech {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -301,6 +305,7 @@ struct Config {
     struct Joiner {
       std::string filename;
       std::string component;
+      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -317,6 +322,7 @@ struct Config {
     struct VAD {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir; flat-dir: empty
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};
@@ -327,6 +333,7 @@ struct Config {
     struct Decoder {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // package-mode: variant dir holding ONNX + assets (shared by pipeline elements); flat-dir: empty
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -474,6 +481,13 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options);
 void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay);
+
+// Returns role_so->value() if set, else config.model.decoder.session_options. Centralizes the
+// "use this role's SO if specified, fall back to the decoder's" pattern that recurs across
+// Marian, Whisper, NemotronSpeech, MultiModal, and SileroVad.
+const Config::SessionOptions& EffectiveSessionOptions(const Config& config,
+                                                      const std::optional<Config::SessionOptions>& role_so);
+
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
