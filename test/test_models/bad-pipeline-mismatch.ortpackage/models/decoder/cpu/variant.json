@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "files": [
+    { "filename": "model.onnx" }
+  ]
+}

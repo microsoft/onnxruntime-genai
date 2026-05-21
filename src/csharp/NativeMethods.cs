@@ -42,6 +42,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                      out IntPtr /* OgaConfig** */ config);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateConfigWithEp(byte[] /* const char* */ configPath,
+                                                                           byte[] /* const char* */ ep,
+                                                                           out IntPtr /* OgaConfig** */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyConfig(IntPtr /* OgaConfig* */ config);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -85,6 +90,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
                                                                     out IntPtr /* OgaModel** */ model);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateModelWithEp(byte[] /* const char* */ configPath,
+                                                                          byte[] /* const char* */ ep,
+                                                                          out IntPtr /* OgaModel** */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModelFromConfig(IntPtr /* const OgaConfig* */ config,

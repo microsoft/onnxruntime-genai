@@ -83,16 +83,13 @@ SileroVad::SileroVad(Model& model)
     : model_{model} {
   auto& vad_config = model.config_->model.vad;
 
-  // Create session options via CreateSessionOptionsFromConfig (public on Model).
-  // Falls back to decoder session options if VAD-specific ones aren't provided.
+  // VAD session. filename is absolute in package mode (set by normalization) or relative in
+  // flat-dir mode; Model::CreateSession handles both.
   session_options_ = OrtSessionOptions::Create();
   model.CreateSessionOptionsFromConfig(
-      vad_config.session_options.has_value()
-          ? vad_config.session_options.value()
-          : model.config_->model.decoder.session_options,
-      *session_options_, false, true);
+      EffectiveSessionOptions(*model.config_, vad_config.session_options),
+      *session_options_, false, /*disable_graph_capture=*/true);
 
-  // Load session through Model::CreateSession
   std::string filename = vad_config.filename;
   if (filename.empty()) {
     throw std::runtime_error("VAD filename must be specified in genai_config.json");

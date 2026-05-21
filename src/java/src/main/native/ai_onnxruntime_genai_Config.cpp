@@ -21,6 +21,19 @@ Java_ai_onnxruntime_genai_Config_createConfig(JNIEnv* env, jobject thiz, jstring
   return reinterpret_cast<jlong>(config);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Config_createConfigWithEp(JNIEnv* env, jobject thiz, jstring model_path, jstring ep) {
+  CString path{env, model_path};
+  CString ep_str{env, ep};
+
+  OgaConfig* config = nullptr;
+  if (ThrowIfError(env, OgaCreateConfigWithEp(path, ep_str, &config))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(config);
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Config_destroyConfig(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);

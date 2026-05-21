@@ -121,35 +121,23 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   nemotron_config_ = NemotronConfig{};
   nemotron_config_.PopulateFromConfig(*config_);
 
-  // Create session options
   encoder_session_options_ = OrtSessionOptions::Create();
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
 
-  if (config_->model.encoder.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
-  }
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.encoder.session_options),
+                                 *encoder_session_options_, true);
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *decoder_session_options_, true);
-  if (config_->model.joiner.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true);
-  }
+  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.joiner.session_options),
+                                 *joiner_session_options_, true);
 
-  // Load the three ONNX models
+  // Defaults if the config omits a filename. Package mode always populates filenames via
+  // normalization, so the defaults only apply to flat-dir configs.
   std::string encoder_filename = config_->model.encoder.filename;
   if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
-
   std::string decoder_filename = config_->model.decoder.filename;
   if (decoder_filename.empty()) decoder_filename = "decoder.onnx";
-
   std::string joiner_filename = config_->model.joiner.filename;
   if (joiner_filename.empty()) joiner_filename = "joiner.onnx";
 

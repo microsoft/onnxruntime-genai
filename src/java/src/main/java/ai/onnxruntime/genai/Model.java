@@ -18,6 +18,17 @@ public final class Model implements AutoCloseable {
   }
 
   /**
+   * Construct a Model from folder path with an execution provider.
+   *
+   * @param modelPath The path of the GenAI model.
+   * @param ep The execution provider to use (e.g. "cuda", "cpu", "dml").
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Model(String modelPath, String ep) throws GenAIException {
+    nativeHandle = createModelWithEp(modelPath, ep);
+  }
+
+  /**
    * Construct a Model from the given Config.
    *
    * @param config The config to use.
@@ -48,6 +59,8 @@ public final class Model implements AutoCloseable {
   }
 
   private native long createModel(String modelPath) throws GenAIException;
+
+  private native long createModelWithEp(String modelPath, String ep) throws GenAIException;
 
   private native long createModelFromConfig(long configHandle) throws GenAIException;
 

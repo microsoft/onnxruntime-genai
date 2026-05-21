@@ -1524,3 +1524,129 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
+
+#if ORT_API_VERSION >= 27
+// OrtModelPackageOptions
+inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
+                                                                               const OrtSessionOptions& session_options) {
+  OrtModelPackageOptions* p;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageOptionsFromSessionOptions(&env, &session_options, &p));
+  return std::unique_ptr<OrtModelPackageOptions>{p};
+}
+
+// OrtModelPackageContext
+inline std::unique_ptr<OrtModelPackageContext> OrtModelPackageContext::Create(const ORTCHAR_T* package_root) {
+  OrtModelPackageContext* p;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageContext(package_root, &p));
+  return std::unique_ptr<OrtModelPackageContext>{p};
+}
+
+inline size_t OrtModelPackageContext::GetComponentCount() const {
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetComponentCount(this, &count));
+  return count;
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetComponentNames() const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetComponentNames(this, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline size_t OrtModelPackageContext::GetVariantCount(const char* component_name) const {
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantCount(this, component_name, &count));
+  return count;
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const char* component_name) const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantNames(this, component_name, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline size_t OrtModelPackageContext::GetVariantEpCompatibilityCount(const char* component_name,
+                                                                     const char* variant_name) const {
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpCompatibilityCount(
+      this, component_name, variant_name, &count));
+  return count;
+}
+
+inline void OrtModelPackageContext::GetVariantEpCompatibility(const char* component_name,
+                                                               const char* variant_name, size_t ep_idx,
+                                                               const char** out_ep, const char** out_device,
+                                                               const char** out_compat) const {
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpCompatibility(
+      this, component_name, variant_name, ep_idx, out_ep, out_device, out_compat));
+}
+
+inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(
+    const char* component_name, const OrtModelPackageOptions& options) const {
+  OrtModelPackageComponentContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().SelectComponent(this, component_name, &options, &p));
+  return std::unique_ptr<OrtModelPackageComponentContext>{p};
+}
+
+// OrtModelPackageComponentContext
+inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelectedVariantFolderPath() const {
+  const ORTCHAR_T* path = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFolderPath(this, &path));
+  return std::basic_string<ORTCHAR_T>{path};
+}
+
+inline size_t OrtModelPackageComponentContext::GetSelectedVariantFileCount() const {
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFileCount(this, &count));
+  return count;
+}
+
+inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelectedVariantFilePath(size_t file_idx) const {
+  const ORTCHAR_T* path = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFilePath(this, file_idx, &path));
+  return std::basic_string<ORTCHAR_T>{path};
+}
+
+inline void OrtModelPackageComponentContext::GetSelectedVariantFileSessionOptions(
+    size_t file_idx, const char* const** keys, const char* const** values, size_t* count) const {
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFileSessionOptions(
+      this, file_idx, keys, values, count));
+}
+
+inline void OrtModelPackageComponentContext::GetSelectedVariantFileProviderOptions(
+    size_t file_idx, const char* const** keys, const char* const** values, size_t* count) const {
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFileProviderOptions(
+      this, file_idx, keys, values, count));
+}
+
+inline std::string OrtModelPackageComponentContext::GetSelectedVariantConsumerMetadata() const {
+  const char* json_str = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantConsumerMetadata(this, &json_str));
+  return (json_str != nullptr) ? std::string{json_str} : std::string{};
+}
+
+inline std::unique_ptr<OrtSession> OrtModelPackageComponentContext::CreateSession(OrtEnv& env) {
+  OrtSession* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateSession(&env, this, nullptr, &p));
+  return std::unique_ptr<OrtSession>{p};
+}
+
+inline std::unique_ptr<OrtSession> OrtModelPackageComponentContext::CreateSession(OrtEnv& env,
+                                                                                   const OrtSessionOptions& session_options) {
+  OrtSession* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateSession(&env, this, &session_options, &p));
+  return std::unique_ptr<OrtSession>{p};
+}
+#endif

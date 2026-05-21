@@ -6,6 +6,7 @@
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
+#include "model_package.h"
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
@@ -157,7 +158,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+  // Open a session against an ONNX file. Absolute filenames (e.g. those written by the package
+  // normalization pass) are used as-is; relative filenames resolve against config_->config_path.
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                            OrtSessionOptions* session_options);
 
   bool IsPruned() const;
 

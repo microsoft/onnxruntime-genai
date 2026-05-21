@@ -6,6 +6,7 @@
 #include <climits>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -13,6 +14,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -765,7 +767,8 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options) {
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -789,8 +792,14 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     return session;
   }
 
-  // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  // Otherwise, load the model from the file system. Absolute paths (e.g. those written by the
+  // package normalization pass) are used as-is; relative paths resolve against config_path.
+  fs::path model_path(model_filename);
+  if (!model_path.is_relative()) {
+    return OrtSession::Create(ort_env, model_path.c_str(), session_options);
+  }
+  fs::path base = config_->config_path;
+  return OrtSession::Create(ort_env, (base / model_path).c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
@@ -809,12 +818,12 @@ bool Model::IsPruned() const {
   return logits_shape[1] == 1;
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
-  std::string config_overlay;
-  if (settings) {
-    config_overlay = settings->GenerateConfigOverlay();
-  }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path,
+                                   const RuntimeSettings* settings /*= nullptr*/,
+                                   const char* ep /*= nullptr*/) {
+  // CreateConfig owns both the package and flat-dir loading paths; CreateModel
+  // is the subclass-dispatch shim that wraps the resulting Config into a Model.
+  auto config = CreateConfig(ort_env, config_path, settings, ep);
   return CreateModel(ort_env, std::move(config));
 }
 
@@ -862,6 +871,93 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
 
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {
   return std::make_shared<GeneratorParams>(model);
+}
+
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const RuntimeSettings* settings /*= nullptr*/,
+                                     const char* ep /*= nullptr*/) {
+  std::string config_overlay;
+  if (settings) {
+    config_overlay = settings->GenerateConfigOverlay();
+  }
+
+  fs::path model_path(config_path);
+
+  if (IsModelPackage(model_path)) {
+#if ORT_HAS_MODEL_PACKAGE
+    fs::path configs_path = model_path / "configs";
+
+    // Read base genai_config.json
+    fs::path base_config_file = configs_path / "genai_config.json";
+    std::ifstream file = base_config_file.open(std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+      throw std::runtime_error("Error opening " + base_config_file.string());
+    }
+    std::streamsize const size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::string base_json(size, '\0');
+    if (!file.read(base_json.data(), size)) {
+      throw std::runtime_error("Error reading " + base_config_file.string());
+    }
+    file.close();
+
+    // Open the package, resolve EP, and build a ModelPackageState. The temp
+    // OrtSessionOptions and CUDA V2 special case live inside the helper.
+    std::string resolved_ep;
+    std::string explicit_ep = (ep && ep[0] != '\0') ? std::string(ep) : std::string{};
+    auto package_state = OpenAndPrepareModelPackage(ort_env, model_path, base_json,
+                                                    explicit_ep, resolved_ep);
+
+    // Parse the base config to discover which components are referenced. Select each one and
+    // collect its genai_config_overlay before parsing the final merged config.
+    extern void ParseConfigFromString(std::string_view json, Config& config);
+    auto base_config = std::make_unique<Config>();
+    base_config->config_path = configs_path;
+    ParseConfigFromString(base_json, *base_config);
+
+    auto collect_components = [](const Config& c) {
+      std::vector<std::string> v;
+      auto add = [&](const std::string& comp) {
+        if (!comp.empty() && std::find(v.begin(), v.end(), comp) == v.end()) v.push_back(comp);
+      };
+      add(c.model.decoder.component);
+      add(c.model.encoder.component);
+      add(c.model.vision.component);
+      add(c.model.speech.component);
+      add(c.model.embedding.component);
+      add(c.model.joiner.component);
+      add(c.model.vad.component);
+      return v;
+    };
+    auto components = collect_components(*base_config);
+
+    std::string merged_json = base_json;
+    for (const auto& comp_name : components) {
+      try {
+        package_state->SelectComponent(comp_name);
+      } catch (const std::exception& e) {
+        throw std::runtime_error(MakeString("Failed to select component '", comp_name,
+                                            "' referenced in genai_config.json: ", e.what()));
+      }
+      std::string overlay = package_state->GetGenAIConfigOverlay(comp_name);
+      if (!overlay.empty()) {
+        merged_json = JsonMergePatch(merged_json, overlay);
+      }
+    }
+
+    if (!config_overlay.empty()) {
+      merged_json = JsonMergePatch(merged_json, config_overlay);
+    }
+
+    auto config = Config::FromPackage(configs_path, merged_json);
+    NormalizePackageIntoConfig(*config, *package_state);
+    return config;
+#else
+    throw std::runtime_error("This build of onnxruntime-genai does not support model packages; rebuild with ONNX Runtime API version 27 or newer");
+#endif
+  }
+
+  return std::make_unique<Config>(fs::path(config_path), config_overlay);
 }
 
 // Used by benchmarking tests only, should not be used normally
