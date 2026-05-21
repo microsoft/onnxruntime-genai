@@ -528,6 +528,9 @@ class Model:
         }
         return (self.ep, self.io_dtype) in valid_packed_attn_configurations
 
+    def is_fused_rope_supported(self):
+        return self.ep not in ["dml"]
+
     def make_attention_init(self):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
@@ -548,7 +551,7 @@ class Model:
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
+            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]

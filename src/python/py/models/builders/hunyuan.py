@@ -42,14 +42,11 @@ class HunyuanDenseV1Model(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # GQA fuses RoPE inside the attention op (use_rope_in_attn=True) which makes
-        # it impossible to insert QK norms between RoPE output and the attention op.
-        # Force explicit RotaryEmbedding nodes so our override can place QK norms after them.
-        if self.attention_attrs.get("use_rope_in_attn", False):
-            self.attention_attrs["use_rope_in_attn"] = False
-            # position_ids was removed from graph inputs when use_rope_in_attn was True; restore it.
-            if "position_ids" not in self.input_names:
-                self.input_names["position_ids"] = "position_ids"
+    def is_fused_rope_supported(self):
+        # GQA fuses RoPE inside the attention op which makes it impossible to
+        # insert QK norms between RoPE output and the attention op.
+        # Force explicit RotaryEmbedding nodes so QK norms can be placed after them.
+        return False
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
