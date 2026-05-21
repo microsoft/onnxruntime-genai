@@ -188,6 +188,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         device = session_device;  // Set the device if not already set by a previous provider
       }
     } else {
+      // CPU EP is always built-in to ORT as the implicit fallback provider.
+      // Skip plugin registration to avoid failures on WinML where CPU is not
+      // in the ExecutionProviderCatalog.
+      if (provider_options.name == "cpu" || provider_options.name == "CPUExecutionProvider") {
+        continue;
+      }
       if (!AppendExecutionProviderV2(session_options, provider_options,
                                      DeviceType::CPU, provider_options.name)) {
         AppendExecutionProviderV1(session_options, provider_options);
