@@ -9,27 +9,23 @@
 #include <string>
 #include <vector>
 
-#if !defined(_WIN32)
-#include <dlfcn.h>
-#endif
-
 namespace Generators::VitisAIExecutionProvider {
 
+#if defined(_WIN32)
 namespace {
 
-// Minimal cross-platform RAII handle for a dynamically loaded shared library.
-// Wraps LoadLibrary/FreeLibrary on Windows and dlopen/dlclose elsewhere.
-#if defined(_WIN32)
-struct DllDeleter {
+// RAII wrapper for HMODULE so a loaded external EP library is released
+// (FreeLibrary) at process exit instead of leaked.
+struct HModuleDeleter {
   using pointer = HMODULE;
   void operator()(HMODULE h) const noexcept {
     if (h) FreeLibrary(h);
   }
 };
-using DllHandle = std::unique_ptr<HMODULE, DllDeleter>;
+using HModulePtr = std::unique_ptr<HMODULE, HModuleDeleter>;
 
-DllHandle LoadSharedLibrary(const std::string& path) {
-  DllHandle handle{LoadLibrary(path.c_str())};
+HModulePtr LoadSharedLibrary(const std::string& path) {
+  HModulePtr handle{LoadLibrary(path.c_str())};
   if (!handle) {
     throw std::runtime_error("Failed to load external EP library '" + path +
                              "' (Error " + std::to_string(GetLastError()) + ")");
@@ -37,32 +33,8 @@ DllHandle LoadSharedLibrary(const std::string& path) {
   return handle;
 }
 
-void* GetSymbol(const DllHandle& handle, const char* name) {
-  return reinterpret_cast<void*>(GetProcAddress(handle.get(), name));
-}
-#else
-struct DllDeleter {
-  void operator()(void* h) const noexcept {
-    if (h) dlclose(h);
-  }
-};
-using DllHandle = std::unique_ptr<void, DllDeleter>;
-
-DllHandle LoadSharedLibrary(const std::string& path) {
-  DllHandle handle{dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL)};
-  if (!handle) {
-    throw std::runtime_error("Failed to load external EP library '" + path +
-                             "': " + dlerror());
-  }
-  return handle;
-}
-
-void* GetSymbol(const DllHandle& handle, const char* name) {
-  return dlsym(handle.get(), name);
-}
-#endif
-
 }  // namespace
+#endif  // _WIN32
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
@@ -81,6 +53,12 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     AppendExecutionProviderV1(session_options, provider_options);
   }
 
+#if defined(_WIN32)
+  // Windows-only because the CreateEpFactories handshake below needs the
+  // OrtApiBase pointer that OrtGetApiBase returns, and only the Windows build
+  // of libonnxruntime-genai links against onnxruntime to resolve that symbol;
+  // on Linux ORT is loaded dynamically and OrtGetApiBase is not available at
+  // link time.
   if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
                                        [](const auto& pair) { return pair.first == "external_ep_library"; });
       opt_it != provider_options.options.end()) {
@@ -90,11 +68,12 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     // provides the EP factory and custom ops used by the ORT session. Park
     // each owning handle in a process-lifetime container so it's released at
     // exit (via static destruction) instead of leaked.
-    static std::vector<DllHandle> g_external_ep_libraries;
-    auto& lib = g_external_ep_libraries.emplace_back(LoadSharedLibrary(lib_name));
+    static std::vector<HModulePtr> g_external_ep_libraries;
+    g_external_ep_libraries.push_back(LoadSharedLibrary(lib_name));
+    HMODULE lib = g_external_ep_libraries.back().get();
 
     using CreateEpFactoriesFunc = void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*);
-    if (const auto func = reinterpret_cast<CreateEpFactoriesFunc>(GetSymbol(lib, "CreateEpFactories"))) {
+    if (const auto func = reinterpret_cast<CreateEpFactoriesFunc>(GetProcAddress(lib, "CreateEpFactories"))) {
       OrtEpFactory* factory = nullptr;
       size_t num = 1;
       func(nullptr, OrtGetApiBase(), nullptr, &factory, num, &num);
@@ -102,6 +81,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     fs::path custom_ops_lib_path(lib_name);
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
+#endif  // _WIN32
 
   return nullptr;
 }
