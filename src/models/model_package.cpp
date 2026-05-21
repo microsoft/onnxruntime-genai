@@ -413,9 +413,13 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
 
   for (const auto& [key, value] : root.obj_members) {
     if (key == "genai_config_overlay") {
+      // null means "no overlay" (not an error)
+      if (value.is_null()) {
+        return {};
+      }
       if (!value.is_object()) {
         throw std::runtime_error(MakeString("Component '", component_name,
-                                            "': genai_config_overlay must be a JSON object"));
+                                            "': genai_config_overlay must be a JSON object or null"));
       }
       return SerializeJson(value);
     }
@@ -483,138 +487,6 @@ size_t ModelPackageState::ResolveFileIndex(const std::string& component_name,
   }
   throw std::runtime_error("File '" + filename + "' not found in package variant for component '" +
                            component_name + "'");
-}
-
-// --- Package session option helpers ---
-
-namespace {
-
-bool ParseBoolValue(std::string_view key, std::string_view value) {
-  if (value == "true" || value == "1") return true;
-  if (value == "false" || value == "0") return false;
-  throw std::runtime_error(
-      "variant.json: session_options[\"" + std::string(key) +
-      "\"] must be a boolean (got '" + std::string(value) + "')");
-}
-
-int ParseIntValue(std::string_view key, std::string_view value) {
-  try {
-    size_t consumed = 0;
-    int parsed = std::stoi(std::string(value), &consumed);
-    if (consumed != value.size()) throw std::invalid_argument("trailing characters");
-    return parsed;
-  } catch (const std::exception& e) {
-    throw std::runtime_error(
-        "variant.json: session_options[\"" + std::string(key) +
-        "\"] must be an integer (got '" + std::string(value) + "'): " + e.what());
-  }
-}
-
-GraphOptimizationLevel ParseGraphOptLevel(std::string_view value) {
-  if (value == "ORT_DISABLE_ALL") return ORT_DISABLE_ALL;
-  if (value == "ORT_ENABLE_BASIC") return ORT_ENABLE_BASIC;
-  if (value == "ORT_ENABLE_EXTENDED") return ORT_ENABLE_EXTENDED;
-  if (value == "ORT_ENABLE_ALL") return ORT_ENABLE_ALL;
-  throw std::runtime_error(
-      "variant.json: session_options[\"graph_optimization_level\"] has unrecognized value '" +
-      std::string(value) + "'");
-}
-
-}  // namespace
-
-void InjectPackageEp(Config::SessionOptions& session_options, const std::string& resolved_ep) {
-  if (resolved_ep.empty() || resolved_ep == "CPUExecutionProvider") return;
-
-  std::string tag = EpNameToGenAIProviderName(resolved_ep);
-  if (tag == resolved_ep) return;  // unrecognized EP, no-op
-
-  auto& providers = session_options.providers;
-  auto it = std::find(providers.begin(), providers.end(), tag);
-  if (it == providers.end()) {
-    providers.insert(providers.begin(), tag);
-  } else if (it != providers.begin()) {
-    // Already present but not first; rotate to position 0
-    std::rotate(providers.begin(), it, std::next(it));
-  }
-
-  // Ensure a matching ProviderOptions entry exists
-  auto& po_list = session_options.provider_options;
-  auto po_it = std::find_if(po_list.begin(), po_list.end(),
-                            [&](const Config::ProviderOptions& po) { return po.name == tag; });
-  if (po_it == po_list.end()) {
-    Config::ProviderOptions po;
-    po.name = tag;
-    po_list.push_back(std::move(po));
-  }
-}
-
-void ApplyVariantFileDefaults(Config::SessionOptions& so,
-                              OrtModelPackageComponentContext* cix,
-                              size_t file_index,
-                              const std::string& resolved_ep) {
-  // Read per-file session_options from ORT package API
-  const char* const* so_keys = nullptr;
-  const char* const* so_values = nullptr;
-  size_t so_count = 0;
-  cix->GetSelectedVariantFileSessionOptions(file_index, &so_keys, &so_values, &so_count);
-
-  // Apply as layer-1 defaults: only fill unset fields
-  for (size_t i = 0; i < so_count; ++i) {
-    std::string_view key(so_keys[i]);
-    std::string_view val(so_values[i]);
-
-    if (key == "intra_op_num_threads") {
-      if (!so.intra_op_num_threads.has_value()) so.intra_op_num_threads = ParseIntValue(key, val);
-    } else if (key == "inter_op_num_threads") {
-      if (!so.inter_op_num_threads.has_value()) so.inter_op_num_threads = ParseIntValue(key, val);
-    } else if (key == "log_severity_level") {
-      if (!so.log_severity_level.has_value()) so.log_severity_level = ParseIntValue(key, val);
-    } else if (key == "log_verbosity_level") {
-      if (!so.log_verbosity_level.has_value()) so.log_verbosity_level = ParseIntValue(key, val);
-    } else if (key == "enable_cpu_mem_arena") {
-      if (!so.enable_cpu_mem_arena.has_value()) so.enable_cpu_mem_arena = ParseBoolValue(key, val);
-    } else if (key == "enable_mem_pattern") {
-      if (!so.enable_mem_pattern.has_value()) so.enable_mem_pattern = ParseBoolValue(key, val);
-    } else if (key == "log_id") {
-      if (!so.log_id.has_value()) so.log_id = std::string(val);
-    } else if (key == "enable_profiling") {
-      if (!so.enable_profiling.has_value()) so.enable_profiling = std::string(val);
-    } else if (key == "custom_ops_library") {
-      if (!so.custom_ops_library.has_value()) so.custom_ops_library = std::string(val);
-    } else if (key == "graph_optimization_level") {
-      if (!so.graph_optimization_level.has_value()) so.graph_optimization_level = ParseGraphOptLevel(val);
-    } else {
-      // Unknown keys go to config_entries if not already present
-      bool exists = std::any_of(so.config_entries.begin(), so.config_entries.end(),
-                                [&](const auto& e) { return e.first == key; });
-      if (!exists) {
-        so.config_entries.emplace_back(std::string(key), std::string(val));
-      }
-    }
-  }
-
-  // Read per-file provider_options and merge into matching ProviderOptions entry
-  if (resolved_ep.empty() || resolved_ep == "CPUExecutionProvider") return;
-
-  const char* const* po_keys = nullptr;
-  const char* const* po_values = nullptr;
-  size_t po_count = 0;
-  cix->GetSelectedVariantFileProviderOptions(file_index, &po_keys, &po_values, &po_count);
-  if (po_count == 0) return;
-
-  std::string tag = EpNameToGenAIProviderName(resolved_ep);
-  auto& po_list = so.provider_options;
-  auto po_it = std::find_if(po_list.begin(), po_list.end(),
-                            [&](const Config::ProviderOptions& po) { return po.name == tag; });
-  if (po_it == po_list.end()) return;  // no matching entry to merge into
-
-  for (size_t i = 0; i < po_count; ++i) {
-    bool exists = std::any_of(po_it->options.begin(), po_it->options.end(),
-                              [&](const auto& e) { return e.first == po_keys[i]; });
-    if (!exists) {
-      po_it->options.emplace_back(std::string(po_keys[i]), std::string(po_values[i]));
-    }
-  }
 }
 
 #endif

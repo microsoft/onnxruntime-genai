@@ -104,60 +104,7 @@ TEST(IsModelPackage, PackageDirectory) {
   std::system(("rm -rf " + tmp_dir).c_str());
 }
 
-// --- InjectPackageEp tests ---
-
-#if ORT_HAS_MODEL_PACKAGE
-TEST(InjectPackageEp, InjectsEpAtPosition0) {
-  Generators::Config::SessionOptions so;
-  Generators::InjectPackageEp(so, "CUDAExecutionProvider");
-
-  ASSERT_EQ(so.providers.size(), 1u);
-  EXPECT_EQ(so.providers[0], "cuda");
-  ASSERT_EQ(so.provider_options.size(), 1u);
-  EXPECT_EQ(so.provider_options[0].name, "cuda");
-}
-
-TEST(InjectPackageEp, MaintainsPosition0WhenAlreadyPresent) {
-  Generators::Config::SessionOptions so;
-  so.providers.push_back("cuda");
-  so.provider_options.push_back({"cuda", {}, {}});
-
-  // Should be idempotent
-  Generators::InjectPackageEp(so, "CUDAExecutionProvider");
-
-  ASSERT_EQ(so.providers.size(), 1u);
-  EXPECT_EQ(so.providers[0], "cuda");
-}
-
-TEST(InjectPackageEp, RotatesExistingProviderToFront) {
-  Generators::Config::SessionOptions so;
-  so.providers.push_back("webgpu");
-  so.providers.push_back("cuda");
-  so.provider_options.push_back({"webgpu", {}, {}});
-  so.provider_options.push_back({"cuda", {}, {}});
-
-  Generators::InjectPackageEp(so, "CUDAExecutionProvider");
-
-  ASSERT_EQ(so.providers.size(), 2u);
-  EXPECT_EQ(so.providers[0], "cuda");
-  EXPECT_EQ(so.providers[1], "webgpu");
-}
-
-TEST(InjectPackageEp, SkipsCpuExecutionProvider) {
-  Generators::Config::SessionOptions so;
-  Generators::InjectPackageEp(so, "CPUExecutionProvider");
-
-  // CPU is a no-op (CPU is always available as implicit fallback)
-  EXPECT_TRUE(so.providers.empty());
-}
-
-// --- Consumer metadata validation tests ---
-
-// We can't easily test GetGenAIConfigOverlay without a real package context,
-// but we can test the JSON parsing utilities it relies on.
-
 // --- Config::FromPackage tests ---
-#endif
 
 // The following tests need ORT_HAS_MODEL_PACKAGE
 #if ORT_HAS_MODEL_PACKAGE

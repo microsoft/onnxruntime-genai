@@ -81,7 +81,7 @@ struct ModelPackageState {
   std::unordered_map<std::string, size_t> BuildFileIndexMap(const std::string& component_name) const;
 
   /// Resolve a filename to its file index within the selected variant.
-  /// Tries exact basename match. Throws if not found or ambiguous.
+  /// Tries exact basename match. Throws if not found.
   size_t ResolveFileIndex(const std::string& component_name, const std::string& filename) const;
 
  private:
@@ -92,20 +92,6 @@ struct ModelPackageState {
   std::unique_ptr<OrtModelPackageOptions> pkg_opts_;
   std::unordered_map<std::string, std::unique_ptr<OrtModelPackageComponentContext>> component_contexts_;
 };
-/// Inject the resolved package EP into a Config::SessionOptions' providers list.
-/// Ensures the GenAI provider tag is at position 0 with a matching ProviderOptions entry.
-/// No-op for "CPUExecutionProvider", empty, or unrecognized EP names.
-void InjectPackageEp(Config::SessionOptions& session_options, const std::string& resolved_ep);
-
-/// Apply variant per-file session_options and provider_options as layer-1 defaults.
-/// Reads from the ORT package C API for the given file index. Existing values in
-/// session_options take precedence (genai_config is layer-2, which wins over variant defaults).
-/// Validates typed field values and throws on parse errors.
-void ApplyVariantFileDefaults(Config::SessionOptions& session_options,
-                              OrtModelPackageComponentContext* cix,
-                              size_t file_index,
-                              const std::string& resolved_ep);
-
 #endif
 
 /// Apply RFC 7386 JSON Merge Patch: merge patch_json into base_json.
