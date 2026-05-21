@@ -648,16 +648,31 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   // ORTCHAR_T is wchar_t on Windows and char on Linux. ORT package APIs return paths as
   // basic_string<ORTCHAR_T>, so on Windows we need to UTF-8 encode before stashing into the
   // (narrow std::string) Config fields. On Linux the conversion is a no-op copy.
-  auto ort_path_to_utf8 = [](const std::basic_string<ORTCHAR_T>& s) -> std::string {
+  // Additionally, if the user opened the package with a relative path, ORT returns paths
+  // relative to CWD. We canonicalize to absolute so Model::CreateSession can use them as-is.
+  auto ort_path_to_string = [](const std::basic_string<ORTCHAR_T>& s) -> std::string {
 #ifdef _WIN32
     if (s.empty()) return {};
-    int needed = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+    // Resolve to absolute on Windows using the wide API, then UTF-8 encode.
+    wchar_t abs_buf[MAX_PATH];
+    DWORD len = GetFullPathNameW(s.c_str(), MAX_PATH, abs_buf, nullptr);
+    std::wstring abs_w = (len > 0 && len < MAX_PATH) ? std::wstring(abs_buf, len) : s;
+    int needed = WideCharToMultiByte(CP_UTF8, 0, abs_w.data(), static_cast<int>(abs_w.size()),
                                      nullptr, 0, nullptr, nullptr);
     std::string out(static_cast<size_t>(needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+    WideCharToMultiByte(CP_UTF8, 0, abs_w.data(), static_cast<int>(abs_w.size()),
                         out.data(), needed, nullptr, nullptr);
     return out;
 #else
+    if (s.empty()) return {};
+    // Resolve to absolute so Model::CreateSession can use the path as-is regardless of
+    // whether the user opened the package with a relative or absolute path.
+    char resolved[PATH_MAX];
+    if (realpath(s.c_str(), resolved)) {
+      return std::string(resolved);
+    }
+    // realpath fails if file doesn't exist yet (shouldn't happen for selected variant files,
+    // but fall through gracefully).
     return std::string(s);
 #endif
   };
@@ -712,8 +727,8 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
       throw std::runtime_error("Component '" + component +
                                "' has no files in the selected variant");
     }
-    fs::path variant_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
-    filename_slot = ort_path_to_utf8(cix->GetSelectedVariantFilePath(0));
+    fs::path variant_dir(ort_path_to_string(cix->GetSelectedVariantFolderPath()));
+    filename_slot = ort_path_to_string(cix->GetSelectedVariantFilePath(0));
 
     Config::SessionOptions merged = so_slot.has_value() ? std::move(*so_slot) : Config::SessionOptions{};
     ApplyVariantFileOptions(merged, *cix, 0, resolved_ep);
@@ -727,7 +742,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
   if (!dec.component.empty()) {
     auto* cix = require_selected(dec.component);
     auto file_count = cix->GetSelectedVariantFileCount();
-    fs::path dec_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
+    fs::path dec_dir(ort_path_to_string(cix->GetSelectedVariantFolderPath()));
 
     if (dec.pipeline.empty()) {
       // Single-file decoder.
@@ -735,7 +750,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
         throw std::runtime_error("Decoder component '" + dec.component +
                                  "' has no files in the selected variant");
       }
-      dec.filename = ort_path_to_utf8(cix->GetSelectedVariantFilePath(0));
+      dec.filename = ort_path_to_string(cix->GetSelectedVariantFilePath(0));
       ApplyVariantFileOptions(dec.session_options, *cix, 0, resolved_ep);
       RebuildProvidersFromProviderOptions(dec.session_options);
       resolve_against_asset_dir(dec.session_options.custom_ops_library, dec_dir);
@@ -757,7 +772,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
 
       for (size_t i = 0; i < dec.pipeline.size(); ++i) {
         auto& pipe = dec.pipeline[i];
-        pipe.filename = ort_path_to_utf8(cix->GetSelectedVariantFilePath(i));
+        pipe.filename = ort_path_to_string(cix->GetSelectedVariantFilePath(i));
         const std::string& ep = pipe.run_on_cpu ? std::string{} : resolved_ep;
 
         Config::SessionOptions merged = pipe.session_options.has_value()
@@ -781,7 +796,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& pkg_state) {
     if (!cix) return;
     normalize_single_optional(component, filename_slot, so_slot);
     if (cix) {
-      fs::path variant_dir(ort_path_to_utf8(cix->GetSelectedVariantFolderPath()));
+      fs::path variant_dir(ort_path_to_string(cix->GetSelectedVariantFolderPath()));
       resolve_against_asset_dir(adapter_slot, variant_dir);
     }
   };
