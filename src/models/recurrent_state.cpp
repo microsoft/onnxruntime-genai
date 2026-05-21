@@ -110,19 +110,9 @@ RecurrentState::RecurrentState(State& state)
 
     ZeroStates(presents_);
   } else {
-    pasts_.resize(num_layers * 2);
-
-    for (int i = 0; i < num_layers; ++i) {
-      pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
-      pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
-
-      presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
-      presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
-    }
-
-    // Zero-initialize past and present states
-    ZeroStates(pasts_);
-    ZeroStates(presents_);
+    throw std::runtime_error(
+        "RecurrentState requires past_present_share_buffer=true. "
+        "Set past_present_share_buffer to true in genai_config.json.");
   }
 }
 
