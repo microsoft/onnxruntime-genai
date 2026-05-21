@@ -132,8 +132,8 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.joiner.session_options),
                                  *joiner_session_options_, true);
 
-  // Defaults if the flat-dir config omits a filename. Package mode always populates filenames
-  // via normalization, so the defaults only matter for legacy flat-dir loads.
+  // Defaults if the config omits a filename. Package mode always populates filenames via
+  // normalization, so the defaults only apply to flat-dir configs.
   std::string encoder_filename = config_->model.encoder.filename;
   if (encoder_filename.empty()) encoder_filename = "encoder.onnx";
   std::string decoder_filename = config_->model.decoder.filename;

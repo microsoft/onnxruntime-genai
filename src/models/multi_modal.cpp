@@ -720,9 +720,10 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
-  // Resolve a per-role LoRA adapter. If adapter_filename is absolute (e.g. set by package
-  // normalization when the LoRA lives in the variant folder), use it as-is. Otherwise treat
-  // it as relative to config_path, matching legacy flat-dir behavior.
+  // Resolve a per-role LoRA adapter. adapter_filename may be absolute (a path inside the
+  // package's variant folder rewritten to absolute by NormalizePackageIntoConfig, or a
+  // user-supplied absolute path), in which case it is used as-is. Otherwise it resolves
+  // against config_path.
   auto resolve_adapter = [&](const std::string& adapter_filename) {
     fs::path adapter_path(adapter_filename);
     if (!adapter_path.is_relative()) return adapter_path.string();

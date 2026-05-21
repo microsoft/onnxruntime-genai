@@ -428,7 +428,7 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
   return {};
 }
 
-// --- Helpers extracted from Model::BuildSessionOptionsForPackageFile ---
+// --- variant.json per-file option parsers ---
 
 namespace {
 
@@ -825,24 +825,6 @@ std::string NormalizeEpName(const std::string& ep_name) {
     return it->second;
   }
   return ep_name;
-}
-
-DeviceInterface* DeviceFromEpName(const std::string& ep_name) {
-  static const std::unordered_map<std::string, DeviceType> ep_device_map = {
-      {"CUDAExecutionProvider", DeviceType::CUDA},
-      {"DmlExecutionProvider", DeviceType::DML},
-      {"QNNExecutionProvider", DeviceType::QNN},
-      {"NvTensorRtRtxExecutionProvider", DeviceType::NvTensorRtRtx},
-      {"WebGpuExecutionProvider", DeviceType::WEBGPU},
-      {"RyzenAIExecutionProvider", DeviceType::RyzenAI},
-      {"CPUExecutionProvider", DeviceType::CPU},
-  };
-
-  auto it = ep_device_map.find(ep_name);
-  if (it != ep_device_map.end()) {
-    return GetDeviceInterface(it->second);
-  }
-  return GetDeviceInterface(DeviceType::CPU);
 }
 
 std::string EpNameToGenAIProviderName(const std::string& ep_name) {
