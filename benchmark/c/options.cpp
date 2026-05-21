@@ -100,19 +100,6 @@ void VerifyOptions(const Options& opts) {
     throw std::runtime_error("ONNX model directory path must be provided.");
   }
 
-  const int prompt_source_count = opts.prompt_length_specified + opts.prompt_specified + opts.prompt_file_specified;
-  if (prompt_source_count > 1) {
-    throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
-  }
-
-  if (opts.use_random_tokens && !opts.prompt_length_specified) {
-    throw std::runtime_error("--use_random_tokens requires -l/--prompt_length.");
-  }
-
-  if (opts.use_random_tokens && (opts.prompt_specified || opts.prompt_file_specified)) {
-    throw std::runtime_error("--use_random_tokens cannot be used with --prompt or --prompt_file.");
-  }
-
   // validate execution provider since it has a valid value
   ValidateExecutionProvider(opts.execution_provider);
 }
@@ -143,14 +130,17 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = ParseNumber<size_t>(next_arg(i));
-        opts.prompt_length_specified = true;
       } else if (arg == "--prompt") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = std::string{next_arg(i)};
-        opts.prompt_specified = true;
       } else if (arg == "--prompt_file") {
+        if (prompt_num_tokens_or_content.has_value())
+          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = ReadFileContent(next_arg(i));
-        opts.prompt_file_specified = true;
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-r" || arg == "--repetitions") {
@@ -174,6 +164,15 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
 
     if (prompt_num_tokens_or_content.has_value()) {
       opts.prompt_num_tokens_or_content = std::move(*prompt_num_tokens_or_content);
+    }
+
+    if (opts.use_random_tokens) {
+      if (!prompt_num_tokens_or_content.has_value() ||
+          !std::holds_alternative<size_t>(*prompt_num_tokens_or_content)) {
+        throw std::runtime_error(!prompt_num_tokens_or_content.has_value()
+                                     ? "--use_random_tokens requires -l/--prompt_length."
+                                     : "--use_random_tokens cannot be used with --prompt or --prompt_file.");
+      }
     }
 
     VerifyOptions(opts);
