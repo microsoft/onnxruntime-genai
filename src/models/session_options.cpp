@@ -173,6 +173,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   }
 
   for (const auto& provider : providers_list) {
+    // CPU EP is always implicitly registered, skip it to avoid passing it
+    // to ORT's AppendExecutionProvider which does not accept "cpu" as a name.
+    if (provider == "cpu" || provider == "CPU" || provider == "CPUExecutionProvider") {
+      continue;
+    }
+
     auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
                                             [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
 
