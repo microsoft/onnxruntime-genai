@@ -3,7 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 """
 A set of Python classes to unpack the quantized weights and repack them in ONNX Runtime's
 standard format.
@@ -312,11 +313,9 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.q_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.q_proj.bias
                             tensor_map["self_attn.q_proj.bias"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.weight$", name)):
-                            # model.layers.layer_id.self_attn.q_norm.weight
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(q_norm|query_layernorm)\.weight$", name)):
                             tensor_map["self_attn.q_norm.weight"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.bias$", name)):
-                            # model.layers.layer_id.self_attn.q_norm.bias
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(q_norm|query_layernorm)\.bias$", name)):
                             tensor_map["self_attn.q_norm.bias"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.k_proj.qweight
@@ -336,11 +335,9 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.k_proj.bias
                             tensor_map["self_attn.k_proj.bias"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.weight$", name)):
-                            # model.layers.layer_id.self_attn.k_norm.weight
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(k_norm|key_layernorm)\.weight$", name)):
                             tensor_map["self_attn.k_norm.weight"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.bias$", name)):
-                            # model.layers.layer_id.self_attn.k_norm.bias
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(k_norm|key_layernorm)\.bias$", name)):
                             tensor_map["self_attn.k_norm.bias"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.v_proj.qweight

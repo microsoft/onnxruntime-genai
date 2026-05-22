@@ -3,13 +3,17 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 
+import os
 
 import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import (
     AutoConfig,
+    Qwen2ForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
@@ -913,6 +917,35 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         )
 
 
+class VideoChatFlashQwenModel(QwenModel):
+    """
+    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
+
+    The language model backbone is standard Qwen2.5-7B with flat config and
+    standard weight keys (model.layers.*, lm_head.*). The model uses standard
+    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
+
+    This builder exports only the text decoder component. It sets exclude_embeds=True
+    so the decoder receives inputs_embeds from the embedding merger model, which
+    fuses the InternVideo2 visual tokens with text embeddings.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Override model_type for the C++ runtime registration in model.cpp
+        # and genai_config.json. Same pattern as Qwen3VLTextModel.
+        # Base class transforms this to "videochat_flash_qwen" via:
+        #   model_type[:model_type.find("For")].lower()
+        self.model_type = "VideoChat_Flash_QwenForCausalLM"
+
+    def load_weights(self, input_path):
+        extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
+        return Qwen2ForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            token=self.hf_token,
+            **extra_kwargs,
+        )
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
