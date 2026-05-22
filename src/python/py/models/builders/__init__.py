@@ -12,6 +12,7 @@ from .ernie import ErnieModel
 from .gemma import Gemma2Model, Gemma3Model, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel
+from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
 from .llama import LlamaModel
@@ -40,6 +41,7 @@ __all__ = [
     "Gemma3Model",
     "GemmaModel",
     "GraniteModel",
+    "HunyuanDenseV1Model",
     "InternLM2Model",
     "LFM2Model",
     "LlamaModel",
