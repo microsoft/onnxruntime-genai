@@ -433,7 +433,24 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
+  const char* provider_name = device_type_names[static_cast<int>(type)];
+  Config::ProviderOptions dummy_provider_options{provider_name, {}};
+
+  // Forward the user's provider options (e.g. validationMode) to the dummy session
+  // so that singleton resources (like WebGpuContext) are initialized with the correct settings.
+  // Exclude enableGraphCapture since the trivial model can't use graph capture.
+  for (const auto& user_po : config.model.decoder.session_options.provider_options) {
+    if (user_po.name == provider_name) {
+      for (const auto& opt : user_po.options) {
+        if (opt.first != "enableGraphCapture") {
+          dummy_provider_options.options.emplace_back(opt);
+        }
+      }
+      break;
+    }
+  }
+
+  provider_options_list.emplace_back(std::move(dummy_provider_options));
   // QnnHtpShared is a special case. This allocator is only made available when the provider option
   // 'enable_htp_shared_memory_allocator' is set to 1.
   if (type == DeviceType::QNN) {
