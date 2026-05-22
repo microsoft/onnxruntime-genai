@@ -44,6 +44,13 @@
 
 namespace Generators {
 
+namespace {
+
+constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
+    "session.model_external_initializers_file_folder_path";
+
+}  // namespace
+
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},
@@ -740,8 +747,9 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     }
     // For models loaded from memory that reference external data files, tell ORT where to find them
     // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
-    session_options->AddConfigEntry("session.model_external_initializers_file_folder_path",
-                                    config_->config_path.string().c_str());
+    const fs::path external_initializers_path = fs::absolute(config_->config_path);
+    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                    external_initializers_path.string().c_str());
     return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
