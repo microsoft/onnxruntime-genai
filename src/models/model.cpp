@@ -446,6 +446,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
           dummy_provider_options.options.emplace_back(opt);
         }
       }
+      dummy_provider_options.device_filtering_options = user_po.device_filtering_options;
       break;
     }
   }
