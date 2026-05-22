@@ -3,6 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import torch
+
 from .mistral import MistralModel
 
 
@@ -90,7 +92,6 @@ class GraniteMoeHybridModel(GraniteModel):
     def make_mlp_unpacked_regular(self, layer_id, mlp, gate_up_linear, root_input):
         # Override to split input_linear at _mlp_intermediate_size explicitly,
         # making the slicing independent of self.intermediate_size.
-        import torch
         s = self._mlp_intermediate_size
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=s)
         mlp.gate_proj.weight = torch.nn.Parameter(
