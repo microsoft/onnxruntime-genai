@@ -193,6 +193,33 @@ def run_nemotron_speech():
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_parakeet_tdt():
+    """Run Parakeet TDT E2E test by invoking the parakeet.py example."""
+    log.debug("Running Parakeet TDT Python E2E Test")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(cwd, "..", "test_models", "parakeet-tdt")
+    if not os.path.exists(model_path):
+        log.info(f"Parakeet TDT model not found at {model_path}, skipping E2E test.")
+        return
+
+    for audio_filename in ("jfk.flac", "tedlium_long_120s.flac"):
+        audio_path = os.path.join(cwd, "..", "test_models", "audios", audio_filename)
+        if not os.path.exists(audio_path):
+            log.info(f"Test audio file not found at {audio_path}, skipping.")
+            continue
+
+        command = [
+            sys.executable,
+            os.path.join(cwd, "..", "..", "examples", "python", "parakeet.py"),
+            "--model_path",
+            model_path,
+            "--audio_file",
+            audio_path,
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -224,6 +251,9 @@ if __name__ == "__main__":
 
     # Run Nemotron Speech E2E tests
     run_nemotron_speech()
+
+    # Run Parakeet TDT E2E tests
+    run_parakeet_tdt()
 
     # Run tool calling E2E tests
     run_tool_calling()
