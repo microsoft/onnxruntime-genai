@@ -10,6 +10,49 @@ import numpy as np
 import onnxruntime_genai as og
 from common import get_config
 
+# Maps short language codes / locale tags to (lang_id, human-readable name).
+# Mirrors the upstream NeMo multilingual Nemotron prompt schema.
+LANG_TO_ID = {
+    "en":    (0,   "English (default / US)"),
+    "en-US": (0,   "English (United States)"),
+    "en-GB": (1,   "English (United Kingdom)"),
+    "es-ES": (2,   "Spanish (Spain)"),
+    "es":    (3,   "Spanish (default / Latin America)"),
+    "es-US": (3,   "Spanish (US Latin American)"),
+    "zh-CN": (4,   "Chinese (Simplified, Mainland)"),
+    "zh-TW": (5,   "Chinese (Traditional, Taiwan)"),
+    "hi":    (6,   "Hindi"),
+    "ar":    (7,   "Arabic"),
+    "fr":    (8,   "French (default / France)"),
+    "fr-FR": (8,   "French (France)"),
+    "fr-CA": (100, "French (Canada)"),
+    "de":    (9,   "German"),
+    "de-DE": (9,   "German (Germany)"),
+    "it":    (10,  "Italian"),
+    "ru":    (11,  "Russian"),
+    "pt-BR": (12,  "Portuguese (Brazil)"),
+    "pt":    (13,  "Portuguese (default / Portugal)"),
+    "pt-PT": (13,  "Portuguese (Portugal)"),
+    "ja":    (14,  "Japanese"),
+    "ko":    (15,  "Korean"),
+    "nl":    (16,  "Dutch"),
+    "pl":    (17,  "Polish"),
+    "tr":    (18,  "Turkish"),
+    "uk":    (19,  "Ukrainian"),
+    "ro":    (20,  "Romanian"),
+    "el":    (21,  "Greek"),
+    "cs":    (22,  "Czech"),
+    "hu":    (23,  "Hungarian"),
+    "sv":    (24,  "Swedish"),
+    "da":    (25,  "Danish"),
+    "fi":    (26,  "Finnish"),
+    "no":    (27,  "Norwegian"),
+    "sk":    (28,  "Slovak"),
+    "hr":    (29,  "Croatian"),
+    "bg":    (30,  "Bulgarian"),
+    "auto":  (101, "Auto-detect"),
+}
+
 
 def load_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
@@ -47,13 +90,20 @@ def decode_tokens(generator, tokenizer_stream):
     return text
 
 
-def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None):
+def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None, language=None):
     """Stream audio through Generator + StreamingProcessor API."""
     sample_rate, chunk_samples = load_config(model_path)
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
 
     config = get_config(model_path, execution_provider)
+    selected_lang = None
+    if language is not None:
+        if language not in LANG_TO_ID:
+            raise ValueError(f"Unknown language '{language}'. Known: {sorted(LANG_TO_ID)}")
+        selected_lang = LANG_TO_ID[language]
+        lang_id, lang_name = selected_lang
+        print(f"  Language: {language} -> {lang_name} (lang_id={lang_id})")
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
 
@@ -73,6 +123,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
+    # Per-generator language selection
+    if selected_lang is not None:
+        generator.set_runtime_option("lang_id", str(int(selected_lang[0])))
 
     print("-" * 60)
     stream_start = time.perf_counter()
@@ -112,11 +165,18 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
     parser.add_argument("--use_vad", type=str, choices=["true", "false"], default=None,
                         help="Override VAD setting from genai_config.json (true/false).")
+    lang_help = "Language / locale code for the multilingual encoder. " \
+                "Overrides model.default_lang_id from genai_config.json. " \
+                "Use a bare ISO 639-1 code (e.g. 'de', 'fr', 'pt') for the default locale, " \
+                "or a BCP-47 locale tag for region-specific variants. " \
+                "Pass 'auto' to let the model detect the language. Supported codes:\n" \
+                + "\n".join(f"  {code:<7} {name}" for code, (_, name) in sorted(LANG_TO_ID.items()))
+    parser.add_argument("--language", "-l", type=str, default=None, help=lang_help)
     parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
                         choices=["cpu", "cuda", "dml", "follow_config"],
                         help="Execution provider to run with. Defaults to follow_config.")
@@ -128,7 +188,7 @@ def main():
     if args.use_vad is not None:
         use_vad_override = args.use_vad == "true"
     simulate_microphone(args.model_path, args.audio_file, args.execution_provider,
-                        use_vad=use_vad_override)
+                        use_vad=use_vad_override, language=args.language)
 
 
 if __name__ == "__main__":

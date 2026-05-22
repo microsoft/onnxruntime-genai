@@ -935,6 +935,8 @@ class Qwen35TextModel(Model):
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
+        # When exclude_embeds is explicitly set to False, build as a standalone LLM.
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
@@ -978,8 +980,14 @@ class Qwen35TextModel(Model):
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        # Position IDs input.
+        # In text-only mode the runtime provides standard 2D [B, S] position_ids.
+        # We expand them to 3D [3, B, S] inside the graph so mRoPE works unchanged.
+        # In VL mode the pipeline provides 3D position_ids directly.
+        if self.is_text_only:
+            self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+        else:
+            self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         self.input_names["position_ids"] = "position_ids"
 
         # mRoPE config
@@ -1085,6 +1093,34 @@ class Qwen35TextModel(Model):
         self.input_names["past_key_values.value"] = filtered_value_inputs
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
+
+    def make_position_ids_reformatting(self):
+        if self.is_text_only:
+            # The graph input is 2D position_ids [B, S].
+            # Expand to 3D [3, B, S] for mRoPE by stacking 3 copies.
+            pos_2d = "position_ids"
+            unsq_name = "/model/position_ids_expand/Unsqueeze"
+            unsq_output = f"{unsq_name}/output_0"
+            self.make_unsqueeze(
+                unsq_name,
+                [pos_2d, "/model/constants/INT64/[0]"],
+                ir.DataType.INT64,
+                [1, "batch_size", "sequence_length"],
+            )
+            tile_name = "/model/position_ids_expand/Tile"
+            tile_output = f"{tile_name}/output_0"
+            self.make_tile(
+                tile_name,
+                [unsq_output, "/model/constants/INT64/[3, 1, 1]"],
+                ir.DataType.INT64,
+                [3, "batch_size", "sequence_length"],
+            )
+            return tile_output
+        return self.input_names["position_ids"]
+
+    def make_preprocessing_nodes(self):
+        super().make_preprocessing_nodes()
+        self.position_ids_reformatted = self.make_position_ids_reformatting()
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1329,10 +1365,10 @@ class Qwen35TextModel(Model):
     def _make_mrope_cos_sin(self, basename):
         """Build interleaved mRoPE cos/sin from pre-computed cache + position_ids.
 
-        Input: position_ids [3, B, S]
+        Input: position_ids [3, B, S] (from self.position_ids_reformatted)
         Output: cos [B, S, rdim_half], sin [B, S, rdim_half]
         """
-        pos_ids = self.input_names["position_ids"]
+        pos_ids = self.position_ids_reformatted
         cos_cache = "model.rotary_emb.cos_cache"
         sin_cache = "model.rotary_emb.sin_cache"
         h_mask = "model.rotary_emb.h_mask"
@@ -1397,7 +1433,7 @@ class Qwen35TextModel(Model):
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
-        pos_ids_input = self.input_names["position_ids"]
+        pos_ids_input = self.position_ids_reformatted
 
         # Shape(position_ids) → [3, B, S]
         shape_name = f"{basename}/Shape"
@@ -2000,7 +2036,7 @@ class Qwen35TextModel(Model):
             "model_type": self.model_type,
         }
         self.num_layers = len(self.layer_types)
-        self.model_type = "Qwen3_5ForConditionalGeneration"
+        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"

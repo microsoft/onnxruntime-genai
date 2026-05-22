@@ -552,6 +552,9 @@ class Model:
         }
         return (self.ep, self.io_dtype) in valid_packed_attn_configurations
 
+    def is_fused_rope_supported(self):
+        return self.ep not in ["dml"]
+
     def make_attention_init(self):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
@@ -572,7 +575,7 @@ class Model:
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
+            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
@@ -3207,12 +3210,13 @@ class Model:
             self.attention_attrs["k_path"] = split_outputs[1]
             self.attention_attrs["v_path"] = split_outputs[2]
 
-    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+    def make_attention_qk_norm(self, layer_id, attention):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
             self.make_qk_norm(layer_id, attention)
 
-        # Make RotaryEmbedding nodes
+    def make_attention_qk_rope(self, layer_id, **kwargs):
+        # Make RotaryEmbedding nodes; returns (cos_cache_name, sin_cache_name)
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["rope"]:
             if self.attention_attrs["use_rope_in_attn"]:
@@ -3232,6 +3236,15 @@ class Model:
                     position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
                 )
                 self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
+        return cos_cache_name, sin_cache_name
+
+    def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
+        # Base order: norm first, then RoPE
+        self.make_attention_qk_norm(layer_id, attention)
+        return self.make_attention_qk_rope(layer_id, **kwargs)
+
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_attention_qk_rope_and_norm(layer_id, attention, **kwargs)
 
         # Get key-value cache names if they exist
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
