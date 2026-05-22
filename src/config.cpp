@@ -18,7 +18,9 @@ namespace Generators {
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "qnn") {
+  if (lower_name == "cpu" || lower_name == "cpuexecutionprovider") {
+    return "CPU";
+  } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
     return "WebGPU";

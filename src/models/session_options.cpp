@@ -4,7 +4,6 @@
 #include "session_options.h"
 
 #include <algorithm>
-#include <cctype>
 #include <functional>
 #include <unordered_map>
 
@@ -147,9 +146,25 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                                          const Config&,
                                                          bool);
 
+  // CPU EP is always implicitly registered — no action needed.
+  // Throws if users attempt to set provider options (which would be silently lost).
+  static auto CPUAppendExecutionProvider = [](OrtSessionOptions&,
+                                              const Config::ProviderOptions& provider_options,
+                                              const Config&,
+                                              bool) -> DeviceInterface* {
+    if (!provider_options.options.empty()) {
+      throw std::runtime_error(
+          "CPU execution provider does not support provider options. "
+          "CPU is always available as the default fallback and does not need to be explicitly registered. "
+          "Remove the CPU provider entry and its options from your configuration.");
+    }
+    return nullptr;
+  };
+
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},
       {"NvTensorRtRtx", NvTensorRtRtxExecutionProvider::AppendExecutionProvider},
@@ -175,27 +190,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   }
 
   for (const auto& provider : providers_list) {
-    // CPU EP is always implicitly registered and cannot be appended via
-    // ORT's AppendExecutionProvider API. Throw if users attempt to set
-    // CPU-specific provider options (which would be silently lost), but
-    // accept bare "cpu" as a no-op for backward compatibility.
-    {
-      std::string lower_provider(provider);
-      std::transform(lower_provider.begin(), lower_provider.end(), lower_provider.begin(),
-                     [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-      if (lower_provider == "cpu" || lower_provider == "cpuexecutionprovider") {
-        auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
-                                                [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
-        if (provider_options_it != provider_options_list.end() && !provider_options_it->options.empty()) {
-          throw std::runtime_error(
-              "CPU execution provider does not support provider options. "
-              "CPU is always available as the default fallback and does not need to be explicitly registered. "
-              "Remove the CPU provider entry and its options from your configuration.");
-        }
-        continue;
-      }
-    }
-
     auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
                                             [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
 
