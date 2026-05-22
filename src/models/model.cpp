@@ -435,9 +435,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 
   // Use the trivial model to create an OrtSession that lets us get a device Ort::Allocator for each device type.
   // This is necessary because the Ort::Allocator needs to persist and is valid for the lifetime of this OrtSession.
+  const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(),
-                                          GetTrivialModel().data(),
-                                          GetTrivialModel().size(),
+                                          trivial_model.data(),
+                                          trivial_model.size(),
                                           session_options.get());
 
   try {
