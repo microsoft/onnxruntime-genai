@@ -441,15 +441,17 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // Forward the user's provider options (e.g. validationMode) to the dummy session
   // so that singleton resources (like WebGpuContext) are initialized with the correct settings.
   // Exclude enableGraphCapture since the trivial model can't use graph capture.
-  for (const auto& user_po : config.model.decoder.session_options.provider_options) {
-    if (user_po.name == provider_name) {
-      for (const auto& opt : user_po.options) {
-        if (opt.first != "enableGraphCapture") {
-          dummy_provider_options.options.emplace_back(opt);
+  if (type == DeviceType::WEBGPU) {
+    for (const auto& user_po : config.model.decoder.session_options.provider_options) {
+      if (user_po.name == provider_name) {
+        for (const auto& opt : user_po.options) {
+          if (opt.first != "enableGraphCapture") {
+            dummy_provider_options.options.emplace_back(opt);
+          }
         }
+        dummy_provider_options.device_filtering_options = user_po.device_filtering_options;
+        break;
       }
-      dummy_provider_options.device_filtering_options = user_po.device_filtering_options;
-      break;
     }
   }
 
