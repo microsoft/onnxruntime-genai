@@ -3,7 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # -------------------------------------------------------------------------
-# Copyright (C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # -------------------------------------------------------------------------
 from .base import Model
@@ -29,7 +29,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen3VLTextModel, Qwen25VLTextModel, Qwen35TextModel, QwenModel
+from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, QwenModel, VideoChatFlashQwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -64,5 +64,6 @@ __all__ = [
     "Qwen35TextModel",
     "QwenModel",
     "SmolLM3Model",
+    "VideoChatFlashQwenModel",
     "WhisperModel",
 ]

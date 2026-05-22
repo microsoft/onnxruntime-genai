@@ -48,6 +48,7 @@ from builders import (
     Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
+    VideoChatFlashQwenModel,
     WhisperModel,
 )
 from transformers import (
@@ -293,6 +294,10 @@ def create_model(
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
