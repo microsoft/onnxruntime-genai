@@ -67,7 +67,7 @@
         "no_repeat_ngram_size": 0,
         "num_beams": 1,
         "num_return_sequences": 1,
-        "past_present_share_buffer": false,
+        "past_present_share_buffer": true,
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_k": 1,
