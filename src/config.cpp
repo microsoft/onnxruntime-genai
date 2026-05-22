@@ -250,6 +250,8 @@ struct EncoderInputs_Element : JSON::Element {
       v_.cache_last_time = JSON::Get<std::string_view>(value);
     } else if (name == "cache_last_channel_len") {
       v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
+    } else if (name == "lang_id") {
+      v_.lang_id = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
