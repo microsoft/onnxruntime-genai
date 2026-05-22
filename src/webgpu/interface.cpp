@@ -170,7 +170,7 @@ struct InterfaceImpl : DeviceInterface {
         return OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
       } catch (const Ort::Exception& fallback_e) {
         throw std::runtime_error(
-            "Failed to create allocator for WebGPU. "
+            "Failed to create memory info for WebGPU. "
             "Primary name 'WebGPU_Buf' error: " + std::string(e.what()) +
             "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
       }

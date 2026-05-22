@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <string>
+
 #include "interface.h"
 #include "session_options.h"
 #include "../models/model.h"

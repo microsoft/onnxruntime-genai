@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <atomic>
 #include <memory>
+#include <string>
 #include "span.h"
 #include "config.h" // for Config and Config::ProviderOptions
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
