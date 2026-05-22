@@ -22,6 +22,7 @@ struct Options {
   int64_t max_length{0};
   bool verbose{};
   bool reuse_generator{};
+  bool use_random_tokens{};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);
