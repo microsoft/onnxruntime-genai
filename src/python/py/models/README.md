@@ -42,6 +42,7 @@ The tool currently supports the following model architectures.
 - Gemma
 - gpt-oss
 - Granite
+- HunYuan Dense V1
 - InternLM2
 - Llama
 - Mistral
