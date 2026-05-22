@@ -30,12 +30,13 @@ static bool IsAllocatorAvailable(const Config& config) {
                                           Generators::GetTrivialModel().size(),
                                           session_options.get());
 
-  const auto memory_info = OrtMemoryInfo::Create("QnnHtpShared",
-                                                 OrtAllocatorType::OrtDeviceAllocator,
-                                                 0,
-                                                 OrtMemType::OrtMemTypeDefault);
-  const auto allocator = Ort::Allocator::Create(*session, *memory_info);
-  return allocator != nullptr;
+  try {
+    const auto memory_info = GetQNNInterface()->GetMemoryInfo(config);
+    const auto allocator = Ort::Allocator::Create(*session, *memory_info);
+    return allocator != nullptr;
+  } catch (const Ort::Exception&) {
+    return false;
+  }
 }
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
