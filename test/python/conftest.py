@@ -99,5 +99,15 @@ def nemotron_speech_model_path(request):
 
 
 @pytest.fixture
+def parakeet_tdt_model_path(request):
+    """Return the path to a parakeet-tdt model directory, or skip if not available."""
+    test_data = request.config.getoption("--test_models")
+    model_path = os.path.join(test_data, "parakeet-tdt")
+    if not os.path.exists(os.path.join(model_path, "genai_config.json")):
+        pytest.skip(f"Parakeet TDT model not found at {model_path}")
+    return model_path
+
+
+@pytest.fixture
 def test_data_path(request):
     return request.config.getoption("--test_models")

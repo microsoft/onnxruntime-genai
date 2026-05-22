@@ -378,9 +378,11 @@ DeviceSpan<float> NemotronJoinerSubState::Run(int /*total_length*/, DeviceSpan<i
 
 NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
                                          const GeneratorParams& params)
-    : State{params, model},
+    : TransducerState{params, model},
       nemotron_model_{model} {
   nemotron_config_ = model.nemotron_config_;
+  // Until audio is fed via SetExtraInputs/SetInputs, the stream is idle.
+  chunk_done_ = true;
 
   encoder_state_ = std::make_unique<NemotronEncoderSubState>(model, params);
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
@@ -504,7 +506,7 @@ void NemotronSpeechState::RunEncoder() {
   current_mel_.reset();
 }
 
-std::span<const int32_t> NemotronSpeechState::StepToken() {
+void NemotronSpeechState::StepToken() {
   if (need_encoder_run_) {
     RunEncoder();
     need_encoder_run_ = false;
@@ -606,13 +608,12 @@ std::span<const int32_t> NemotronSpeechState::StepToken() {
     }
 
     last_tokens_.push_back(static_cast<int32_t>(best_token));
-    token_count_++;
-    return last_tokens_;
+    all_tokens_.push_back(static_cast<int32_t>(best_token));
+    return;
   }
 
   // Exhausted all time steps
   chunk_done_ = true;
-  return last_tokens_;
 }
 
 }  // namespace Generators

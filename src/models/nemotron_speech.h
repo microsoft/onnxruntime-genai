@@ -6,6 +6,7 @@
 
 #include "model.h"
 #include "audio_features.h"
+#include "transducer_state.h"
 
 namespace Generators {
 
@@ -191,7 +192,7 @@ struct NemotronJoinerSubState : State {
 };
 
 /// Orchestrator state for the full RNNT pipeline.
-struct NemotronSpeechState : State {
+struct NemotronSpeechState : TransducerState {
   NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
   ~NemotronSpeechState() override;
 
@@ -200,10 +201,7 @@ struct NemotronSpeechState : State {
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
-  std::span<const int32_t> StepToken();
-  bool IsChunkDone() const { return chunk_done_; }
-  std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
-  size_t TokenCount() const { return token_count_; }
+  void StepToken() override;
   void ResetStreamingState();
 
   void SetLangId(int lang_id);
@@ -233,9 +231,6 @@ struct NemotronSpeechState : State {
   int64_t time_step_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
-  bool chunk_done_{true};
-  std::vector<int32_t> last_tokens_;
-  size_t token_count_{};  // Total tokens emitted across all chunks
 
   void RunEncoder();
 };
