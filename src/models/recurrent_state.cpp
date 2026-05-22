@@ -89,9 +89,6 @@ RecurrentState::RecurrentState(State& state)
   const int num_layers = static_cast<int>(layer_indices_.size());
 
   const bool past_present_share_buffer = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
-  if (g_log.enabled && past_present_share_buffer) {
-    Log("info", "RecurrentState: using shared past/present buffers");
-  }
   if (!past_present_share_buffer) {
     throw std::runtime_error(
         "RecurrentState requires past_present_share_buffer=true. "
