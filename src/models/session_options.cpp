@@ -3,6 +3,8 @@
 
 #include "session_options.h"
 
+#include <algorithm>
+#include <cctype>
 #include <functional>
 #include <unordered_map>
 
@@ -175,8 +177,13 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   for (const auto& provider : providers_list) {
     // CPU EP is always implicitly registered, skip it to avoid passing it
     // to ORT's AppendExecutionProvider which does not accept "cpu" as a name.
-    if (provider == "cpu" || provider == "CPU" || provider == "CPUExecutionProvider") {
-      continue;
+    {
+      std::string lower_provider(provider);
+      std::transform(lower_provider.begin(), lower_provider.end(), lower_provider.begin(),
+                     [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+      if (lower_provider == "cpu" || lower_provider == "cpuexecutionprovider") {
+        continue;
+      }
     }
 
     auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
