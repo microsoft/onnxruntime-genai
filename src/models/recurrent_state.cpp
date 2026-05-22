@@ -132,7 +132,7 @@ void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
-    // Recurrent states cannot be partially rewound; they are compressed summaries
+    // Recurrent states cannot be partially rewound — they are compressed summaries
     // with no per-position history. Non-zero rewind is a no-op; the state remains unchanged.
     if (g_log.enabled)
       Log("warning", "RecurrentState::RewindTo(" + std::to_string(index) +
