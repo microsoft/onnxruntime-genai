@@ -53,9 +53,9 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
 def get_config(
     path: str,
     ep: str,
+    ep_path: str | None,
     ep_options: dict[str, str] = {},
     search_options: dict[str, int] = {},
-    ep_path: str = "",
 ) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it
@@ -63,10 +63,10 @@ def get_config(
     Args:
         path (str): Path to model folder containing GenAI config
         ep (str): Name of execution provider to set
+        ep_path (str | None): Path to an external execution provider library. If set, the
+            registered library is used and providers from the GenAI config are preserved.
         ep_options (dict[str, str]): Map of EP-specific option names and their values
         search_options (dict[str, int]): Map of search-specific option names and their values
-        ep_path (str): Path to an external execution provider library. If set, the
-            registered library is used and providers from the GenAI config are preserved.
     Returns:
         og.Config: ORT GenAI config object with all options set
     """

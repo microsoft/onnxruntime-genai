@@ -53,7 +53,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
 
-    config = get_config(model_path, execution_provider)
+    config = get_config(model_path, execution_provider, None)
     model = og.Model(config)
     processor = og.StreamingProcessor(model)
 

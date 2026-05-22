@@ -32,7 +32,7 @@ def main(args):
         print("Loading model...")
 
     # Create model
-    config = get_config(args.model_path, args.execution_provider, ep_path=args.ep_path)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path)
     model = og.Model(config)
     if args.verbose:
         print("Model loaded")
