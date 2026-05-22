@@ -13,6 +13,7 @@ import onnx_ir as ir
 import torch
 from transformers import (
     AutoConfig,
+    Qwen2ForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
@@ -939,10 +940,6 @@ class VideoChatFlashQwenModel(QwenModel):
         self.model_type = "VideoChat_Flash_QwenForCausalLM"
 
     def load_weights(self, input_path):
-        # The LM backbone is identical to Qwen2ForCausalLM. Load it directly
-        # to avoid the custom remote code (which requires video libraries).
-        from transformers import Qwen2ForCausalLM
-        print("Loading VideoChatFlash model as Qwen2ForCausalLM...")
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
         return Qwen2ForCausalLM.from_pretrained(
             self.model_name_or_path,
