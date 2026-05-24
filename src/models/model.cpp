@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include <algorithm>
 #include <climits>
@@ -911,6 +911,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_5", Processor::Create<QwenImageProcessor>},
+          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
