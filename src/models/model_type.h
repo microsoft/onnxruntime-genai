@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved
+// --------------------------------------------------------------------------
+// Modifications Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 // --------------------------------------------------------------------------
 
 #pragma once
@@ -21,13 +23,14 @@ struct ModelType {
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 7> VLM = {"fara", "gemma3", "mistral3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
+    static constexpr std::array<std::string_view, 9> VLM = {"fara", "gemma3", "mistral3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "videochat_flash_qwen"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
     // Qwen-VL family: models requiring 3D mRoPE position IDs
-    return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl" || model_type == "qwen3_5";
+    static constexpr std::array<std::string_view, 5> QwenVL = {"fara", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe"};
+    return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
   }
 
   inline static bool IsPixtralFamily(const std::string& model_type) {
