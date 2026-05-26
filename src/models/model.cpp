@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -25,6 +26,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
@@ -34,12 +36,9 @@
 #if defined(_WIN32)
 #include <direct.h>
 #define GETCWD _getcwd
-#define CHDIR _wchdir
-#include <windows.h>
 #else
 #include <unistd.h>
 #define GETCWD getcwd
-#define CHDIR chdir
 #include <limits.h>
 #endif
 
@@ -47,36 +46,8 @@ namespace Generators {
 
 namespace {
 
-class DirGuard {
- private:
-  fs::path original_dir_;
-
- public:
-  DirGuard() {
-    char buffer[PATH_MAX];
-    if (GETCWD(buffer, sizeof(buffer))) {
-      original_dir_ = fs::path(buffer);
-    } else {
-      throw std::runtime_error("Failed to get current working directory");
-    }
-  }
-
-  DirGuard(const DirGuard&) = delete;
-  DirGuard& operator=(const DirGuard&) = delete;
-  DirGuard(DirGuard&&) = delete;
-
-  void ChangeTo(const fs::path& new_dir) {
-    if (CHDIR(new_dir.c_str()) != 0) {
-      throw std::runtime_error("Failed to change directory to: " + new_dir.string());
-    }
-  }
-
-  ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
-      Log("warning", "Failed to change back to original directory: " + original_dir_.string());
-    }
-  }
-};
+constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
+    "session.model_external_initializers_file_folder_path";
 
 }  // namespace
 
@@ -794,21 +765,12 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // TODO (baijumeswani): Loading ONNX models from memory that hold references to data stored in external files
-    // is not supported at the moment. This limitation stems from the fact that ONNX models typically
-    // reference these external files using relative paths to the model file. When loading a model from memory,
-    // the relative paths may not resolve correctly, leading to issues in locating the referenced data.
-    // To work around this, we change the current working directory to the model's config path
-    // before creating the session. This allows the model to resolve relative paths correctly.
-    // Note that this is not a problem for models that do not reference external files.
-    // This is a temporary solution and can be potentially addressed by exposing means to set a working directory
-    // for the OrtSession through the ONNX Runtime API.
-    // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
-    DirGuard dir_guard;
-    dir_guard.ChangeTo(config_->config_path);
-    auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
-
-    return session;
+    // For models loaded from memory that reference external data files, tell ORT where to find them
+    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
+    const fs::path external_initializers_path = fs::absolute(config_->config_path);
+    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                    external_initializers_path.string().c_str());
+    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
   // Otherwise, load the model from the file system
@@ -968,7 +930,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
+          {"qwen3_5", Processor::Create<QwenImageProcessor>},
+          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
+          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

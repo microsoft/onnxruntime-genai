@@ -570,8 +570,15 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 void Generator::SetRuntimeOption(const char* key, const char* value) {
   // Nemotron speech models support per-generator "lang_id" override so that
   // a single loaded model can serve generators in different languages.
-  if (is_nemotron_speech_model_ && key != nullptr && std::strcmp(key, "lang_id") == 0) {
-    int lang_id = std::atoi(value);
+  if (ModelType::IsRNNT(model_->config_->model.type) && key != nullptr && std::strcmp(key, "lang_id") == 0) {
+    if (value == nullptr) {
+      throw std::runtime_error("SetRuntimeOption(\"lang_id\"): value must not be null.");
+    }
+    size_t pos = 0;
+    int lang_id = std::stoi(value, &pos);
+    if (pos != std::strlen(value)) {
+      throw std::runtime_error(std::string("SetRuntimeOption(\"lang_id\"): invalid integer value \"") + value + "\".");
+    }
     static_cast<NemotronSpeechState*>(state_.get())->SetLangId(lang_id);
     return;
   }
