@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -250,6 +251,8 @@ struct EncoderInputs_Element : JSON::Element {
       v_.cache_last_time = JSON::Get<std::string_view>(value);
     } else if (name == "cache_last_channel_len") {
       v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
+    } else if (name == "lang_id") {
+      v_.lang_id = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -340,6 +343,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "targets_length") {
+      v_.targets_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -373,6 +378,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "outputs_length") {
+      v_.outputs_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -778,6 +785,8 @@ struct Vision_Element : JSON::Element {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
       v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_visual_tokens") {
+      v_.num_visual_tokens = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "window_size") {
       v_.window_size = static_cast<int>(JSON::Get<double>(value));
     } else {
@@ -1129,6 +1138,8 @@ struct Model_Element : JSON::Element {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
       v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "left_context") {
@@ -1145,6 +1156,10 @@ struct Model_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_samples") {
+      v_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "right_context_samples") {
+      v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1153,6 +1168,8 @@ struct Model_Element : JSON::Element {
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
       return eos_token_id_;
+    if (name == "tdt_durations")
+      return tdt_durations_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1186,6 +1203,7 @@ struct Model_Element : JSON::Element {
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
+  Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};

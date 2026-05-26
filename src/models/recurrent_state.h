@@ -27,20 +27,11 @@ struct RecurrentState {
   std::vector<int> layer_indices_;
 
   // Interleaved as [conv_0, recurrent_0, conv_1, recurrent_1, ...]
-  std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
-
-  // Cached byte spans for graph-capture copy path (avoids recomputing
-  // tensor metadata on every decode step for fixed-shape tensors).
-  std::vector<DeviceSpan<uint8_t>> past_byte_spans_;
-  std::vector<DeviceSpan<uint8_t>> present_byte_spans_;
 
   // Kept alive for state_ const char* pointers
   std::vector<std::string> input_name_strings_;
   std::vector<std::string> output_name_strings_;
-
-  size_t input_index_{~0U};
-  size_t output_index_{~0U};
 
   ONNXTensorElementDataType conv_type_{};
   ONNXTensorElementDataType recurrent_type_{};

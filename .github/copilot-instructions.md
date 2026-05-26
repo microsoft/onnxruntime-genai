@@ -149,7 +149,7 @@ The repo supports specific model architectures - check `src/models/model_type.h`
 
 ### Performance Considerations
 
-- **KV caching** is automatically managed but can be configured via `runtime_settings.cpp`
+- **KV caching** is automatically managed but can be configured via `src/runtime_settings.cpp`
 - **Continuous decoding** (session continuation) requires careful state management
 - **Multi-LoRA** adapters use separate weight loading in `src/models/adapters.cpp`
 
