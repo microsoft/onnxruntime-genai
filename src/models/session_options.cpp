@@ -3,6 +3,8 @@
 
 #include "session_options.h"
 
+#include <algorithm>
+#include <cctype>
 #include <functional>
 #include <unordered_map>
 
@@ -191,7 +193,11 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       // CPU EP is always built-in to ORT as the implicit fallback provider.
       // Skip plugin registration to avoid failures on WinML where CPU is not
       // in the ExecutionProviderCatalog.
-      if (provider_options.name == "cpu" || provider_options.name == "CPUExecutionProvider") {
+      std::string provider_name_lower = provider_options.name;
+      std::transform(provider_name_lower.begin(), provider_name_lower.end(),
+                     provider_name_lower.begin(),
+                     [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+      if (provider_name_lower == "cpu" || provider_name_lower == "cpuexecutionprovider") {
         continue;
       }
       if (!AppendExecutionProviderV2(session_options, provider_options,
