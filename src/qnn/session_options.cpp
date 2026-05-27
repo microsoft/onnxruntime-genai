@@ -11,8 +11,6 @@
 
 namespace Generators::QNNExecutionProvider {
 
-std::once_flag flag;
-
 static bool IsAllocatorAvailable(const Config& config) {
   // This serves primarily to check for Dx12 shared memory allocator support, which depends on both:
   //   a. The graphics drivers installed on the system
