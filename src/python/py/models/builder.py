@@ -117,9 +117,9 @@ def check_extra_options(kv_pairs, execution_provider):
             )
         kv_pairs["kv_cache_quant_type"] = val
         if val != "none" and execution_provider != "cpu":
-            print(
-                f"WARNING: Quantized KV cache is currently optimized for the CPU execution provider. "
-                f"Using it with '{execution_provider}' may not be supported."
+            raise ValueError(
+                f"Quantized KV cache is only supported for the CPU execution provider. "
+                f"Got execution_provider='{execution_provider}'."
             )
 
 

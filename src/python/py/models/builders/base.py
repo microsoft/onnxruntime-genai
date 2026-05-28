@@ -623,8 +623,7 @@ class Model:
         v_scales_per_layer = None
 
         if scale_file is not None:
-            # Load calibrated scales from JSON file
-            import json
+            # Load calibrated scales from JSON file (json is imported at module top)
             with open(scale_file, "r") as f:
                 scale_data = json.load(f)
             k_scales_per_layer = scale_data["scales"]["k_scales"]

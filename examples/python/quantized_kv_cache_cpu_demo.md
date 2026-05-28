@@ -105,19 +105,18 @@ This will:
 2. Run text generation on 3 test prompts
 3. Print throughput (tokens/sec)
 
-### With calibration (better accuracy)
+### With a pre-computed scale file
 
 ```bash
-python quantized_kv_cache_cpu_demo.py --calibrate
+python quantized_kv_cache_cpu_demo.py --scale_file kv_scales.json
 ```
 
-Calibration runs a few forward passes on sample text to find optimal
-quantization scales for each layer's K and V projections.
+Use a JSON file with per-layer quantization scales for better accuracy.
 
 ### Compare with FP32 baseline
 
 ```bash
-python quantized_kv_cache_cpu_demo.py --calibrate --compare
+python quantized_kv_cache_cpu_demo.py --compare
 ```
 
 This exports both FP32 and INT8 models, runs generation with each, then
@@ -164,7 +163,6 @@ When running with `--compare`, you'll also see:
 | `--model`, `-m` | `Qwen/Qwen2.5-0.5B-Instruct` | HuggingFace model ID or local path |
 | `--output_dir`, `-o` | `./quantized_kv_demo_output` | Directory for exported models |
 | `--quant_type` | `int8_per_tensor` | One of: `int8_per_tensor`, `int8_per_channel`, `int4_per_tensor`, `int4_per_channel` |
-| `--calibrate` | off | Run calibration before export |
 | `--scale_file` | None | Path to pre-computed scales JSON |
 | `--compare` | off | Also run FP32 baseline |
 | `--max_length` | 100 | Max tokens to generate |
@@ -180,7 +178,7 @@ When running with `--compare`, you'll also see:
 | `ModuleNotFoundError: onnx_ir` | Run `pip install onnx-ir` |
 | Model export fails with 403 | Use a non-gated model or run `hf auth login` |
 | `Tensor type mismatch` in GQA | Install ORT built from `main` with quantized KV cache support |
-| Poor output quality | Use `--calibrate` for data-driven scales |
+| Poor output quality | Use `--scale_file` with calibrated per-layer scales |
 | Slow build | Add `--parallel N` and `--skip_tests` to `build.sh` |
 
 ---

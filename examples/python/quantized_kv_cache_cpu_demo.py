@@ -6,9 +6,8 @@ End-to-end demo: LLM inference with INT8 quantized KV cache on CPU.
 
 This script demonstrates the full workflow:
 1. Export a model using the onnxruntime-genai model builder with quantized KV cache
-2. (Optional) Calibrate KV cache scales from sample data
-3. Run text generation using onnxruntime-genai with CPU execution provider
-4. Compare output quality and performance vs FP32 KV cache baseline
+2. Run text generation using onnxruntime-genai with CPU execution provider
+3. Compare output quality and performance vs FP32 KV cache baseline
 
 Prerequisites:
 - onnxruntime (built from main branch with quantized KV cache support)
@@ -16,13 +15,10 @@ Prerequisites:
 - transformers, torch, numpy
 
 Usage:
-    # Quick demo with default scale (no calibration):
+    # Quick demo with default scale:
     python quantized_kv_cache_cpu_demo.py --model Qwen/Qwen2.5-0.5B-Instruct
 
-    # With calibration for better accuracy:
-    python quantized_kv_cache_cpu_demo.py --model Qwen/Qwen2.5-0.5B-Instruct --calibrate
-
-    # Using a pre-calibrated scale file:
+    # Using a pre-computed scale file:
     python quantized_kv_cache_cpu_demo.py --model Qwen/Qwen2.5-0.5B-Instruct --scale_file kv_scales.json
 
     # Compare with FP32 baseline:
@@ -61,25 +57,12 @@ def get_builder_path():
         if os.path.exists(builder_path):
             return builder_path
     except ImportError:
-        pass
+        pass  # onnxruntime_genai not installed; fall through to FileNotFoundError below
 
     raise FileNotFoundError(
         "Could not find builder.py. Please run this script from the onnxruntime-genai repository "
         "or install onnxruntime-genai with model builder support."
     )
-
-
-def get_calibration_path():
-    """Find the calibration utility script."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(script_dir, "..", "..", "src", "python", "py", "models", "calibrate_kv_scales.py"),
-        os.path.join(script_dir, "../../src/python/py/models/calibrate_kv_scales.py"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return os.path.abspath(path)
-    raise FileNotFoundError("Could not find calibrate_kv_scales.py")
 
 
 def export_model(model_name, output_dir, quant_type="int8_per_tensor", scale_file=None, cache_dir=None):
@@ -150,38 +133,6 @@ def export_baseline_model(model_name, output_dir, cache_dir=None):
 
     print(f"\nBaseline model exported to: {output_dir}")
     return output_dir
-
-
-def calibrate_scales(model_name, output_file, quant_type="int8_per_tensor", num_samples=32, max_length=128):
-    """Run KV cache scale calibration."""
-    calibration_path = get_calibration_path()
-
-    cmd = [
-        sys.executable,
-        calibration_path,
-        "--model_name",
-        model_name,
-        "--quant_type",
-        quant_type,
-        "--output",
-        output_file,
-        "--num_samples",
-        str(num_samples),
-        "--max_length",
-        str(max_length),
-    ]
-
-    print(f"\n{'=' * 60}")
-    print("Calibrating KV cache scales...")
-    print(f"Command: {' '.join(cmd)}")
-    print(f"{'=' * 60}\n")
-
-    result = subprocess.run(cmd, check=False, capture_output=False, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Calibration failed with return code {result.returncode}")
-
-    print(f"\nScales saved to: {output_file}")
-    return output_file
 
 
 def run_generation(model_path, prompts, max_length=100, verbose=True):
@@ -382,8 +333,7 @@ Examples:
         choices=["int8_per_tensor", "int8_per_channel", "int4_per_tensor", "int4_per_channel"],
         help="KV cache quantization type",
     )
-    parser.add_argument("--calibrate", action="store_true", help="Run calibration to compute optimal KV cache scales")
-    parser.add_argument("--scale_file", type=str, default=None, help="Pre-computed scale file from calibration utility")
+    parser.add_argument("--scale_file", type=str, default=None, help="Pre-computed scale file (JSON with per-layer scales)")
     parser.add_argument("--compare", action="store_true", help="Also export and run FP32 baseline for comparison")
     parser.add_argument("--max_length", type=int, default=100, help="Maximum generation length")
     parser.add_argument("--skip_export", action="store_true", help="Skip model export (use existing exported model)")
@@ -406,36 +356,30 @@ Examples:
     baseline_model_dir = os.path.join(args.output_dir, "model_fp32_baseline")
     scale_file = args.scale_file
 
-    # Step 1: Calibrate scales (optional)
-    if args.calibrate and not scale_file:
-        scale_file = os.path.join(args.output_dir, "kv_scales.json")
-        os.makedirs(args.output_dir, exist_ok=True)
-        calibrate_scales(args.model, scale_file, args.quant_type)
-
-    # Step 2: Export model with quantized KV cache
+    # Step 1: Export model with quantized KV cache
     if not args.skip_export:
         os.makedirs(quant_model_dir, exist_ok=True)
         export_model(args.model, quant_model_dir, args.quant_type, scale_file, args.cache_dir)
 
-    # Step 3: Export baseline model (if comparison requested)
+    # Step 2: Export baseline model (if comparison requested)
     if args.compare and not args.skip_export:
         os.makedirs(baseline_model_dir, exist_ok=True)
         export_baseline_model(args.model, baseline_model_dir, args.cache_dir)
 
-    # Step 4: Run generation with quantized KV cache
+    # Step 3: Run generation with quantized KV cache
     print(f"\n{'=' * 60}")
     print("Running generation with INT8 quantized KV cache...")
     print(f"{'=' * 60}")
     quant_results, quant_summary = run_generation(quant_model_dir, prompts, args.max_length)
 
-    # Step 5: Run baseline (if comparison requested)
+    # Step 4: Run baseline (if comparison requested)
     if args.compare:
         print(f"\n{'=' * 60}")
         print("Running generation with FP32 KV cache (baseline)...")
         print(f"{'=' * 60}")
         baseline_results, baseline_summary = run_generation(baseline_model_dir, prompts, args.max_length)
 
-        # Step 6: Compare
+        # Step 5: Compare
         compare_outputs(baseline_results, quant_results)
         print_performance_summary(baseline_summary, quant_summary)
     else:
