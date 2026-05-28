@@ -322,26 +322,33 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     if (actual_patches < num_padded_patches) {
       // Trim: copy only the first actual_patches from the padded tensor.
-      // For 3D [batch, patches, dim], copy batch * actual_patches * dim elements.
+      // The preprocessor outputs float32 data, so we trim using float32 strides,
+      // then cast to the model's pixel_values type (float, fp16, or bf16).
       const int64_t batch = (pv_dims == 3) ? pv_shape[0] : 1;
       auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
                                           : std::vector<int64_t>{actual_patches, patch_dim};
 
-      // Respect the model's pixel_values type (float, fp16, or bf16)
-      auto trimmed_pv = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
-      const size_t elem_size = (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 4 : 2;  // float=4, fp16/bf16=2
-      // For 3D with batch > 1, copy each batch slice separately (padded stride differs from trimmed stride).
-      // Use raw byte pointers since the type may be float, fp16, or bf16.
-      auto* dst = static_cast<uint8_t*>(trimmed_pv->GetTensorMutableRawData());
-      const auto* src = reinterpret_cast<const uint8_t*>(pv_data);
-      const size_t src_stride = static_cast<size_t>(num_padded_patches * patch_dim) * elem_size;
-      const size_t dst_stride = static_cast<size_t>(actual_patches * patch_dim) * elem_size;
+      // Trim in float32 (source is always float32 from the preprocessor)
+      auto trimmed_fp32 = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
+      float* dst = trimmed_fp32->GetTensorMutableData<float>();
+      const float* src = pv_data;
+      const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
+      const size_t dst_row = static_cast<size_t>(actual_patches * patch_dim);
       for (int64_t b = 0; b < batch; ++b) {
-        std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+        std::memcpy(dst + b * dst_row, src + b * src_row, dst_row * sizeof(float));
       }
 
-      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                             std::make_shared<Tensor>(std::move(trimmed_pv)));
+      // Cast to model's pixel_values type if needed (e.g. float32 -> float16)
+      if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(trimmed_fp32)));
+      } else {
+        auto trimmed_target = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
+        auto p_device = GetDeviceInterface(DeviceType::CPU);
+        Cast(*trimmed_fp32, trimmed_target, *p_device, pixel_values_type_);
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(trimmed_target)));
+      }
     } else {
       EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
     }
