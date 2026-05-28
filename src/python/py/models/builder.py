@@ -108,6 +108,20 @@ def check_extra_options(kv_pairs, execution_provider):
         )
         kv_pairs["enable_webgpu_graph"] = False
 
+    if "kv_cache_quant_type" in kv_pairs:
+        valid_kv_quant_types = {"none", "int8_per_tensor", "int8_per_channel", "int4_per_tensor", "int4_per_channel"}
+        val = kv_pairs["kv_cache_quant_type"].lower()
+        if val not in valid_kv_quant_types:
+            raise ValueError(
+                f"kv_cache_quant_type must be one of {valid_kv_quant_types}, got '{kv_pairs['kv_cache_quant_type']}'"
+            )
+        kv_pairs["kv_cache_quant_type"] = val
+        if val != "none" and execution_provider != "cpu":
+            print(
+                f"WARNING: Quantized KV cache is currently optimized for the CPU execution provider. "
+                f"Using it with '{execution_provider}' may not be supported."
+            )
+
 
 def parse_extra_options(kv_items, execution_provider):
     """
