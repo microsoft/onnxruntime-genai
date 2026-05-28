@@ -222,13 +222,17 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, pixel_values_owner.ToBeAssigned()));
     pixel_values = pixel_values_owner.get();
 
-    // pixel_position_ids is the second output from the Gemma4 image preprocessor
-    if (OrtxTensorResultGetAt(image_result.get(), 1, pixel_position_ids_owner.ToBeAssigned()) == kOrtxOK && pixel_position_ids_owner.get()) {
+    // pixel_position_ids is the second output from the Gemma4 image preprocessor.
+    // Note: ToBeAssigned() uses a PointerAssigner whose destructor sets the owner;
+    // we must not check .get() in the same expression or it will still be null.
+    auto pos_status = OrtxTensorResultGetAt(image_result.get(), 1, pixel_position_ids_owner.ToBeAssigned());
+    if (pos_status == kOrtxOK && pixel_position_ids_owner.get()) {
       pixel_position_ids = pixel_position_ids_owner.get();
     }
 
     // num_soft_tokens is the third output — the actual number of vision tokens after pooling
-    if (OrtxTensorResultGetAt(image_result.get(), 2, num_soft_tokens_owner.ToBeAssigned()) == kOrtxOK && num_soft_tokens_owner.get()) {
+    auto nst_status = OrtxTensorResultGetAt(image_result.get(), 2, num_soft_tokens_owner.ToBeAssigned());
+    if (nst_status == kOrtxOK && num_soft_tokens_owner.get()) {
       const int64_t* nst_data{};
       const int64_t* nst_shape{};
       size_t nst_dims;
