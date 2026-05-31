@@ -85,6 +85,7 @@ LANG_TO_ID = {
     "he-IL":  (64,  "Hebrew (Israel)"),
     "fr-CA":  (100, "French (Canada)"),
     "auto":   (101, "Auto-detect"),
+    "mt":     (102, "Maltese"),
     "mt-MT":  (102, "Maltese"),
     "nb":     (103, "Norwegian Bokmål"),
     "nb-NO":  (103, "Norwegian Bokmål"),
