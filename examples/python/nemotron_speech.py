@@ -81,6 +81,7 @@ LANG_TO_ID = {
     "lv-LV":  (61,  "Latvian"),
     "sl":     (62,  "Slovenian"),
     "sl-SI":  (62,  "Slovenian"),
+    "he":     (64,  "Hebrew"),
     "he-IL":  (64,  "Hebrew (Israel)"),
     "fr-CA":  (100, "French (Canada)"),
     "auto":   (101, "Auto-detect"),
