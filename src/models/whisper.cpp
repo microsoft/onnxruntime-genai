@@ -8,11 +8,14 @@ namespace Generators {
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(EffectiveSessionOptions(*config_, config_->model.encoder.session_options),
-                                 *encoder_session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options,
+                                 *encoder_session_options_, true, /*disable_graph_capture=*/false,
+                                 config_->model.encoder.asset_dir);
 
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
-  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get(),
+                                   config_->model.encoder.asset_dir);
+  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(),
+                                   config_->model.decoder.asset_dir);
 
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);

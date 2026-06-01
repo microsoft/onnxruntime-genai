@@ -4,8 +4,11 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include <cstring>
+#include <cstdlib>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -365,11 +368,11 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
-  // RNNT models don't use the traditional search/logits pipeline,
+  // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
-  if (ModelType::IsRNNT(model.config_->model.type)) {
+  if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
-    is_nemotron_speech_model_ = dynamic_cast<NemotronSpeechState*>(state_.get()) != nullptr;
+    transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
     return;
   }
 
@@ -565,22 +568,36 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
+  // Nemotron speech models support per-generator "lang_id" override so that
+  // a single loaded model can serve generators in different languages.
+  if (ModelType::IsRNNT(model_->config_->model.type) && key != nullptr && std::strcmp(key, "lang_id") == 0) {
+    if (value == nullptr) {
+      throw std::runtime_error("SetRuntimeOption(\"lang_id\"): value must not be null.");
+    }
+    size_t pos = 0;
+    int lang_id = std::stoi(value, &pos);
+    if (pos != std::strlen(value)) {
+      throw std::runtime_error(std::string("SetRuntimeOption(\"lang_id\"): invalid integer value \"") + value + "\".");
+    }
+    static_cast<NemotronSpeechState*>(state_.get())->SetLangId(lang_id);
+    return;
+  }
   state_->SetRunOption(key, value);
 }
 
 size_t Generator::TokenCount() const {
-  if (is_nemotron_speech_model_)
-    return static_cast<NemotronSpeechState*>(state_.get())->TokenCount();
+  if (transducer_state_)
+    return transducer_state_->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  if (is_nemotron_speech_model_) {
+  if (transducer_state_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    return static_cast<NemotronSpeechState*>(state_.get())->IsChunkDone();
+    return transducer_state_->IsChunkDone();
   }
 
   if (computed_logits_) {
@@ -613,11 +630,12 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  // RNNT models: yield one token per call from the decoder state machine
-  if (is_nemotron_speech_model_) {
+  // Transducer models (RNNT, TDT): yield one token per call by stepping
+  // the encoder/decoder/joiner loop directly.
+  if (transducer_state_) {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
-    static_cast<NemotronSpeechState*>(state_.get())->StepToken();
+    transducer_state_->StepToken();
     return;
   }
 

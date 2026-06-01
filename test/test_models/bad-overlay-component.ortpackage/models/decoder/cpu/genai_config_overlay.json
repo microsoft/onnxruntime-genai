@@ -1,0 +1,8 @@
+{
+  "model": {
+    "vision": {
+      "component": "vision-not-in-package",
+      "filename": "vision.onnx"
+    }
+  }
+}

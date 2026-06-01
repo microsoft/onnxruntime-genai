@@ -259,152 +259,6 @@ TEST(EpNameToGenAIProviderName, UnknownReturnsInput) {
   EXPECT_EQ(Generators::EpNameToGenAIProviderName("UnknownEP"), "UnknownEP");
 }
 
-// --- EffectiveSessionOptions tests ---
-
-TEST(EffectiveSessionOptions, ReturnsRoleSoWhenSet) {
-  Generators::Config config;
-  config.model.decoder.session_options.intra_op_num_threads = 16;
-  std::optional<Generators::Config::SessionOptions> role_so;
-  role_so.emplace();
-  role_so->intra_op_num_threads = 4;
-  const auto& result = Generators::EffectiveSessionOptions(config, role_so);
-  EXPECT_EQ(result.intra_op_num_threads.value_or(-1), 4);
-}
-
-TEST(EffectiveSessionOptions, FallsBackToDecoderWhenEmpty) {
-  Generators::Config config;
-  config.model.decoder.session_options.intra_op_num_threads = 16;
-  std::optional<Generators::Config::SessionOptions> role_so;
-  const auto& result = Generators::EffectiveSessionOptions(config, role_so);
-  EXPECT_EQ(result.intra_op_num_threads.value_or(-1), 16);
-}
-
-// --- ApplyVariantFileSessionOptions unit tests ---
-
-#if ORT_HAS_MODEL_PACKAGE
-using KV = std::pair<std::string, std::string>;
-using KVList = std::vector<KV>;
-
-TEST(ApplyVariantFileSessionOptions, FillsUnsetTypedFields) {
-  Generators::Config::SessionOptions so;
-  KVList variant_so = {
-      {"intra_op_num_threads", "4"},
-      {"inter_op_num_threads", "2"},
-      {"log_severity_level", "3"},
-      {"log_verbosity_level", "1"},
-      {"enable_cpu_mem_arena", "false"},
-      {"enable_mem_pattern", "true"},
-      {"log_id", "test"},
-      {"enable_profiling", "/tmp/p"},
-      {"custom_ops_library", "libfoo.so"},
-      {"graph_optimization_level", "ORT_ENABLE_BASIC"},
-  };
-  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
-  EXPECT_EQ(*so.intra_op_num_threads, 4);
-  EXPECT_EQ(*so.inter_op_num_threads, 2);
-  EXPECT_EQ(*so.log_severity_level, 3);
-  EXPECT_EQ(*so.log_verbosity_level, 1);
-  EXPECT_FALSE(*so.enable_cpu_mem_arena);
-  EXPECT_TRUE(*so.enable_mem_pattern);
-  EXPECT_EQ(*so.log_id, "test");
-  EXPECT_EQ(*so.enable_profiling, "/tmp/p");
-  EXPECT_EQ(*so.custom_ops_library, "libfoo.so");
-  EXPECT_EQ(*so.graph_optimization_level, ORT_ENABLE_BASIC);
-}
-
-TEST(ApplyVariantFileSessionOptions, ExistingValuesWin) {
-  Generators::Config::SessionOptions so;
-  so.intra_op_num_threads = 99;
-  so.enable_cpu_mem_arena = true;
-  so.log_id = "existing";
-  so.graph_optimization_level = ORT_ENABLE_ALL;
-  KVList variant_so = {
-      {"intra_op_num_threads", "4"},
-      {"enable_cpu_mem_arena", "false"},
-      {"log_id", "variant"},
-      {"graph_optimization_level", "ORT_ENABLE_BASIC"},
-  };
-  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
-  EXPECT_EQ(*so.intra_op_num_threads, 99);
-  EXPECT_TRUE(*so.enable_cpu_mem_arena);
-  EXPECT_EQ(*so.log_id, "existing");
-  EXPECT_EQ(*so.graph_optimization_level, ORT_ENABLE_ALL);
-}
-
-TEST(ApplyVariantFileSessionOptions, UnknownKeysGoToConfigEntries) {
-  Generators::Config::SessionOptions so;
-  KVList variant_so = {{"session.custom_key", "val"}};
-  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
-  ASSERT_EQ(so.config_entries.size(), 1u);
-  EXPECT_EQ(so.config_entries[0].first, "session.custom_key");
-  EXPECT_EQ(so.config_entries[0].second, "val");
-}
-
-TEST(ApplyVariantFileSessionOptions, ExistingConfigEntryWins) {
-  Generators::Config::SessionOptions so;
-  so.config_entries.emplace_back("session.key", "existing");
-  KVList variant_so = {{"session.key", "variant"}};
-  Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, "");
-  EXPECT_EQ(so.config_entries[0].second, "existing");
-  EXPECT_EQ(so.config_entries.size(), 1u);
-}
-
-TEST(ApplyVariantFileSessionOptions, InvalidGraphOptLevelThrows) {
-  Generators::Config::SessionOptions so;
-  KVList variant_so = {{"graph_optimization_level", "INVALID"}};
-  EXPECT_THROW(
-      Generators::ApplyVariantFileSessionOptions(so, variant_so, {}, ""),
-      std::runtime_error);
-}
-
-TEST(ApplyVariantFileSessionOptions, CpuEpSkipsProviderOptions) {
-  Generators::Config::SessionOptions so;
-  Generators::ApplyVariantFileSessionOptions(so, {}, {}, "CPUExecutionProvider");
-  EXPECT_TRUE(so.provider_options.empty());
-}
-
-TEST(ApplyVariantFileSessionOptions, CpuEpWithProviderOptionsThrows) {
-  Generators::Config::SessionOptions so;
-  KVList po = {{"device_id", "0"}};
-  EXPECT_THROW(
-      Generators::ApplyVariantFileSessionOptions(so, {}, po, "CPUExecutionProvider"),
-      std::runtime_error);
-}
-
-TEST(ApplyVariantFileSessionOptions, EmptyEpSkipsProviderOptions) {
-  Generators::Config::SessionOptions so;
-  Generators::ApplyVariantFileSessionOptions(so, {}, {}, "");
-  EXPECT_TRUE(so.provider_options.empty());
-}
-
-TEST(ApplyVariantFileSessionOptions, AppendsNewProviderEntry) {
-  Generators::Config::SessionOptions so;
-  KVList po = {{"htp_mode", "burst"}, {"soc_model", "60"}};
-  Generators::ApplyVariantFileSessionOptions(so, {}, po, "CUDAExecutionProvider");
-  ASSERT_EQ(so.provider_options.size(), 1u);
-  EXPECT_EQ(so.provider_options[0].name, "cuda");
-  EXPECT_EQ(so.provider_options[0].options.size(), 2u);
-}
-
-TEST(ApplyVariantFileSessionOptions, BackfillsMissingProviderOptionKeys) {
-  Generators::Config::SessionOptions so;
-  Generators::Config::ProviderOptions existing;
-  existing.name = "cuda";
-  existing.options.emplace_back("device_id", "1");
-  so.provider_options.push_back(existing);
-  KVList po = {{"device_id", "0"}, {"new_key", "val"}};
-  Generators::ApplyVariantFileSessionOptions(so, {}, po, "CUDAExecutionProvider");
-  ASSERT_EQ(so.provider_options.size(), 1u);
-  EXPECT_EQ(so.provider_options[0].options[0].second, "1");  // existing wins
-  EXPECT_EQ(so.provider_options[0].options.size(), 2u);       // new_key added
-  auto new_key_it = std::find_if(so.provider_options[0].options.begin(),
-                                  so.provider_options[0].options.end(),
-                                  [](const auto& p) { return p.first == "new_key"; });
-  ASSERT_NE(new_key_it, so.provider_options[0].options.end());
-  EXPECT_EQ(new_key_it->second, "val");
-}
-#endif  // ORT_HAS_MODEL_PACKAGE (ApplyVariantFileSessionOptions tests)
-
 // --- Package detection tests ---
 
 TEST(IsModelPackage, NonExistentPath) {
@@ -689,34 +543,35 @@ TEST(ModelPackageE2E, CreateConfigWithEpNullFallsBackToAutoDetect) {
 // --- Targeted regression tests for the package-load error paths and merge logic ---
 //
 // Each test loads a small fixture that exercises one branch of NormalizePackageIntoConfig
-// or ApplyVariantFileOptions. The fixtures live alongside the existing package fixtures.
+// or the genai_config_overlay.json merge.
 
 static const char* kKitchenSinkPkgPath = MODEL_PATH "kitchen-sink-cpu.ortpackage";
-static const char* kBadPipelineMismatchPkgPath = MODEL_PATH "bad-pipeline-mismatch.ortpackage";
 static const char* kBadOverlayComponentPkgPath = MODEL_PATH "bad-overlay-component.ortpackage";
-static const char* kBadCpuPoPkgPath = MODEL_PATH "bad-cpu-po.ortpackage";
 
-TEST(ModelPackageNormalize, MergesVariantSoAndGenAIOverlay) {
+TEST(ModelPackageNormalize, OverlayMergePatchSemantics) {
   if (!PackageExists(kKitchenSinkPkgPath)) {
     GTEST_SKIP() << "Kitchen-sink test package not found at " << kKitchenSinkPkgPath;
   }
-  // The fixture's variant.json declares every typed SO field; its
-  // consumer_metadata.genai_config_overlay re-sets a subset. One load exercises both
-  // halves of the merge contract:
-  //   * overlay-set fields carry the genai_config value (genai wins on conflict),
-  //   * variant-only fields carry the variant value (variant fills gaps).
+  // The fixture's base genai_config.json sets a subset of decoder.session_options; its
+  // <variant>/genai_config_overlay.json sets the rest AND deliberately re-sets two base fields
+  // to different values. Loading the package exercises both halves of the new contract:
+  //   * base-only fields survive (overlay didn't touch them),
+  //   * overlay-only fields appear,
+  //   * fields set in both follow merge-patch semantics: the overlay wins.
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), kKitchenSinkPkgPath,
                                           /*settings=*/nullptr, /*ep=*/nullptr);
   ASSERT_NE(config, nullptr);
   const auto& so = config->model.decoder.session_options;
 
-  // Fields the overlay re-sets: genai_config wins.
+  // Base-only fields: overlay did not touch them, so they remain.
   EXPECT_EQ(so.intra_op_num_threads.value_or(-1), 99);
   EXPECT_TRUE(so.enable_cpu_mem_arena.value_or(false));
-  EXPECT_EQ(so.log_id.value_or(""), "genai-log-id");
-  EXPECT_EQ(so.graph_optimization_level.value_or(ORT_DISABLE_ALL), ORT_ENABLE_ALL);
 
-  // Fields only the variant sets: variant fills the gap.
+  // Fields set in both base and overlay: overlay wins (RFC 7396 merge patch).
+  EXPECT_EQ(so.log_id.value_or(""), "overlay-log-id");
+  EXPECT_EQ(so.graph_optimization_level.value_or(ORT_DISABLE_ALL), ORT_ENABLE_BASIC);
+
+  // Overlay-only fields populate previously-unset typed slots.
   EXPECT_EQ(so.inter_op_num_threads.value_or(-1), 2);
   EXPECT_EQ(so.log_severity_level.value_or(-1), 3);
   EXPECT_EQ(so.log_verbosity_level.value_or(-1), 1);
@@ -724,46 +579,26 @@ TEST(ModelPackageNormalize, MergesVariantSoAndGenAIOverlay) {
   EXPECT_EQ(so.enable_profiling.value_or(""), "/tmp/variant-profile");
   EXPECT_EQ(so.custom_ops_library.value_or(""), "libcustomops.so");
 
-  // Unknown-key fallback for arbitrary entries.
+  // Unknown keys land in config_entries.
   auto entry = std::find_if(so.config_entries.begin(), so.config_entries.end(),
                             [](const auto& p) { return p.first == "session.disable_prepacking"; });
   ASSERT_NE(entry, so.config_entries.end());
   EXPECT_EQ(entry->second, "1");
-}
 
-TEST(ModelPackageNormalize, PipelineSizeMismatchThrows) {
-  if (!PackageExists(kBadPipelineMismatchPkgPath)) {
-    GTEST_SKIP() << "bad-pipeline-mismatch fixture not found";
-  }
-  // Pipeline declares 2 stages, variant has 1 file. NormalizePackageIntoConfig requires
-  // equal counts for positional mapping.
-  EXPECT_THROW(
-      Generators::CreateConfig(Generators::GetOrtEnv(), kBadPipelineMismatchPkgPath,
-                                /*settings=*/nullptr, /*ep=*/nullptr),
-      std::runtime_error);
+  // Per-role asset_dir is recorded and points at the selected variant directory.
+  EXPECT_FALSE(config->model.decoder.asset_dir.string().empty());
+  EXPECT_NE(config->model.decoder.asset_dir.string().find("cpu"), std::string::npos);
 }
 
 TEST(ModelPackageNormalize, OverlayIntroducedComponentThrows) {
   if (!PackageExists(kBadOverlayComponentPkgPath)) {
     GTEST_SKIP() << "bad-overlay-component fixture not found";
   }
-  // The variant's consumer_metadata overlay introduces model.vision.component =
-  // "vision-not-in-package". Selection happened against the base config (decoder only), so
-  // the new component reference must be rejected.
+  // The variant's genai_config_overlay.json introduces model.vision.component =
+  // "vision-not-in-package". Component selection ran against the base config (decoder only),
+  // so the new component reference must be rejected by NormalizePackageIntoConfig.
   EXPECT_THROW(
       Generators::CreateConfig(Generators::GetOrtEnv(), kBadOverlayComponentPkgPath,
-                                /*settings=*/nullptr, /*ep=*/nullptr),
-      std::runtime_error);
-}
-
-TEST(ModelPackageNormalize, CpuVariantWithProviderOptionsThrows) {
-  if (!PackageExists(kBadCpuPoPkgPath)) {
-    GTEST_SKIP() << "bad-cpu-po fixture not found";
-  }
-  // CPU has no GenAI provider tag, so non-empty variant provider_options under a CPU file
-  // would be silently dropped. ApplyVariantFileOptions rejects that as a producer error.
-  EXPECT_THROW(
-      Generators::CreateConfig(Generators::GetOrtEnv(), kBadCpuPoPkgPath,
                                 /*settings=*/nullptr, /*ep=*/nullptr),
       std::runtime_error);
 }

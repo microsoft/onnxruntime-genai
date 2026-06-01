@@ -12,10 +12,17 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     : DecoderOnlyPipelineModel(std::move(config), ort_env) {
   if (config_->model.vision.pipeline.empty()) return;
 
-  // Find vision pipeline stage paths
+  // Find vision pipeline stage paths. Vision stage filenames are relative; resolve them
+  // against the vision role's asset_dir when set (package mode), otherwise config_path.
+  fs::path vision_root = config_->model.vision.asset_dir.string().empty()
+                             ? config_->config_path
+                             : config_->model.vision.asset_dir;
   auto find_stage = [&](const std::string& id) -> std::string {
     for (const auto& stage : config_->model.vision.pipeline) {
-      if (stage.model_id == id) return (config_->config_path / fs::path(stage.filename)).string();
+      if (stage.model_id == id) {
+        fs::path stage_root = vision_root;
+        return (stage_root / fs::path(stage.filename)).string();
+      }
     }
     return "";
   };
@@ -31,7 +38,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
       if (stage.session_options.has_value()) {
         auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
-        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
+        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false,
+                                       /*disable_graph_capture=*/false, config_->model.vision.asset_dir);
         vision_attn_so = emplaced.first->second.get();
       } else {
         // Fall back to primary session options when run_on_cpu=false but no stage-specific options

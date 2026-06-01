@@ -50,13 +50,21 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         print(f"Registered {ep} from {ep_path} successfully!")
 
 
-def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
+def get_config(
+    path: str,
+    ep: str,
+    ep_path: str | None,
+    ep_options: dict[str, str] = {},
+    search_options: dict[str, int] = {},
+) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it
 
     Args:
         path (str): Path to model folder containing GenAI config
         ep (str): Name of execution provider to set
+        ep_path (str | None): Path to an external execution provider library. If set, the
+            registered library is used and providers from the GenAI config are preserved.
         ep_options (dict[str, str]): Map of EP-specific option names and their values
         search_options (dict[str, int]): Map of search-specific option names and their values
     Returns:
@@ -66,7 +74,7 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     # - If follow_config, then use the default EP stored inside the GenAI config.
     # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
     config = og.Config(path)
-    if ep != "follow_config":
+    if not ep_path and ep != "follow_config":
         config.clear_providers()
         if ep != "cpu":
             print(f"Setting model to {ep}")

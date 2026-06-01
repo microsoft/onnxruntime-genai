@@ -11,10 +11,9 @@ namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
-  // Pipeline stage filenames are absolute in package mode (set by normalization) and relative
-  // in flat-dir mode; Model::CreateSession handles both.
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
+    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id),
+                                         config_->model.decoder.asset_dir));
   }
 
   for (auto& session : sessions_) {
@@ -70,11 +69,12 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
-    auto& mutable_model = const_cast<DecoderOnlyPipelineModel&>(model_);
-    mutable_model.sessions_[id_] = mutable_model.CreateSession(
-        model_.ort_env_,
-        model_.config_->model.decoder.pipeline[id_].filename,
-        model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+    fs::path root = model_.config_->model.decoder.asset_dir.string().empty()
+                        ? model_.config_->config_path
+                        : model_.config_->model.decoder.asset_dir;
+    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
+        OrtSession::Create(model_.ort_env_, (root / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
+                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
 
   if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {

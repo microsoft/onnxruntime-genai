@@ -1494,9 +1494,6 @@ struct OrtModelPackageOptions {
 struct OrtModelPackageContext {
   static std::unique_ptr<OrtModelPackageContext> Create(const ORTCHAR_T* package_root);
 
-  size_t GetComponentCount() const;
-  std::vector<std::string> GetComponentNames() const;
-  size_t GetVariantCount(const char* component_name) const;
   std::vector<std::string> GetVariantNames(const char* component_name) const;
 
   size_t GetVariantEpCompatibilityCount(const char* component_name, const char* variant_name) const;
@@ -1512,25 +1509,13 @@ struct OrtModelPackageContext {
 
 /** \brief Model Package Component Context
  *
- * Represents a selected component within a model package. Provides accessors for the
- * selected variant's folder path, file paths, per-file session/provider options, and consumer metadata.
+ * Represents a selected component within a model package. The only accessor GenAI consumes
+ * is the selected variant's folder path; all per-variant assets (filenames, session/provider
+ * options, custom_ops_library, LoRA adapters) live in `<variant_dir>/genai_config_overlay.json`
+ * and are merged via the standard genai_config pipeline.
  */
 struct OrtModelPackageComponentContext {
   std::basic_string<ORTCHAR_T> GetSelectedVariantFolderPath() const;
-  size_t GetSelectedVariantFileCount() const;
-  std::basic_string<ORTCHAR_T> GetSelectedVariantFilePath(size_t file_idx) const;
-
-  void GetSelectedVariantFileSessionOptions(size_t file_idx,
-                                            const char* const** keys, const char* const** values,
-                                            size_t* count) const;
-  void GetSelectedVariantFileProviderOptions(size_t file_idx,
-                                             const char* const** keys, const char* const** values,
-                                             size_t* count) const;
-
-  std::string GetSelectedVariantConsumerMetadata() const;
-
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& env);
-  std::unique_ptr<OrtSession> CreateSession(OrtEnv& env, const OrtSessionOptions& session_options);
 
   static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageComponentContext(reinterpret_cast<OrtModelPackageComponentContext*>(p)); }
   Ort::Abstract make_abstract;

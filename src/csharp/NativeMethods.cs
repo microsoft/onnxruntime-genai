@@ -218,6 +218,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                          byte[] /*const char**/ adapterName);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_SetRuntimeOption(IntPtr /* OgaGenerator* */ generator,
+                                                                                   byte[] /* const char* */ key,
+                                                                                   byte[] /* const char* */ value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateSequences(out IntPtr /* OgaSequences** */ sequences);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

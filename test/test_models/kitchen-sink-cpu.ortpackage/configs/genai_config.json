@@ -8,11 +8,18 @@
     "pad_token_id": 0,
     "decoder": {
       "component": "decoder",
+      "filename": "model.onnx",
       "head_size": 8,
       "hidden_size": 16,
       "num_attention_heads": 2,
       "num_hidden_layers": 1,
-      "num_key_value_heads": 2
+      "num_key_value_heads": 2,
+      "session_options": {
+        "intra_op_num_threads": 99,
+        "enable_cpu_mem_arena": true,
+        "log_id": "base-log-id",
+        "graph_optimization_level": "ORT_ENABLE_ALL"
+      }
     }
   },
   "search": { "max_length": 20 }

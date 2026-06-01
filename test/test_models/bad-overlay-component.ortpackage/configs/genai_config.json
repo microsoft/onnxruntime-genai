@@ -8,6 +8,7 @@
     "pad_token_id": 0,
     "decoder": {
       "component": "decoder",
+      "filename": "model.onnx",
       "head_size": 8,
       "hidden_size": 16,
       "num_attention_heads": 2,

@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 #include "model_type.h"
 #include "ortx_tokenizer.h"
@@ -10,6 +11,7 @@
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
+#include "parakeet_processor.h"
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
 #include "gemma4_multimodal_processor.h"
@@ -158,10 +160,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
-  // Open a session against an ONNX file. Absolute filenames (e.g. those written by the package
-  // normalization pass) are used as-is; relative filenames resolve against config_->config_path.
+  // Open a session against an ONNX file. Absolute filenames are used as-is. Relative filenames
+  // resolve against `asset_dir` when it is non-empty (per-role variant directory in model-package
+  // mode), otherwise against `config_->config_path` (flat-dir mode). The memory-load branch
+  // changes CWD to the same root so the model's external-data relative paths resolve too.
   std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename,
-                                            OrtSessionOptions* session_options);
+                                            OrtSessionOptions* session_options,
+                                            const fs::path& asset_dir = {});
 
   bool IsPruned() const;
 
@@ -178,11 +183,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   SessionInfo session_info_;
 
   /// Create session options from config. Public so components like VAD can create
-  /// properly configured sessions using the GenAI infrastructure.
+  /// properly configured sessions using the GenAI infrastructure. `asset_dir` is used as the
+  /// primary search root when `custom_ops_library` is a relative path (per-role variant dir
+  /// in model-package mode); when empty, `config_->config_path` is the primary root.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      const fs::path& asset_dir = {});
 
  protected:
   void CreateSessionOptions();

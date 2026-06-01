@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 
 #include <memory>
@@ -25,9 +26,10 @@ struct Config {
 
   // Factory for creating Config from a model package's pre-merged genai_config JSON.
   // config_path is the configs/ directory inside the package. After this returns,
-  // model_package.cpp's NormalizePackageIntoConfig materializes per-role variant data
-  // (absolute filename, merged session_options) into the Config so the rest of the
-  // codebase can treat it as a flat-dir Config with no further package awareness.
+  // model_package.cpp's NormalizePackageIntoConfig sets each role's asset_dir to the
+  // selected variant directory so relative filenames (model file, custom_ops_library,
+  // adapter_filename) supplied by the per-variant overlay resolve there at session-
+  // creation time, with config_path acting as the fallback (matching flat-dir mode).
 #if ORT_HAS_MODEL_PACKAGE
   static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
                                               std::string_view merged_json);
@@ -89,6 +91,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view LangIdName = "lang_id";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -167,6 +170,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -176,9 +180,15 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
+    // Parakeet TDT (Token-and-Duration Transducer) parameters
+    int left_context_samples{};
+    int right_context_samples{};
+    std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
+
     struct Encoder {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -199,6 +209,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string lang_id{Defaults::LangIdName};
       } inputs;
 
       struct Outputs {
@@ -216,6 +227,7 @@ struct Config {
     struct Embedding {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -233,6 +245,7 @@ struct Config {
     struct Vision {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -243,10 +256,11 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
-                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
+                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -279,6 +293,7 @@ struct Config {
     struct Speech {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -300,6 +315,7 @@ struct Config {
     struct Joiner {
       std::string filename;
       std::string component;
+      fs::path asset_dir;  // search root for relative file refs in this role (empty -> fall back to config_path)
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -316,6 +332,7 @@ struct Config {
     struct VAD {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       float threshold{0.5f};
       int silence_duration_ms{500};
       int prefix_padding_ms{300};
@@ -326,6 +343,7 @@ struct Config {
     struct Decoder {
       std::string filename;
       std::string component;  // package component name for this role
+      fs::path asset_dir;     // search root for relative file refs in this role (empty -> fall back to config_path)
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
 
@@ -375,6 +393,9 @@ struct Config {
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Parakeet TDT decoder (prediction network) extra inputs
+        std::string targets_length;
       } inputs;
 
       struct Outputs {
@@ -390,6 +411,9 @@ struct Config {
         std::string outputs;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Parakeet TDT decoder (prediction network) extra outputs
+        std::string outputs_length;
       } outputs;
 
       struct PipelineModel {
@@ -403,7 +427,6 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
-        bool run_on_cpu{false};  // If true, force CPU EP for this stage (used in package mode for mixed-EP pipelines)
         bool is_lm_head{false};
         int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
                                     // This is the index of the session that needs to be reset during the execution of the current session.
@@ -467,19 +490,11 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
-void ParseSessionOptionsFromJson(std::string_view json, Config::SessionOptions& session_options);
-void OverlaySessionOptions(Config::SessionOptions& base, const Config::SessionOptions& overlay);
 
 // Parse a JSON document (read from disk by the caller) into `config`. The caller is
 // responsible for any pre-merging of overlays. Used by both the flat-dir Config constructor
 // (in config.cpp) and the package-aware loaders in model.cpp and models/model_package.cpp.
 void ParseConfigFromString(std::string_view json, Config& config);
-
-// Returns role_so->value() if set, else config.model.decoder.session_options. Centralizes the
-// "use this role's SO if specified, fall back to the decoder's" pattern that recurs across
-// Marian, Whisper, NemotronSpeech, MultiModal, and SileroVad.
-const Config::SessionOptions& EffectiveSessionOptions(const Config& config,
-                                                      const std::optional<Config::SessionOptions>& role_so);
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);

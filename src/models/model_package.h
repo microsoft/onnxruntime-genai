@@ -55,42 +55,19 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
     const std::string& explicit_ep,
     std::string& out_resolved_ep);
 
-/// Walk the Config's referenced components and materialize variant data into the Config so
-/// downstream code can treat it as a flat-dir Config:
-///   - role.filename = basename of GetSelectedVariantFilePath(0) (single-file role) or
-///     per-pipeline-element basename for GetSelectedVariantFilePath(i) (pipeline, positional).
-///   - role.session_options (and per-pipeline-element session_options) = variant per-file SO
-///     overlaid with the genai_config role SO, with back-fill to keep variant provider_options
-///     that genai_config didn't override.
-///   - For run_on_cpu pipeline stages, no EP is injected (CPU is implicit).
+/// Walk the Config's referenced components and record the selected variant's directory on
+/// each role's `asset_dir`. Path resolution at session-creation time (Model::CreateSession,
+/// custom_ops_library lookup, LoRA adapter loading) then uses asset_dir as the primary search
+/// root, falling back to config_path when empty (matching flat-dir behavior).
 /// Throws if a referenced component is not selected (overlays introducing new component
-/// references are rejected) or if pipeline.size() doesn't match the selected variant's file count.
+/// references are rejected).
 void NormalizePackageIntoConfig(Config& config, ModelPackageState& package_state);
 
-/// The well-known key under variant.json's `consumer_metadata` that the GenAI consumer reads.
-/// The key is part of the ORT-GenAI consumer contract; ORT itself does not interpret it.
-inline constexpr std::string_view kGenAIConfigOverlayKey = "genai_config_overlay";
-
-/// Apply a variant file's per-file session_options and resolved-EP provider_options to
-/// `target` as layered defaults. Semantics:
-///   - target's existing typed fields win; variant fills only when the std::optional is empty.
-///   - target's existing config_entries win; variant entries are appended only when the key
-///     isn't already present.
-///   - target's existing provider_options entry for ep_for_file wins on per-key conflicts;
-///     variant entries back-fill missing keys. If no same-named entry exists, the variant
-///     entry is appended.
-/// CPU is implicit in ORT (no GenAI provider tag), so an ep_for_file of "CPUExecutionProvider"
-/// or empty skips the provider entry. A variant declaring non-empty provider_options under
-/// such a file is a producer error and throws.
-///
-/// Exposed in the header so tests can drive it directly without needing a real
-/// OrtModelPackageComponentContext. NormalizePackageIntoConfig calls this internally with
-/// data read from the ORT package API.
-void ApplyVariantFileSessionOptions(
-    Config::SessionOptions& target,
-    const std::vector<std::pair<std::string, std::string>>& variant_session_options,
-    const std::vector<std::pair<std::string, std::string>>& variant_provider_options,
-    const std::string& ep_for_file);
+/// Name of the GenAI overlay file that may sit alongside the per-variant ONNX artifacts.
+/// When present at `<variant_dir>/genai_config_overlay.json`, its contents are JSON-merged
+/// onto the package's pre-merged genai_config.json. ORT itself does not interpret this file;
+/// it is a GenAI consumer convention recorded in the v4 model-package spec.
+inline constexpr std::string_view kVariantOverlayFilename = "genai_config_overlay.json";
 
 /// Holds the lifetime state for a single model-package load. Constructed by
 /// OpenAndPrepareModelPackage; consumed by component selection, genai_config_overlay
@@ -116,9 +93,9 @@ struct ModelPackageState {
   /// Get the resolved EP name used for variant selection.
   const std::string& GetResolvedEpName() const { return resolved_ep_name_; }
 
-  /// Extract the genai_config_overlay JSON blob from the selected component's variant
-  /// consumer_metadata. Returns an empty string when the variant has no overlay.
-  /// Throws if consumer_metadata is malformed or genai_config_overlay is the wrong type.
+  /// Read the variant's GenAI overlay (`<variant_dir>/genai_config_overlay.json`) for the
+  /// selected component. Returns an empty string when the file does not exist (no patch).
+  /// Throws if the component has not been selected or the file is unreadable.
   std::string GetGenAIConfigOverlay(const std::string& component_name) const;
 
  private:

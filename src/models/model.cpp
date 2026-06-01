@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -18,6 +19,8 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "parakeet.h"
+#include "parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -25,6 +28,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
@@ -34,12 +38,9 @@
 #if defined(_WIN32)
 #include <direct.h>
 #define GETCWD _getcwd
-#define CHDIR _wchdir
-#include <windows.h>
 #else
 #include <unistd.h>
 #define GETCWD getcwd
-#define CHDIR chdir
 #include <limits.h>
 #endif
 
@@ -47,36 +48,8 @@ namespace Generators {
 
 namespace {
 
-class DirGuard {
- private:
-  fs::path original_dir_;
-
- public:
-  DirGuard() {
-    char buffer[PATH_MAX];
-    if (GETCWD(buffer, sizeof(buffer))) {
-      original_dir_ = fs::path(buffer);
-    } else {
-      throw std::runtime_error("Failed to get current working directory");
-    }
-  }
-
-  DirGuard(const DirGuard&) = delete;
-  DirGuard& operator=(const DirGuard&) = delete;
-  DirGuard(DirGuard&&) = delete;
-
-  void ChangeTo(const fs::path& new_dir) {
-    if (CHDIR(new_dir.c_str()) != 0) {
-      throw std::runtime_error("Failed to change directory to: " + new_dir.string());
-    }
-  }
-
-  ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
-      Log("warning", "Failed to change back to original directory: " + original_dir_.string());
-    }
-  }
-};
+constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
+    "session.model_external_initializers_file_folder_path";
 
 }  // namespace
 
@@ -604,7 +577,8 @@ Model::~Model() {
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           const fs::path& asset_dir) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -670,14 +644,29 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     if (custom_library_path.is_relative()) {
       bool resolved = false;
 
-      // First try: resolve relative to GenAI model folder (most intuitive for users)
-      fs::path model_relative_path = config_->config_path / custom_library_path;
+      // First try: resolve against the role-specific asset directory (set by
+      // NormalizePackageIntoConfig in model-package mode). When empty (flat-dir mode), fall
+      // back to the GenAI config directory.
+      const fs::path& primary_root_ref = asset_dir.string().empty() ? config_->config_path : asset_dir;
+      fs::path primary_root = primary_root_ref;
+      fs::path model_relative_path = primary_root / custom_library_path;
       if (fs::exists(model_relative_path)) {
         custom_library_file_prefix = model_relative_path.string();
         resolved = true;
       }
 
-      // Second try: resolve relative to EP library directory (for system-wide installations)
+      // Second try: if asset_dir was used above, also check the config dir as a back-stop
+      // (handles libraries shipped in configs/ rather than the variant dir).
+      if (!resolved && !asset_dir.string().empty()) {
+        fs::path cfg_path = config_->config_path;
+        fs::path cfg_relative_path = cfg_path / custom_library_path;
+        if (fs::exists(cfg_relative_path)) {
+          custom_library_file_prefix = cfg_relative_path.string();
+          resolved = true;
+        }
+      }
+
+      // Third try: resolve relative to EP library directory (for system-wide installations)
       if (!resolved) {
         size_t num_devices = 0;
         const OrtEpDevice* const* device_ptrs = nullptr;
@@ -706,7 +695,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
       }
 
-      // Third try: resolve relative to current working directory (for development/portable apps)
+      // Fourth try: resolve relative to current working directory (for development/portable apps)
       if (!resolved) {
         char cwd_buffer[PATH_MAX];
         if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
@@ -743,12 +732,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true,
+                                 /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false,
+                                     /*disable_graph_capture=*/false, config_->model.decoder.asset_dir);
     }
   }
 
@@ -768,38 +759,31 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
-                                                 OrtSessionOptions* session_options) {
+                                                 OrtSessionOptions* session_options,
+                                                 const fs::path& asset_dir) {
+  // Pick the base directory used for resolving relative artifact paths and for CWD-pinning
+  // the memory-load branch's external-data lookups. In model-package mode each role passes its
+  // variant directory in `asset_dir`; in flat-dir mode the caller leaves it empty and we fall
+  // back to the GenAI config directory.
+  fs::path resolution_root = asset_dir.string().empty() ? config_->config_path : asset_dir;
+
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // TODO (baijumeswani): Loading ONNX models from memory that hold references to data stored in external files
-    // is not supported at the moment. This limitation stems from the fact that ONNX models typically
-    // reference these external files using relative paths to the model file. When loading a model from memory,
-    // the relative paths may not resolve correctly, leading to issues in locating the referenced data.
-    // To work around this, we change the current working directory to the model's config path
-    // before creating the session. This allows the model to resolve relative paths correctly.
-    // Note that this is not a problem for models that do not reference external files.
-    // This is a temporary solution and can be potentially addressed by exposing means to set a working directory
-    // for the OrtSession through the ONNX Runtime API.
-    // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
-    DirGuard dir_guard;
-    dir_guard.ChangeTo(config_->config_path);
-    auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
-
-    return session;
+    // For models loaded from memory that reference external data files, tell ORT where to find them
+    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
+    const fs::path external_initializers_path = fs::absolute(resolution_root);
+    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                    external_initializers_path.string().c_str());
+    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
-  // Otherwise, load the model from the file system. Absolute paths (e.g. those written by the
-  // package normalization pass) are used as-is; relative paths resolve against config_path.
-  fs::path model_path(model_filename);
-  if (!model_path.is_relative()) {
-    return OrtSession::Create(ort_env, model_path.c_str(), session_options);
-  }
-  fs::path base = config_->config_path;
-  return OrtSession::Create(ort_env, (base / model_path).c_str(), session_options);
+  // Otherwise, load the model from the file system, resolving against resolution_root
+  // (variant dir in package mode, config dir in flat-dir mode).
+  return OrtSession::Create(ort_env, (resolution_root / fs::path(model_filename)).c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
@@ -839,6 +823,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+  if (ModelType::IsTDT(config->model.type))
+    return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -1031,6 +1017,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
@@ -1038,7 +1025,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
+          {"qwen3_5", Processor::Create<QwenImageProcessor>},
+          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
+          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

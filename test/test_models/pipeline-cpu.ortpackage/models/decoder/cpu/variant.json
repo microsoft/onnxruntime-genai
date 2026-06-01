@@ -1,18 +1,9 @@
 {
   "schema_version": 1,
   "files": [
-    {
-      "filename": "embeds.onnx"
-    },
-    {
-      "filename": "transformer_prefill.onnx"
-    },
-    {
-      "filename": "transformer_gen.onnx"
-    },
-    {
-      "filename": "lm_head.onnx"
-    }
-  ],
-  "consumer_metadata": {}
+    { "filename": "embeds.onnx" },
+    { "filename": "transformer_prefill.onnx" },
+    { "filename": "transformer_gen.onnx" },
+    { "filename": "lm_head.onnx" }
+  ]
 }

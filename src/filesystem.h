@@ -15,12 +15,19 @@
 #define ENABLE_INTSAFE_SIGNED_FUNCTIONS  // Only unsigned intsafe math/casts available without this def
 #include <intsafe.h>
 #include <tchar.h>
+#include <direct.h>
 #endif  // _WIN32
 
 #include <sys/stat.h>
 
-#include <string>
 #include <fstream>
+#include <stdexcept>
+#include <string>
+
+#ifndef _WIN32
+#include <limits.h>
+#include <unistd.h>
+#endif
 
 namespace fs {
 
@@ -176,6 +183,25 @@ class path {
 // Namespace-level functions
 inline bool exists(const path& p) {
   return p.exists();
+}
+
+inline path absolute(const path& p) {
+  if (!p.is_relative()) {
+    return p;
+  }
+
+#ifdef _WIN32
+  char cwd_buffer[_MAX_PATH];
+  if (!_getcwd(cwd_buffer, sizeof(cwd_buffer))) {
+#else
+  char cwd_buffer[PATH_MAX];
+  if (!getcwd(cwd_buffer, sizeof(cwd_buffer))) {
+#endif
+    throw std::runtime_error("Failed to get current working directory");
+  }
+
+  path cwd_path{cwd_buffer};
+  return cwd_path / p;
 }
 
 }  // namespace fs

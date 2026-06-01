@@ -1,35 +1,6 @@
 {
   "schema_version": 1,
   "files": [
-    {
-      "filename": "model.onnx",
-      "session_options": {
-        "intra_op_num_threads": "4",
-        "inter_op_num_threads": "2",
-        "log_severity_level": "3",
-        "log_verbosity_level": "1",
-        "enable_cpu_mem_arena": "false",
-        "enable_mem_pattern": "true",
-        "log_id": "variant-log-id",
-        "enable_profiling": "/tmp/variant-profile",
-        "custom_ops_library": "libcustomops.so",
-        "graph_optimization_level": "ORT_ENABLE_BASIC",
-        "session.disable_prepacking": "1"
-      }
-    }
-  ],
-  "consumer_metadata": {
-    "genai_config_overlay": {
-      "model": {
-        "decoder": {
-          "session_options": {
-            "intra_op_num_threads": 99,
-            "enable_cpu_mem_arena": true,
-            "log_id": "genai-log-id",
-            "graph_optimization_level": "ORT_ENABLE_ALL"
-          }
-        }
-      }
-    }
-  }
+    { "filename": "model.onnx" }
+  ]
 }
