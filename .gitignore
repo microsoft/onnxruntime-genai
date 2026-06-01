@@ -35,6 +35,7 @@ examples/csharp/ModelChat/models
 !test/models/multimodal-decoder-no-input-ids/*
 !test/models/multimodal-decoder-with-input-ids/*
 !test/models/phi3-v/*
+!test/models/pipeline-model/*.json
 !test/models/qwen-vl/*
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
