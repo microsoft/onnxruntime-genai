@@ -186,7 +186,7 @@ class Phi3SmallModel(Model):
 
         self.clamp_limit = config.gegelu_limit
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         # Block-sparse attention-specific variables
         sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
         kernel_block_size = config.blocksparse_triton_kernel_block_size if hasattr(config, "blocksparse_triton_kernel_block_size") else 0
@@ -202,9 +202,9 @@ class Phi3SmallModel(Model):
             "homo_head": homo_head,                      # Use homo head pattern for sparse attention
         }
 
-        super().make_attention_init()
+        super().make_attention_init(config)
 
-    def make_lm_head_init(self):
+    def make_lm_head_init(self, config):
         if hasattr(config, "dummy_token_indices"):
             # Create LM head mask for tokens in the vocabulary
             dummy_tokens_mask = torch.zeros(self.vocab_size).bool()

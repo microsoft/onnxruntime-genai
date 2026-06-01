@@ -52,6 +52,7 @@ def parse_hf_token(hf_token):
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
             config.original_max_position_embeddings
@@ -132,8 +133,8 @@ class Model:
             "trt-rtx": {"enable_cuda_graph": "1"},
         }
         self.graph_capture = (
-            extra_options.get("enable_cuda_graph", False) == "1" or
-            extra_options.get("enable_webgpu_graph", False) == "1" or
+            extra_options.get("enable_cuda_graph", False) or
+            extra_options.get("enable_webgpu_graph", False) or
             self.ep in {"dml", "trt-rtx"}
         )
         # Initialize EP-specific expansions
@@ -289,7 +290,7 @@ class Model:
             "unidirectional": False,                         # Whether every token can only attend to previous tokens
             "use_matmul_in_attn": False,                     # Use MatMuls with attention (instead of separate MatMul ops)
         }
-        self.make_attention_init()
+        self.make_attention_init(config)
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -324,12 +325,12 @@ class Model:
             "mask": None,                                    # LM head mask for tokens in the vocabulary
             "softcap": lm_head_softcap,                      # Softcap value to prevent values from exploding in LM head
         }
-        self.make_lm_head_init()
+        self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
         algo_config = self.make_algo_config(extra_options.get("int4_algo_config", "default"))
-        self.matmul_block_size = extra_options.get("int4_block_size", 32)
-        self.qmoe_block_size = extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32)
+        self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
+        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32))
         self.quant_attrs = {
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
@@ -463,7 +464,7 @@ class Model:
     def is_fused_rope_supported(self):
         return self.ep not in ["dml"]
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
 
@@ -496,7 +497,7 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
-    def make_lm_head_init(self):
+    def make_lm_head_init(self, config):
         pass
 
     def make_quant_init(self, config):
@@ -3210,8 +3211,8 @@ class Model:
         qweight, scales = None, None
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
-        # TRT-RTX defaults to 128; others default to 32.
-        supported_blockwise_eps = ["cpu", "webgpu", "trt-rtx"]
+        # CUDA and TRT-RTX default to 128; others default to 32.
+        supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:

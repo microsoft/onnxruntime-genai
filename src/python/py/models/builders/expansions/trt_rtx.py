@@ -6,12 +6,16 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
+import onnx_ir as ir
+import torch
+
+
 class TRT_RTX:
     """
     TRT-RTX specific subgraph expansions
     """
 
-    def make_layernorm_op(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
@@ -115,7 +119,7 @@ class TRT_RTX:
         self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
-        self._make_simplified_layer_norm(
+        self.make_simplified_layer_norm(
             make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape
         )
 
