@@ -30,8 +30,7 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
 
-  // When graph capture is active (TRT-RTX), the same buffer is bound as both
-  // input and output for stable addresses. Otherwise, separate buffers with swap.
+  // WebGPU cannot alias input/output buffers, so it uses separate past/present\n  // with swap. All other EPs share buffers for stable addresses.
   bool share_buffers_{false};
   size_t input_index_{~0U};
   size_t output_index_{~0U};

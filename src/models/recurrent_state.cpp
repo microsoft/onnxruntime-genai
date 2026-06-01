@@ -94,11 +94,11 @@ RecurrentState::RecurrentState(State& state)
         "Set past_present_share_buffer to true in genai_config.json.");
   }
 
-  // Graph capture (TRT-RTX) requires stable buffer addresses across steps —
-  // bind the same tensor as both input and output. Otherwise use separate
-  // past/present buffers with swap, which is compatible with all EPs including
-  // WebGPU (which prohibits aliasing a buffer as both read-only and read-write).
-  share_buffers_ = state_.params_->use_graph_capture;
+  // WebGPU prohibits binding the same buffer as both read-only (input) and
+  // read-write (output) storage in the same compute pass, so it must use
+  // separate past/present buffers with swap. All other EPs share buffers
+  // for stable addresses (required by TRT-RTX graph replay, beneficial elsewhere).
+  share_buffers_ = model_.p_device_kvcache_->GetType() != DeviceType::WEBGPU;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);
@@ -130,8 +130,8 @@ void RecurrentState::Add() {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    // Graph capture: alias input=output for stable addresses.
-    // Otherwise: separate past/present buffers.
+    // Shared: alias input=output for stable addresses.
+    // WebGPU: separate past/present buffers to avoid aliasing violation.
     state_.inputs_.push_back(share_buffers_ ? presents_[i].get() : pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
@@ -154,15 +154,12 @@ void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
-    // Recurrent states cannot be partially rewound — they are compressed summaries
-    // with no per-position history. Non-zero rewind is a no-op; the state remains unchanged.
-    if (g_log.enabled)
-      Log("warning", "RecurrentState::RewindTo(" + std::to_string(index) +
-                         ") is a no-op. Recurrent states cannot be partially rewound.");
-    return;
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) +
+        ") is not supported. Recurrent states cannot be partially rewound.");
   }
   if (share_buffers_) {
-    // Graph capture: zero in place, addresses stay stable.
+    // Shared buffers: zero in place, addresses stay stable.
     ZeroStates(presents_);
   } else {
     // Zero and rebind all state buffers.
