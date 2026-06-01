@@ -36,7 +36,7 @@ def test_qwen_fara_vision_basic(test_data_path, relative_model_path, relative_im
 
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     # Test with Qwen vision tokens
@@ -57,7 +57,7 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
 
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = None
     with open(image_path, "rb") as image:
         image_bytes = image.read()
@@ -90,7 +90,7 @@ def test_qwen_fara_vision_multiple_images(test_data_path, relative_model_path, r
     processor = model.create_multimodal_processor()
 
     image_paths = [
-        os.fspath(Path(test_data_path) / relative_image_path) for relative_image_path in relative_image_paths
+        os.fspath(Path(test_data_path).parent / relative_image_path) for relative_image_path in relative_image_paths
     ]
     images = og.Images.open(*image_paths)
 
@@ -169,7 +169,7 @@ def test_qwen_fara_vision_with_special_tokens(test_data_path, relative_model_pat
 
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     # Test with Qwen vision tokens
@@ -190,7 +190,7 @@ def test_qwen_fara_vision_different_image_formats(test_data_path, relative_model
 
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>Analyze this image"
@@ -212,7 +212,7 @@ def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, rela
         pytest.skip("PyTorch or transformers not available for accuracy comparison")
 
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
 
     # Load ONNX model
     onnx_model = og.Model(model_path)
@@ -270,7 +270,7 @@ def test_qwen_fara_preprocessing_consistency(test_data_path, relative_model_path
     This validates deterministic behavior of the preprocessing pipeline.
     """
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
 
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
@@ -371,7 +371,7 @@ def test_qwen3_vl_pixel_values_shape(test_data_path, relative_image_path):
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
@@ -418,7 +418,7 @@ def test_qwen_vl_family_patch_size_difference(test_data_path, model_name, expect
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
@@ -455,7 +455,7 @@ def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_mode
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
@@ -516,7 +516,7 @@ def test_qwen_vl_image_grid_thw_consistency(test_data_path, relative_model_path,
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     images = og.Images.open(image_path)
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe this image"
@@ -555,7 +555,7 @@ def test_qwen_vl_normalization_range_difference(test_data_path, relative_image_p
     Qwen3-VL uses mean/std=[0.5, 0.5, 0.5] → pixel range [-1, 1].
     Qwen2.5-VL uses OpenAI CLIP normalization → wider range.
     """
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
 
     # Qwen3-VL: normalized with [0.5, 0.5, 0.5]
     q3_model_path = os.fspath(Path(test_data_path) / "qwen3-vl")
@@ -672,7 +672,7 @@ def test_qwen35_hybrid_vision_preprocessing(test_data_path, relative_image_path)
     if not os.path.exists(model_path):
         pytest.skip("qwen35-hybrid-preprocessing test model not found")
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
     if not os.path.exists(image_path):
         pytest.skip(f"Test image not found: {image_path}")
 
