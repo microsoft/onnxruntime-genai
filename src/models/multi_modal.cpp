@@ -601,6 +601,15 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
       model_{model} {
   input_ids_.Add();
   inputs_embeds_.Add();
+
+  // Gemma4: embedding model produces per_layer_inputs alongside inputs_embeds
+  if (!model_.config_->model.embedding.outputs.per_layer_inputs.empty()) {
+    auto shape = model_.session_info_.GetOutputShape(model_.config_->model.embedding.outputs.per_layer_inputs);
+    int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
+                                                     model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
+    per_layer_inputs_->Add();
+  }
 }
 
 void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_image_tokens, const int64_t num_audio_tokens) {
@@ -650,6 +659,15 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
+  // Gemma4: decoder accepts per_layer_inputs from the embedding model
+  if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
+    auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);
+    int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
+                                                     model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
+    per_layer_inputs_->Add();
+  }
+
   // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds.
   // Use a decoder-only SessionInfo to avoid false positives: the combined session_info_
   // includes embedding session inputs (which always has input_ids), causing this check
@@ -690,6 +708,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
+  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
 
 // Overload for pipeline to call
@@ -700,6 +719,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
+  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
@@ -798,6 +818,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
+    if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
+      embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
+    }
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
@@ -810,6 +833,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
+  if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
+    embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
+  }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }

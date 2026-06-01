@@ -239,6 +239,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
 
@@ -393,6 +394,9 @@ struct Config {
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Gemma4 per-layer inputs (e.g. per-layer embeddings from embedding model)
+        std::string per_layer_inputs;
 
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string targets_length;
