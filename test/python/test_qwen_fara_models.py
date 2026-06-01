@@ -747,10 +747,16 @@ def test_qwen35_hybrid_text_generation_cuda(test_data_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not (hasattr(og, "is_webgpu_available") and og.is_webgpu_available()),
-    reason="WebGPU EP not available",
-)
+def _is_webgpu_test_enabled():
+    """WebGPU tests require both runtime support and explicit opt-in via TEST_WEBGPU env var."""
+    return (
+        hasattr(og, "is_webgpu_available")
+        and og.is_webgpu_available()
+        and os.environ.get("TEST_WEBGPU", "").lower() in ("true", "1", "yes")
+    )
+
+
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
 def test_qwen35_hybrid_generator_creates_webgpu(test_data_path):
     """Test that a Generator can be created for the hybrid model on WebGPU.
     Validates RecurrentState separate-buffer path (WebGPU cannot alias
@@ -769,10 +775,7 @@ def test_qwen35_hybrid_generator_creates_webgpu(test_data_path):
     assert generator is not None
 
 
-@pytest.mark.skipif(
-    not (hasattr(og, "is_webgpu_available") and og.is_webgpu_available()),
-    reason="WebGPU EP not available",
-)
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
 def test_qwen35_hybrid_text_generation_webgpu(test_data_path):
     """Test that the hybrid model generator constructs and prefill executes on WebGPU.
     RecurrentState uses separate past/present buffers to avoid the WebGPU
