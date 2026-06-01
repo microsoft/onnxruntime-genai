@@ -88,37 +88,51 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  const bool past_present_share_buffer = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
-  if (!past_present_share_buffer) {
+  if (!state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)) {
     throw std::runtime_error(
         "RecurrentState requires past_present_share_buffer=true. "
         "Set past_present_share_buffer to true in genai_config.json.");
   }
 
+  // Graph capture (TRT-RTX) requires stable buffer addresses across steps —
+  // bind the same tensor as both input and output. Otherwise use separate
+  // past/present buffers with swap, which is compatible with all EPs including
+  // WebGPU (which prohibits aliasing a buffer as both read-only and read-write).
+  share_buffers_ = state_.params_->use_graph_capture;
+
+  if (!share_buffers_) {
+    pasts_.resize(num_layers * 2);
+  }
   presents_.reserve(num_layers * 2);
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
 
-  // Qwen3.5 linear-attention state is a compressed recurrent state, not a
-  // token-indexed KV cache. For graph replay, bind each state tensor as both
-  // past input and present output so ORT/TRT-RTX sees stable addresses.
-  // The EP/plugin kernels must read the previous contents before writing the
-  // updated state back to the same buffer.
   for (int i = 0; i < num_layers; ++i) {
+    if (!share_buffers_) {
+      pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
+      pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
+    }
     presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
     presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
   }
 
+  if (!share_buffers_) {
+    ZeroStates(pasts_);
+  }
   ZeroStates(presents_);
 }
 
 void RecurrentState::Add() {
   if (layer_indices_.empty()) return;
 
+  input_index_ = state_.inputs_.size();
+  output_index_ = state_.outputs_.size();
+
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    auto* past = presents_[i].get();
-    state_.inputs_.push_back(past);
+    // Graph capture: alias input=output for stable addresses.
+    // Otherwise: separate past/present buffers.
+    state_.inputs_.push_back(share_buffers_ ? presents_[i].get() : pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -126,6 +140,14 @@ void RecurrentState::Add() {
 }
 
 void RecurrentState::Update() {
+  if (layer_indices_.empty() || share_buffers_) return;
+
+  const int num_layers = static_cast<int>(layer_indices_.size());
+  for (int i = 0; i < num_layers * 2; ++i) {
+    std::swap(pasts_[i], presents_[i]);
+    state_.inputs_[input_index_ + i] = pasts_[i].get();
+    state_.outputs_[output_index_ + i] = presents_[i].get();
+  }
 }
 
 void RecurrentState::RewindTo(size_t index) {
@@ -139,10 +161,19 @@ void RecurrentState::RewindTo(size_t index) {
                          ") is a no-op. Recurrent states cannot be partially rewound.");
     return;
   }
-  // Shared recurrent states keep stable input/output pointers for graph replay.
-  // Reset the state contents in place without rebinding.
-  ZeroStates(presents_);
-  return;
+  if (share_buffers_) {
+    // Graph capture: zero in place, addresses stay stable.
+    ZeroStates(presents_);
+  } else {
+    // Zero and rebind all state buffers.
+    ZeroStates(pasts_);
+    ZeroStates(presents_);
+    const int num_layers = static_cast<int>(layer_indices_.size());
+    for (int i = 0; i < num_layers * 2; ++i) {
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
+  }
 }
 
 void RecurrentState::ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states) {
