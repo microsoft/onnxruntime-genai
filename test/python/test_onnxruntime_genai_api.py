@@ -656,9 +656,9 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         assert equal
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing(test_data_path, relative_model_path, relative_image_path):
+def test_phi3v_preprocessing(test_data_path, relative_model_path, relative_image_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -671,9 +671,9 @@ def test_vision_preprocessing(test_data_path, relative_model_path, relative_imag
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
+def test_phi3v_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -689,12 +689,12 @@ def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_mod
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_vision_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
+def test_phi3v_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -924,9 +924,9 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
             generator.generate_next_token()
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+def test_whisper_preprocessing(test_data_path, relative_model_path, relative_audio_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -941,9 +941,9 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     _ = processor(prompts, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+def test_whisper_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -957,12 +957,12 @@ def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, 
     _ = processor(prompt, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
 )
-def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 

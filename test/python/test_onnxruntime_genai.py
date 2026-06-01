@@ -60,7 +60,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--test_models",
-        help="Path to the test_models directory",
+        help="Path to the 'models' directory",
         default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "models",
     )
     parser.add_argument(

@@ -6,7 +6,7 @@ Unit tests for Gemma4 multimodal model.
 Tests cover model loading, text-only processing, and image understanding.
 
 This file can be used in two ways:
-1. As a pytest module: pytest test_gemma4_models.py --test_models=/path/to/test_models
+1. As a pytest module: pytest test_gemma4_models.py --test_models=/path/to/models
 2. As a standalone runner: python test_gemma4_models.py --cwd test/python --test_models test/models
 """
 
@@ -24,7 +24,7 @@ from _test_utils import run_subprocess
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("gemma4-tests")
 
-GEMMA4_MODEL_NAME = "gemma4-vision-preprocessing"
+GEMMA4_MODEL_NAME = "gemma4"
 
 
 def _get_gemma4_model_path(test_data_path):
@@ -311,8 +311,8 @@ def parse_arguments():
     )
     parser.add_argument(
         "--test_models",
-        help="Path to the test_models directory",
-        default=Path(__file__).parent.parent.resolve().absolute() / "test_models",
+        help="Path to the 'models' directory",
+        default=Path(__file__).parent.parent.resolve().absolute() / "models",
     )
     return parser.parse_args()
 
