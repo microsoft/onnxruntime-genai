@@ -32,7 +32,7 @@ public class TestUtils {
   }
 
   public static final String getTestResourcePath(String relativeResourcePath) {
-    return getFilePathFromDisk(getRepoRoot() + "test/test_models/" + relativeResourcePath);
+    return getFilePathFromDisk(getRepoRoot() + "test/models/" + relativeResourcePath);
   }
 
   public static final String getRepoRoot() {

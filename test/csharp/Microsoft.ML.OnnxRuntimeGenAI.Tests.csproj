@@ -80,10 +80,10 @@
         <Visible>false</Visible>
     </None>
 
-    <None Include="$(TestsSrcRoot)\test_models\**">
+    <None Include="$(TestsSrcRoot)\models\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
-      <LinkBase>"test_models\"</LinkBase>
+      <LinkBase>"models\"</LinkBase>
     </None>
   </ItemGroup>
 
