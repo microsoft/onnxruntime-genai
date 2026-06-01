@@ -70,6 +70,25 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             # position_ids won't be used since rotary embeddings are handled in GQA
             self.position_ids_name = None
 
+    def make_rope_init(self, config):
+        if "short_factor" in config.rope_scaling:
+            # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
+            self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
+            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+
+            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
+            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+            short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+            long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+
+            self.rope_attrs["multi_cache"] = {
+                "short_factor": short_factor,  # Short factor when calculating `inv_freq` in rotary embeddings
+                "long_factor": long_factor,    # Long factor when calculating `inv_freq` in rotary embeddings
+                "short_mscale": short_mscale,  # Magnitude scaling for short factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+                "long_mscale": long_mscale,    # Magnitude scaling for long factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+            }
+
     def make_position_ids_reformatting(self):
         if self.ep not in self.eps_without_if_support:
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
@@ -166,6 +185,36 @@ class Phi3SmallModel(Model):
             self.attention_attrs["scale"] = config.mup_attn_multiplier / self.head_size
 
         self.clamp_limit = config.gegelu_limit
+
+    def make_attention_init(self):
+        # Block-sparse attention-specific variables
+        sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
+        kernel_block_size = config.blocksparse_triton_kernel_block_size if hasattr(config, "blocksparse_triton_kernel_block_size") else 0
+        local_blocks = config.blocksparse_num_local_blocks if hasattr(config, "blocksparse_num_local_blocks") else 0
+        vert_block_stride = config.blocksparse_vert_stride if hasattr(config, "blocksparse_vert_stride") else 0
+        homo_head = config.blocksparse_homo_head_pattern if hasattr(config, "blocksparse_homo_head_pattern") else False
+
+        self.attention_attrs["block_sparse"] = {
+            "sparse_block_size": sparse_block_size,      # Sparse block size for SparseAttention op
+            "kernel_block_size": kernel_block_size,      # Kernel block size for sparse attention
+            "local_blocks": local_blocks,                # Number of local blocks for sparse attention
+            "vert_stride": vert_block_stride,            # Vertical stride to use for sparse attention
+            "homo_head": homo_head,                      # Use homo head pattern for sparse attention
+        }
+
+        super().make_attention_init()
+
+    def make_lm_head_init(self):
+        if hasattr(config, "dummy_token_indices"):
+            # Create LM head mask for tokens in the vocabulary
+            dummy_tokens_mask = torch.zeros(self.vocab_size).bool()
+            dummy_tokens_mask[config.dummy_token_indices] = True
+            self.lm_head_attrs["mask"] = dummy_tokens_mask
+
+    def make_attention_mask_reformatting(self):
+        super().make_attention_mask_reformatting()
+        if self.attention_attrs["block_sparse"]["sparse_block_size"] != 0:
+            self.make_attention_mask_reformatting_for_sparse_attn()
 
     def calculate_cdiv(self, a, b):
         return -(a // -b)

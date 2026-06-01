@@ -945,6 +945,8 @@ class VideoChatFlashQwenModel(QwenModel):
             token=self.hf_token,
             **extra_kwargs,
         )
+
+
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
@@ -2107,7 +2109,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
-        algo_config = self.quant_attrs["int4"].get("algo_config")
+        algo_config = self.quant_attrs.get("algo_config")
         if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
@@ -2246,7 +2248,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
                           shape=["batch_size", "sequence_length", 1])
 
-        gated_mul_name = f"{basename}/GatedMul"
+        gated_mul_name = f"{basename}/Mul"
         self.make_mul(gated_mul_name,
                       [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
                       dtype=self.io_dtype,
