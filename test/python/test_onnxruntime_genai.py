@@ -9,8 +9,8 @@ import sys
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
-from test_gemma4_models import run_gemma4_vision_tests
-from test_qwen_fara_models import run_qwen_fara_vision_tests
+from models.test_gemma4_models import run_gemma4_vision_tests
+from models.test_qwen_fara_models import run_qwen_fara_vision_tests
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
