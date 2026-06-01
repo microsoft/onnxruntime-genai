@@ -409,14 +409,20 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const char* provider_name = device_type_names[static_cast<int>(type)];
   Config::ProviderOptions dummy_provider_options{provider_name, {}};
 
-  // Forward the user's provider options (e.g. validationMode) to the dummy session
-  // so that singleton resources (like WebGpuContext) are initialized with the correct settings.
-  // Exclude enableGraphCapture since the trivial model can't use graph capture.
+  // Forward only global/singleton WebGPU options to the dummy session so that the
+  // process-wide WebGpuContext singleton is initialized with the correct settings.
+  // Per-session options (enableGraphCapture, bufferCacheMode, etc.) are excluded
+  // because they are meaningless for the trivial initialization model.
   if (type == DeviceType::WEBGPU) {
+    static const std::unordered_set<std::string> global_options = {
+        "deviceId", "webgpuInstance", "webgpuDevice",
+        "dawnBackendType", "powerPreference",
+        "validationMode", "dawnProcTable",
+    };
     for (const auto& user_po : config.model.decoder.session_options.provider_options) {
       if (user_po.name == provider_name) {
         for (const auto& opt : user_po.options) {
-          if (opt.first != "enableGraphCapture") {
+          if (global_options.count(opt.first)) {
             dummy_provider_options.options.emplace_back(opt);
           }
         }
