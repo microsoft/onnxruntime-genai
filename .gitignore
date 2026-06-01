@@ -29,24 +29,16 @@ examples/python/genai_models
 examples/python/hf_cache
 examples/csharp/ModelChat/models
 
-!test/models/hf-internal-testing/
-!test/models/hf-internal-testing/tiny-random-gpt2*/*.onnx
-!test/models/hf-internal-testing/tiny-qwen35-cuda/*.onnx
-!test/models/grammars/
-!test/models/qwen-vision-preprocessing/
-!test/models/qwen-vision-preprocessing/*.onnx
-!test/models/qwen3-vl-vision-preprocessing/
-!test/models/qwen3-vl-vision-preprocessing/*.onnx
-!test/models/qwen35-hybrid-preprocessing/
-!test/models/qwen35-hybrid-preprocessing/*.onnx
-!test/models/mistral3-vision-preprocessing/
-!test/models/gemma4-vision-preprocessing/
-!test/models/gemma4-vision-preprocessing/*.onnx
-!test/models/multimodal-decoder-no-input-ids/
+!test/models/gemma4/*
+!test/models/hf-internal-testing/*
+!test/models/mistral3/*
 !test/models/multimodal-decoder-no-input-ids/*
-!test/models/multimodal-decoder-with-input-ids/
 !test/models/multimodal-decoder-with-input-ids/*
-!test/create/create_decoder_input_ids_test_models.py
+!test/models/phi3-v/*
+!test/models/qwen-vl/*
+!test/models/qwen3-5/*
+!test/models/qwen3-vl/*
+!test/models/whisper/*
 
 .ipynb_checkpoints/
 /src/java/.gradle
