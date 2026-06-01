@@ -68,14 +68,9 @@ std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx,
     auto variant_names = pkg_ctx.GetVariantNames(comp_name.c_str());
 
     for (const auto& var_name : variant_names) {
-      size_t ep_count = pkg_ctx.GetVariantEpCompatibilityCount(comp_name.c_str(), var_name.c_str());
-      for (size_t i = 0; i < ep_count; ++i) {
-        const char* ep_name = nullptr;
-        pkg_ctx.GetVariantEpCompatibility(comp_name.c_str(), var_name.c_str(), i,
-                                          &ep_name, nullptr, nullptr);
-        if (ep_name != nullptr) {
-          comp_eps.insert(ep_name);
-        }
+      auto ep_name = pkg_ctx.GetVariantEpName(comp_name.c_str(), var_name.c_str());
+      if (ep_name.has_value()) {
+        comp_eps.insert(*ep_name);
       }
     }
 

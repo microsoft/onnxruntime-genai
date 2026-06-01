@@ -1553,20 +1553,15 @@ inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const ch
   return result;
 }
 
-inline size_t OrtModelPackageContext::GetVariantEpCompatibilityCount(const char* component_name,
-                                                                     const char* variant_name) const {
-  size_t count = 0;
-  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpCompatibilityCount(
-      this, component_name, variant_name, &count));
-  return count;
-}
-
-inline void OrtModelPackageContext::GetVariantEpCompatibility(const char* component_name,
-                                                               const char* variant_name, size_t ep_idx,
-                                                               const char** out_ep, const char** out_device,
-                                                               const char** out_compat) const {
-  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpCompatibility(
-      this, component_name, variant_name, ep_idx, out_ep, out_device, out_compat));
+inline std::optional<std::string> OrtModelPackageContext::GetVariantEpName(const char* component_name,
+                                                                          const char* variant_name) const {
+  const char* ep = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(
+      this, component_name, variant_name, &ep));
+  if (ep == nullptr) {
+    return std::nullopt;
+  }
+  return std::string{ep};
 }
 
 inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(

@@ -66,6 +66,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #pragma once
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -1496,9 +1497,9 @@ struct OrtModelPackageContext {
 
   std::vector<std::string> GetVariantNames(const char* component_name) const;
 
-  size_t GetVariantEpCompatibilityCount(const char* component_name, const char* variant_name) const;
-  void GetVariantEpCompatibility(const char* component_name, const char* variant_name, size_t ep_idx,
-                                 const char** out_ep, const char** out_device, const char** out_compat) const;
+  /// Returns the EP name declared for a (component, variant) pair, or std::nullopt when the
+  /// variant does not declare an EP. Each variant targets a single EP under the v4 schema.
+  std::optional<std::string> GetVariantEpName(const char* component_name, const char* variant_name) const;
 
   std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(const char* component_name,
                                                                     const OrtModelPackageOptions& options) const;
