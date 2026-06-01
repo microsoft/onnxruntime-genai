@@ -294,7 +294,7 @@ def run_gemma4_vision_tests(
         "-m",
         "pytest",
         "-sv",
-        "test_gemma4_models.py",
+        os.path.abspath(__file__),
         "--test_models",
         test_models,
     ]
