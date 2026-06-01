@@ -98,6 +98,8 @@ RecurrentState::RecurrentState(State& state)
   // read-write (output) storage in the same compute pass, so it must use
   // separate past/present buffers with swap. All other EPs share buffers
   // for stable addresses (required by TRT-RTX graph replay, beneficial elsewhere).
+  // TODO: Remove WebGPU special case once the ORT WebGPU EP adds a
+  // LinearAttention kernel with native past/present buffer sharing support.
   share_buffers_ = model_.p_device_kvcache_->GetType() != DeviceType::WEBGPU;
 
   if (!share_buffers_) {
