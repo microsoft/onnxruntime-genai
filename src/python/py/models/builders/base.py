@@ -354,15 +354,25 @@ class Model:
         with additional functionality provided by the expansion class.
         """
         if self.ep == "trt-rtx":
-            from expansions import TRT_RTX as Expansions
+            from expansions import TRT_RTX
+
+            self.make_layernorm_subgraph = TRT_RTX.make_layernorm_subgraph.__get__(self, self.__class__)
+            self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
+            self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
+            self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
+            self.make_padded_cache = TRT_RTX.make_padded_cache.__get__(self, self.__class__)
+            self.make_split_if_nodes = TRT_RTX.make_split_if_nodes.__get__(self, self.__class__)
+
+        elif self.ep == "webgpu":
+            from expansions import WebGPU
+
+            if self.extra_options.get("enable_webgpu_graph", False):
+                self.make_attention_mask_reformatting_for_gqa = (
+                    WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__get__(self, self.__class__)
+                )
+
         else:
             return
-
-        for name, attr in Expansions.__dict__.items():
-            # Only replace functions (skip special methods, non-callables, constructors, etc.)
-            if callable(attr) and not name.startswith("_"):
-                # Bind the function to the current class
-                setattr(self, name, attr)
 
     def make_inputs_init(self):
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
@@ -1528,8 +1538,16 @@ class Model:
         if cast:
             inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
 
-        # Make op and its shape
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        # Make op subgraph and its shapes
+        self.make_layernorm_subgraph(
+            name,
+            op_type=op_type,
+            inputs=inputs,
+            outputs=outputs,
+            skip=skip,
+            new_io_dtype=new_io_dtype,
+            **kwargs,
+        )
         if not use_hidden_states_as_output:
             # Add shape only if not graph output
             self.make_value(outputs[0], new_io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
@@ -1601,6 +1619,21 @@ class Model:
             outputs[3] = output_3_cast_output
 
         return inputs, outputs
+
+    def make_layernorm_subgraph(self, name, **kwargs):
+        # This method can be used to create multiple LayerNorm operations
+        op_type = kwargs.pop("op_type")
+        inputs = kwargs.pop("inputs")
+        outputs = kwargs.pop("outputs")
+        skip = kwargs.pop("skip")
+        new_io_dtype = kwargs.pop("new_io_dtype")
+
+        # Create LayerNorm op
+        self.make_layernorm_op(name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs)
+
+    def make_layernorm_op(self, name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs):
+        # Create the LayerNorm, SimplifiedLayerNorm, SkipLayerNorm, or SkipSimplifiedLayerNorm op
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -4163,49 +4196,7 @@ class Model:
 
         return expand_name
 
-    def make_attention_mask_graph_capture_reformatting_for_gqa(self, attn_mask_basename):
-        # Make nodes for the attention mask subgraph that calculates
-        # attributes about the 2D attention mask to use in GroupQueryAttention
-        #
-        # Key difference vs make_attention_mask_standard_reformatting_for_gqa:
-        # - Standard mode: total_seq_len is calculated from Shape op (always runs on CPU)
-        # - Graph capture mode: No Shape ops inserted to ensure all ops run on GPU (no CPU ops)
-        #
-        #          attention_mask
-        #               |
-        #         Cast to int32
-        #               |
-        #           ReduceSum (keepdims=0)
-        #              /    \
-        #             /      \
-        #           Sub    ReduceMax
-        #            |        |
-        #       seqlens_k  total_seq_len
-        #         (1D)       (int)
-
-        # Calculate ReduceSum from attention_mask
-        cast_1_name = f"{attn_mask_basename}/Cast"
-        self.make_cast(
-            cast_1_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"]
-        )
-        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-        # Left branch: Calculate seqlens_k = ReduceSum - 1
-        sub_name = f"{attn_mask_basename}/Sub"
-        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-        # Right branch: ReduceMax to get maximum int value for total_seq_len
-        reduce_max_name = f"{attn_mask_basename}/ReduceMax"
-        reduce_max_inputs = [f"{reduce_sum_name}/output_0"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=ir.DataType.INT32, shape=[])
-
-        self.mask_attrs["seqlens_k"] = sub_name
-        self.mask_attrs["total_seq_len"] = reduce_max_name
-
-    def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
+    def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
@@ -4220,6 +4211,8 @@ class Model:
         #              |                |
         #          seqlens_k      total_seq_len
         #            (1D)             (int)
+        basename = "/model/attn_mask_reformat"
+        attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
@@ -4242,17 +4235,6 @@ class Model:
 
         self.mask_attrs["seqlens_k"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
-
-    def make_attention_mask_reformatting_for_gqa(self):
-        # Make nodes for the attention mask subgraph that calculates
-        # attributes about the 2D attention mask to use in GroupQueryAttention
-        basename = "/model/attn_mask_reformat"
-        attn_mask_basename = f"{basename}/attn_mask_subgraph"
-
-        if self.graph_capture:
-            self.make_attention_mask_graph_capture_reformatting_for_gqa(attn_mask_basename)
-        else:
-            self.make_attention_mask_standard_reformatting_for_gqa(attn_mask_basename)
 
     def make_position_ids_reformatting(self):
         # For most cases, position_ids are already properly formatted as 2D tensors

@@ -2,9 +2,6 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
-#
-# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 import onnx_ir as ir
 import torch
@@ -14,95 +11,56 @@ class TRT_RTX:
     """
     TRT-RTX specific subgraph expansions
     """
+    def make_layernorm_subgraph(self, name, **kwargs):
+        # This method can be used to create multiple LayerNorm operations
+        op_type = kwargs.pop("op_type")
+        inputs = kwargs.pop("inputs")
+        outputs = kwargs.pop("outputs")
+        skip = kwargs.pop("skip")
+        new_io_dtype = kwargs.pop("new_io_dtype")
 
-    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        root_input = self.layernorm_attrs["root_input"]
-        skip_input = self.layernorm_attrs["skip_input"]
-
-        # Get precision types to use
-        old_io_dtype = self.io_dtype
-        new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
-        cast = old_io_dtype != new_io_dtype
-
-        # Create weight and bias tensors
-        weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer(layernorm.weight + self.layernorm_attrs["add_offset"], weight, to=new_io_dtype)
-        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
-        if not simple:
-            self.make_initializer(layernorm.bias, bias, to=new_io_dtype)
-
-        # Create input names for op
-        inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
-        if not simple:
-            inputs.append(bias)
-
-        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        if not skip:
-            kwargs.update({"axis": -1, "stash_type": 1})
-
-        # Create output names for op
-        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
-        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        use_hidden_states_as_output = self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head)
-        if use_hidden_states_as_output:
-            output_0 = self.output_names["hidden_states"]
-        outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
-
-        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
-        if cast:
-            inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
-            root_input = inputs[0]
-            skip_input = inputs[1] if skip else None
-
-        if op_type == "SimplifiedLayerNormalization":
-            self.make_simplified_layer_norm(
-                name,
-                root_input,
-                weight,
-                outputs[0],
-                new_io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
-            )
-        elif op_type == "SkipSimplifiedLayerNormalization":
-            self.make_skip_simplified_layer_norm(
-                name,
-                root_input,
-                skip_input,
-                weight,
-                outputs[0],
-                output_3,
-                new_io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
-            )
+        if op_type == "LayerNormalization":
+            # Create LayerNorm op
+            self.make_layernorm_op(name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs)
+    
         elif op_type == "SkipLayerNormalization":
+            # Create subgraph to calculate SkipLayerNorm
             self.make_skip_layer_norm(
                 name,
-                root_input,
-                skip_input,
-                weight,
-                bias,
-                outputs[0],
-                output_3,
-                new_io_dtype,
+                root_input=inputs[0],
+                skip_input=inputs[1],
+                weight_name=inputs[2],
+                bias_name=inputs[3],
+                output_0=outputs[0],
+                output_3=outputs[3] if len(outputs) > 3 else None,
+                io_dtype=new_io_dtype,
                 shape=["batch_size", "sequence_length", self.hidden_size],
             )
-        else:
-            raise ValueError(f"Invalid op_type: {op_type}")
 
-        if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        elif op_type == "SimplifiedLayerNormalization":
+            # Create subgraph to calculate RMSNorm
+            self.make_simplified_layer_norm(
+                name,
+                root_input=inputs[0],
+                weight_name=inputs[1],
+                output_0=outputs[0],
+                io_dtype=new_io_dtype,
+                shape=["batch_size", "sequence_length", self.hidden_size],
+            )
 
-        # Update LayerNorm attributes
-        self.layernorm_attrs["output_0"] = output_0
-        if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.layernorm_attrs["output_3"] = output_3
+        elif op_type == "SkipSimplifiedLayerNormalization":
+            # Create subgraph to calculate SkipRMSNorm
+            self.make_skip_simplified_layer_norm(
+                name,
+                root_input=inputs[0],
+                skip_input=inputs[1],
+                weight_name=inputs[2],
+                output_0=outputs[0],
+                output_3=outputs[3] if len(outputs) > 3 else None,
+                io_dtype=new_io_dtype,
+                shape=["batch_size", "sequence_length", self.hidden_size],
+            )
 
-            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
-            self.layernorm_attrs["root_input"] = output_3
-
-    # This expansion of contrib-op can be updated / deprecated in future.
     def make_skip_simplified_layer_norm(
         self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape
     ):
@@ -123,7 +81,6 @@ class TRT_RTX:
             make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape
         )
 
-    # This expansion contrib-op can be updated / deprecated in the future.
     def make_skip_layer_norm(
         self, basename, root_input, skip_input, weight_name, bias_name, output_0, output_3, io_dtype, shape
     ):

@@ -4,7 +4,9 @@
 # license information.
 # -------------------------------------------------------------------------
 from .trt_rtx import TRT_RTX
+from .webgpu import WebGPU
 
 __all__ = [
     "TRT_RTX",
+    "WebGPU",
 ]
