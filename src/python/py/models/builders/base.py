@@ -4254,44 +4254,6 @@ class Model:
         else:
             self.make_attention_mask_standard_reformatting_for_gqa(attn_mask_basename)
 
-    def make_attention_mask_reformatting_for_sparse_attn(self):
-        # Make nodes for the attention mask subgraph that calculates
-        # attributes about the 2D attention mask to use in SparseAttention
-        #
-        #                attention_mask
-        #               /              \
-        #          ReduceSum          Shape
-        #         (keepdims=0)          |
-        #              |                |
-        #        Cast to int32        Gather
-        #              |                |
-        #      key_total_seq_lens  Cast to int32
-        #            (1D)               |
-        #                          total_seq_len
-        #                             (int)
-
-        basename = "/model/attn_mask_reformat"
-        attn_mask_basename = f"{basename}/attn_mask_subgraph"
-
-        # Left path
-        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = [self.input_names["attention_mask"], "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
-        cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
-        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size"])
-
-        # Right path
-        shape_name = f"{attn_mask_basename}/Shape"
-        self.make_shape(shape_name, self.input_names["attention_mask"], shape=[2])
-        gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
-        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
-        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
-
-        self.mask_attrs["key_total_seq_lens"] = cast_1_name
-        self.mask_attrs["total_seq_len"] = cast_2_name
-
     def make_position_ids_reformatting(self):
         # For most cases, position_ids are already properly formatted as 2D tensors
         # with int64 values matching input_ids shape, so we can use them directly
