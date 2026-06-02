@@ -122,7 +122,6 @@ def create_dummy_decoder_model(
     output_path: str,
     num_layers: int = 4,
     kv_layers: list | None = None,
-    kv_layers: list | None = None,
     hidden_size: int = 1024,
     num_kv_heads: int = 2,
     head_size: int = 256,
@@ -345,8 +344,12 @@ def create_genai_config(output_path: str, num_kv_layers: int, kv_layers: list):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate dummy ONNX models for Qwen3.5 hybrid model testing")
-    parser.add_argument("--output", type=str, default="test/models/qwen3-5",
-                        help="Output directory for the dummy models")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="test/models/qwen3-5",
+        help="Output directory for the dummy models",
+    )
     args = parser.parse_args()
 
     output_dir = args.output
