@@ -27,7 +27,9 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("qwen-fara-vision-tests")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_fara_vision_basic(test_data_path, relative_model_path, relative_image_path):
     """Test basic vision preprocessing for Qwen/Fara-style models."""
@@ -48,7 +50,9 @@ def test_qwen_fara_vision_basic(test_data_path, relative_model_path, relative_im
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "landscape.jpg"])
 def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, relative_image_path):
     """Test loading images from bytes for Qwen/Fara models."""
@@ -70,7 +74,9 @@ def test_qwen_fara_vision_load_from_bytes(test_data_path, relative_model_path, r
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
@@ -114,9 +120,7 @@ def test_qwen3_vl_vision_dynamic_grid_dim(test_data_path):
     """
     onnx = pytest.importorskip("onnx")
 
-    vision_path = os.path.join(
-        test_data_path, "qwen3-vl-vision-preprocessing", "dummy_vision.onnx"
-    )
+    vision_path = os.path.join(test_data_path, "qwen3-vl-vision-preprocessing", "dummy_vision.onnx")
     model = onnx.load(vision_path)
 
     # Find image_grid_thw input
@@ -131,19 +135,18 @@ def test_qwen3_vl_vision_dynamic_grid_dim(test_data_path):
     # dim-0 should be symbolic (dynamic), not a fixed integer
     dim0 = grid_input.type.tensor_type.shape.dim[0]
     assert dim0.dim_param != "", (
-        f"image_grid_thw dim-0 should be symbolic (e.g. 'num_images') "
-        f"but got static dim_value={dim0.dim_value}"
+        f"image_grid_thw dim-0 should be symbolic (e.g. 'num_images') but got static dim_value={dim0.dim_value}"
     )
-    assert dim0.dim_param == "num_images", (
-        f"Expected dim_param='num_images', got '{dim0.dim_param}'"
-    )
+    assert dim0.dim_param == "num_images", f"Expected dim_param='num_images', got '{dim0.dim_param}'"
 
     # dim-1 should be static 3 (temporal, height, width)
     dim1 = grid_input.type.tensor_type.shape.dim[1]
     assert dim1.dim_value == 3, f"image_grid_thw dim-1 should be 3, got {dim1.dim_value}"
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 def test_qwen_fara_text_only_generation(test_data_path, relative_model_path):
     """Test text-only generation without images."""
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
@@ -160,7 +163,9 @@ def test_qwen_fara_text_only_generation(test_data_path, relative_model_path):
     assert "input_ids" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
 def test_qwen_fara_vision_with_special_tokens(test_data_path, relative_model_path, relative_image_path):
     """Test vision processing with special tokens in prompt."""
@@ -181,7 +186,9 @@ def test_qwen_fara_vision_with_special_tokens(test_data_path, relative_model_pat
     assert "input_ids" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "10809054.jpg"])
 def test_qwen_fara_vision_different_image_formats(test_data_path, relative_model_path, relative_image_path):
     """Test processing different image formats."""
@@ -200,7 +207,9 @@ def test_qwen_fara_vision_different_image_formats(test_data_path, relative_model
     assert "pixel_values" in inputs
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, relative_image_path):
     """
@@ -262,7 +271,9 @@ def test_qwen_fara_accuracy_comparison(test_data_path, relative_model_path, rela
     log.debug(f"ONNX pixel_values range: [{pixel_min:.4f}, {pixel_max:.4f}]")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
 def test_qwen_fara_preprocessing_consistency(test_data_path, relative_model_path, relative_image_path):
     """
@@ -401,8 +412,8 @@ def test_qwen3_vl_pixel_values_shape(test_data_path, relative_image_path):
 @pytest.mark.parametrize(
     "model_name,expected_patch_dim",
     [
-        ("qwen-vision-preprocessing", 1176),       # Qwen2.5-VL: patch_size=14, 14*14*3*2=1176
-        ("qwen3-vl-vision-preprocessing", 1536),    # Qwen3-VL:   patch_size=16, 16*16*3*2=1536
+        ("qwen-vision-preprocessing", 1176),  # Qwen2.5-VL: patch_size=14, 14*14*3*2=1176
+        ("qwen3-vl-vision-preprocessing", 1536),  # Qwen3-VL:   patch_size=16, 16*16*3*2=1536
     ],
 )
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
@@ -440,7 +451,9 @@ def test_qwen_vl_family_patch_size_difference(test_data_path, model_name, expect
     log.debug(f"{model_name} pixel_values shape: {pixel_array.shape}")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_model_path, relative_image_path):
     """
@@ -464,9 +477,7 @@ def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_mode
     # All four keys must be present for vision inputs
     expected_keys = {"pixel_values", "input_ids", "image_grid_thw", "num_image_tokens"}
     actual_keys = set(inputs.keys())
-    assert expected_keys.issubset(actual_keys), (
-        f"Missing keys: {expected_keys - actual_keys}. Got: {actual_keys}"
-    )
+    assert expected_keys.issubset(actual_keys), f"Missing keys: {expected_keys - actual_keys}. Got: {actual_keys}"
 
     def _to_numpy(tensor):
         """Convert a tensor-like object to NumPy (supports as_numpy, numpy, np.array)."""
@@ -499,7 +510,9 @@ def test_qwen_vl_preprocessing_output_completeness(test_data_path, relative_mode
     log.debug(f"{relative_model_path} output: pv={pv.shape}, grid={grid}, nit={nit}, ids={ids.shape}")
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_model_path", [Path("qwen-vision-preprocessing"), Path("qwen3-vl-vision-preprocessing")]
+)
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_qwen_vl_image_grid_thw_consistency(test_data_path, relative_model_path, relative_image_path):
     """
@@ -599,6 +612,7 @@ def test_qwen_vl_normalization_range_difference(test_data_path, relative_image_p
 # Qwen3.5 hybrid model tests (RecurrentState + sparse KV cache)
 # ---------------------------------------------------------------------------
 
+
 def test_qwen35_hybrid_model_loads(test_data_path):
     """Test that a Qwen3.5 hybrid model (with recurrent + KV states) loads successfully."""
     model_path = os.fspath(Path(test_data_path) / "qwen35-hybrid-preprocessing")
@@ -685,6 +699,99 @@ def test_qwen35_hybrid_vision_preprocessing(test_data_path, relative_image_path)
 
     assert inputs is not None
     assert "pixel_values" in inputs
+
+
+# ---------------------------------------------------------------------------
+# Qwen3.5 hybrid model tests — CUDA EP (RecurrentState with shared buffers)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="CUDA EP not available")
+def test_qwen35_hybrid_generator_creates_cuda(test_data_path):
+    """Test that a Generator can be created for the hybrid model on CUDA.
+    Validates RecurrentState shared-buffer path on CUDA EP."""
+    model_path = os.fspath(Path(test_data_path) / "qwen35-hybrid-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen35-hybrid-preprocessing test model not found")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.append_provider("cuda")
+    model = og.Model(config)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    generator = og.Generator(model, params)
+    assert generator is not None
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="CUDA EP not available")
+def test_qwen35_hybrid_text_generation_cuda(test_data_path):
+    """Test that the hybrid model generator constructs and prefill executes on CUDA.
+    RecurrentState uses shared buffers (same tensor as input and output)."""
+    model_path = os.fspath(Path(test_data_path) / "qwen35-hybrid-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen35-hybrid-preprocessing test model not found")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.append_provider("cuda")
+    model = og.Model(config)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=5)
+    generator = og.Generator(model, params)
+    assert generator is not None
+
+
+# ---------------------------------------------------------------------------
+# Qwen3.5 hybrid model tests — WebGPU EP (RecurrentState with separate buffers)
+# ---------------------------------------------------------------------------
+
+
+def _is_webgpu_test_enabled():
+    """WebGPU tests require both runtime support and explicit opt-in via TEST_WEBGPU env var."""
+    return (
+        hasattr(og, "is_webgpu_available")
+        and og.is_webgpu_available()
+        and os.environ.get("TEST_WEBGPU", "").lower() in ("true", "1", "yes")
+    )
+
+
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+def test_qwen35_hybrid_generator_creates_webgpu(test_data_path):
+    """Test that a Generator can be created for the hybrid model on WebGPU.
+    Validates RecurrentState separate-buffer path (WebGPU cannot alias
+    input/output buffers in the same compute pass)."""
+    model_path = os.fspath(Path(test_data_path) / "qwen35-hybrid-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen35-hybrid-preprocessing test model not found")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.append_provider("webgpu")
+    model = og.Model(config)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    generator = og.Generator(model, params)
+    assert generator is not None
+
+
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+def test_qwen35_hybrid_text_generation_webgpu(test_data_path):
+    """Test that the hybrid model generator constructs and prefill executes on WebGPU.
+    RecurrentState uses separate past/present buffers to avoid the WebGPU
+    buffer aliasing restriction (Storage read-write | read-only conflict)."""
+    model_path = os.fspath(Path(test_data_path) / "qwen35-hybrid-preprocessing")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen35-hybrid-preprocessing test model not found")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.append_provider("webgpu")
+    model = og.Model(config)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=5)
+    generator = og.Generator(model, params)
+    assert generator is not None
 
 
 # Standalone runner functionality
