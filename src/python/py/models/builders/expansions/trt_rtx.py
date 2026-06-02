@@ -72,7 +72,7 @@ class TRT_RTX:
         #                              |
         #                      SimplifiedLayerNorm----> output (0)
         make_add_name = f"{basename}/Add"
-        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
+        output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
         self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
@@ -91,8 +91,8 @@ class TRT_RTX:
         #                             Add-------------> output (1)
         #                              |
         #                      LayerNormalization-----> output (0)
-        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
         make_add_name = f"{basename}/Add"
+        output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
         self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
