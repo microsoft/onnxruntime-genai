@@ -2097,12 +2097,22 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.model_type = "Qwen3_5_MoeForConditionalGeneration"
+        # The base builder derives the GenAI model.type by stripping the suffix
+        # after "For" and lowercasing, matching Qwen3.5 text-only export.
+        self.model_type = (
+            "Qwen3_5_Moe_textForCausalLM"
+            if self.is_text_only
+            else "Qwen3_5_MoeForConditionalGeneration"
+        )
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
+        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
+            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
+            # use +inf to preserve the "no clamp" behavior when the model omits it.
+            self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
