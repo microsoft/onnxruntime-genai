@@ -18,6 +18,21 @@
 #endif
 #endif
 
+// Export macro for the small set of free helper functions that unit tests link against
+// directly. On Windows the onnxruntime-genai DLL otherwise only exports the C API, so these
+// internal C++ helpers must be explicitly exported to be linkable from unit_tests.
+// BUILDING_ORT_GENAI_DLL is defined (target-private) only when compiling the onnxruntime-genai
+// shared library, so consumers such as unit_tests import the symbols.
+#if defined(_WIN32)
+#ifdef BUILDING_ORT_GENAI_DLL
+#define MODEL_PACKAGE_API __declspec(dllexport)
+#else
+#define MODEL_PACKAGE_API __declspec(dllimport)
+#endif
+#else
+#define MODEL_PACKAGE_API
+#endif
+
 struct OrtEnv;
 struct OrtSessionOptions;
 #if ORT_HAS_MODEL_PACKAGE
@@ -31,7 +46,7 @@ namespace Generators {
 struct Config;
 
 /// Detect whether a path is a model package (contains manifest.json) or a flat directory.
-bool IsModelPackage(const fs::path& path);
+MODEL_PACKAGE_API bool IsModelPackage(const fs::path& path);
 
 #if ORT_HAS_MODEL_PACKAGE
 struct ModelPackageState;  // defined below
@@ -40,7 +55,7 @@ struct ModelPackageState;  // defined below
 /// If component_names is empty, all components in the package are considered.
 /// Throws if ambiguous (>1 EP in intersection) or empty intersection.
 std::string DefaultEpFromPackage(const OrtModelPackageContext& pkg_ctx,
-                                  const std::vector<std::string>& component_names = {});
+                                 const std::vector<std::string>& component_names = {});
 
 /// Open a model package and prepare it for component selection.
 /// Resolves the EP (from `explicit_ep` if non-empty, else auto-detected via
@@ -75,7 +90,7 @@ inline constexpr std::string_view kVariantOverlayFilename = "genai_config_overla
 /// completes the state's resources can be released.
 struct ModelPackageState {
   ModelPackageState(const fs::path& package_root, OrtEnv& env, const OrtSessionOptions& session_options,
-                   const std::string& resolved_ep_name = "CPUExecutionProvider");
+                    const std::string& resolved_ep_name = "CPUExecutionProvider");
   ~ModelPackageState() = default;
 
   // Non-copyable, movable
@@ -109,17 +124,17 @@ struct ModelPackageState {
 
 /// Apply RFC 7386 JSON Merge Patch: merge patch_json into base_json.
 /// Returns the merged JSON string.
-std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json);
+MODEL_PACKAGE_API std::string JsonMergePatch(std::string_view base_json, std::string_view patch_json);
 
 /// Normalize an EP name string to its canonical ORT form.
 /// Accepts short aliases (e.g. "cuda") and full names (e.g. "CUDAExecutionProvider").
 /// Returns the canonical name, or the input unchanged if no mapping exists.
-std::string NormalizeEpName(const std::string& ep_name);
+MODEL_PACKAGE_API std::string NormalizeEpName(const std::string& ep_name);
 
 /// Map an EP name string to a DeviceInterface*.
 /// Map a full ORT EP name (e.g. "CUDAExecutionProvider") to the short name
 /// used in genai_config.json provider_options (e.g. "cuda").
 /// Returns the input unchanged if no mapping exists.
-std::string EpNameToGenAIProviderName(const std::string& ep_name);
+MODEL_PACKAGE_API std::string EpNameToGenAIProviderName(const std::string& ep_name);
 
 }  // namespace Generators

@@ -154,10 +154,15 @@ namespace {
 
 // Minimal JSON value type for merge patch
 struct JsonValue {
-  enum Type { Null, String, Number, Bool, Array, Object };
+  enum Type { Null,
+              String,
+              Number,
+              Bool,
+              Array,
+              Object };
   Type type = Null;
-  std::string str_val;           // for String, Number (as string), Bool ("true"/"false")
-  std::string raw;               // raw JSON representation (for arrays and simple values)
+  std::string str_val;                                         // for String, Number (as string), Bool ("true"/"false")
+  std::string raw;                                             // raw JSON representation (for arrays and simple values)
   std::vector<std::pair<std::string, JsonValue>> obj_members;  // for Object, preserves order
 
   bool is_null() const { return type == Null; }
@@ -183,14 +188,30 @@ std::string ParseJsonString(std::string_view s, size_t& pos) {
       if (pos >= s.size()) throw std::runtime_error("Unexpected end of JSON string");
       char esc = s[pos++];
       switch (esc) {
-        case '"': result += '"'; break;
-        case '\\': result += '\\'; break;
-        case '/': result += '/'; break;
-        case 'b': result += '\b'; break;
-        case 'f': result += '\f'; break;
-        case 'n': result += '\n'; break;
-        case 'r': result += '\r'; break;
-        case 't': result += '\t'; break;
+        case '"':
+          result += '"';
+          break;
+        case '\\':
+          result += '\\';
+          break;
+        case '/':
+          result += '/';
+          break;
+        case 'b':
+          result += '\b';
+          break;
+        case 'f':
+          result += '\f';
+          break;
+        case 'n':
+          result += '\n';
+          break;
+        case 'r':
+          result += '\r';
+          break;
+        case 't':
+          result += '\t';
+          break;
         case 'u': {
           if (pos + 4 > s.size()) throw std::runtime_error("Invalid unicode escape");
           auto parse_hex4 = [&](size_t p) -> uint32_t {
@@ -198,10 +219,14 @@ std::string ParseJsonString(std::string_view s, size_t& pos) {
             for (int i = 0; i < 4; ++i) {
               char ch = s[p + i];
               uint32_t d;
-              if (ch >= '0' && ch <= '9') d = static_cast<uint32_t>(ch - '0');
-              else if (ch >= 'a' && ch <= 'f') d = static_cast<uint32_t>(ch - 'a' + 10);
-              else if (ch >= 'A' && ch <= 'F') d = static_cast<uint32_t>(ch - 'A' + 10);
-              else throw std::runtime_error("Invalid hex digit in \\u escape");
+              if (ch >= '0' && ch <= '9')
+                d = static_cast<uint32_t>(ch - '0');
+              else if (ch >= 'a' && ch <= 'f')
+                d = static_cast<uint32_t>(ch - 'a' + 10);
+              else if (ch >= 'A' && ch <= 'F')
+                d = static_cast<uint32_t>(ch - 'A' + 10);
+              else
+                throw std::runtime_error("Invalid hex digit in \\u escape");
               v = (v << 4) | d;
             }
             return v;
@@ -238,7 +263,9 @@ std::string ParseJsonString(std::string_view s, size_t& pos) {
           }
           break;
         }
-        default: result += esc; break;
+        default:
+          result += esc;
+          break;
       }
     } else if (c == '"') {
       return result;
@@ -286,8 +313,14 @@ JsonValue ParseJsonValue(std::string_view s, size_t& pos) {
       val.obj_members.emplace_back(std::move(key), std::move(member_val));
       pos = SkipWs(s, pos);
       if (pos >= s.size()) throw std::runtime_error("Unterminated JSON object");
-      if (s[pos] == '}') { ++pos; return val; }
-      if (s[pos] == ',') { ++pos; continue; }
+      if (s[pos] == '}') {
+        ++pos;
+        return val;
+      }
+      if (s[pos] == ',') {
+        ++pos;
+        continue;
+      }
       throw std::runtime_error("Expected ',' or '}' in JSON object");
     }
   }
@@ -300,11 +333,15 @@ JsonValue ParseJsonValue(std::string_view s, size_t& pos) {
     for (size_t i = pos; i < s.size(); ++i) {
       char ch = s[i];
       if (in_str) {
-        if (ch == '\\') ++i;
-        else if (ch == '"') in_str = false;
+        if (ch == '\\')
+          ++i;
+        else if (ch == '"')
+          in_str = false;
       } else {
-        if (ch == '"') in_str = true;
-        else if (ch == '[') ++depth;
+        if (ch == '"')
+          in_str = true;
+        else if (ch == '[')
+          ++depth;
         else if (ch == ']') {
           --depth;
           if (depth == 0) {
@@ -355,7 +392,8 @@ JsonValue ParseJsonValue(std::string_view s, size_t& pos) {
 // Serialize a JsonValue to a JSON string
 std::string SerializeJson(const JsonValue& val) {
   switch (val.type) {
-    case JsonValue::Null: return "null";
+    case JsonValue::Null:
+      return "null";
     case JsonValue::Bool:
     case JsonValue::Number:
     case JsonValue::Array:
@@ -364,13 +402,27 @@ std::string SerializeJson(const JsonValue& val) {
       std::string result = "\"";
       for (unsigned char c : val.str_val) {
         switch (c) {
-          case '"': result += "\\\""; break;
-          case '\\': result += "\\\\"; break;
-          case '\b': result += "\\b"; break;
-          case '\f': result += "\\f"; break;
-          case '\n': result += "\\n"; break;
-          case '\r': result += "\\r"; break;
-          case '\t': result += "\\t"; break;
+          case '"':
+            result += "\\\"";
+            break;
+          case '\\':
+            result += "\\\\";
+            break;
+          case '\b':
+            result += "\\b";
+            break;
+          case '\f':
+            result += "\\f";
+            break;
+          case '\n':
+            result += "\\n";
+            break;
+          case '\r':
+            result += "\\r";
+            break;
+          case '\t':
+            result += "\\t";
+            break;
           default:
             if (c < 0x20) {
               // Other control characters must be escaped as \u00XX to produce valid JSON.

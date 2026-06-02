@@ -167,6 +167,11 @@ else()
   add_library(onnxruntime-genai SHARED ${generator_srcs})
 endif()
 
+# Mark the onnxruntime-genai DLL build so MODEL_PACKAGE_API (model_package.h) exports the
+# internal C++ helpers that unit tests link against directly. Consumers (e.g. unit_tests) do
+# not define this and therefore import the symbols.
+target_compile_definitions(onnxruntime-genai PRIVATE BUILDING_ORT_GENAI_DLL)
+
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
