@@ -4,7 +4,6 @@
 # license information.
 # --------------------------------------------------------------------------
 import onnx_ir as ir
-import torch
 
 
 class WebGPU:
