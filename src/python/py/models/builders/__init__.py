@@ -16,7 +16,13 @@ from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
 from .llama import LlamaModel
-from .mistral import Mistral3TextModel, MistralModel
+from .mistral import (
+    Ministral3ConditionalGenerationModel,
+    Ministral3TextModel,
+    Mistral3TextModel,
+    MistralModel,
+    MistralNeMoModel,
+)
 from .nemotron import NemotronModel
 from .olmo import OLMoModel
 from .phi import (
@@ -29,7 +35,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, Qwen35MoeTextModel, QwenModel, VideoChatFlashQwenModel
+from .qwen import Qwen25VLTextModel, Qwen35MoeTextModel, Qwen35TextModel, Qwen3Model, Qwen3VLTextModel, QwenModel, VideoChatFlashQwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -45,8 +51,11 @@ __all__ = [
     "InternLM2Model",
     "LFM2Model",
     "LlamaModel",
+    "Ministral3ConditionalGenerationModel",
+    "Ministral3TextModel",
     "Mistral3TextModel",
     "MistralModel",
+    "MistralNeMoModel",
     "Model",
     "NemotronModel",
     "OLMoModel",
@@ -58,10 +67,10 @@ __all__ = [
     "Phi3VModel",
     "Phi4MMModel",
     "PhiModel",
-    "Qwen3Model",
-    "Qwen3VLTextModel",
     "Qwen25VLTextModel",
     "Qwen35TextModel",
+    "Qwen3Model",
+    "Qwen3VLTextModel",
     "Qwen35MoeTextModel",
     "QwenModel",
     "SmolLM3Model",

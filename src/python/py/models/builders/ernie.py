@@ -12,9 +12,3 @@ class ErnieModel(MistralModel):
 
         # Ernie uses interleaved rotary position embeddings.
         self.rope_attrs["interleaved"] = 1
-
-        # Ernie uses a `compression_ratio` for its RoPE scaling.
-        # The original RoPE logic in ernie is: position_ids / compression_ratio,
-        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
-        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
-            self.rope_attrs["rescale_factors"] = 1.0 / config.compression_ratio

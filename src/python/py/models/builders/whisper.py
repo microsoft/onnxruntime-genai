@@ -335,7 +335,7 @@ class WhisperDecoder(Model):
     def make_embedding(self, embedding):
         # Embedding is already created in preprocessing
         pass
-    
+
     def make_layer(self, layer_id, layer):
         # Each Whisper decoder layer is typically defined as:
         # self_attn_layernorm --> self-attention --> cross_attn_layernorm --> cross-attention --> output_layernorm --> MLP

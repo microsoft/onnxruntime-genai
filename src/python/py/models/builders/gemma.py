@@ -124,7 +124,25 @@ class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.rope_local_theta = config.rope_local_base_freq
+        # Remember whether this was originally a conditional-generation config
+        # (Gemma3ForConditionalGeneration) before builder.py overrides model_type
+        # to "gemma3_text". load_weights needs to know which HF class to instantiate.
+        self._original_architecture = config.architectures[0]
+
+        if hasattr(config, "rope_local_base_freq"):
+            # Older transformers: rope_local_base_freq and rope_theta are top-level fields
+            self.rope_local_theta = config.rope_local_base_freq
+        elif hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
+            # Newer transformers (v5+): rope info lives in a nested rope_parameters dict
+            sliding_params = config.rope_parameters.get("sliding_attention", {})
+            self.rope_local_theta = sliding_params.get("rope_theta", 10000.0)
+            # Update the global theta (full-attention layers) which the base class
+            # could not infer because config.rope_theta is absent in this format.
+            full_params = config.rope_parameters.get("full_attention", {})
+            self.rope_attrs["theta"] = full_params.get("rope_theta", self.rope_attrs["theta"])
+        else:
+            # Default local RoPE theta matching Gemma3's original rope_local_base_freq
+            self.rope_local_theta = 10000.0
         self.make_rotary_embedding_multi_cache()
 
     def is_local(self, layer_id):
@@ -149,6 +167,21 @@ class Gemma3Model(Gemma2Model):
         super().make_rotary_embedding_caches(
             cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
         )
+
+    def load_weights(self, input_path):
+        # Gemma3ForConditionalGeneration (VLM) does not accept the
+        # ``num_hidden_layers`` keyword argument that the base class would
+        # normally forward to ``AutoModelForCausalLM.from_pretrained``.
+        # Load it directly here instead.
+        if self._original_architecture == "Gemma3ForConditionalGeneration":
+            if self.quant_type is not None or input_path.endswith(".gguf"):
+                return super().load_weights(input_path)
+            from transformers import Gemma3ForConditionalGeneration as _HFModel
+
+            return _HFModel.from_pretrained(
+                self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=self.hf_remote
+            )
+        return super().load_weights(input_path)
 
     def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get(
