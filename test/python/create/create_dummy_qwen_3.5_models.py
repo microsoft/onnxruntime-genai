@@ -11,7 +11,7 @@ state tensors. These models produce dummy outputs but have the correct
 shapes for testing the ort-genai runtime's auto-discovery and state management.
 
 Usage:
-    python create_dummy_qwen35_models.py --output test/models/qwen35-hybrid-preprocessing
+    python create_dummy_qwen_3.5_models.py --output test/models/qwen3-5
 """
 
 import argparse
@@ -93,7 +93,7 @@ def create_dummy_vision_model(output_path: str, hidden_size: int = 1024):
 def create_dummy_decoder_model(
     output_path: str,
     num_layers: int = 4,
-    kv_layers: list = None,
+    kv_layers: list | None = None,
     hidden_size: int = 1024,
     num_kv_heads: int = 2,
     head_size: int = 256,
@@ -255,7 +255,7 @@ def create_genai_config(output_path: str, num_kv_layers: int, kv_layers: list):
             "no_repeat_ngram_size": 0,
             "num_beams": 1,
             "num_return_sequences": 1,
-            "past_present_share_buffer": False,
+            "past_present_share_buffer": True,
             "repetition_penalty": 1.0,
             "temperature": 1.0,
             "top_k": 1,
@@ -269,7 +269,7 @@ def create_genai_config(output_path: str, num_kv_layers: int, kv_layers: list):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate dummy ONNX models for Qwen3.5 hybrid model testing")
-    parser.add_argument("--output", type=str, default="test/models/qwen35-hybrid-preprocessing",
+    parser.add_argument("--output", type=str, default="test/models/qwen3-5",
                         help="Output directory for the dummy models")
     args = parser.parse_args()
 
