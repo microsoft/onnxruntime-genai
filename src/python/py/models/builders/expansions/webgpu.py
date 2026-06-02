@@ -30,7 +30,6 @@ class WebGPU:
         #            |        |
         #       seqlens_k  total_seq_len
         #         (1D)       (int)
-        print("Inside WebGPU expansions!!!")
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
