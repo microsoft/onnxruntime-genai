@@ -354,7 +354,7 @@ class Model:
         with additional functionality provided by the expansion class.
         """
         if self.ep == "trt-rtx":
-            from expansions import TRT_RTX
+            from .expansions import TRT_RTX
 
             self.make_layernorm_subgraph = TRT_RTX.make_layernorm_subgraph.__get__(self, self.__class__)
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
@@ -364,7 +364,7 @@ class Model:
             self.make_split_if_nodes = TRT_RTX.make_split_if_nodes.__get__(self, self.__class__)
 
         elif self.ep == "webgpu":
-            from expansions import WebGPU
+            from .expansions import WebGPU
 
             if self.extra_options.get("enable_webgpu_graph", False):
                 self.make_attention_mask_reformatting_for_gqa = (
