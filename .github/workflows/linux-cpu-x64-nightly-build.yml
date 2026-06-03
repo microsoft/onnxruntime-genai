@@ -108,10 +108,16 @@ jobs:
       - name: Build the C Examples
         run: |
           set -e -x
+          ORT_EXAMPLE_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native
+          if [ -f "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" ] && [ ! -e "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" ]; then
+            ln -s libonnxruntime.so "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" || \
+            cp "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1"
+          fi
+
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
             -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
-            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DORT_LIB_DIR=$ORT_EXAMPLE_LIB_DIR \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
             -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
           cmake --build examples/c/build --config Release
