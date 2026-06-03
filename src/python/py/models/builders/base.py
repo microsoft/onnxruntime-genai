@@ -406,6 +406,11 @@ class Model:
         else:
             del self.input_names["inputs_embeds"]
 
+        self.exclude_caches = self.extra_options.get("exclude_caches", False)
+        if self.exclude_caches:
+            del self.input_names["past_key_values.key"]
+            del self.input_names["past_key_values.value"]
+
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
         if self.io_dtype == ir.DataType.BFLOAT16:
@@ -424,6 +429,10 @@ class Model:
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
+
+        if self.exclude_caches:
+            del self.output_names["present.key"]
+            del self.output_names["present.value"]
 
     def make_rope_init(self, config):
         if "short_factor" in config.rope_scaling:
@@ -2558,12 +2567,14 @@ class Model:
             shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size],
             perm=[0, 2, 1, 3],
         )
-        concat_1_name = f"{basename}/Concat_1"
-        concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
-        self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
+
+        if not self.exclude_caches:
+            concat_1_name = f"{basename}/Concat_1"
+            concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
+            self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
 
         shape_1_name = f"{basename}/Shape_1"
-        self.make_shape(shape_1_name, present_kv, shape=[4])
+        self.make_shape(shape_1_name, present_kv if not self.exclude_caches else f"{transpose_1_name}/output_0", shape=[4])
         gather_1_name = f"{basename}/Gather_1"
         gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0"]
         self.make_gather(gather_1_name, gather_1_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
@@ -2650,7 +2661,7 @@ class Model:
         #                   \           \
         # Unsqueeze --> Expand --> Reshape --> Transpose --> Reshape
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        unsqueeze_5_inputs = [present_kv, "/model/constants/INT64/[2]"]
+        unsqueeze_5_inputs = [present_kv if not self.exclude_caches else f"{transpose_1_name}/output_0", "/model/constants/INT64/[2]"]
         self.make_unsqueeze(
             unsqueeze_5_name,
             unsqueeze_5_inputs,
@@ -2950,9 +2961,9 @@ class Model:
         #                  QKV_MatMul                     seqlens_k  total_seq_len  past_key  past_value
         #                       |                            |            |           |          |
         #                  QKV_Add (packed)                  +------------+-----------+----------+
-        #                       |                                          |
-        #                  Q_Rotary / K_Rotary (in-attn or external)       |
-        #                       |                                          |
+        #                       |                                         |
+        #                  Q_Rotary / K_Rotary (in-attn or external)      |
+        #                       |                                         |
         #                  GroupQueryAttention----------------------------+
         #                       |
         #                   O_MatMul
@@ -2968,11 +2979,11 @@ class Model:
         #                  QKV_Add (packed, only if bias exists)
         #                       |
         #                     Split  ->  Q, K, V
-        #                  /     |     \
-        #             Q_Norm   K_Norm   V             seqlens_k  total_seq_len  past_key  past_value
-        #                |       |      |                 |            |           |          |
-        #            Q_Rotary  K_Rotary V                 +------------+-----------+----------+
-        #                  \     |     /                                |
+        #                 /     |     \
+        #            Q_Norm   K_Norm   V                 seqlens_k  total_seq_len  past_key  past_value
+        #               |       |      |                     |            |           |          |
+        #           Q_Rotary  K_Rotary V                     +------------+-----------+----------+
+        #                 \     |     /                                   |
         #                  GroupQueryAttention----------------------------+
         #                       |
         #                   O_MatMul
@@ -3133,7 +3144,7 @@ class Model:
         cos_cache_name, sin_cache_name = self.make_attention_qk_rope_and_norm(layer_id, attention, **kwargs)
 
         # Get key-value cache names if they exist
-        (past_k, past_v, present_k, present_v) = self.make_key_value_cache_names(layer_id)
+        (past_k, past_v, present_k, present_v) = self.make_key_value_cache_names(layer_id) if not self.exclude_caches else "", "", "", ""
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":

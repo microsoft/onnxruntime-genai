@@ -30,6 +30,7 @@ class WhisperEncoder(Model):
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
 
+        assert not self.exclude_caches, "Caches are required for Whisper's outputs"
         extra_options["include_hidden_states"] = True  # Include hidden states as output
         extra_options["exclude_lm_head"] = True        # Exclude LM head since it's not used in the encoder
         extra_options["filename"] = "encoder.onnx"     # Label encoder ONNX model
@@ -136,7 +137,7 @@ class WhisperEncoder(Model):
         super().make_layer(layer_id, layer)
 
     def make_key_value_cache_names(self, layer_id):
-        # Whisper encoder does not use any KV caches
+        # Whisper encoder does not use any input KV caches
         past_k, past_v, present_k, present_v = "", "", "", ""
         return past_k, past_v, present_k, present_v
 
@@ -204,6 +205,7 @@ class WhisperDecoder(Model):
         config.hidden_act = "gelu"
         config.seq_length = config.max_target_positions
 
+        assert not self.exclude_caches, "Caches are required for Whisper's inputs and outputs"
         extra_options["filename"] = "decoder.onnx"  # Label decoder ONNX model
 
         self.max_source_positions = config.max_source_positions

@@ -9,27 +9,27 @@
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, GemmaModel
+from .gemma import GemmaModel, Gemma2Model, Gemma3Model
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
 from .llama import LlamaModel
-from .mistral import Mistral3TextModel, MistralModel
+from .mistral import MistralModel, Mistral3Model
 from .nemotron import NemotronModel
 from .olmo import OLMoModel
 from .phi import (
-    Phi3MiniLongRoPEModel,
-    Phi3MiniModel,
-    Phi3MoELongRoPEModel,
-    Phi3SmallLongRoPEModel,
-    Phi3SmallModel,
-    Phi3VModel,
-    Phi4MMModel,
     PhiModel,
+    Phi3MiniModel,
+    Phi3MiniLongRoPEModel,
+    Phi3SmallModel,
+    Phi3SmallLongRoPEModel,
+    Phi3VModel,
+    Phi3MoELongRoPEModel,
+    Phi4MMModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, Qwen35MoeTextModel, QwenModel, VideoChatFlashQwenModel
+from .qwen import QwenModel, Qwen25VLModel, Qwen3Model, Qwen3VLModel, Qwen35Model, Qwen35MoEModel, VideoChatFlashQwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -45,8 +45,8 @@ __all__ = [
     "InternLM2Model",
     "LFM2Model",
     "LlamaModel",
-    "Mistral3TextModel",
     "MistralModel",
+    "Mistral3Model",
     "Model",
     "NemotronModel",
     "OLMoModel",
@@ -58,12 +58,12 @@ __all__ = [
     "Phi3VModel",
     "Phi4MMModel",
     "PhiModel",
-    "Qwen3Model",
-    "Qwen3VLTextModel",
-    "Qwen25VLTextModel",
-    "Qwen35TextModel",
-    "Qwen35MoeTextModel",
     "QwenModel",
+    "Qwen25VLModel",
+    "Qwen3Model",
+    "Qwen3VLModel",
+    "Qwen35Model",
+    "Qwen35MoEModel",
     "SmolLM3Model",
     "VideoChatFlashQwenModel",
     "WhisperModel",

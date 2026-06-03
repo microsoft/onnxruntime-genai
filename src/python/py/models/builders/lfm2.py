@@ -14,6 +14,7 @@ from .base import Model
 
 class LFM2Model(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        assert not self.exclude_caches, "Caches are required for LFMs"
         config.hidden_act = "silu"
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 

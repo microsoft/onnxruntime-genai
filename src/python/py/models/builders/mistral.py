@@ -15,7 +15,7 @@ class MistralModel(Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
-class Mistral3TextModel(MistralModel):
+class Mistral3Model(MistralModel):
     """Builder for the text decoder component of Mistral3 VLM models.
 
     Mistral3ForConditionalGeneration is a VLM whose text backbone

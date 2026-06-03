@@ -35,9 +35,12 @@ class Qwen3Model(QwenModel):
         super().make_attention_init()
 
 
-class Qwen25VLTextModel(Model):
+class Qwen25VLModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.input_names["position_ids"] = "position_ids"
+        assert not self.exclude_caches, "Caches are required for Qwen2.5-VL"
 
         # The HF model (Qwen2RMSNorm) *always* computes LayerNorm in float32.
         # By inheriting from `base.Model`, all `layernorm_attrs["cast"]` flags
@@ -70,8 +73,6 @@ class Qwen25VLTextModel(Model):
         # We need separate Q, K, V tensors to apply MRoPE manually.
         # Packed MatMul provides a single output which would require splitting.
         self.attention_attrs["use_packed_matmul"] = False
-
-        self.input_names["position_ids"] = "position_ids"
 
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
@@ -679,10 +680,41 @@ class Qwen25VLTextModel(Model):
         )
 
 
-class Qwen3VLTextModel(Qwen25VLTextModel):
+class VideoChatFlashQwenModel(QwenModel):
     """
-    Qwen3-VL text model builder. Inherits from Qwen25VLTextModel.
+    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
 
+    The language model backbone is standard Qwen2.5-7B with flat config and
+    standard weight keys (model.layers.*, lm_head.*). The model uses standard
+    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
+
+    This builder exports only the text decoder component. It sets exclude_embeds=True
+    so the decoder receives inputs_embeds from the embedding merger model, which
+    fuses the InternVideo2 visual tokens with text embeddings.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        assert not self.exclude_caches, "Caches are required for VideoChat-Flash"
+
+        # Override model_type for the C++ runtime registration in model.cpp
+        # and genai_config.json. Same pattern as Qwen3VLTextModel.
+        # Base class transforms this to "videochat_flash_qwen" via:
+        #   model_type[:model_type.find("For")].lower()
+        self.model_type = "VideoChat_Flash_QwenForCausalLM"
+
+    def load_weights(self, input_path):
+        extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
+        return Qwen2ForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            token=self.hf_token,
+            **extra_kwargs,
+        )
+
+
+class Qwen3VLModel(Qwen25VLModel):
+    """
     Key differences from Qwen2.5-VL:
     - Uses interleaved MRoPE layout [THWTHWTHW...TT] instead of chunked [TTT...HHH...WWW]
     - Adds QK normalization (q_norm, k_norm) from Qwen3 base architecture
@@ -692,6 +724,8 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        assert not self.exclude_caches, "Caches are required for Qwen3-VL"
 
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
         # but the C++ runtime expects "qwen3_vl" (with underscore).
@@ -916,36 +950,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         )
 
 
-class VideoChatFlashQwenModel(QwenModel):
-    """
-    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
-
-    The language model backbone is standard Qwen2.5-7B with flat config and
-    standard weight keys (model.layers.*, lm_head.*). The model uses standard
-    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
-
-    This builder exports only the text decoder component. It sets exclude_embeds=True
-    so the decoder receives inputs_embeds from the embedding merger model, which
-    fuses the InternVideo2 visual tokens with text embeddings.
-    """
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # Override model_type for the C++ runtime registration in model.cpp
-        # and genai_config.json. Same pattern as Qwen3VLTextModel.
-        # Base class transforms this to "videochat_flash_qwen" via:
-        #   model_type[:model_type.find("For")].lower()
-        self.model_type = "VideoChat_Flash_QwenForCausalLM"
-
-    def load_weights(self, input_path):
-        extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
-        return Qwen2ForCausalLM.from_pretrained(
-            self.model_name_or_path,
-            token=self.hf_token,
-            **extra_kwargs,
-        )
-class Qwen35TextModel(Model):
+class Qwen35Model(Model):
     """Qwen3.5 hybrid model builder.
 
     Qwen3.5 uses a hybrid architecture with two layer types:
@@ -961,6 +966,8 @@ class Qwen35TextModel(Model):
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        assert not self.exclude_caches, "Caches are required for Qwen3.5"
+
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
         self.is_text_only = extra_options.get("exclude_embeds", None) is False
@@ -2069,7 +2076,7 @@ class Qwen35TextModel(Model):
         del self.output_names["present.value"]
 
 
-class Qwen35MoeTextModel(Qwen35TextModel):
+class Qwen35MoEModel(Qwen35Model):
     """Qwen3.5 MoE hybrid model builder.
 
     Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
@@ -2083,6 +2090,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        assert not self.exclude_caches, "Caches are required for Qwen3.5-MoE"
+
         # Map Qwen3.5-MoE config attributes to what the base class expects.
         if hasattr(config, "text_config"):
             tc = config.text_config
