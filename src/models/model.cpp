@@ -400,7 +400,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "MorphiZenEP"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -418,15 +418,39 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'.
+  // The MorphiZenEP entry "MorphiZen" must match the name passed to
+  // CreateMemoryInfo_V2 by the MorphiZen EP factory when it registers
+  // its GPU OrtMemoryInfo via EpDevice_AddAllocatorInfo; otherwise OGA
+  // cannot look up the EP's allocator.
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "MorphiZen"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
   try {
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+    std::unique_ptr<OrtMemoryInfo> memory_info;
+    if (type == DeviceType::MorphiZenEP) {
+      // MorphiZenEP exposes its allocator via the ORT plugin EP V2 API
+      // (CreateMemoryInfo_V2, registered through EpDevice_AddAllocatorInfo).
+      // The legacy OrtMemoryInfo::Create only knows ORT-internal device names
+      // ("Cuda", "DML", ...) and would fail with
+      // "Specified device is not supported. Try CreateMemoryInfo_V2."
+      // Use CreateMemoryInfo_V2 with the same parameters the EP factory used
+      // when registering its OrtMemoryInfo so ORT can match the allocator.
+      OrtMemoryInfo* raw = nullptr;
+      Ort::ThrowOnError(Ort::api->CreateMemoryInfo_V2(name, OrtMemoryInfoDeviceType_GPU,
+                                                      /*vendor*/ 0x1002,  // OrtDevice::VendorIds::AMD
+                                                      /*device_id*/ 0,
+                                                      OrtDeviceMemoryType_DEFAULT,
+                                                      /*alignment*/ 0,
+                                                      OrtAllocatorType::OrtDeviceAllocator,
+                                                      &raw));
+      memory_info.reset(raw);
+    } else {
+      memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
+                                          0, OrtMemType::OrtMemTypeDefault);
+    }
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
     // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
