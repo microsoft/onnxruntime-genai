@@ -298,6 +298,11 @@ class Model:
         }
         self.make_attention_init()
 
+        # Quantized KV cache configuration
+        self.kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
+        if self.kv_cache_quant_type != "none":
+            self.make_quantized_kv_cache_init()
+
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
@@ -564,6 +569,94 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
+    def make_quantized_kv_cache_init(self):
+        """Configure KV cache quantization: modify I/O types, shapes, and prepare scale info."""
+        if self.attention_attrs["op_type"] != "GroupQueryAttention":
+            print("WARNING: Quantized KV cache requires GroupQueryAttention. Disabling kv_cache_quant_type.")
+            self.kv_cache_quant_type = "none"
+            return
+
+        quant_type = self.kv_cache_quant_type
+        is_int4 = quant_type.startswith("int4")
+        self.kv_cache_bit_width = 4 if is_int4 else 8
+
+        # Map to ORT attribute values
+        if "per_channel" in quant_type:
+            self.kv_quant_type_str = "PER_CHANNEL"
+        else:
+            self.kv_quant_type_str = "PER_TENSOR"
+
+        # Change KV cache I/O types to INT8 (for 8-bit) or UINT8 (for 4-bit packed)
+        cache_dtype = ir.DataType.UINT8 if is_int4 else ir.DataType.INT8
+        self.input_types["past_key_values.key"] = cache_dtype
+        self.input_types["past_key_values.value"] = cache_dtype
+        self.output_types["present.key"] = cache_dtype
+        self.output_types["present.value"] = cache_dtype
+
+        # For INT4, the head_size dimension is packed (2 values per byte)
+        if is_int4:
+            packed_head_size = (self.head_size + 1) // 2
+            self.input_shapes["past_key_values.key"] = ["batch_size", self.num_kv_heads, "past_sequence_length", packed_head_size]
+            self.input_shapes["past_key_values.value"] = ["batch_size", self.num_kv_heads, "past_sequence_length", packed_head_size]
+            self.output_shapes["present.key"] = ["batch_size", self.num_kv_heads, "total_sequence_length", packed_head_size]
+            self.output_shapes["present.value"] = ["batch_size", self.num_kv_heads, "total_sequence_length", packed_head_size]
+
+        # Disable past_present_share_buffer for quantized cache (different semantics)
+        self.past_present_share_buffer = False
+
+        print(f"Quantized KV cache enabled: {quant_type} (bit_width={self.kv_cache_bit_width}, quant_type={self.kv_quant_type_str})")
+
+    def make_kv_cache_scale_initializers(self):
+        """Create scale initializer tensors for quantized KV cache.
+
+        For per-tensor: one scalar scale per layer.
+        For per-channel: one scale vector of shape [kv_num_heads * head_size] per layer.
+
+        Scale values are loaded from a calibration file if provided via
+        extra_options['kv_cache_scale_file'], otherwise a conservative default is used.
+        """
+        is_per_channel = self.kv_quant_type_str == "PER_CHANNEL"
+        scale_file = self.extra_options.get("kv_cache_scale_file", None)
+        default_scale = self.extra_options.get("kv_cache_scale", None)
+
+        k_scales_per_layer = None
+        v_scales_per_layer = None
+
+        if scale_file is not None:
+            # Load calibrated scales from JSON file (json is imported at module top)
+            with open(scale_file, "r") as f:
+                scale_data = json.load(f)
+            k_scales_per_layer = scale_data["scales"]["k_scales"]
+            v_scales_per_layer = scale_data["scales"]["v_scales"]
+            print(f"Loaded KV cache scales from: {scale_file}")
+
+        for layer_id in range(self.num_layers):
+            if is_per_channel:
+                scale_size = self.num_kv_heads * self.head_size
+                if k_scales_per_layer is not None:
+                    k_scale = np.array(k_scales_per_layer[layer_id], dtype=np.float32)
+                    v_scale = np.array(v_scales_per_layer[layer_id], dtype=np.float32)
+                elif default_scale is not None:
+                    k_scale = np.full(scale_size, float(default_scale), dtype=np.float32)
+                    v_scale = np.full(scale_size, float(default_scale), dtype=np.float32)
+                else:
+                    k_scale = np.full(scale_size, 0.05, dtype=np.float32)
+                    v_scale = np.full(scale_size, 0.05, dtype=np.float32)
+            else:
+                # Per-tensor: single scalar scale
+                if k_scales_per_layer is not None:
+                    k_scale = np.array([k_scales_per_layer[layer_id]], dtype=np.float32)
+                    v_scale = np.array([v_scales_per_layer[layer_id]], dtype=np.float32)
+                elif default_scale is not None:
+                    k_scale = np.array([float(default_scale)], dtype=np.float32)
+                    v_scale = np.array([float(default_scale)], dtype=np.float32)
+                else:
+                    k_scale = np.array([0.05], dtype=np.float32)
+                    v_scale = np.array([0.05], dtype=np.float32)
+
+            self.make_initializer(k_scale, name=f"/model/kv_cache_scales/k_scale.{layer_id}")
+            self.make_initializer(v_scale, name=f"/model/kv_cache_scales/v_scale.{layer_id}")
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -606,7 +699,7 @@ class Model:
             inputs["past_value_names"] = "past_key_values.%d.value"
 
         # Create outputs dict
-        outputs = {} 
+        outputs = {}
         if "logits" in self.output_names:
             outputs["logits"] = self.output_names["logits"]
         if "present.key" in self.output_names:
@@ -681,6 +774,12 @@ class Model:
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
+
+        if self.kv_cache_quant_type != "none":
+            genai_config["model"]["decoder"]["kv_cache_quantization"] = {
+                "quant_type": self.kv_cache_quant_type,
+                "bit_width": self.kv_cache_bit_width,
+            }
 
         self.update_genai_config(genai_config)
 
@@ -923,7 +1022,7 @@ class Model:
                     outputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
             else:
                 outputs.append(self.make_value(name, dtype=dtype, shape=shape))
-    
+
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{num}"
@@ -1372,7 +1471,7 @@ class Model:
 
         matmul = PackedMatMul()
         return matmul
-    
+
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
         if not hasattr(q_matmul, "qweight"):
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
@@ -1434,7 +1533,7 @@ class Model:
         return add
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        add = self.make_packed_add_tensor(q_add, k_add, v_add)        
+        add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -2810,21 +2909,45 @@ class Model:
             kwargs.get("sinks", ""),
         ]
 
+        # Add scale inputs for quantized KV cache
+        if self.kv_cache_quant_type != "none":
+            # Extract layer index from the name to get per-layer scale names
+            layer_id = kwargs.get("layer_id", None)
+            k_scale_name = f"/model/kv_cache_scales/k_scale.{layer_id}" if layer_id is not None else "/model/kv_cache_scales/k_scale"
+            v_scale_name = f"/model/kv_cache_scales/v_scale.{layer_id}" if layer_id is not None else "/model/kv_cache_scales/v_scale"
+            inputs.append(k_scale_name)  # k_scale
+            inputs.append(v_scale_name)  # v_scale
+        else:
+            inputs.append("")  # k_scale (empty)
+            inputs.append("")  # v_scale (empty)
+
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+
+        # Build GQA node attributes
+        gqa_attrs = {
+            "num_heads": self.num_attn_heads,
+            "kv_num_heads": self.num_kv_heads,
+            "scale": self.attention_attrs["scale"],
+            "local_window_size": self.window_size,
+            "softcap": self.attention_attrs["softcap"],
+            "do_rotary": self.attention_attrs["use_rope_in_attn"],
+            "rotary_interleaved": self.rope_attrs["interleaved"],
+        }
+
+        # Add quantization attributes when KV cache quantization is enabled
+        if self.kv_cache_quant_type != "none":
+            gqa_attrs["k_quant_type"] = self.kv_quant_type_str
+            gqa_attrs["v_quant_type"] = self.kv_quant_type_str
+            gqa_attrs["kv_cache_bit_width"] = self.kv_cache_bit_width
+
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            local_window_size=self.window_size,
-            softcap=self.attention_attrs["softcap"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rope_attrs["interleaved"],
+            **gqa_attrs,
         )
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
@@ -3155,6 +3278,7 @@ class Model:
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name,
+            layer_id=layer_id,
             root_input=root_input,
             q_path=self.attention_attrs["q_path"],
             k_path=self.attention_attrs["k_path"],
@@ -4130,6 +4254,10 @@ class Model:
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
+
+        # Add quantized KV cache scale initializers if enabled
+        if self.kv_cache_quant_type != "none":
+            self.make_kv_cache_scale_initializers()
 
         # Load weights of original model
         self.weights = self.load_weights(input_path)
