@@ -150,6 +150,19 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
 
 namespace {
 
+// Compute the compressed KV cache head dimension for TurboQuant.
+// TurboQuant packs each head into (1 + head_size/8) u32 words: one fp32 scale followed by
+// head_size values quantized to 4 bits. The tensor dimension depends on the element type.
+// Returns the original head_size unchanged when turbo_quant_bits is 0 (disabled).
+int64_t ComputeTurboQuantHeadSize(int head_size, int turbo_quant_bits, ONNXTensorElementDataType type) {
+  if (turbo_quant_bits == 4) {
+    const int compressed_u32_words = head_size / 8 + 1;
+    const int bytes_per_element = static_cast<int>(Ort::SizeOf(type));
+    return static_cast<int64_t>(compressed_u32_words * (4 / bytes_per_element));  // 4 bytes per u32
+  }
+  return head_size;
+}
+
 // Auto-detect a fixed kv-cache shape from the model's past_key input shapes,
 // and, when detected, apply the implied configuration:
 //   - reject beam search (num_beams != 1),
@@ -226,7 +239,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0,
+             model_.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
@@ -279,6 +293,33 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+
+  // Detect TurboQuant configuration from provider options.
+  int turbo_quant_bits = 0;
+  for (const auto& provider : model_.config_->model.decoder.session_options.provider_options) {
+    if (provider.name == "WebGPU") {
+      for (const auto& opt : provider.options) {
+        if (opt.first == "turboQuant") {
+          turbo_quant_bits = std::stoi(opt.second);
+          if (turbo_quant_bits != 0 && turbo_quant_bits != 4) {
+            throw std::runtime_error("Unsupported turboQuant value: " + opt.second + ". Only 0 (disabled) and 4 are supported.");
+          }
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  // When TurboQuant is enabled, compute the compressed KV cache head dimension.
+  if (turbo_quant_bits == 4) {
+    shape_[3] = ComputeTurboQuantHeadSize(model_.config_->model.decoder.head_size, turbo_quant_bits, type_);
+    if (g_log.enabled) {
+      Log("info", "DefaultKeyValueCache: TurboQuant " + std::to_string(turbo_quant_bits) +
+                      "-bit enabled, compressed kv_cache head_size=" + std::to_string(shape_[3]));
+    }
+  }
+
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   // Auto-detect per-layer KV cache shape from ONNX session input shapes.
@@ -288,6 +329,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // per layer, so detect and store both. (Previously only head_dim was handled, which
   // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
   // "past_key_values.5.key index 1 Got 8 Expected 1".)
+  // When TurboQuant is active, the ONNX model reports uncompressed head dimensions;
+  // we must apply compression before comparing/storing.
   {
     // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
     constexpr size_t kKvHeadsAxis = 1;
@@ -304,7 +347,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
       if (input_shape.size() == 4) {
         if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
-        if (input_shape[kHeadDimAxis] > 0) per_layer_head_dim[i] = input_shape[kHeadDimAxis];
+        if (input_shape[kHeadDimAxis] > 0) {
+          // The ONNX model reports uncompressed head dimensions; when TurboQuant is
+          // active apply compression before comparing/storing (no-op when disabled).
+          per_layer_head_dim[i] =
+              ComputeTurboQuantHeadSize(static_cast<int>(input_shape[kHeadDimAxis]), turbo_quant_bits, type_);
+        }
         if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
             per_layer_head_dim[i] != shape_[kHeadDimAxis])
           has_per_layer_variation = true;
