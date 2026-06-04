@@ -418,11 +418,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'.
-  // The MorphiZenEP entry "MorphiZen" must match the name passed to
-  // CreateMemoryInfo_V2 by the MorphiZen EP factory when it registers
-  // its GPU OrtMemoryInfo via EpDevice_AddAllocatorInfo; otherwise OGA
-  // cannot look up the EP's allocator.
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'
   static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "MorphiZen"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
@@ -559,10 +555,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
-  // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
+  // Only CUDA, TRT-RTX, RyzenAI, MorphiZenEP and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-      p_device_->GetType() == DeviceType::RyzenAI ||
+      p_device_->GetType() == DeviceType::RyzenAI || p_device_->GetType() == DeviceType::MorphiZenEP ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
