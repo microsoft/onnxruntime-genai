@@ -511,6 +511,20 @@ OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, c
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_SetSearchNumber(OgaGenerator* generator, const char* name, double value) {
+  OGA_TRY
+  generator->SetSearchNumber(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetSearchBool(OgaGenerator* generator, const char* name, bool value) {
+  OGA_TRY
+  generator->SetSearchBool(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
 namespace {
 
 /**

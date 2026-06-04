@@ -460,6 +460,142 @@ TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
       << " Unpenalized per-token avg=" << unpenalized_avg;
 }
 
+// Test switching from greedy to top-k sampling via Generator::SetSearchNumber/SetSearchBool.
+// Greedy always picks the highest logit; after switching to top_k=2, only the top 2 tokens are candidates.
+TEST(SamplingTests, MutableSamplingGreedyToTopK) {
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  auto model = OgaModel::Create(*config);
+
+  // Create generator with greedy, then switch to top_k sampling before generating
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Switch to top-k sampling before first generation
+  generator->SetSearchBool("do_sample", true);
+  generator->SetSearchNumber("top_k", 2);
+  generator->SetSearchNumber("temperature", 1.0);
+
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL}));
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  // With top_k=2, only tokens 0 (2.0) and 1 (1.5) are candidates
+  EXPECT_TRUE(next_tokens[0] == 0 || next_tokens[0] == 1)
+      << "Token " << next_tokens[0] << " is outside top_k=2 candidates";
+}
+
+// Test switching from sampling back to greedy via SetSearchBool("do_sample", false).
+TEST(SamplingTests, MutableSamplingSamplingToGreedy) {
+  std::vector<float> logits_cpu{0.25f, 2.0f, 1.5f, 1.25f, 0.25f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 4);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Switch to greedy before generating
+  generator->SetSearchBool("do_sample", false);
+
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL}));
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 1) << "Greedy should always pick token 1 (highest logit = 2.0)";
+}
+
+// Test changing temperature on a live generator.
+// With temperature=0, sampling degenerates to greedy.
+TEST(SamplingTests, MutableSamplingTemperatureZero) {
+  std::vector<float> logits_cpu{0.25f, 0.25f, 2.0f, 1.5f, 0.25f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 4);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetSearchNumber("temperature", 0.0);
+
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL}));
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 2) << "temperature=0 should always pick token 2 (highest logit)";
+}
+
+// Test that changing top_k=1 on a live generator forces greedy selection.
+TEST(SamplingTests, MutableSamplingTopKChange) {
+  std::vector<float> logits_cpu{5.0f, 4.0f, 3.0f, 2.0f, 1.0f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 5);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetSearchNumber("top_k", 1);
+
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL}));
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 0) << "top_k=1 should always pick the highest logit token";
+}
+
+// Test that SetSearchNumber rejects unknown parameter names.
+TEST(SamplingTests, MutableSamplingInvalidName) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_THROW(generator->SetSearchNumber("nonexistent_param", 1.0), std::runtime_error);
+  EXPECT_THROW(generator->SetSearchBool("nonexistent_param", true), std::runtime_error);
+}
+
+// Test that overrides don't affect other generators created from the same params.
+TEST(SamplingTests, MutableSamplingIsolation) {
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", false);  // greedy
+
+  // Generator 1: override to sampling
+  auto gen1 = OgaGenerator::Create(*model, *params);
+  gen1->SetSearchBool("do_sample", true);
+  gen1->SetSearchNumber("top_k", 3);
+
+  // Generator 2: should still be greedy (params unchanged)
+  auto gen2 = OgaGenerator::Create(*model, *params);
+
+  gen2->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL}));
+  gen2->GenerateNextToken();
+  auto next_tokens = gen2->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 0) << "Generator 2 should still be greedy (token 0 has highest logit)";
+}
+
 #if USE_CUDA
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};

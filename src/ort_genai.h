@@ -512,6 +512,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
 
+  void SetSearchNumber(const char* name, double value) {
+    OgaCheckResult(OgaGenerator_SetSearchNumber(this, name, value));
+  }
+
+  void SetSearchBool(const char* name, bool value) {
+    OgaCheckResult(OgaGenerator_SetSearchBool(this, name, value));
+  }
+
   size_t GetSequenceCount(size_t index) const {
     return OgaGenerator_GetSequenceCount(this, index);
   }

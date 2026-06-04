@@ -108,6 +108,8 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
+  void SetSearchNumber(const char* name, double value);
+  void SetSearchBool(const char* name, bool value);
   bool IsSessionTerminated() const;
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
@@ -143,6 +145,15 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+  void UpdateSamplingMethod();
+
+  // Mutable sampling parameter overrides (set via SetSearchNumber/SetSearchBool)
+  std::optional<float> temperature_override_;
+  std::optional<int> top_k_override_;
+  std::optional<float> top_p_override_;
+  std::optional<float> repetition_penalty_override_;
+  std::optional<int> min_length_override_;
+  std::optional<bool> do_sample_override_;
 };
 
 struct OrtGlobals {

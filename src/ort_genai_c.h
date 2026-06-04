@@ -553,6 +553,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /**
+ * \brief Set a numeric search parameter on a live generator without discarding the KV-cache.
+ *        Supported names: temperature, top_k, top_p, repetition_penalty, min_length.
+ * \param[in] generator The generator to update.
+ * \param[in] name The search parameter name.
+ * \param[in] value The new value.
+ * \return OgaResult containing the error message if setting failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetSearchNumber(OgaGenerator* generator, const char* name, double value);
+
+/**
+ * \brief Set a boolean search parameter on a live generator without discarding the KV-cache.
+ *        Supported names: do_sample.
+ * \param[in] generator The generator to update.
+ * \param[in] name The search parameter name.
+ * \param[in] value The new value.
+ * \return OgaResult containing the error message if setting failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetSearchBool(OgaGenerator* generator, const char* name, bool value);
+
+/**
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
  *        and continue generating from that point.
  * \param[in] generator The generator to rewind to the given length.
