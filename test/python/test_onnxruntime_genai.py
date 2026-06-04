@@ -9,8 +9,8 @@ import sys
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
-from test_gemma4_models import run_gemma4_vision_tests
-from test_qwen_fara_models import run_qwen_fara_vision_tests
+from models.test_gemma4_models import run_gemma4_vision_tests
+from models.test_qwen_fara_models import run_qwen_fara_vision_tests
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -60,8 +60,8 @@ def parse_arguments():
     )
     parser.add_argument(
         "--test_models",
-        help="Path to the test_models directory",
-        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "test_models",
+        help="Path to the 'models' directory",
+        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "models",
     )
     parser.add_argument(
         "--e2e",

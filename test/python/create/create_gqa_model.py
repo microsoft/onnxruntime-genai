@@ -207,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir",
                         default=os.path.join(os.path.dirname(__file__),
-                                             "test_models", "hf-internal-testing", "tiny-qwen35-cuda"))
+                                             "models", "hf-internal-testing", "tiny-qwen35-cuda"))
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"Creating tiny GQA test model in {args.output_dir}")

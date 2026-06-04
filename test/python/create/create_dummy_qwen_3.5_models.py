@@ -11,7 +11,7 @@ state tensors. These models produce dummy outputs but have the correct
 shapes for testing the ort-genai runtime's auto-discovery and state management.
 
 Usage:
-    python create_qwen35_dummy_models.py --output test/test_models/qwen35-hybrid-preprocessing
+    python create_dummy_qwen_3.5_models.py --output test/models/qwen3-5
 """
 
 import argparse
@@ -347,7 +347,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="test/test_models/qwen35-hybrid-preprocessing",
+        default="test/models/qwen3-5",
         help="Output directory for the dummy models",
     )
     args = parser.parse_args()
@@ -382,7 +382,7 @@ def main():
     print("  Created genai_config.json")
 
     # Copy tokenizer files from qwen3-vl test model if available
-    src_dir = os.path.join(os.path.dirname(output_dir), "qwen3-vl-vision-preprocessing")
+    src_dir = os.path.join(os.path.dirname(output_dir), "qwen3-vl")
     for fname in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "processor_config.json"]:
         src = os.path.join(src_dir, fname)
         if os.path.exists(src):

@@ -195,7 +195,7 @@ bool ParseArgs(
   app.add_option("-p,--top_p", generator_params_args.top_p, "Top p probability to sample with")->group(generator_params);
 
   app.add_option("--response_format", guidance_args.response_format, "Provide response format for the model")->group(guidance);
-  app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json")->group(guidance);
+  app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json")->group(guidance);
   app.add_flag("--text_output", guidance_args.text_output, "Produce a text response in the output")->group(guidance);
   app.add_flag("--tool_output", guidance_args.tool_output, "Produce a tool call in the output")->group(guidance);
   app.add_option("--tool_call_start", guidance_args.tool_call_start, "String representation of tool call start (ex: <|tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.")->group(guidance);

@@ -37,10 +37,10 @@ class LFM2Model(Model):
         self.conv_L_cache = config.conv_L_cache
         self.kv_layer_indices = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
     def make_inputs_and_outputs(self):
         # Replace the base class's all-layer KV lists with attention-layer-only lists,
