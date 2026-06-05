@@ -54,6 +54,11 @@ parameters:
     type: string
     default: '1.8.2091'
 
+  - name: ort_cuda_version
+    displayName: 'OnnxRuntime GPU version'
+    type: string
+    default: '1.23.0'
+
   - name: cuda_versions
     displayName: 'CUDA versions'
     type: string
@@ -120,6 +125,7 @@ extends:
           cuda_versions: ${{ parameters.cuda_versions }}
           build_config: ${{ parameters.build_config }}
           enable_winml: ${{ parameters.enable_winml }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
           ${{ if eq(parameters.enable_winml, true) }}:
             ort_version: ${{ parameters.ort_winml_version }}
           ${{ else }}:

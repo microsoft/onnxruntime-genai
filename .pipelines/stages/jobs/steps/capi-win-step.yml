@@ -64,7 +64,7 @@ steps:
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA $(cuda_version)'
-  condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
+  condition: and(eq(variables['arch'], 'x64'), or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -160,13 +160,13 @@ steps:
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if ne(parameters.ort_build_version, 'default') }}:
+- ${{ if or(ne(parameters.ort_build_version, 'default'), and(eq(parameters.ep, 'cuda'), eq(parameters.arch, 'arm64'))) }}:
   - powershell: |
       $ep = "$(ep)"
       $arch = "$(arch)"
 
       switch ($ep) {
-          "cuda" { $packageName = "Microsoft.ML.OnnxRuntime.Gpu.Windows" }
+          "cuda" { $packageName = if ($arch -eq "arm64") { "Microsoft.ML.OnnxRuntime" } else { "Microsoft.ML.OnnxRuntime.Gpu.Windows" } }
           "directml" { $packageName = "Microsoft.ML.OnnxRuntime.DirectML" }
           default { $packageName = "Microsoft.ML.OnnxRuntime" }
       }
@@ -175,6 +175,13 @@ steps:
       $feedProject = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
       $feedId = "7982ae20-ed19-4a35-a362-a96ac99897b7"
       $version = "${{ parameters.ort_build_version }}"
+      if ($version -eq "default") {
+          $version = "$(ort_version)"
+      }
+      if ([string]::IsNullOrWhiteSpace($version)) {
+          Write-Error "ORT build version is empty. Set ort_build_version or pass the appropriate ORT version parameter for $ep/$arch."
+          exit 1
+      }
 
       $source = "${{ parameters.ort_build_source }}"
       if ($source -eq "Ort-Nightly") {
@@ -200,7 +207,8 @@ steps:
       # Copy headers
       # CUDA packages store headers in buildTransitive/native/include, while other
       # ORT packages (CPU, DML) use build/native/include per NuGet package layout.
-      if ($ep -eq "cuda") {
+      # CUDA arm64 currently builds against the CPU ORT package, which uses build/native/include.
+      if ($ep -eq "cuda" -and $arch -ne "arm64") {
           $headerSrc = "$extractPath\buildTransitive\native\include"
       } else {
           $headerSrc = "$extractPath\build\native\include"
@@ -214,7 +222,7 @@ steps:
       Write-Host "ORT_HOME: $ortHome"
       Get-ChildItem "$ortHome" -Recurse | Select-Object FullName
       Write-Host "##vso[task.setvariable variable=ORT_HOME_CMAKE_ARG]-DORT_HOME=$ortHome"
-    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+    displayName: 'Download ORT build package'
     condition: ne(variables['ep'], 'winml')
     workingDirectory: '$(Build.Repository.LocalPath)'
 

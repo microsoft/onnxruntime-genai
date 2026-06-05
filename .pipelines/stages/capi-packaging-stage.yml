@@ -130,6 +130,19 @@ stages:
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cuda, true)) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_version }}
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
   - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
