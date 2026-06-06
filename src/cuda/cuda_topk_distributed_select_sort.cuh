@@ -186,10 +186,10 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
         int vocab_index = top_k_sequence_reduced.p_indirection;
 
         scores_out[ite] = top_k_sequence_reduced.u;
-        // Guard against NaN: if no valid element was found, p_indirection stays INT_MAX.
+        // Guard against NaN: if no valid element was found, p_indirection stays at -1 (init value).
         // Clamp to 0 to avoid downstream OOB in embedding lookups.
         indices_out[ite] = (vocab_index >= 0 && vocab_index < vocab_size) ? vocab_index : 0;
-        // Guard against NaN inputs: if all scores are NaN, p remains -1 (init value).
+        // Guard against NaN inputs: if all scores are NaN, p stays at -1 (init value).
         if (index >= 0 && index < num_top_k_shards * k) {
           shared_distributed_scores_out[index] = MIN_FLOAT;
         }
