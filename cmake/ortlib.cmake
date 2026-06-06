@@ -125,9 +125,25 @@ else()
   else()
     set(ORT_BINARY_PLATFORM "x64")
     if (APPLE)
-      if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+      # Honor CMAKE_OSX_ARCHITECTURES when set; otherwise fall back to the host
+      # architecture so a plain build on Apple Silicon selects the arm64 ONNX
+      # Runtime binaries instead of defaulting to x64.
+      if (CMAKE_OSX_ARCHITECTURES)
+        set(_ort_apple_arch ${CMAKE_OSX_ARCHITECTURES})
+      else()
+        set(_ort_apple_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
+      endif()
+      # The prebuilt ONNX Runtime package only provides single-arch macOS
+      # binaries (osx-arm64 / osx-x64), so universal builds are not supported.
+      list(LENGTH _ort_apple_arch _ort_apple_arch_count)
+      if (_ort_apple_arch_count GREATER 1)
+        message(FATAL_ERROR "Universal macOS builds (CMAKE_OSX_ARCHITECTURES=\"${CMAKE_OSX_ARCHITECTURES}\") are not supported with the auto-downloaded ONNX Runtime binaries; specify a single architecture (arm64 or x86_64).")
+      endif()
+      if (_ort_apple_arch STREQUAL "arm64")
         set(ORT_BINARY_PLATFORM "arm64")
       endif()
+      unset(_ort_apple_arch)
+      unset(_ort_apple_arch_count)
       set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/osx-${ORT_BINARY_PLATFORM}/native)
     elseif(WIN32)
       if (CMAKE_GENERATOR_PLATFORM)
