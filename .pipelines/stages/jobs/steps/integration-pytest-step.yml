@@ -1,0 +1,139 @@
+parameters:
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+  - 'osx'
+- name: ep
+  type: string
+  values:
+  - 'cpu'
+  - 'cuda'
+  - 'webgpu'
+- name: model
+  type: string
+- name: modelRoot
+  type: string
+- name: cudaDockerImage
+  type: string
+  default: ''
+- name: wheelDir
+  type: string
+
+steps:
+- ${{ if eq(parameters.os, 'win') }}:
+  - powershell: |
+      $wheel = Get-ChildItem "${{ parameters.wheelDir }}\*.whl" | Select-Object -First 1
+      if (-not $wheel) { throw "no wheel found in ${{ parameters.wheelDir }}" }
+      python -m pip install --upgrade pip
+      python -m pip install -r test\python\requirements.txt
+      python -m pip install pytest
+      python -m pip install $wheel.FullName
+      if ("${{ parameters.ep }}" -eq "webgpu") {
+        python -m pip install onnxruntime-ep-webgpu
+      }
+    displayName: 'Install source-built wheel and test deps'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - powershell: |
+      $env:ORTGENAI_MODEL_ROOT = "${{ parameters.modelRoot }}"
+      if ("${{ parameters.ep }}" -eq "cuda") {
+        $cudaBin = "$(Build.Repository.LocalPath)\cuda_sdk\v12.8\bin"
+        if (-not (Test-Path $cudaBin)) { throw "CUDA bin not found at $cudaBin" }
+        $env:PATH = "$cudaBin;$env:PATH"
+        nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
+      }
+      python -m pytest test\python\integration -sv `
+        --execution-provider ${{ parameters.ep }} `
+        --model "${{ parameters.model }}" `
+        --junitxml=$(Common.TestResultsDirectory)\integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+    displayName: 'Run integration test'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if and(eq(parameters.os, 'linux'), eq(parameters.ep, 'cuda')) }}:
+  - task: Docker@2
+    displayName: 'Login to Azure container registry'
+    inputs:
+      containerRegistry: 'onnxruntimebuildcache'
+      command: 'login'
+      addPipelineData: false
+
+  - bash: |
+      set -e -x
+      docker run --rm --gpus all \
+        -v $(Build.Repository.LocalPath):/onnxruntime-genai \
+        -v ${{ parameters.wheelDir }}:/wheel \
+        -v ${{ parameters.modelRoot }}:/models:ro \
+        -v $(Common.TestResultsDirectory):/results \
+        -e ORTGENAI_MODEL_ROOT=/models \
+        -w /onnxruntime-genai \
+        ${{ parameters.cudaDockerImage }} \
+        /bin/bash -c "
+          set -e -x
+          PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
+          \$PYTHON_EXE -m pip install -r test/python/requirements.txt
+          \$PYTHON_EXE -m pip install pytest
+          \$PYTHON_EXE -m pip install /wheel/*.whl
+          nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
+          \$PYTHON_EXE -m pytest test/python/integration -sv \
+            --execution-provider ${{ parameters.ep }} \
+            --model '${{ parameters.model }}' \
+            --junitxml=/results/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+        "
+    displayName: 'Run integration test in CUDA container'
+
+- ${{ if and(eq(parameters.os, 'linux'), ne(parameters.ep, 'cuda')) }}:
+  - bash: |
+      set -e -x
+      python3 -m pip install --upgrade pip
+      python3 -m pip install -r test/python/requirements.txt
+      python3 -m pip install pytest
+      python3 -m pip install ${{ parameters.wheelDir }}/*.whl
+    displayName: 'Install source-built wheel and test deps'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - bash: |
+      set -e -x
+      export ORTGENAI_MODEL_ROOT="${{ parameters.modelRoot }}"
+      python3 -m pytest test/python/integration -sv \
+        --execution-provider ${{ parameters.ep }} \
+        --model "${{ parameters.model }}" \
+        --junitxml=$(Common.TestResultsDirectory)/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+    displayName: 'Run integration test'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.os, 'osx') }}:
+  - bash: |
+      set -e -x
+      python3 -m venv $(Agent.TempDirectory)/genai-venv
+      source $(Agent.TempDirectory)/genai-venv/bin/activate
+      python -m pip install --upgrade pip
+      python -m pip install -r test/python/requirements.txt
+      python -m pip install pytest
+      python -m pip install ${{ parameters.wheelDir }}/*.whl
+      if [ "${{ parameters.ep }}" = "webgpu" ]; then
+        python -m pip install onnxruntime-ep-webgpu
+      fi
+    displayName: 'Install source-built wheel and test deps'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - bash: |
+      set -e -x
+      source $(Agent.TempDirectory)/genai-venv/bin/activate
+      export ORTGENAI_MODEL_ROOT="${{ parameters.modelRoot }}"
+      python -m pytest test/python/integration -sv \
+        --execution-provider ${{ parameters.ep }} \
+        --model "${{ parameters.model }}" \
+        --junitxml=$(Common.TestResultsDirectory)/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+    displayName: 'Run integration test'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- task: PublishTestResults@2
+  condition: succeededOrFailed()
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: '$(Common.TestResultsDirectory)/integration-*.xml'
+    testRunTitle: 'integration ${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}'
+    mergeTestResults: true
+    failTaskOnFailedTests: true

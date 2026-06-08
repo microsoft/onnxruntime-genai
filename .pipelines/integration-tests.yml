@@ -1,0 +1,162 @@
+# ONNX Runtime GenAI - integration tests
+#
+# Purpose
+#   Validate the ORT GenAI native layer against real models, end to end.
+#   The Python binding is the entry point, but the goal is to exercise the
+#   C++ core: model loading, tokenizer, generator loop, and each supported
+#   execution provider.
+#
+# When it runs
+#   - On every pull request to main: the `pr` suite (small fast set).
+#   - On every merge to main:        the `all` suite (broader coverage).
+#   - Manually queued:               choose the suite and which OS/EP combos.
+#
+# What gets built
+#   ORT GenAI is built from source on each run, once per (os, arch):
+#     - Windows x64: built with --use_cuda (CUDA 12.8, sm_86 for A10). The
+#                    same wheel exercises the CPU, CUDA, and WebGPU lanes.
+#     - Linux x64:   built with --use_cuda (CUDA 12.8, sm_90 for H100)
+#                    inside the manylinux container. The same wheel
+#                    exercises the CPU and CUDA lanes.
+#     - macOS arm64: built without CUDA. The same wheel exercises the CPU
+#                    and WebGPU lanes.
+#
+# What gets tested
+#   The hardwired model catalog lives in test/python/integration/models.py.
+#   The same catalog is mirrored below in the `pr_models` and `all_models`
+#   parameter defaults so the pipeline can fan one job out per model.
+#   Keep them in sync - when adding a new model, update both.
+#
+# How models are delivered
+#   Foundry Local publishes models to the `foundrylocalmodels` storage
+#   account. Each test job (one per model × ep combination) uses the
+#   agent's managed identity to azcopy just its own model directory, then
+#   runs pytest against that local copy.
+#
+# Pipeline structure
+#   Per (os, arch):
+#     Stage 1: build the wheel.
+#     Stage 2: test jobs - one ADO job per (model, ep). Models run in
+#              parallel on separate agents, so each agent only needs disk
+#              for one model.
+
+trigger:
+  branches:
+    include:
+    - main
+
+pr:
+  branches:
+    include:
+    - main
+
+parameters:
+- name: suite
+  displayName: 'Test suite. "auto" picks pr for PRs, all for main merges.'
+  type: string
+  default: 'auto'
+  values:
+  - 'auto'
+  - 'pr'
+  - 'all'
+
+- name: windows_x64_cpu
+  displayName: 'Run Windows x64 CPU tests'
+  type: boolean
+  default: true
+
+- name: windows_x64_cuda
+  displayName: 'Run Windows x64 CUDA tests'
+  type: boolean
+  default: true
+
+- name: windows_x64_webgpu
+  displayName: 'Run Windows x64 WebGPU tests'
+  type: boolean
+  default: true
+
+- name: linux_x64_cpu
+  displayName: 'Run Linux x64 CPU tests'
+  type: boolean
+  default: true
+
+- name: linux_x64_cuda
+  displayName: 'Run Linux x64 CUDA tests'
+  type: boolean
+  default: true
+
+- name: macos_arm64_cpu
+  displayName: 'Run macOS arm64 CPU tests'
+  type: boolean
+  default: true
+
+- name: macos_arm64_webgpu
+  displayName: 'Run macOS arm64 WebGPU tests'
+  type: boolean
+  default: true
+
+# Suite contents - keep in sync with test/python/integration/models.py.
+- name: pr_models
+  type: object
+  default:
+    - qwen2.5-0.5b-instruct
+    - qwen3-0.6b
+    - Phi-3.5-mini-instruct
+    - Phi-4-mini-instruct
+    - smollm3-3b
+    - ministral-3-3b-Instruct-2512
+
+- name: all_models
+  type: object
+  default:
+    - qwen2.5-0.5b-instruct
+    - qwen3-0.6b
+    - Phi-3.5-mini-instruct
+    - Phi-4-mini-instruct
+    - smollm3-3b
+    - ministral-3-3b-Instruct-2512
+    - Phi-3-mini-4k-instruct
+    - Phi-4
+    - Phi-4-mini-reasoning
+    - Phi-4-reasoning
+    - deepseek-r1-distill-qwen-1.5b
+    - olmo-3-7b-instruct
+    - qwen2.5-1.5b-instruct
+    - qwen2.5-3b-instruct
+    - qwen2.5-7b-instruct
+    - qwen2.5-coder-1.5b-instruct
+    - qwen3-1.7b
+    - qwen3-4b
+    - qwen3-8b
+    - qwen3.5-0.8b
+    - qwen3.5-2b
+    - qwen3.5-4b
+
+stages:
+- template: stages/integration-stage.yml
+  parameters:
+    # Resolve the suite's model list at compile time so each model
+    # becomes its own ADO job (fans out via ${{ each }} in the template).
+    ${{ if eq(parameters.suite, 'pr') }}:
+      models: ${{ parameters.pr_models }}
+    ${{ elseif eq(parameters.suite, 'all') }}:
+      models: ${{ parameters.all_models }}
+    ${{ elseif eq(variables['Build.Reason'], 'PullRequest') }}:
+      models: ${{ parameters.pr_models }}
+    ${{ else }}:
+      models: ${{ parameters.all_models }}
+    # Skip the per-(os, arch) build if no test job needs it.
+    build_windows_x64: ${{ or(parameters.windows_x64_cpu, parameters.windows_x64_cuda, parameters.windows_x64_webgpu) }}
+    build_linux_x64: ${{ or(parameters.linux_x64_cpu, parameters.linux_x64_cuda) }}
+    build_macos_arm64: ${{ or(parameters.macos_arm64_cpu, parameters.macos_arm64_webgpu) }}
+    windows_x64_cpu: ${{ parameters.windows_x64_cpu }}
+    windows_x64_cuda: ${{ parameters.windows_x64_cuda }}
+    windows_x64_webgpu: ${{ parameters.windows_x64_webgpu }}
+    linux_x64_cpu: ${{ parameters.linux_x64_cpu }}
+    linux_x64_cuda: ${{ parameters.linux_x64_cuda }}
+    macos_arm64_cpu: ${{ parameters.macos_arm64_cpu }}
+    macos_arm64_webgpu: ${{ parameters.macos_arm64_webgpu }}
+
+# TODO: on main-merge failure, post a GitHub issue and a Teams/email to the
+# integration-tests owners. Implement as a final job with:
+#   condition: and(failed(), eq(variables['Build.Reason'], 'IndividualCI'))

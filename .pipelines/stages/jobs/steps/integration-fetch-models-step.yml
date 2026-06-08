@@ -1,0 +1,90 @@
+parameters:
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+  - 'osx'
+- name: ep
+  type: string
+- name: model
+  type: string
+- name: serviceConnection
+  type: string
+  default: 'ortcibuild_readonly_mi2-ONNX Runtime'
+- name: storageAccount
+  type: string
+  default: 'foundrylocalmodels'
+- name: container
+  type: string
+  default: 'models'
+# Blobs in the container live under this prefix (e.g.
+# `models/foundrylocal/models/<model>/onnx/<device>/v<N>/...`). We point
+# azcopy at <container>/<pathPrefix> so files land at <targetDir>/<model>/...
+# and ORTGENAI_MODEL_ROOT works without further translation.
+- name: pathPrefix
+  type: string
+  default: 'foundrylocal/models'
+- name: targetDir
+  type: string
+
+steps:
+- ${{ if eq(parameters.os, 'win') }}:
+  - task: AzureCLI@2
+    displayName: 'azcopy ${{ parameters.model }} (${{ parameters.ep }})'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      inlineScript: |
+        $subpath = python tools/python/integration/suite_paths.py `
+          --model "${{ parameters.model }}" `
+          --device ${{ parameters.ep }}
+        if (-not $subpath) {
+          throw "Model '${{ parameters.model }}' does not support device '${{ parameters.ep }}'"
+        }
+        Write-Host "Downloading: $subpath"
+        New-Item -ItemType Directory -Force "${{ parameters.targetDir }}" | Out-Null
+        $env:AZCOPY_AUTO_LOGIN_TYPE = "AZCLI"
+        azcopy copy `
+          "https://${{ parameters.storageAccount }}.blob.core.windows.net/${{ parameters.container }}/${{ parameters.pathPrefix }}/*" `
+          "${{ parameters.targetDir }}" `
+          --include-path "$subpath" `
+          --recursive
+
+- ${{ if eq(parameters.os, 'osx') }}:
+  - bash: |
+      set -e -x
+      if ! command -v azcopy >/dev/null 2>&1; then
+        brew update --quiet
+        brew install --quiet azcopy
+      fi
+      azcopy --version
+    displayName: 'Install azcopy (macOS)'
+
+- ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
+  - task: AzureCLI@2
+    displayName: 'azcopy ${{ parameters.model }} (${{ parameters.ep }})'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      inlineScript: |
+        set -e -x
+        subpath=$(python3 tools/python/integration/suite_paths.py \
+          --model "${{ parameters.model }}" \
+          --device ${{ parameters.ep }})
+        if [ -z "$subpath" ]; then
+          echo "##vso[task.logissue type=error]Model '${{ parameters.model }}' does not support device '${{ parameters.ep }}'"
+          exit 1
+        fi
+        echo "Downloading: $subpath"
+        mkdir -p "${{ parameters.targetDir }}"
+        export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+        azcopy copy \
+          "https://${{ parameters.storageAccount }}.blob.core.windows.net/${{ parameters.container }}/${{ parameters.pathPrefix }}/*" \
+          "${{ parameters.targetDir }}" \
+          --include-path "$subpath" \
+          --recursive

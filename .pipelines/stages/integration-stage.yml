@@ -1,0 +1,139 @@
+parameters:
+# Models that the suite tests. The top-level pipeline picks the list
+# based on suite (pr vs all). One ADO job is spawned per (ep, model)
+# combination, so models run in parallel on separate agents.
+- name: models
+  type: object
+  default: []
+- name: build_windows_x64
+  type: boolean
+  default: true
+- name: build_linux_x64
+  type: boolean
+  default: true
+- name: windows_x64_cpu
+  type: boolean
+  default: true
+- name: windows_x64_cuda
+  type: boolean
+  default: true
+- name: windows_x64_webgpu
+  type: boolean
+  default: true
+- name: linux_x64_cpu
+  type: boolean
+  default: true
+- name: linux_x64_cuda
+  type: boolean
+  default: true
+- name: build_macos_arm64
+  type: boolean
+  default: true
+- name: macos_arm64_cpu
+  type: boolean
+  default: true
+- name: macos_arm64_webgpu
+  type: boolean
+  default: true
+
+stages:
+- ${{ if eq(parameters.build_windows_x64, true) }}:
+  - stage: build_win_x64
+    displayName: 'Build · Windows x64'
+    dependsOn: []
+    jobs:
+    - template: jobs/integration-build-job.yml
+      parameters:
+        os: 'win'
+        arch: 'x64'
+
+  - stage: integration_test_win_x64
+    displayName: 'Test · Windows x64'
+    dependsOn: build_win_x64
+    jobs:
+    - ${{ each model in parameters.models }}:
+      - ${{ if eq(parameters.windows_x64_cpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'win'
+            arch: 'x64'
+            ep: 'cpu'
+            model: ${{ model }}
+
+      - ${{ if eq(parameters.windows_x64_cuda, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'win'
+            arch: 'x64'
+            ep: 'cuda'
+            model: ${{ model }}
+
+      - ${{ if eq(parameters.windows_x64_webgpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'win'
+            arch: 'x64'
+            ep: 'webgpu'
+            model: ${{ model }}
+
+- ${{ if eq(parameters.build_linux_x64, true) }}:
+  - stage: build_linux_x64
+    displayName: 'Build · Linux x64'
+    dependsOn: []
+    jobs:
+    - template: jobs/integration-build-job.yml
+      parameters:
+        os: 'linux'
+        arch: 'x64'
+
+  - stage: integration_test_linux_x64
+    displayName: 'Test · Linux x64'
+    dependsOn: build_linux_x64
+    jobs:
+    - ${{ each model in parameters.models }}:
+      - ${{ if eq(parameters.linux_x64_cpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'linux'
+            arch: 'x64'
+            ep: 'cpu'
+            model: ${{ model }}
+
+      - ${{ if eq(parameters.linux_x64_cuda, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'linux'
+            arch: 'x64'
+            ep: 'cuda'
+            model: ${{ model }}
+
+- ${{ if eq(parameters.build_macos_arm64, true) }}:
+  - stage: build_osx_arm64
+    displayName: 'Build · macOS arm64'
+    dependsOn: []
+    jobs:
+    - template: jobs/integration-build-job.yml
+      parameters:
+        os: 'osx'
+        arch: 'arm64'
+
+  - stage: integration_test_osx_arm64
+    displayName: 'Test · macOS arm64'
+    dependsOn: build_osx_arm64
+    jobs:
+    - ${{ each model in parameters.models }}:
+      - ${{ if eq(parameters.macos_arm64_cpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'osx'
+            arch: 'arm64'
+            ep: 'cpu'
+            model: ${{ model }}
+
+      - ${{ if eq(parameters.macos_arm64_webgpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'osx'
+            arch: 'arm64'
+            ep: 'webgpu'
+            model: ${{ model }}

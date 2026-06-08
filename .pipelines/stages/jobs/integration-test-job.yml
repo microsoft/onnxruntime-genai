@@ -1,0 +1,103 @@
+parameters:
+- name: arch
+  type: string
+  default: 'x64'
+- name: ep
+  type: string
+  values:
+  - 'cpu'
+  - 'cuda'
+  - 'webgpu'
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+  - 'osx'
+- name: model
+  type: string
+- name: py_dot_ver
+  type: string
+  default: '3.12'
+
+jobs:
+- job: integration_${{ parameters.ep }}_${{ replace(replace(parameters.model, '.', '_'), '-', '_') }}
+  displayName: '${{ parameters.ep }} · ${{ parameters.model }}'
+  ${{ if eq(parameters.os, 'linux') }}:
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      pool: 'onnx-publish-Linux-GPU-H100'
+    ${{ else }}:
+      pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    ${{ if or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'webgpu')) }}:
+      pool: 'onnxruntime-Win2022-GPU-A10'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: AcesShared
+      os: macOS
+      demands:
+        - ImageOverride -equals ACES_VM_SharedPool_Sequoia
+
+  timeoutInMinutes: 60
+  workspace:
+    clean: all
+
+  variables:
+  - name: artifactName
+    value: 'integration-wheel-${{ parameters.os }}-${{ parameters.arch }}'
+  - name: modelRoot
+    ${{ if eq(parameters.os, 'win') }}:
+      value: '$(Agent.TempDirectory)\ortgenai-models'
+    ${{ else }}:
+      value: '$(Agent.TempDirectory)/ortgenai-models'
+  - name: cuda_docker_image
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20250714.2
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: false
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: ${{ parameters.py_dot_ver }}
+      addToPath: true
+      architecture: ${{ parameters.arch }}
+
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download integration wheel'
+    inputs:
+      artifactName: $(artifactName)
+      targetPath: '$(Build.BinariesDirectory)/wheel'
+
+  - ${{ if and(eq(parameters.os, 'win'), eq(parameters.ep, 'cuda')) }}:
+    - task: AzureCLI@2
+      displayName: 'Download CUDA 12.8 runtime'
+      inputs:
+        azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+        inlineScript: |
+          $env:AZCOPY_AUTO_LOGIN_TYPE = "AZCLI"
+          azcopy copy --recursive `
+            "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.8" `
+            "cuda_sdk"
+
+  - template: steps/integration-fetch-models-step.yml
+    parameters:
+      os: ${{ parameters.os }}
+      ep: ${{ parameters.ep }}
+      model: ${{ parameters.model }}
+      targetDir: $(modelRoot)
+
+  - template: steps/integration-pytest-step.yml
+    parameters:
+      os: ${{ parameters.os }}
+      ep: ${{ parameters.ep }}
+      model: ${{ parameters.model }}
+      modelRoot: $(modelRoot)
+      cudaDockerImage: $(cuda_docker_image)
+      wheelDir: '$(Build.BinariesDirectory)/wheel'
