@@ -136,7 +136,7 @@ TEST(JsonMergePatch, UnicodeEscapeRoundTrip) {
   EXPECT_EQ(result.find("\\\\u"), std::string::npos);
   // The decoded characters should appear as UTF-8 bytes in the output.
   EXPECT_NE(result.find("\"a\":\"A\""), std::string::npos);
-  EXPECT_NE(result.find("caf\xc3\xa9"), std::string::npos);    // 'é' = 0xC3 0xA9
+  EXPECT_NE(result.find("caf\xc3\xa9"), std::string::npos);       // 'é' = 0xC3 0xA9
   EXPECT_NE(result.find("\xf0\x9f\x98\x80"), std::string::npos);  // U+1F600 = 0xF0 0x9F 0x98 0x80
   EXPECT_NE(result.find("\"keep\":\"x\""), std::string::npos);
 }
@@ -559,7 +559,7 @@ TEST(ModelPackageNormalize, OverlayMergePatchSemantics) {
   //   * overlay-only fields appear,
   //   * fields set in both follow merge-patch semantics: the overlay wins.
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), kKitchenSinkPkgPath,
-                                          /*settings=*/nullptr, /*ep=*/nullptr);
+                                         /*settings=*/nullptr, /*ep=*/nullptr);
   ASSERT_NE(config, nullptr);
   const auto& so = config->model.decoder.session_options;
 
@@ -599,7 +599,7 @@ TEST(ModelPackageNormalize, OverlayIntroducedComponentThrows) {
   // so the new component reference must be rejected by NormalizePackageIntoConfig.
   EXPECT_THROW(
       Generators::CreateConfig(Generators::GetOrtEnv(), kBadOverlayComponentPkgPath,
-                                /*settings=*/nullptr, /*ep=*/nullptr),
+                               /*settings=*/nullptr, /*ep=*/nullptr),
       std::runtime_error);
 }
 #endif

@@ -1528,7 +1528,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 #if ORT_API_VERSION >= 27
 // OrtModelPackageOptions
 inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
-                                                                               const OrtSessionOptions& session_options) {
+                                                                              const OrtSessionOptions& session_options) {
   OrtModelPackageOptions* p;
   Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageOptionsFromSessionOptions(&env, &session_options, &p));
   return std::unique_ptr<OrtModelPackageOptions>{p};
@@ -1554,7 +1554,7 @@ inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const ch
 }
 
 inline std::optional<std::string> OrtModelPackageContext::GetVariantEpName(const char* component_name,
-                                                                          const char* variant_name) const {
+                                                                           const char* variant_name) const {
   const char* ep = nullptr;
   Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(
       this, component_name, variant_name, &ep));

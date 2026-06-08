@@ -1502,7 +1502,7 @@ struct OrtModelPackageContext {
   std::optional<std::string> GetVariantEpName(const char* component_name, const char* variant_name) const;
 
   std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(const char* component_name,
-                                                                    const OrtModelPackageOptions& options) const;
+                                                                   const OrtModelPackageOptions& options) const;
 
   static void operator delete(void* p) { Ort::GetModelPackageApi().ReleaseModelPackageContext(reinterpret_cast<OrtModelPackageContext*>(p)); }
   Ort::Abstract make_abstract;

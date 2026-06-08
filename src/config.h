@@ -32,7 +32,7 @@ struct Config {
   // creation time, with config_path acting as the fallback (matching flat-dir mode).
 #if ORT_HAS_MODEL_PACKAGE
   static std::unique_ptr<Config> FromPackage(const fs::path& config_path,
-                                              std::string_view merged_json);
+                                             std::string_view merged_json);
 #endif
 
   struct Defaults {

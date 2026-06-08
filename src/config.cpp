@@ -1677,7 +1677,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay)
 
 #if ORT_HAS_MODEL_PACKAGE
 std::unique_ptr<Config> Config::FromPackage(const fs::path& config_path,
-                                             std::string_view merged_json) {
+                                            std::string_view merged_json) {
   auto config = std::make_unique<Config>();
   config->config_path = config_path;
   ParseConfigFromString(merged_json, *config);
