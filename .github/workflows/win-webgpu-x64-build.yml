@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   binaryDir: 'build/cpu/win-x64'
@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           # Use Foundry package which includes WebGPU DLLs (dxil.dll, dxcompiler.dll)
-          $FOUNDRY_VERSION = "1.25.0-dev-20260210-0905-b214734cba"
+          $FOUNDRY_VERSION = "1.26.0-dev-20260410-0804-ce91376bdf"
           Write-Host "Downloading OnnxRuntime.Foundry version: $FOUNDRY_VERSION"
           nuget install Microsoft.ML.OnnxRuntime.Foundry -version $FOUNDRY_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
 
@@ -103,7 +103,7 @@ jobs:
 
       - name: Run the Python Tests
         run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
 
       - name: Verify Build Artifacts
         if: always()

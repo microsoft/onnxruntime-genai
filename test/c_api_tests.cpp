@@ -1332,7 +1332,166 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+
+TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify generation completed and produced output
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, static_cast<size_t>(input_ids_shape[1]));
+  ASSERT_LE(sequence_length, max_length);
+}
+
+TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate a few tokens
+  generator->GenerateNextToken();
+
+  // RewindTo should throw for LFM2 because conv state cannot be rewound
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
+}
 #endif
+
+// Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
+// Skipped when the phi3-fp16-nvtrt model is not available (CI-only model).
+TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
+  std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+  if (!std::filesystem::exists(nvtrt_path)) {
+    GTEST_SKIP() << "NvTensorRtRtx model not available at " << nvtrt_path;
+  }
+
+  auto config = OgaConfig::Create(nvtrt_path.c_str());
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  int max_length = 20;
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  std::vector<int32_t> input_ids{1, 15043, 29892, 920};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  generator->RewindTo(6);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+}
+
+// Test RewindTo with the qwen-2.5 model. Exercises the static mask rewind path if
+// the EP supports it (DML by default, WebGPU/CUDA when graph capture is enabled
+// in model generation via _test_utils.py), otherwise falls back to the dynamic mask path.
+// Skipped when qwen-2.5 model is not available.
+//
+// CUDA is explicitly disabled: RewindTo(seq_len - 3) — a deep partial rewind near
+// the end of a completed sequence — produces incorrect output on CUDA. This is a
+// pre-existing runtime bug (not model-specific): it reproduces with both
+// qwen-2.5-0.5b-graph and tiny-qwen35-cuda models, and with both static-mask
+// (graph-capture) and dynamic-mask (baseline) code paths. Full rewind (RewindTo(0))
+// and shallow partial rewind (e.g. RewindTo(input_ids.size()-1)) work correctly.
+// TODO: Remove !USE_CUDA once the CUDA partial rewind bug is fixed.
+#if TEST_QWEN_2_5 && !USE_CUDA
+TEST(CAPITests, RewindQwen25CAPI) {
+  // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),
+  // fall back to baseline model when it is not available.
+  std::string model_path = QWEN_2_5_GRAPH_PATH;
+  if (!std::filesystem::exists(model_path)) {
+    model_path = QWEN_2_5_PATH;
+  }
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "qwen-2.5 model not available at " << model_path;
+  }
+
+  int max_length = 50;
+  std::vector<int32_t> input_ids{1, 2, 3, 4, 5};
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOptionBool("do_sample", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Save first-run output
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  // RewindTo(0) - full rewind
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  // Partial rewind
+  if (seq_len > 7) {
+    generator->RewindTo(seq_len - 3);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+
+    seq_len2 = generator->GetSequenceCount(0);
+    ASSERT_EQ(seq_len2, seq_len);
+    EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+  }
+}
+#endif  // TEST_QWEN_2_5
 
 #ifndef STREAMING_ASR_PATH
 #define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
@@ -1541,4 +1700,79 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   auto mel3 = processor->Process(silence.data(), silence.size());
   ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
+}
+
+#ifndef PARAKEET_TDT_PATH
+#define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_JFK
+#define PARAKEET_TDT_AUDIO_JFK MODEL_PATH "audios/jfk.flac"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_TEDLIUM
+#define PARAKEET_TDT_AUDIO_TEDLIUM MODEL_PATH "audios/tedlium_long_120s.flac"
+#endif
+
+// Test that the Parakeet TDT model + processor + generator construct correctly.
+TEST(CAPITests, ParakeetTdtCreate) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+namespace {
+std::string RunParakeetTdt(const std::string& audio_path) {
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+
+  std::vector<const char*> paths{audio_path.c_str()};
+  auto audios = OgaAudios::Load(paths);
+  auto inputs = processor->ProcessAudios("", audios.get());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*inputs);
+
+  std::string transcription;
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+    auto count = generator->GetSequenceCount(0);
+    if (count == 0) continue;
+    auto last = generator->GetSequenceData(0)[count - 1];
+    if (auto piece = tokenizer_stream->Decode(last); piece && *piece) {
+      transcription += piece;
+    }
+  }
+  return transcription;
+}
+}  // namespace
+
+// Transcribe the bundled JFK clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeJfk) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_JFK))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_JFK;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_JFK);
+  EXPECT_FALSE(transcription.empty());
+}
+
+// Transcribe a 120s TED clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeLong) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_TEDLIUM))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_TEDLIUM;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_TEDLIUM);
+  EXPECT_FALSE(transcription.empty());
 }

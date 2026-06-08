@@ -30,12 +30,14 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
 
+  // WebGPU cannot alias input/output buffers, so it uses separate past/present\n  // with swap. All other EPs share buffers for stable addresses.
+  bool share_buffers_{false};
+  size_t input_index_{~0U};
+  size_t output_index_{~0U};
+
   // Kept alive for state_ const char* pointers
   std::vector<std::string> input_name_strings_;
   std::vector<std::string> output_name_strings_;
-
-  size_t input_index_{~0U};
-  size_t output_index_{~0U};
 
   ONNXTensorElementDataType conv_type_{};
   ONNXTensorElementDataType recurrent_type_{};

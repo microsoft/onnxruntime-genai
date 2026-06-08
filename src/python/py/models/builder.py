@@ -3,7 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
@@ -24,8 +25,11 @@ from builders import (
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
+    HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2Model,
     LlamaModel,
+    Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
@@ -42,8 +46,10 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
+    Qwen35MoeTextModel,
     QwenModel,
     SmolLM3Model,
+    VideoChatFlashQwenModel,
     WhisperModel,
 )
 from transformers import (
@@ -240,12 +246,25 @@ def create_model(
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
+        onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2ForCausalLM":
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        if hasattr(config, "quantization_config"):
+            delattr(config, "quantization_config")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
@@ -276,6 +295,10 @@ def create_model(
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
@@ -288,6 +311,8 @@ def create_model(
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        onnx_model = Qwen35MoeTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
@@ -391,7 +416,7 @@ def get_args():
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
-                    Default is 128 for trt-rtx, 32 for others. Supported EPs: cpu, webgpu, trt-rtx.
+                    Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -401,13 +426,14 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
                     rtn = RTN algorithm for int4 quantization.
                     rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                     k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.

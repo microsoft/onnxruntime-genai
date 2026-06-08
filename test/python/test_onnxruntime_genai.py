@@ -9,6 +9,8 @@ import sys
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
+from models.test_gemma4_models import run_gemma4_vision_tests
+from models.test_qwen_fara_models import run_qwen_fara_vision_tests
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -58,8 +60,8 @@ def parse_arguments():
     )
     parser.add_argument(
         "--test_models",
-        help="Path to the test_models directory",
-        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "test_models",
+        help="Path to the 'models' directory",
+        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "models",
     )
     parser.add_argument(
         "--e2e",
@@ -105,6 +107,11 @@ def main():
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+
+    # Run vision model tests (tests auto-skip if models are not present)
+    run_gemma4_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+    run_qwen_fara_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)
 

@@ -2,15 +2,17 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
-# --------------------------------------------------------------------------
+# ------------------------------------------------------
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 
-
+import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
 from transformers import (
     AutoConfig,
+    Qwen2ForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
@@ -27,10 +29,10 @@ class Qwen3Model(QwenModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
 
 class Qwen25VLTextModel(Model):
@@ -440,17 +442,17 @@ class Qwen25VLTextModel(Model):
         shape_node = f"{basename}/Shape"
         self.make_shape(shape_node, q_or_k_path, [3])
 
-        # Extract B and S
+        # Extract B and S (scalar Gather indices → scalar outputs)
         batch_size_node = f"{basename}/BatchSize/Gather"
         batch_size_out = f"{batch_size_node}/output_0"
         self.make_gather(
-            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [], 0
+            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/0"], ir.DataType.INT64, [], 0
         )
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
         self.make_gather(
-            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [], 0
+            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
         )
 
         # Calculate Total Tokens = B * S
@@ -900,13 +902,48 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         return flat_cos, flat_sin
 
     def load_weights(self, input_path):
-        # Load the Hugging Face model
+        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
+        # which loads weights directly via QuantModel
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
         print("Loading Qwen3VLForConditionalGeneration model...")
         return Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
             cache_dir=self.cache_dir,
             token=self.hf_token,
             trust_remote_code=self.hf_remote,
+        )
+
+
+class VideoChatFlashQwenModel(QwenModel):
+    """
+    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
+
+    The language model backbone is standard Qwen2.5-7B with flat config and
+    standard weight keys (model.layers.*, lm_head.*). The model uses standard
+    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
+
+    This builder exports only the text decoder component. It sets exclude_embeds=True
+    so the decoder receives inputs_embeds from the embedding merger model, which
+    fuses the InternVideo2 visual tokens with text embeddings.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Override model_type for the C++ runtime registration in model.cpp
+        # and genai_config.json. Same pattern as Qwen3VLTextModel.
+        # Base class transforms this to "videochat_flash_qwen" via:
+        #   model_type[:model_type.find("For")].lower()
+        self.model_type = "VideoChat_Flash_QwenForCausalLM"
+
+    def load_weights(self, input_path):
+        extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
+        return Qwen2ForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            token=self.hf_token,
+            **extra_kwargs,
         )
 
 
@@ -927,6 +964,8 @@ class Qwen35TextModel(Model):
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
+        # When exclude_embeds is explicitly set to False, build as a standalone LLM.
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
         if "exclude_embeds" not in extra_options:
             extra_options["exclude_embeds"] = True
             print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
@@ -947,25 +986,39 @@ class Qwen35TextModel(Model):
             if "partial_rotary_factor" in config.rope_scaling:
                 config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
 
+        # Parse layer types before super().__init__() because
+        # make_int4_algo_config() is called from the base class init
+        # and needs self.layer_types to identify linear attention layers.
+        # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
+        text_config = getattr(config, "text_config", config)
+        num_layers = extra_options.get("num_hidden_layers", getattr(text_config, "num_hidden_layers", 0))
+        if hasattr(config, "layer_types") and config.layer_types is not None:
+            self.layer_types = list(config.layer_types)
+        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
+            interval = config.full_attention_interval
+            self.layer_types = [
+                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)
+            ]
+        else:
+            self.layer_types = ["full_attention"] * num_layers
+
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # HF Qwen3_5RMSNorm always computes in float32 regardless of model
-        # dtype.  Force the builder to cast inputs to fp32 before LayerNorm
-        # and cast back after, matching HF behaviour and preventing precision
-        # loss that compounds across 36+ layers in fp16/bf16 builds.
-        self.layernorm_attrs["cast"]["use_fp32"] = True
-        self.layernorm_attrs["cast"]["root_input"] = True
-        self.layernorm_attrs["cast"]["skip_input"] = True
-        self.layernorm_attrs["cast"]["output_0"] = True
-        self.layernorm_attrs["cast"]["output_3"] = True
-
-        # 3D position_ids for mRoPE: [3, batch_size, sequence_length]
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        # Position IDs input.
+        # In text-only mode the runtime provides standard 2D [B, S] position_ids.
+        # We expand them to 3D [3, B, S] inside the graph so mRoPE works unchanged.
+        # In VL mode the pipeline provides 3D position_ids directly.
+        if self.is_text_only:
+            self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+        else:
+            self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         self.input_names["position_ids"] = "position_ids"
 
         # mRoPE config
@@ -984,17 +1037,6 @@ class Qwen35TextModel(Model):
         # Pre-compute cos/sin cache tables and interleaving masks for mRoPE
         self._make_rotary_caches()
 
-        # Parse layer types
-        if hasattr(config, "layer_types") and config.layer_types is not None:
-            self.layer_types = list(config.layer_types)
-        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
-            interval = config.full_attention_interval
-            self.layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(self.num_layers)
-            ]
-        else:
-            self.layer_types = ["full_attention"] * self.num_layers
-
         # Store linear attention config
         self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
         self.linear_value_head_dim = getattr(config, "linear_value_head_dim", 128)
@@ -1012,30 +1054,6 @@ class Qwen35TextModel(Model):
         self.attention_attrs["k_norm"] = True
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
-
-        # Mixed-precision quantization for linear attention layers.
-        # Baseline: whole model INT4. Override linear attention layer nodes
-        # to INT8 for better accuracy with modest size increase.
-        #
-        # Linear attention recurrence accumulates errors across the full sequence,
-        # unlike softmax attention which normalizes per-step.
-        int8_nodes = {}
-        for i, lt in enumerate(self.layer_types):
-            if lt == "linear_attention":
-                # All linear attention projections: INT8
-                for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                    int8_nodes[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                # MLP projections in linear attention layers: INT8
-                for proj in ("gate_proj", "up_proj", "down_proj"):
-                    int8_nodes[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-
-        if int8_nodes:
-            algo_config = self.quant_attrs["int4"].get("algo_config")
-            if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-                algo_config.customized_weight_config.update(int8_nodes)
-            else:
-                algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=int8_nodes)
-                self.quant_attrs["int4"]["algo_config"] = algo_config
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1106,6 +1124,34 @@ class Qwen35TextModel(Model):
         self.input_names["past_key_values.value"] = filtered_value_inputs
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
+
+    def make_position_ids_reformatting(self):
+        if self.is_text_only:
+            # The graph input is 2D position_ids [B, S].
+            # Expand to 3D [3, B, S] for mRoPE by stacking 3 copies.
+            pos_2d = "position_ids"
+            unsq_name = "/model/position_ids_expand/Unsqueeze"
+            unsq_output = f"{unsq_name}/output_0"
+            self.make_unsqueeze(
+                unsq_name,
+                [pos_2d, "/model/constants/INT64/[0]"],
+                ir.DataType.INT64,
+                [1, "batch_size", "sequence_length"],
+            )
+            tile_name = "/model/position_ids_expand/Tile"
+            tile_output = f"{tile_name}/output_0"
+            self.make_tile(
+                tile_name,
+                [unsq_output, "/model/constants/INT64/[3, 1, 1]"],
+                ir.DataType.INT64,
+                [3, "batch_size", "sequence_length"],
+            )
+            return tile_output
+        return self.input_names["position_ids"]
+
+    def make_preprocessing_nodes(self):
+        super().make_preprocessing_nodes()
+        self.position_ids_reformatted = self.make_position_ids_reformatting()
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1350,10 +1396,10 @@ class Qwen35TextModel(Model):
     def _make_mrope_cos_sin(self, basename):
         """Build interleaved mRoPE cos/sin from pre-computed cache + position_ids.
 
-        Input: position_ids [3, B, S]
+        Input: position_ids [3, B, S] (from self.position_ids_reformatted)
         Output: cos [B, S, rdim_half], sin [B, S, rdim_half]
         """
-        pos_ids = self.input_names["position_ids"]
+        pos_ids = self.position_ids_reformatted
         cos_cache = "model.rotary_emb.cos_cache"
         sin_cache = "model.rotary_emb.sin_cache"
         h_mask = "model.rotary_emb.h_mask"
@@ -1402,6 +1448,84 @@ class Qwen35TextModel(Model):
 
         return interleave("cos", cos_cache), interleave("sin", sin_cache)
 
+    def _make_synthetic_position_ids(self):
+        """Build synthetic position_ids [B, S] with values 0 .. B*S-1.
+
+        Derives B and S from the ``position_ids`` model input ``[3, B, S]``
+        instead of using Shape on intermediate Q/K tensors.  This avoids a
+        data-dependency on Q/K computation.
+
+        B*S is obtained by reshaping position_ids to ``[3, -1]`` and reading
+        the inferred dimension from the shape.  This lets the runtime compute
+        the product implicitly (Reshape is metadata-only) and avoids an
+        explicit INT64 Mul that would fall back to CPU on WebGPU.
+
+        Uses a fixed basename so ``make_node`` dedup ensures nodes are
+        created once and reused across all layers and Q/K calls.
+        """
+        basename = "/model/attn/synthetic_pos_ids"
+        pos_ids_input = self.position_ids_reformatted
+
+        # Shape(position_ids) → [3, B, S]
+        shape_name = f"{basename}/Shape"
+        self.make_shape(shape_name, root_input=pos_ids_input, shape=[3])
+
+        # Slice shape[1:3] → [B, S] (used as reshape target at the end)
+        bs_shape_name = f"{basename}/bs_shape/Slice"
+        self.make_slice(
+            bs_shape_name,
+            inputs=[
+                f"{shape_name}/output_0",
+                "/model/constants/INT64/[1]",
+                "/model/constants/INT64/[3]",
+                "/model/constants/INT64/[0]",
+            ],
+            dtype=ir.DataType.INT64,
+            shape=[2],
+        )
+
+        # Reshape position_ids [3, B, S] → [3, -1] to get B*S implicitly
+        flat_name = f"{basename}/flat/Reshape"
+        self.make_reshape(
+            flat_name,
+            inputs=[pos_ids_input, "/model/constants/INT64/[3, -1]"],
+            dtype=ir.DataType.INT64,
+            shape=[3, "batch_seq"],
+        )
+
+        # Shape([3, B*S]) → [3, B*S], Gather scalar index 1 → scalar B*S
+        shape2_name = f"{basename}/Shape2"
+        self.make_shape(shape2_name, root_input=f"{flat_name}/output_0", shape=[2])
+
+        total_name = f"{basename}/total/Gather"
+        self.make_gather(
+            total_name,
+            inputs=[f"{shape2_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=[],
+            axis=0,
+        )
+
+        # Range(0, B*S, 1)
+        range_name = f"{basename}/range/Range"
+        self.make_range(
+            range_name,
+            inputs=["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_seq"],
+        )
+
+        # Reshape to [B, S]
+        pos_ids_name = f"{basename}/Reshape"
+        self.make_reshape(
+            pos_ids_name,
+            inputs=[f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
+            dtype=ir.DataType.INT64,
+            shape=["batch_size", "sequence_length"],
+        )
+
+        return f"{pos_ids_name}/output_0"
+
     def _apply_mrope_rotation(self, layer_id, qk_path, qk_shape, dyn_cos, dyn_sin, num_heads, basename):
         """Apply mRoPE via com.microsoft.RotaryEmbedding (4-input variant).
 
@@ -1449,45 +1573,10 @@ class Qwen35TextModel(Model):
             rope_sin = f"{sin_cast_name}/output_0"
 
         # --- Build synthetic position_ids [B, S] = Range(0, B*S).reshape(B, S) ---
-        # Shape(Q/K input) → [B, S, N*H], Gather dim 0 and 1 → B, S
-        shape_name = f"{basename}/qk_shape/Shape"
-        self.make_shape(shape_name, qk_path, [3])
-
-        batch_name = f"{basename}/batch/Gather"
-        self.make_gather(batch_name, [f"{shape_name}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [1], axis=0)
-
-        seq_name = f"{basename}/seq/Gather"
-        self.make_gather(seq_name, [f"{shape_name}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0)
-
-        total_name = f"{basename}/total/Mul"
-        self.make_mul(total_name, [f"{batch_name}/output_0", f"{seq_name}/output_0"], ir.DataType.INT64, [1])
-
-        range_name = f"{basename}/range/Range"
-        self.make_range(
-            range_name,
-            ["/model/constants/INT64/[0]", f"{total_name}/output_0", "/model/constants/INT64/[1]"],
-            ir.DataType.INT64,
-            ["batch_seq"],
-        )
-
-        # Reshape to [B, S]
-        bs_shape_name = f"{basename}/bs_shape/Concat"
-        self.make_concat(
-            bs_shape_name,
-            [f"{batch_name}/output_0", f"{seq_name}/output_0"],
-            ir.DataType.INT64,
-            [2],
-            axis=0,
-        )
-
-        pos_ids_name = f"{basename}/pos_ids/Reshape"
-        self.make_reshape(
-            pos_ids_name,
-            [f"{range_name}/output_0", f"{bs_shape_name}/output_0"],
-            ir.DataType.INT64,
-            ["batch_size", "sequence_length"],
-        )
-        pos_ids = f"{pos_ids_name}/output_0"
+        # Derive B and S from the position_ids input [3, B, S] instead of
+        # using Shape on intermediate Q/K tensors.  Shared across all layers
+        # and Q/K calls via make_node dedup.
+        pos_ids = self._make_synthetic_position_ids()
 
         # --- Reshape Q/K to [B, N, S, H] for com.microsoft.RotaryEmbedding ---
         head_size = qk_shape[-1] // num_heads if isinstance(qk_shape[-1], int) else self.head_size
@@ -1841,38 +1930,20 @@ class Qwen35TextModel(Model):
         return unflat_out
 
     def _make_l2_normalize(self, basename, input_name, last_dim, leading_dims=None):
-        """L2-normalize along last dimension: x * rsqrt(sum(x^2) + eps)
+        """L2-normalize along last dimension via ORT's LpNormalization(p=2).
 
-        Matches the FLA library's l2norm used by the PyTorch reference:
-            inv_norm = rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
-            return x * inv_norm
+        Replaces the 5-node Square+ReduceSum+Add(eps)+Rsqrt+Mul subgraph with
+        a single LpNormalization op (natively supported by the WebGPU EP and
+        others). The +eps term is dropped; q/k come from RMSNorm+Proj so
+        magnitudes far exceed 1e-6, keeping any divergence within fp16 noise.
         """
         if leading_dims is None:
             leading_dims = ["batch_size", "sequence_length"]
         full_shape = [*leading_dims, last_dim]
-        reduced_shape = [*leading_dims, 1]
 
-        # sum(x^2, dim=-1, keepdim=True)
-        sq_name = f"{basename}/Square/Mul"
-        self.make_mul(sq_name, [input_name, input_name], self.io_dtype, full_shape)
-
-        sum_name = f"{basename}/SumSq/ReduceSum"
-        self.make_reduce_sum(sum_name, [f"{sq_name}/output_0", "/model/constants/INT64/[-1]"],
-                             self.io_dtype, reduced_shape, keepdims=True)
-
-        # sum(x^2) + eps
-        eps_name = self._get_shared_l2_eps()
-        add_eps_name = f"{basename}/AddEps/Add"
-        self.make_add(add_eps_name, [f"{sum_name}/output_0", eps_name], self.io_dtype, reduced_shape)
-
-        # x * rsqrt(sum(x^2) + eps)
-        rsqrt_name = f"{basename}/Rsqrt"
-        self.make_rsqrt(rsqrt_name, [f"{add_eps_name}/output_0"], self.io_dtype, reduced_shape)
-
-        norm_name = f"{basename}/Normalize/Mul"
-        self.make_mul(norm_name, [input_name, f"{rsqrt_name}/output_0"], self.io_dtype, full_shape)
-
-        return f"{norm_name}/output_0"
+        node_name = f"{basename}/LpNormalization"
+        self.make_lp_normalization(node_name, input_name, self.io_dtype, full_shape, axis=-1, p=2)
+        return f"{node_name}/output_0"
 
     def _make_gated_rms_norm(self, basename, input_name, gate_name, norm_module, layer_id):
         """Gated RMSNorm: RMSNorm(x) * SiLU(z).
@@ -1984,7 +2055,6 @@ class Qwen35TextModel(Model):
             "model_type": self.model_type,
         }
         self.num_layers = len(self.layer_types)
-        self.model_type = "Qwen3_5ForConditionalGeneration"
         self.input_names["past_key_values.key"] = "past_key_values.%d.key"
         self.input_names["past_key_values.value"] = "past_key_values.%d.value"
         self.output_names["present.key"] = "present.%d.key"
@@ -1999,3 +2069,198 @@ class Qwen35TextModel(Model):
         del self.input_names["past_key_values.value"]
         del self.output_names["present.key"]
         del self.output_names["present.value"]
+
+
+class Qwen35MoeTextModel(Qwen35TextModel):
+    """Qwen3.5 MoE hybrid model builder.
+
+    Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
+    Each decoder layer replaces the dense MLP with:
+    - A router that selects top-k experts from ``num_experts`` candidates
+    - Packed routed expert weights (gate_up_proj + down_proj)
+    - A shared expert (always-active) with its own gating signal
+
+    The attention side (GatedDeltaNet linear + gated full) is inherited
+    unchanged from the parent class.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Map Qwen3.5-MoE config attributes to what the base class expects.
+        if hasattr(config, "text_config"):
+            tc = config.text_config
+            # Base class reads num_local_experts; MoE config uses num_experts
+            if hasattr(tc, "num_experts") and not hasattr(tc, "num_local_experts"):
+                tc.num_local_experts = tc.num_experts
+            # Base class reads intermediate_size; MoE has moe_intermediate_size
+            if not hasattr(tc, "intermediate_size") and hasattr(tc, "moe_intermediate_size"):
+                tc.intermediate_size = tc.moe_intermediate_size
+
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # The base builder derives the GenAI model.type by stripping the suffix
+        # after "For" and lowercasing, matching Qwen3.5 text-only export.
+        self.model_type = (
+            "Qwen3_5_Moe_textForCausalLM"
+            if self.is_text_only
+            else "Qwen3_5_MoeForConditionalGeneration"
+        )
+
+        # MoE attributes specific to Qwen3.5-MoE
+        self.moe_attrs["activation_type"] = "swiglu"
+        self.moe_attrs["swiglu_fusion"] = 1
+        self.moe_attrs["normalize_routing_weights"] = True
+        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
+            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
+            # use +inf to preserve the "no clamp" behavior when the model omits it.
+            self.moe_attrs["swiglu_limit"] = float("inf")
+
+        self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
+        self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
+
+        # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
+        # so remove any /mlp/ MatMul overrides that don't apply.
+        algo_config = self.quant_attrs.get("algo_config")
+        if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
+            keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
+            for k in keys_to_remove:
+                del algo_config.customized_weight_config[k]
+
+    def make_layer(self, layer_id, layer):
+        """Override to use MoE instead of dense MLP."""
+        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
+        self.make_layernorm(
+            layer_id,
+            layer.input_layernorm,
+            skip=not self.layernorm_attrs["first_layernorm"],
+            simple=self.layernorm_attrs["simple"],
+            location="input",
+        )
+        self.make_attention(layer_id, attn_module, root_input=self.layernorm_attrs["output_0"])
+        self.make_layernorm(
+            layer_id,
+            layer.post_attention_layernorm,
+            skip=True,
+            simple=self.layernorm_attrs["simple"],
+            location="post_attention",
+        )
+        self.make_moe(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            self.layernorm_attrs["last_layernorm"] = True
+
+    def make_moe(self, layer_id, mlp, root_input):
+        """Build MoE + shared expert subgraph for one decoder layer."""
+        basename = f"/model/layers.{layer_id}/moe"
+        op_type = self.moe_attrs["op_type"]
+        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
+
+        # --- Router (bias-free gate) ---
+        router_basename = f"{basename}/router/MatMul"
+        router_matmul_name = self.make_matmul(mlp.gate, router_basename, root_input)
+        router_reshape_name = f"{basename}/router/Reshape"
+        self.make_reshape(
+            router_reshape_name,
+            [f"{router_matmul_name}/output_0",
+             f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
+            dtype=self.io_dtype,
+            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
+        )
+
+        # --- Routed expert weights ---
+        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
+        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
+        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
+        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
+        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
+        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+
+        # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...] for swiglu_fusion=1
+        raw_gate_up = mlp.experts.gate_up_proj
+        half = raw_gate_up.shape[1] // 2
+        interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+
+        if op_type == "MoE":
+            self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
+        else:
+            gate_up_qw_list, gate_up_sc_list = [], []
+            down_qw_list, down_sc_list = [], []
+            for i in range(self.moe_attrs["num_experts"]):
+                qw1, sc1 = self.make_qmoe_weights(interleaved[i])
+                gate_up_qw_list.append(qw1)
+                gate_up_sc_list.append(sc1)
+                qw2, sc2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
+                down_qw_list.append(qw2)
+                down_sc_list.append(sc2)
+            self.make_initializer(torch.stack(gate_up_qw_list, dim=0).to(torch.uint8), gate_up_proj_weight)
+            self.make_initializer(torch.stack(down_qw_list, dim=0).to(torch.uint8), down_proj_weight)
+            self.make_initializer(torch.stack(gate_up_sc_list, dim=0), gate_up_proj_scales, to=self.io_dtype)
+            self.make_initializer(torch.stack(down_sc_list, dim=0), down_proj_scales, to=self.io_dtype)
+
+        num_e = self.moe_attrs["num_experts"]
+        self.make_initializer(torch.zeros(num_e, 2 * self.moe_intermediate_size), gate_up_proj_bias, to=self.io_dtype)
+        self.make_initializer(torch.zeros(num_e, self.hidden_size), down_proj_bias, to=self.io_dtype)
+
+        # --- MoE/QMoE op ---
+        moe_name = f"{basename}/{op_type}"
+        self.make_moe_op(
+            moe_name,
+            root_input=root_input,
+            router_probs=f"{router_reshape_name}/output_0",
+            weight1=gate_up_proj_weight,
+            scales1=gate_up_proj_scales if op_type == "QMoE" else "",
+            bias1=gate_up_proj_bias,
+            weight2=down_proj_weight,
+            scales2=down_proj_scales if op_type == "QMoE" else "",
+            bias2=down_proj_bias,
+        )
+
+        # --- Shared expert ---
+        shared_output = self.make_shared_expert(layer_id, mlp.shared_expert, mlp.shared_expert_gate, root_input)
+        combine_name = f"{basename}/Add"
+        self.make_add(
+            combine_name,
+            [f"{moe_name}/output_0", shared_output],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
+
+    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
+        """Build shared expert SiLU-MLP with sigmoid gating."""
+        basename = f"/model/layers.{layer_id}/shared_expert"
+
+        gate_matmul = self.make_matmul(shared_expert.gate_proj, f"{basename}/gate_proj/MatMul", root_input)
+        up_matmul = self.make_matmul(shared_expert.up_proj, f"{basename}/up_proj/MatMul", root_input)
+
+        silu_sigmoid_name = f"{basename}/gate_proj/Sigmoid"
+        self.make_sigmoid(silu_sigmoid_name, f"{gate_matmul}/output_0", self.io_dtype,
+                          shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+
+        silu_mul_name = f"{basename}/gate_proj/Mul"
+        self.make_mul(silu_mul_name,
+                      [f"{gate_matmul}/output_0", f"{silu_sigmoid_name}/output_0"],
+                      dtype=self.io_dtype,
+                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+
+        gate_up_mul_name = f"{basename}/Mul"
+        self.make_mul(gate_up_mul_name,
+                      [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
+                      dtype=self.io_dtype,
+                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+
+        down_matmul = self.make_matmul(shared_expert.down_proj, f"{basename}/down_proj/MatMul",
+                                       f"{gate_up_mul_name}/output_0")
+
+        gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
+        gate_sigmoid_name = f"{basename}_gate/Sigmoid"
+        self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
+                          shape=["batch_size", "sequence_length", 1])
+
+        gated_mul_name = f"{basename}/Mul"
+        self.make_mul(gated_mul_name,
+                      [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
+                      dtype=self.io_dtype,
+                      shape=["batch_size", "sequence_length", self.hidden_size])
+        return f"{gated_mul_name}/output_0"

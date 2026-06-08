@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 #include "model_type.h"
 #include "ortx_tokenizer.h"
@@ -9,8 +10,10 @@
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
+#include "parakeet_processor.h"
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
+#include "gemma4_multimodal_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 

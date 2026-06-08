@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
@@ -105,7 +105,11 @@ jobs:
       - name: Configure CMake
         run: |
           $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
+          # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
+          # time and memory usage manageable. The full SM list in CMakePresets.json
+          # is intended for release packaging, not CI validation.
           cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=True -DTEST_QWEN_2_5=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
+            -DCMAKE_CUDA_ARCHITECTURES=86-real `
             -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
@@ -154,7 +158,7 @@ jobs:
 
       - name: Run the Python Tests
         run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
 
       - name: Verify Build Artifacts
         if: always()
@@ -178,8 +182,8 @@ jobs:
 
       - name: Test the C# LLM Example with Tool Calling
         run: |
-          python test\python\special_tokens.py -p test\test_models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"
-          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\test_models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\test_models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+          python test\python\special_tokens.py -p test\models\qwen-2.5-0.5b\int4\cpu\tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          .\examples\csharp\ModelChat\bin\Release\net8.0\ModelChat.exe -m test\models\qwen-2.5-0.5b\int4\cpu\ -e cpu --response_format lark_grammar --tools_file test\models\tool-definitions\weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Prepend CUDA to PATH and Run tests
         run: |-

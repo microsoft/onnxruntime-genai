@@ -12,27 +12,31 @@ public class TestUtils {
   private static final Logger logger = Logger.getLogger(TestUtils.class.getName());
 
   public static final String testAdapterTestModelPath() {
-    return getFilePathFromDisk(getTestResourcePath("adapters"));
+    return getFilePathFromDisk(getTestModelPath("adapters"));
   }
 
   public static final String testAdapterTestAdaptersPath() {
-    return getFilePathFromDisk(getTestResourcePath("adapters/adapters.onnx_adapter"));
+    return getFilePathFromDisk(getTestModelPath("adapters/adapters.onnx_adapter"));
   }
 
   public static final String tinyGpt2ModelPath() {
-    return getFilePathFromDisk(getTestResourcePath("hf-internal-testing/tiny-random-gpt2-fp32"));
+    return getFilePathFromDisk(getTestModelPath("hf-internal-testing/tiny-random-gpt2-fp32"));
   }
 
   public static final String phi2ModelPath() {
-    return getFilePathFromDisk(getTestResourcePath("phi-2/int4/cpu"));
+    return getFilePathFromDisk(getTestModelPath("phi-2/int4/cpu"));
   }
 
   public static final String testVisionModelPath() {
-    return getFilePathFromDisk(getTestResourcePath("vision-preprocessing"));
+    return getFilePathFromDisk(getTestModelPath("phi3-v"));
   }
 
-  public static final String getTestResourcePath(String relativeResourcePath) {
-    return getFilePathFromDisk(getRepoRoot() + "test/test_models/" + relativeResourcePath);
+  public static final String getTestModelPath(String relativeResourcePath) {
+    return getFilePathFromDisk(getRepoRoot() + "test/models/" + relativeResourcePath);
+  }
+
+  public static final String getTestImagePath(String relativeResourcePath) {
+    return getFilePathFromDisk(getRepoRoot() + "test/images/" + relativeResourcePath);
   }
 
   public static final String getRepoRoot() {

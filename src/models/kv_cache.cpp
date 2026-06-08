@@ -148,6 +148,80 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
   }
 }
 
+namespace {
+
+// Auto-detect a fixed kv-cache shape from the model's past_key input shapes,
+// and, when detected, apply the implied configuration:
+//   - reject beam search (num_beams != 1),
+//   - force past_present_share_buffer on,
+//   - log info on the detected size,
+//   - warn if search.max_length exceeds the detected size.
+// Returns the detected static seq_len, or 0 if the model has symbolic
+// kv-cache dims or per-layer static sizes disagree.
+//
+// Background: some compiled backends (e.g. AMD RyzenAI) emit models where the
+// kv-cache seq_len dimension is a static positive integer instead of a
+// symbolic dim. In that case the cache must be allocated to exactly that size
+// and reused as a shared past/present buffer; max_length cannot drive the
+// size because ORT rejects any tensor that doesn't match the model's static
+// dim.
+//
+// Limitation: only uniform per-layer static sizes are recognised — every
+// past_key layer must declare the same fixed seq_len. Models that declare
+// different static seq_lens per layer (e.g. a mix of full-attention and
+// sliding-window layers with distinct static caps) fall through to dynamic
+// handling. Lifting this restriction would extend the existing layer_shapes_
+// infrastructure used for per-layer head_dim detection in
+// DefaultKeyValueCache: store the per-layer detected seq_len into
+// layer_shapes_[i][2] instead of a single scalar, and let the share-buffer
+// branch's per-layer loop do the rest. Deferred until a model in the wild
+// actually needs it.
+int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
+                                       const std::vector<std::string>& input_name_strings,
+                                       int layer_count,
+                                       const Config::Search& search,
+                                       bool& past_present_share_buffer) {
+  if (layer_count <= 0) return 0;
+
+  // input_name_strings stores [past_key.0, past_value.0, past_key.1, past_value.1, ...].
+  int64_t common_seq_len = 0;
+  for (int i = 0; i < layer_count; ++i) {
+    auto input_shape = session_info.GetInputShape(input_name_strings[i * 2]);
+    if (input_shape.size() < 2) return 0;
+    const int64_t seq_dim = input_shape[input_shape.size() - 2];
+    if (seq_dim <= 0) return 0;  // symbolic/dynamic dim (typically -1)
+    if (common_seq_len == 0) {
+      common_seq_len = seq_dim;
+    } else if (common_seq_len != seq_dim) {
+      return 0;
+    }
+  }
+
+  if (search.num_beams != 1) {
+    throw std::runtime_error(
+        "Beam search (num_beams > 1) is not supported for models with a fixed kv-cache "
+        "shape (model expects seq_len=" +
+        std::to_string(common_seq_len) + ").");
+  }
+  past_present_share_buffer = true;
+  if (g_log.enabled) {
+    Log("info", "DefaultKeyValueCache: auto-detected fixed kv-cache seq_len=" +
+                    std::to_string(common_seq_len) +
+                    "; allocating shared past/present buffer to that size.");
+  }
+  if (search.max_length > static_cast<int>(common_seq_len) &&
+      g_log.enabled && g_log.warning) {
+    Log("warning", "Model has fixed kv-cache seq_len=" +
+                       std::to_string(common_seq_len) +
+                       " but search.max_length=" +
+                       std::to_string(search.max_length) +
+                       "; cache is sized to the model's limit, so generation beyond it will fail.");
+  }
+  return common_seq_len;
+}
+
+}  // namespace
+
 DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
@@ -207,6 +281,53 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
+  // Auto-detect per-layer head_dim from ONNX session input shapes.
+  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
+  // full-attention layers use global_head_dim=512.
+  {
+    bool has_varying_head_dim = false;
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    for (int i = 0; i < layer_count_; ++i) {
+      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (!input_shape.empty()) {
+        int64_t layer_head_dim = input_shape.back();
+        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
+          has_varying_head_dim = true;
+        }
+        if (layer_head_dim > 0) {
+          per_layer_head_dim[i] = layer_head_dim;
+        }
+      }
+    }
+    if (has_varying_head_dim) {
+      if (layer_shapes_.empty()) {
+        layer_shapes_.resize(layer_count_);
+        for (int i = 0; i < layer_count_; ++i) {
+          layer_shapes_[i] = shape_;
+        }
+      }
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i][3] = per_layer_head_dim[i];
+      }
+      if (g_log.enabled) {
+        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
+                        std::to_string(layer_count_) + " KV cache layers");
+      }
+
+      // Create per-layer empty past tensors since head_dim varies across layers
+      empty_pasts_.resize(layer_count_);
+      for (int i = 0; i < layer_count_; ++i) {
+        std::array<int64_t, 4> empty_shape = layer_shapes_[i];
+        empty_shape[2] = 0;  // sequence length = 0 for empty past
+        empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), empty_shape, type_);
+      }
+    }
+  }
+
+  const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
+      model_.session_info_, input_name_strings_, layer_count_,
+      state_.params_->search, past_present_share_buffer_);
+
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
     throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
@@ -220,12 +341,18 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
-      // Use per-layer allocation based on sliding window layer indices
-      layer_shapes_.resize(layer_count_);
+      // Use per-layer allocation based on sliding window layer indices.
+      // If layer_shapes_ already exists (from head_dim auto-detection), preserve
+      // the per-layer head_dim values — only update the sequence length dimension.
+      if (layer_shapes_.empty()) {
+        layer_shapes_.resize(layer_count_);
+        for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+          layer_shapes_[layer_idx] = shape_;
+        }
+      }
 
-      // Initialize all layers with base shape and max_length
+      // Set all layers to max_length (sequence dim only)
       for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-        layer_shapes_[layer_idx] = shape_;
         layer_shapes_[layer_idx][2] = max_length;
       }
 
@@ -250,7 +377,19 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       shape_[2] = std::min(max_length, sliding_window_size);
     }
   } else if (past_present_share_buffer_) {
-    shape_[2] = state_.params_->search.max_length;
+    // For fixed kv-cache models the cache size comes from the model graph,
+    // not from max_length — see the auto-detection block earlier in this ctor.
+    const int64_t cache_seq_len = fixed_kv_seq_len > 0
+                                      ? fixed_kv_seq_len
+                                      : static_cast<int64_t>(state_.params_->search.max_length);
+    shape_[2] = cache_seq_len;
+
+    // If per-layer shapes exist (from head_dim auto-detection), update their sequence dim too
+    if (!layer_shapes_.empty()) {
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i][2] = cache_seq_len;
+      }
+    }
   }
 
   try {
@@ -286,7 +425,12 @@ void DefaultKeyValueCache::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    // Use per-layer empty past when head_dim varies across layers
+    if (!empty_pasts_.empty()) {
+      state_.inputs_.push_back(empty_pasts_[i / 2].get());
+    } else {
+      state_.inputs_.push_back(empty_past_.get());
+    }
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -321,7 +465,8 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
       const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      current_shape[2] = std::min(total_length, max_cache_length);
+      // If max_cache_length is 0 (unconstrained), use total_length directly
+      current_shape[2] = (max_cache_length > 0) ? std::min(total_length, max_cache_length) : total_length;
 
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
@@ -354,7 +499,11 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      state_.inputs_[input_index_ + i] = empty_past_.get();
+      if (!empty_pasts_.empty()) {
+        state_.inputs_[input_index_ + i] = empty_pasts_[i / 2].get();
+      } else {
+        state_.inputs_[input_index_ + i] = empty_past_.get();
+      }
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
@@ -545,6 +694,208 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
   state_.ep_dynamic_options_next_run_.push_back({"kvcache_rewind", std::to_string(index)});
 }
 
+LFM2Cache::LFM2Cache(State& state)
+    : state_{state},
+      layer_types_{model_.config_->model.decoder.layer_types},
+      layer_count_{model_.config_->model.decoder.num_hidden_layers} {
+  // Classify layers into attention (KV) and conv types
+  for (int i = 0; i < layer_count_; ++i) {
+    if (layer_types_[i] == "full_attention") {
+      kv_layer_indices_.push_back(i);
+    } else {
+      conv_layer_indices_.push_back(i);
+    }
+  }
+  kv_layer_count_ = static_cast<int>(kv_layer_indices_.size());
+  conv_layer_count_ = static_cast<int>(conv_layer_indices_.size());
+
+  // --- KV cache setup (attention layers only) ---
+  if (kv_layer_count_ > 0) {
+    kv_shape_ = {state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size};
+    kv_pasts_.resize(kv_layer_count_ * 2);
+    kv_presents_.reserve(kv_layer_count_ * 2);
+
+    for (int layer_idx : kv_layer_indices_) {
+      kv_input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
+      kv_input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, layer_idx));
+      kv_output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, layer_idx));
+      kv_output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, layer_idx));
+    }
+
+    kv_type_ = model_.session_info_.GetInputDataType(kv_input_name_strings_[0]);
+    kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+
+    for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+      kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+    }
+  }
+
+  // --- Conv state cache setup (conv layers only) ---
+  if (conv_layer_count_ > 0) {
+    conv_pasts_.resize(conv_layer_count_);
+    conv_presents_.reserve(conv_layer_count_);
+
+    for (int layer_idx : conv_layer_indices_) {
+      conv_input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_conv_names, layer_idx));
+      conv_output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_conv_names, layer_idx));
+    }
+
+    conv_type_ = model_.session_info_.GetInputDataType(conv_input_name_strings_[0]);
+
+    // Determine conv state shape from the ONNX model input
+    auto conv_shape_vec = model_.session_info_.GetInputShape(conv_input_name_strings_[0]);
+    if (conv_shape_vec.size() != 3) {
+      throw std::runtime_error("LFM2Cache: expected conv state input to be rank 3 [B, H, L], got rank " + std::to_string(conv_shape_vec.size()));
+    }
+    // Replace batch dimension with actual batch size
+    conv_shape_vec[0] = state_.params_->BatchBeamSize();
+
+    for (int i = 0; i < conv_layer_count_; ++i) {
+      std::array<int64_t, 3> shape;
+      std::copy_n(conv_shape_vec.begin(), 3, shape.begin());
+      conv_shapes_.push_back(shape);
+      conv_pasts_[i] = OrtValue::CreateTensor(Allocator(), shape, conv_type_);
+      // Zero-initialize conv state
+      if (Device().GetType() != DeviceType::WEBGPU) {
+        ByteWrapTensor(Device(), *conv_pasts_[i]).Zero();
+      }
+      conv_presents_.push_back(OrtValue::CreateTensor(Allocator(), shape, conv_type_));
+    }
+  }
+}
+
+void LFM2Cache::Add() {
+  // Add KV cache inputs/outputs
+  kv_input_index_ = state_.inputs_.size();
+  for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+    state_.inputs_.push_back(kv_empty_past_.get());
+    state_.input_names_.push_back(kv_input_name_strings_[i].c_str());
+  }
+  kv_output_index_ = state_.outputs_.size();
+  for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+    state_.outputs_.push_back(kv_presents_[i].get());
+    state_.output_names_.push_back(kv_output_name_strings_[i].c_str());
+  }
+
+  // Add conv state inputs/outputs
+  conv_input_index_ = state_.inputs_.size();
+  for (int i = 0; i < conv_layer_count_; ++i) {
+    state_.inputs_.push_back(conv_pasts_[i].get());
+    state_.input_names_.push_back(conv_input_name_strings_[i].c_str());
+  }
+  conv_output_index_ = state_.outputs_.size();
+  for (int i = 0; i < conv_layer_count_; ++i) {
+    state_.outputs_.push_back(conv_presents_[i].get());
+    state_.output_names_.push_back(conv_output_name_strings_[i].c_str());
+  }
+}
+
+void LFM2Cache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  // --- Update KV cache (attention layers) ---
+  if (!kv_is_first_update_) {
+    for (int i = 0; i < kv_layer_count_ * 2; i++) {
+      if (beam_indices.empty()) {
+        kv_pasts_[i] = std::move(kv_presents_[i]);
+      } else {
+        PickPastState(beam_indices, i);
+      }
+      state_.inputs_[kv_input_index_ + i] = kv_pasts_[i].get();
+    }
+  }
+
+  kv_shape_[2] = total_length;
+  for (int i = 0; i < kv_layer_count_ * 2; i++) {
+    kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+    state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+  }
+  kv_is_first_update_ = false;
+
+  // --- Update conv state cache ---
+  if (!conv_is_first_update_) {
+    for (int i = 0; i < conv_layer_count_; i++) {
+      if (beam_indices.empty()) {
+        // Simply swap present -> past (conv state is fixed size)
+        conv_pasts_[i] = std::move(conv_presents_[i]);
+      } else {
+        // Reorder conv state by beam indices
+        if (conv_type_ == Ort::TypeToTensorType<float>) {
+          PickConvState<float>(beam_indices, i);
+        } else {
+          PickConvState<Ort::Float16_t>(beam_indices, i);
+        }
+      }
+      state_.inputs_[conv_input_index_ + i] = conv_pasts_[i].get();
+    }
+  }
+
+  // Allocate new present conv tensors
+  for (int i = 0; i < conv_layer_count_; i++) {
+    conv_presents_[i] = OrtValue::CreateTensor(Allocator(), conv_shapes_[i], conv_type_);
+    state_.outputs_[conv_output_index_ + i] = conv_presents_[i].get();
+  }
+  conv_is_first_update_ = false;
+}
+
+void LFM2Cache::RewindTo(size_t index) {
+  // LFM2 uses conv layers with fixed-size rolling state buffers that depend on all prior tokens.
+  // Rewinding the KV cache without replaying tokens through the conv layers would produce
+  // incorrect results, so rewind is not supported for this cache type.
+  throw std::runtime_error("LFM2Cache does not support RewindTo.");
+}
+
+template <typename ScoreType>
+void LFM2Cache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
+  std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
+  std::array<int64_t, 4> tensor_shape = kv_shape_;
+
+  auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
+
+  OrtValue& present_value = *kv_presents_[index];
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
+
+  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
+  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    past.CopyFrom(present);
+  }
+
+  kv_pasts_[index] = std::move(past_value);
+}
+
+void LFM2Cache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
+  if (kv_type_ == Ort::TypeToTensorType<float>) {
+    PickPastState<float>(beam_indices, index);
+  } else {
+    PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
+}
+
+template <typename T>
+void LFM2Cache::PickConvState(DeviceSpan<int32_t> beam_indices_device, int conv_index) {
+  std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
+  auto& shape = conv_shapes_[conv_index];
+  auto block_size_per_beam = shape[1] * shape[2];  // H * L
+
+  OrtValue& present = *conv_presents_[conv_index];
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<T>(Allocator(), shape);
+
+  auto past_span = WrapTensor<T>(Device(), *past);
+  auto present_span = WrapTensor<T>(Device(), present);
+
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present_data = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto past_data = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    past_data.CopyFrom(present_data);
+  }
+
+  conv_pasts_[conv_index] = std::move(past);
+}
+
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
@@ -570,6 +921,12 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     if (g_log.enabled)
       Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
     return std::make_unique<ModelManagedKeyValueCache>(state);
+  }
+
+  // LFM2 models interleave attention and conv layers, requiring a cache that handles
+  // both KV cache for attention layers and fixed-size conv state for conv layers.
+  if (ModelType::IsLFM2(state.model_.config_->model.type)) {
+    return std::make_unique<LFM2Cache>(state);
   }
 
   if (!IsCacheNeeded(state.model_)) {

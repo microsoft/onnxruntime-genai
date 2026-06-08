@@ -15,6 +15,7 @@ def generate_files(lines, args):
         "win-x64": args.win_x64,
         "osx-arm64": args.osx_arm64,
         "linux-x64": args.linux_x64,
+        "linux-arm64": args.linux_arm64,
     }
 
     avoid_keywords = {"pdb", "onnxruntime-genai-cuda.dll", "onnxruntime-genai-cuda.lib"}
@@ -74,6 +75,7 @@ def parse_arguments():
     parser.add_argument("--win_x64", required=True, help="Ort-genai win-x64 directory")
     parser.add_argument("--osx_arm64", required=True, help="Ort-genai osx-arm64 directory")
     parser.add_argument("--linux_x64", required=True, help="Ort-genai linux-x64 directory")
+    parser.add_argument("--linux_arm64", required=True, help="Ort-genai linux-arm64 directory")
 
     args = parser.parse_args()
     args.sdk_info = ""
