@@ -10,5 +10,6 @@ This directory contains assets, scripts, and definitions used by the test suite.
 - `test/python/*` contains all Python scripts used for testing.
     - `test/python/builder/*` contains Python scripts used to validate the model builder.
     - `test/python/create/*` contains Python scripts used to create ONNX models. Scripts follow the `create_*.py` naming format.
+    - `test/python/integration/*` contains Python scripts used to run integrating testing on Foundry Local models.
     - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
 - `test/tool-definitions/*` contains all tool definitions used for testing.
