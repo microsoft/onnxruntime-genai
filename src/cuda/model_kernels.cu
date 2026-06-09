@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <limits>
@@ -125,6 +126,19 @@ void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertFp32ToFp16<<<num_blocks, block_size, 0, stream>>>(fp32, reinterpret_cast<half*>(fp16), count);
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void ConvertBf16ToFp32(const __nv_bfloat16* src, float* dst, int count) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < count)
+    dst[idx] = __bfloat162float(src[idx]);
+}
+
+void LaunchBf16ToFp32(const uint16_t* bf16, float* fp32, int count, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (count + block_size - 1) / block_size;
+  ConvertBf16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const __nv_bfloat16*>(bf16), fp32, count);
   CUDA_CHECK_LAUNCH();
 }
 

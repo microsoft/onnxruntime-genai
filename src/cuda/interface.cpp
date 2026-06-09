@@ -122,6 +122,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
       cuda::LaunchFp32ToFp16(reinterpret_cast<const float*>(input_data), reinterpret_cast<uint16_t*>(output_data), static_cast<int>(element_count), GetStream());
     } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
       cuda::LaunchFp16ToFp32(reinterpret_cast<const uint16_t*>(input_data), reinterpret_cast<float*>(output_data), static_cast<int>(element_count), GetStream());
+    } else if (input_type == Ort::TypeToTensorType<Ort::BFloat16_t> && output_type == Ort::TypeToTensorType<float>) {
+      cuda::LaunchBf16ToFp32(reinterpret_cast<const uint16_t*>(input_data), reinterpret_cast<float*>(output_data), static_cast<int>(element_count), GetStream());
     } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
       cuda::LaunchInt32ToInt64(reinterpret_cast<const int32_t*>(input_data), reinterpret_cast<int64_t*>(output_data), static_cast<int>(element_count), GetStream());
     } else
