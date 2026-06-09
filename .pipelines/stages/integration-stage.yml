@@ -52,6 +52,7 @@ stages:
   dependsOn: []
   jobs:
   - job: check_models_in_sync
+    displayName: 'Check model lists are in sync'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
