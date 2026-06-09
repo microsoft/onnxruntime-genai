@@ -48,6 +48,31 @@ TEST(CAPITests, Config) {
 #endif
 }
 
+// Regression test: appending CPU provider should not throw.
+// See https://github.com/microsoft/onnxruntime-genai/pull/2179
+TEST(CAPITests, AppendCpuProvider) {
+#if TEST_PHI2
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->ClearProviders();
+  config->AppendProvider("cpu");
+  auto model = OgaModel::Create(*config);
+  ASSERT_NE(model.get(), nullptr);
+
+  // Also test other case variants
+  auto config2 = OgaConfig::Create(PHI2_PATH);
+  config2->ClearProviders();
+  config2->AppendProvider("CPU");
+  auto model2 = OgaModel::Create(*config2);
+  ASSERT_NE(model2.get(), nullptr);
+
+  auto config3 = OgaConfig::Create(PHI2_PATH);
+  config3->ClearProviders();
+  config3->AppendProvider("CPUExecutionProvider");
+  auto model3 = OgaModel::Create(*config3);
+  ASSERT_NE(model3.get(), nullptr);
+#endif
+}
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
