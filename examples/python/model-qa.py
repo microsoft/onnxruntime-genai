@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
+﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
 import argparse
@@ -61,13 +61,6 @@ def main(args):
             tool_call_end=args.tool_call_end,
         )
         input_list[0]["tools"] = tools
-    elif args.tools_file:
-        # Tools provided without constrained decoding (e.g. Harmony/GPT-OSS models
-        # that handle tool calling natively via their chat template).
-        # Tools are passed as a separate parameter to apply_chat_template,
-        # NOT embedded in messages (that's the Phi-4 constrained decoding path).
-        with open(args.tools_file, 'r') as f:
-            tools = json.dumps(json.load(f))
 
     # Keep track of timings if requested
     if args.timings:
