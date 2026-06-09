@@ -150,6 +150,8 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<int32_t> prefill_input_ids_;
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
+  // Sequence length at the first generated step; used for begin_suppress_tokens. -1 = not yet set.
+  int64_t begin_suppress_length_{-1};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::weak_ptr<Engine> engine_;

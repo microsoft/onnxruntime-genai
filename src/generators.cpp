@@ -664,6 +664,14 @@ void Generator::GenerateNextToken() {
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  search_->ApplySuppressTokens(search.suppress_tokens);
+  if (!search.begin_suppress_tokens.empty()) {
+    // begin_suppress_tokens are only suppressed at the first generated step (current length == prompt length).
+    if (begin_suppress_length_ < 0)
+      begin_suppress_length_ = search_->GetSequenceLength();
+    if (search_->GetSequenceLength() == begin_suppress_length_)
+      search_->ApplySuppressTokens(search.begin_suppress_tokens);
+  }
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");

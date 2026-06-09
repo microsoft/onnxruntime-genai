@@ -549,6 +549,8 @@ class Model:
                 "temperature": 1.0,
                 "top_k": 50,
                 "top_p": 1.0,
+                "suppress_tokens": None,
+                "begin_suppress_tokens": None,
             }
             for key, default_val in defaults.items():
                 val = getattr(gen_config, key)
@@ -630,6 +632,14 @@ class Model:
                 "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
             },
         }
+
+        # Suppress tokens from generation_config.json (HF generation parity). Only emitted when present and non-empty.
+        suppress_tokens = getattr(config, "suppress_tokens", None)
+        if suppress_tokens:
+            genai_config["search"]["suppress_tokens"] = list(suppress_tokens)
+        begin_suppress_tokens = getattr(config, "begin_suppress_tokens", None)
+        if begin_suppress_tokens:
+            genai_config["search"]["begin_suppress_tokens"] = list(begin_suppress_tokens)
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention

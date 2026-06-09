@@ -116,6 +116,14 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+  search_->ApplySuppressTokens(search_params.suppress_tokens);
+  if (!search_params.begin_suppress_tokens.empty()) {
+    // begin_suppress_tokens are only suppressed at the first generated step (current length == prompt length).
+    if (begin_suppress_length_ < 0)
+      begin_suppress_length_ = search_->GetSequenceLength();
+    if (search_->GetSequenceLength() == begin_suppress_length_)
+      search_->ApplySuppressTokens(search_params.begin_suppress_tokens);
+  }
 
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
     search_->SelectTop();

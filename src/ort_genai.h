@@ -424,6 +424,10 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
+  void SetSearchOptionTokensArray(const char* name, const int32_t* tokens, size_t tokens_count) {
+    OgaCheckResult(OgaGeneratorParamsSetSearchTokensArray(this, name, tokens, tokens_count));
+  }
+
   void SetGuidance(const char* type, const char* data, bool enable_ff_tokens = false) {
     OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
   }

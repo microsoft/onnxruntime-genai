@@ -187,8 +187,13 @@ struct PyGeneratorParams {
         params_->SetSearchOptionBool(name.c_str(), entry.second.cast<bool>());
       } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
         params_->SetSearchOption(name.c_str(), entry.second.cast<int>());
+      } else if (pybind11::isinstance<pybind11::list>(entry.second) || pybind11::isinstance<pybind11::tuple>(entry.second)) {
+        std::vector<int32_t> tokens;
+        for (auto item : entry.second)
+          tokens.push_back(pybind11::cast<int32_t>(item));
+        params_->SetSearchOptionTokensArray(name.c_str(), tokens.data(), tokens.size());
       } else
-        throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
+        throw std::runtime_error("Unknown search option type, can be float/bool/int/list[int]:" + name);
     }
   }
 

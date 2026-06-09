@@ -28,6 +28,7 @@ struct Search : LeakChecked<Search> {
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
+  virtual void ApplySuppressTokens(const std::vector<int>& suppress_tokens) = 0;
 
   // Set user input tokens
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };
@@ -50,6 +51,7 @@ struct Search_Cpu : Search {
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
+  void ApplySuppressTokens(const std::vector<int>& suppress_tokens) override;
 
   std::span<float> GetScores(int batch_beam_index);
 
