@@ -48,6 +48,50 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   EXPECT_TRUE(0 == std::memcmp(expected_output.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
 
+TEST(SamplingTests, SuppressTokensCpu) {
+  // Greedy selection: token 1 has the highest logit, but suppressing tokens 1 and 3
+  // should force selection of the next highest unsuppressed token (token 2).
+  std::vector<float> logits_cpu = {0.1f, 0.9f, 0.5f, 0.7f, 0.2f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 }, "search": { "suppress_tokens": [1, 3] } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("batch_size", 1);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL});
+  generator->SetLogits(*logits_tensor);
+
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 2);
+}
+
+TEST(SamplingTests, BeginSuppressTokensCpu) {
+  // begin_suppress_tokens are suppressed only at the first generated step.
+  // Token 1 has the highest logit but is suppressed at the begin step, so token 3 (next highest) is chosen.
+  std::vector<float> logits_cpu = {0.1f, 0.9f, 0.5f, 0.7f, 0.2f};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 }, "search": { "begin_suppress_tokens": [1] } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("batch_size", 1);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{1LL, 5LL});
+  generator->SetLogits(*logits_tensor);
+
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_EQ(next_tokens[0], 3);
+}
+
 TEST(SamplingTests, BatchedSamplingTopKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,

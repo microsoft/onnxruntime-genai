@@ -26,6 +26,7 @@ struct Search_Cuda : Search {
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
+  void ApplySuppressTokens(const std::vector<int>& suppress_tokens) override;
 
   std::span<float> GetScores(int batch_beam_index);
   std::span<float> GetScores();

@@ -1293,8 +1293,18 @@ struct Search_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "suppress_tokens")
+      return suppress_tokens_;
+    if (name == "begin_suppress_tokens")
+      return begin_suppress_tokens_;
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Search& v_;
+  Int_Array_Element suppress_tokens_{v_.suppress_tokens};
+  Int_Array_Element begin_suppress_tokens_{v_.begin_suppress_tokens};
 };
 
 struct DynamicBatching_Element : JSON::Element {
@@ -1371,6 +1381,16 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
     Search_Element(search).OnValue(name, value);
   } catch (...) {
     JSON::TranslateException(name);
+  }
+}
+
+void SetSearchTokensArray(Config::Search& search, std::string_view name, std::span<const int32_t> tokens) {
+  if (name == "suppress_tokens") {
+    search.suppress_tokens.assign(tokens.begin(), tokens.end());
+  } else if (name == "begin_suppress_tokens") {
+    search.begin_suppress_tokens.assign(tokens.begin(), tokens.end());
+  } else {
+    throw std::runtime_error("Unknown search tokens array option: " + std::string(name));
   }
 }
 
