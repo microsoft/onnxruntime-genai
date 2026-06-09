@@ -321,13 +321,13 @@ void RunNaNSafetyTest(const TopKTestParams& params) {
 TEST(TopKTests, NaNSafetyTests) {
   // Test representative configurations that exercise different code paths
   std::vector<TopKTestParams> test_cases = {
-      {1, 200, 1},       // Top-1 path (GetTop1Kernel)
-      {1, 200, 4},       // Small vocab, k > 1 (GetTopKKernel)
-      {4, 2000, 1},      // Multi-batch Top-1
-      {4, 2000, 16},     // Multi-batch general TopK
-      {1, 200000, 1},    // Large vocab Top-1 (triggers distributed_select_sort)
-      {1, 200000, 32},   // Large vocab general TopK (triggers distributed_select_sort)
-      {32, 20000, 64},   // Large batch, large k
+      {1, 200, 1},
+      {1, 200, 4},
+      {4, 2000, 1},
+      {4, 2000, 16},
+      {1, 200000, 1},
+      {1, 200000, 32},
+      {32, 20000, 64},
   };
 
   for (const auto& params : test_cases) {
