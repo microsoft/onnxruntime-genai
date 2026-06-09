@@ -38,7 +38,7 @@ steps:
       scriptLocation: 'inlineScript'
       workingDirectory: '$(Build.Repository.LocalPath)'
       inlineScript: |
-        $subpath = python tools/python/integration/suite_paths.py `
+        $subpath = python test/python/integration/suite_paths.py `
           --model "${{ parameters.model }}" `
           --device ${{ parameters.ep }}
         if (-not $subpath) {
@@ -73,7 +73,7 @@ steps:
       workingDirectory: '$(Build.Repository.LocalPath)'
       inlineScript: |
         set -e -x
-        subpath=$(python3 tools/python/integration/suite_paths.py \
+        subpath=$(python3 test/python/integration/suite_paths.py \
           --model "${{ parameters.model }}" \
           --device ${{ parameters.ep }})
         if [ -z "$subpath" ]; then

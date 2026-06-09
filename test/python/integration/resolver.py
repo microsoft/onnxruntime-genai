@@ -9,7 +9,7 @@ The integration suite reads models from a directory that mirrors the
     <root>/<logical_id>/onnx/<device_dir>/v<N>/genai_config.json
 
 CI populates ``<root>`` by azcopy-syncing the prefixes returned by
-``tools/python/integration/suite_paths.py``. Local devs can either point
+``test/python/integration/suite_paths.py``. Local devs can either point
 ``--model-root`` (or ``ORTGENAI_MODEL_ROOT``) at a similarly shaped local
 folder, or do their own one-off azcopy.
 

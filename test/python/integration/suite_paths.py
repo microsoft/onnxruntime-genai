@@ -1,25 +1,21 @@
+#!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Print the storage subpath for a single (model, device) pair, used by
-the integration pipeline's per-model fetch step.
+"""Print the storage subpath for a single (model, device) pair.
 
-Prints nothing (empty string) if the model doesn't support the device.
+Used by the integration pipeline's per-model fetch step. Prints nothing
+(empty string) if the model doesn't support the device.
 
 Usage:
-    python tools/python/integration/suite_paths.py --model qwen3-0.6b --device cuda
+    python test/python/integration/suite_paths.py --model qwen3-0.6b --device cuda
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
-
-from integration import models  # noqa: E402
+import models
 
 
 def main():

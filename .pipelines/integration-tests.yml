@@ -96,6 +96,9 @@ parameters:
   default: true
 
 # Suite contents - keep in sync with test/python/integration/models.py.
+# The validate_pipeline_in_sync stage runs test/python/integration/check_models_in_sync.py
+# at the start of every run and fails the pipeline if these defaults drift
+# from the pr / all_ lists in models.py.
 - name: pr_models
   type: object
   default:
@@ -135,6 +138,10 @@ parameters:
 stages:
 - template: stages/integration-stage.yml
   parameters:
+    # Pipeline yaml's lists are passed through so the in-sync checker can
+    # compare them to models.py without parsing yaml itself.
+    pr_models: ${{ parameters.pr_models }}
+    all_models: ${{ parameters.all_models }}
     # Resolve the suite's model list at compile time so each model
     # becomes its own ADO job (fans out via ${{ each }} in the template).
     ${{ if eq(parameters.suite, 'pr') }}:

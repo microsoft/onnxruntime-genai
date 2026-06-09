@@ -17,11 +17,9 @@ warns (without failing) when the expected substring (`paris`) is absent.
 test/python/integration/
   models.py                  # MODELS catalog + suite lists (pr, all)
   resolver.py                # get_path_for(model, device) -> Path
+  suite_paths.py             # blob prefix for one (model, device) pair
   conftest.py                # --model, --execution-provider, --model-root
   test_integration_text.py   # the single text-generation test
-
-tools/python/integration/
-  suite_paths.py             # blob prefix for one (model, device) pair
 ```
 
 ## Running locally

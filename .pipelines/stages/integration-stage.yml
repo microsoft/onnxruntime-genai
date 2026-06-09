@@ -5,6 +5,14 @@ parameters:
 - name: models
   type: object
   default: []
+# Suite lists for the in-sync checker. Passed through from the top-level
+# pipeline so the checker doesn't have to parse YAML itself.
+- name: pr_models
+  type: object
+  default: []
+- name: all_models
+  type: object
+  default: []
 - name: build_windows_x64
   type: boolean
   default: true
@@ -37,10 +45,31 @@ parameters:
   default: true
 
 stages:
+# Fail fast if the pipeline's pr_models / all_models defaults have drifted
+# from test/python/integration/models.py. Cheap Linux job, gates all builds.
+- stage: validate_pipeline_in_sync
+  displayName: 'Validate · models.py in sync with pipeline'
+  dependsOn: []
+  jobs:
+  - job: check_models_in_sync
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      fetchDepth: 1
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.11'
+    - script: |
+        python test/python/integration/check_models_in_sync.py \
+          --pr  "${{ join(',', parameters.pr_models) }}" \
+          --all "${{ join(',', parameters.all_models) }}"
+      displayName: 'Check pr_models / all_models match models.py'
+
 - ${{ if eq(parameters.build_windows_x64, true) }}:
   - stage: build_win_x64
     displayName: 'Build · Windows x64'
-    dependsOn: []
+    dependsOn: validate_pipeline_in_sync
     jobs:
     - template: jobs/integration-build-job.yml
       parameters:
@@ -79,7 +108,7 @@ stages:
 - ${{ if eq(parameters.build_linux_x64, true) }}:
   - stage: build_linux_x64
     displayName: 'Build · Linux x64'
-    dependsOn: []
+    dependsOn: validate_pipeline_in_sync
     jobs:
     - template: jobs/integration-build-job.yml
       parameters:
@@ -110,7 +139,7 @@ stages:
 - ${{ if eq(parameters.build_macos_arm64, true) }}:
   - stage: build_osx_arm64
     displayName: 'Build · macOS arm64'
-    dependsOn: []
+    dependsOn: validate_pipeline_in_sync
     jobs:
     - template: jobs/integration-build-job.yml
       parameters:
