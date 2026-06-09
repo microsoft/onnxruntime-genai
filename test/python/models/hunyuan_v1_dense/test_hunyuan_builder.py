@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import math
 import importlib.util
+import math
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
-BUILDERS_DIR = Path(__file__).parents[2] / "src" / "python" / "py" / "models" / "builders"
+BUILDERS_DIR = Path(__file__).parents[4] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
 
 
