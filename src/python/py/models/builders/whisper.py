@@ -993,11 +993,10 @@ class WhisperModel(Model):
             },
         }
 
-        # Suppress tokens from the model config (HF generation parity). Only emitted when present and non-empty.
-        if self.suppress_tokens:
-            genai_config["search"]["suppress_tokens"] = list(self.suppress_tokens)
-        if self.begin_suppress_tokens:
-            genai_config["search"]["begin_suppress_tokens"] = list(self.begin_suppress_tokens)
+        # Suppress tokens from the model config (HF generation parity).
+        self.add_suppress_tokens_to_search_config(
+            genai_config["search"], self.suppress_tokens, self.begin_suppress_tokens
+        )
 
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
