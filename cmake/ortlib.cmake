@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# For the installation directory variables
+include(GNUInstallDirs)
+
 if(USE_WINML)
   message(STATUS "----- Building with WinML support ----- ")
 
@@ -68,12 +71,20 @@ if(ORT_HOME)
   elseif (IOS OR MAC_CATALYST)
     set(ORT_HEADER_DIR ${ORT_HOME}/Headers)
     set(ORT_LIB_DIR ${ORT_HOME}/)
-  elseif (CMAKE_SYSTEM_NAME MATCHES "AIX")
-    set(ORT_HEADER_DIR ${ORT_HOME}/include/onnxruntime)
-    set(ORT_LIB_DIR ${ORT_HOME}/lib)
   else()
-    set(ORT_HEADER_DIR ${ORT_HOME}/include)
-    set(ORT_LIB_DIR ${ORT_HOME}/lib)
+    if (NOT "${CMAKE_INSTALL_INCLUDEDIR}" STREQUAL "" AND EXISTS ${ORT_HOME}/${CMAKE_INSTALL_INCLUDEDIR})
+      set(ORT_HEADER_DIR ${ORT_HOME}/${CMAKE_INSTALL_INCLUDEDIR})
+    else()
+      set(ORT_HEADER_DIR ${ORT_HOME}/include)
+    endif()
+    if (CMAKE_SYSTEM_NAME MATCHES "AIX")
+      set(ORT_HEADER_DIR ${ORT_HEADER_DIR}/onnxruntime)
+    endif()
+    if (NOT "${CMAKE_INSTALL_LIBDIR}" STREQUAL "" AND EXISTS ${ORT_HOME}/${CMAKE_INSTALL_LIBDIR})
+      set(ORT_LIB_DIR ${ORT_HOME}/${CMAKE_INSTALL_LIBDIR})
+    else()
+      set(ORT_LIB_DIR ${ORT_HOME}/lib)
+    endif()
   endif()
 else()
   # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
