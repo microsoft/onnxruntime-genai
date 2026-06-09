@@ -136,8 +136,8 @@ __global__ void ConvertBf16ToFp32(const __nv_bfloat16* src, float* dst, int coun
 }
 
 void LaunchBf16ToFp32(const uint16_t* bf16, float* fp32, int count, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (count + block_size - 1) / block_size;
+  constexpr int block_size = 256;
+  const int num_blocks = (count + block_size - 1) / block_size;
   ConvertBf16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const __nv_bfloat16*>(bf16), fp32, count);
   CUDA_CHECK_LAUNCH();
 }
