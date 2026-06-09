@@ -41,7 +41,7 @@ MODELS: dict[str, set[str]] = {
     "deepseek-r1-distill-qwen-1.5b":      {"cpu", "cuda", "webgpu"},
     "deepseek-r1-distill-qwen-14b":       {"cpu", "cuda", "webgpu"},
     "deepseek-r1-distill-qwen-7b":        {"cpu", "cuda", "webgpu"},
-    "gpt-oss-20b":                        {"cpu", "webgpu"},
+    "gpt-oss-20b":                        {"cpu", "cuda", "webgpu"},
     "ministral-3-3b-Instruct-2512":       {"cpu", "cuda", "webgpu"},
     "mistral-nemo-12b-instruct":          {"cpu", "cuda", "webgpu"},
     "mistralai-Mistral-7B-Instruct-v0-2": {"cpu", "cuda", "webgpu"},

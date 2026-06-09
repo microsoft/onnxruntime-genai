@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--all",
-        dest="all_",
+        dest="all_models",
         required=True,
         help="Comma-separated all_models list from the pipeline yaml.",
     )
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     suites = (
         ("pr", "pr_models", list(models.pr), _split(args.pr)),
-        ("all", "all_models", list(models.all_), _split(args.all_)),
+        ("all", "all_models", list(models.all_), _split(args.all_models)),
     )
 
     problems: list[str] = []
