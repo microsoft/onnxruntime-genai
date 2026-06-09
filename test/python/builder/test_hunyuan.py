@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-BUILDERS_DIR = Path(__file__).parents[4] / "src" / "python" / "py" / "models" / "builders"
+BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
 
 
