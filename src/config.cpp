@@ -176,6 +176,153 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// v2.1 (issue #2114, PR-F, design §7): SAX parsers for the runtime-vs-build-time feature namespace
+// under session_options. Each sub-element throws JSON::unknown_value_error for unknown keys so a
+// typo or a mis-namespaced feature fails fast at parse time rather than being silently ignored.
+struct RuntimeKvCache_Element : JSON::Element {
+  explicit RuntimeKvCache_Element(Config::RuntimeFeatures::KvCache& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "dtype") {
+      v_.dtype = JSON::Get<std::string_view>(value);
+    } else if (name == "quant") {
+      v_.quant = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeFeatures::KvCache& v_;
+};
+
+struct RuntimePaging_Element : JSON::Element {
+  explicit RuntimePaging_Element(Config::RuntimeFeatures::Paging& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "block_size") {
+      v_.block_size = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeFeatures::Paging& v_;
+};
+
+struct RuntimePrefixCache_Element : JSON::Element {
+  explicit RuntimePrefixCache_Element(Config::RuntimeFeatures::PrefixCache& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeFeatures::PrefixCache& v_;
+};
+
+struct RuntimeSlidingWindow_Element : JSON::Element {
+  explicit RuntimeSlidingWindow_Element(Config::RuntimeFeatures::SlidingWindow& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "size") {
+      v_.size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sink_tokens") {
+      v_.sink_tokens = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeFeatures::SlidingWindow& v_;
+};
+
+struct RuntimeChunkedPrefill_Element : JSON::Element {
+  explicit RuntimeChunkedPrefill_Element(Config::RuntimeFeatures::ChunkedPrefill& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_batched_tokens") {
+      v_.max_batched_tokens = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeFeatures::ChunkedPrefill& v_;
+};
+
+struct RuntimeFeatures_Element : JSON::Element {
+  explicit RuntimeFeatures_Element(Config::RuntimeFeatures& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "precision") {
+      v_.precision = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "kv_cache") {
+      v_.kv_cache = Config::RuntimeFeatures::KvCache{};
+      kv_cache_ = std::make_unique<RuntimeKvCache_Element>(*v_.kv_cache);
+      return *kv_cache_;
+    }
+    if (name == "paging") {
+      v_.paging = Config::RuntimeFeatures::Paging{};
+      paging_ = std::make_unique<RuntimePaging_Element>(*v_.paging);
+      return *paging_;
+    }
+    if (name == "prefix_cache") {
+      v_.prefix_cache = Config::RuntimeFeatures::PrefixCache{};
+      prefix_cache_ = std::make_unique<RuntimePrefixCache_Element>(*v_.prefix_cache);
+      return *prefix_cache_;
+    }
+    if (name == "sliding_window") {
+      v_.sliding_window = Config::RuntimeFeatures::SlidingWindow{};
+      sliding_window_ = std::make_unique<RuntimeSlidingWindow_Element>(*v_.sliding_window);
+      return *sliding_window_;
+    }
+    if (name == "chunked_prefill") {
+      v_.chunked_prefill = Config::RuntimeFeatures::ChunkedPrefill{};
+      chunked_prefill_ = std::make_unique<RuntimeChunkedPrefill_Element>(*v_.chunked_prefill);
+      return *chunked_prefill_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::RuntimeFeatures& v_;
+  std::unique_ptr<RuntimeKvCache_Element> kv_cache_;
+  std::unique_ptr<RuntimePaging_Element> paging_;
+  std::unique_ptr<RuntimePrefixCache_Element> prefix_cache_;
+  std::unique_ptr<RuntimeSlidingWindow_Element> sliding_window_;
+  std::unique_ptr<RuntimeChunkedPrefill_Element> chunked_prefill_;
+};
+
+struct BuildRequires_Element : JSON::Element {
+  explicit BuildRequires_Element(Config::BuildRequires& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "attention") {
+      v_.attention = JSON::Get<std::string_view>(value);
+    } else if (name == "quantization") {
+      v_.quantization = JSON::Get<std::string_view>(value);
+    } else if (name == "extra_heads") {
+      v_.extra_heads = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::BuildRequires& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -213,9 +360,28 @@ struct SessionOptions_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  JSON::Element& OnObject(std::string_view name) override {
+    // v2.1 (issue #2114, PR-F, design §7): the runtime-vs-build-time feature namespace. These are the
+    // only nested objects recognized under session_options; any other object key still throws (so old
+    // configs are unaffected and typos fail fast).
+    if (name == "runtime") {
+      v_.runtime = Config::RuntimeFeatures{};
+      runtime_ = std::make_unique<RuntimeFeatures_Element>(*v_.runtime);
+      return *runtime_;
+    }
+    if (name == "build_requires") {
+      v_.build_requires = Config::BuildRequires{};
+      build_requires_ = std::make_unique<BuildRequires_Element>(*v_.build_requires);
+      return *build_requires_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  std::unique_ptr<RuntimeFeatures_Element> runtime_;
+  std::unique_ptr<BuildRequires_Element> build_requires_;
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -1470,6 +1636,98 @@ bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
   return false;
 }
 
+namespace {
+
+// v2.1 (issue #2114, PR-F, design §7) validation helpers. Each allowlist captures the values that are
+// SENSIBLE for its namespace. A handful of well-known tokens are explicitly tagged as belonging to the
+// *other* namespace so a mis-namespaced feature ("declared, never synthesized") yields a precise error
+// instead of a generic "unknown value".
+bool Contains(std::initializer_list<std::string_view> set, const std::string& value) {
+  return std::find(set.begin(), set.end(), value) != set.end();
+}
+
+[[noreturn]] void ThrowFeatureError(std::string_view context, std::string_view field, const std::string& value,
+                                    std::string_view detail) {
+  std::ostringstream oss;
+  oss << "Invalid session_options." << field << " value '" << value << "' for " << context << ": " << detail;
+  throw std::runtime_error(oss.str());
+}
+
+}  // namespace
+
+void ValidateSessionOptionsFeatures(const Config::SessionOptions& session_options, std::string_view context) {
+  // Back-compat: nothing to validate (and nothing changes) unless one of the v2.1 blocks is present.
+  if (session_options.runtime.has_value()) {
+    const auto& runtime = *session_options.runtime;
+
+    if (runtime.kv_cache.has_value() && runtime.kv_cache->dtype.has_value()) {
+      const std::string& dtype = *runtime.kv_cache->dtype;
+      // Weight-quantization schemes are a BUILD-TIME property of the exported weights, not a runtime KV
+      // element type. Reject them here so the honest runtime/build split is enforced.
+      if (Contains({"awq", "gptq"}, dtype)) {
+        ThrowFeatureError(context, "runtime.kv_cache.dtype", dtype,
+                          "this is a build-time weight quantization; declare it under "
+                          "session_options.build_requires.quantization, not the runtime namespace");
+      }
+      if (!Contains({"fp32", "fp16", "bf16", "fp8", "int8", "int4"}, dtype)) {
+        ThrowFeatureError(context, "runtime.kv_cache.dtype", dtype,
+                          "unknown KV-cache dtype (expected one of fp32, fp16, bf16, fp8, int8, int4)");
+      }
+    }
+    if (runtime.kv_cache.has_value() && runtime.kv_cache->quant.has_value()) {
+      const std::string& quant = *runtime.kv_cache->quant;
+      if (!Contains({"none", "per_token", "per_channel", "per_tensor"}, quant)) {
+        ThrowFeatureError(context, "runtime.kv_cache.quant", quant,
+                          "unknown KV-cache quant scheme (expected none, per_token, per_channel, per_tensor)");
+      }
+    }
+    if (runtime.precision.has_value()) {
+      const std::string& precision = *runtime.precision;
+      if (!Contains({"fp32", "fp16", "bf16", "fp8"}, precision)) {
+        ThrowFeatureError(context, "runtime.precision", precision,
+                          "unknown compute precision (expected fp32, fp16, bf16, fp8)");
+      }
+    }
+    if (runtime.paging.has_value() && runtime.paging->block_size.has_value() &&
+        *runtime.paging->block_size <= 0) {
+      ThrowFeatureError(context, "runtime.paging.block_size", std::to_string(*runtime.paging->block_size),
+                        "block_size must be a positive integer");
+    }
+  }
+
+  if (session_options.build_requires.has_value()) {
+    const auto& build = *session_options.build_requires;
+
+    if (build.attention.has_value()) {
+      const std::string& attention = *build.attention;
+      if (!Contains({"mha", "mqa", "gqa"}, attention)) {
+        ThrowFeatureError(context, "build_requires.attention", attention,
+                          "unknown attention shape (expected mha, mqa, gqa)");
+      }
+    }
+    if (build.quantization.has_value()) {
+      const std::string& quant = *build.quantization;
+      if (!Contains({"none", "awq", "gptq", "int8", "int4", "fp8"}, quant)) {
+        ThrowFeatureError(context, "build_requires.quantization", quant,
+                          "unknown weight quantization (expected none, awq, gptq, int8, int4, fp8)");
+      }
+    }
+    if (build.extra_heads.has_value()) {
+      const std::string& heads = *build.extra_heads;
+      // Runtime-only knobs declared as build heads are nonsensical -- catch the obvious confusions.
+      if (Contains({"paging", "prefix_cache", "sliding_window", "chunked_prefill"}, heads)) {
+        ThrowFeatureError(context, "build_requires.extra_heads", heads,
+                          "this is a runtime feature; declare it under session_options.runtime, not "
+                          "the build_requires namespace");
+      }
+      if (!Contains({"none", "medusa", "mtp", "eagle", "eagle3", "hydra"}, heads)) {
+        ThrowFeatureError(context, "build_requires.extra_heads", heads,
+                          "unknown extra-heads recipe (expected none, medusa, mtp, eagle, eagle3, hydra)");
+      }
+    }
+  }
+}
+
 void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type) {
   auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
@@ -2518,6 +2776,35 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     for (const auto& provider_option : model.embedding.session_options->provider_options) {
       model.embedding.session_options->providers.push_back(provider_option.name);
     }
+  }
+
+  // v2.1 (issue #2114, PR-F, design §7): validate the runtime-vs-build-time feature namespace on every
+  // session_options block. No-op (and therefore byte-for-byte back-compatible) unless a config declares
+  // a "runtime"/"build_requires" object; otherwise it fails fast on an unknown or mis-namespaced value.
+  ValidateSessionOptionsFeatures(model.decoder.session_options, "decoder");
+  if (model.encoder.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.encoder.session_options, "encoder");
+  if (model.vision.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.vision.session_options, "vision");
+  if (model.speech.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.speech.session_options, "speech");
+  if (model.embedding.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.embedding.session_options, "embedding");
+  if (model.joiner.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.joiner.session_options, "joiner");
+  if (model.vad.session_options.has_value())
+    ValidateSessionOptionsFeatures(*model.vad.session_options, "vad");
+  for (const auto& stage : model.decoder.pipeline) {
+    if (stage.session_options.has_value())
+      ValidateSessionOptionsFeatures(*stage.session_options, "pipeline model '" + stage.model_id + "'");
+  }
+  for (const auto& stage : model.vision.pipeline) {
+    if (stage.session_options.has_value())
+      ValidateSessionOptionsFeatures(*stage.session_options, "vision pipeline model");
+  }
+  for (const auto& session : pipeline.sessions) {
+    if (session.session_options.has_value())
+      ValidateSessionOptionsFeatures(*session.session_options, "pipeline session '" + session.name + "'");
   }
 }
 

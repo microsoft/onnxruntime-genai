@@ -99,6 +99,49 @@ struct Config {
     std::optional<DeviceFilteringOptions> device_filtering_options;
   };
 
+  // v2.1 (issue #2114, PR-F, design §7): the runtime-vs-build-time feature namespace.
+  // RUNTIME features are schedulable at load/session time and imply NO change to the exported ONNX
+  // graph (KV-cache dtype/quant, PagedAttention, prefix cache, sliding window, chunked prefill,
+  // compute precision). They are parsed and validated here; per the design's "KV-quant/paging numeric
+  // parity is out of PR-F scope" note, their numeric session-time effects are DEFERRED (declared, the
+  // plumbing point exists in Model::CreateSessionOptionsFromConfig, but no knob is flipped yet).
+  struct RuntimeFeatures {
+    struct KvCache {
+      std::optional<std::string> dtype;  // KV element type, e.g. "fp16" | "fp8" | "int8" (runtime).
+      std::optional<std::string> quant;  // KV quant scheme, e.g. "per_token" | "per_channel" (runtime).
+    };
+    struct Paging {
+      bool enabled{false};
+      std::optional<int> block_size;
+    };
+    struct PrefixCache {
+      bool enabled{false};
+    };
+    struct SlidingWindow {
+      std::optional<int> size;
+      std::optional<int> sink_tokens;
+    };
+    struct ChunkedPrefill {
+      std::optional<int> max_batched_tokens;
+    };
+    std::optional<KvCache> kv_cache;
+    std::optional<Paging> paging;
+    std::optional<PrefixCache> prefix_cache;
+    std::optional<SlidingWindow> sliding_window;
+    std::optional<ChunkedPrefill> chunked_prefill;
+    std::optional<std::string> precision;  // Compute precision, e.g. "fp16" | "bf16" (runtime).
+  };
+
+  // v2.1 (issue #2114, PR-F, design §7): BUILD-TIME requirements are properties baked into the exported
+  // ONNX graph/weights (attention shape, weight quantization, extra speculative heads). They are
+  // "declared, never synthesized": parsed and validated at load time so a mismatch fails fast with a
+  // clear message, but the runtime NEVER builds them.
+  struct BuildRequires {
+    std::optional<std::string> attention;     // "mha" | "mqa" | "gqa" (in weights/graph).
+    std::optional<std::string> quantization;  // "awq" | "gptq" | "int8" | ... (in weights).
+    std::optional<std::string> extra_heads;   // "medusa" | "mtp" | "eagle" | ... (in graph).
+  };
+
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
     std::optional<int> inter_op_num_threads;
@@ -117,6 +160,12 @@ struct Config {
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
     std::vector<ProviderOptions> provider_options;
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
+
+    // v2.1 (issue #2114, PR-F, design §7): runtime-vs-build-time feature namespace. Block-presence
+    // gated and additive -- both are absent unless the config declares a "runtime" / "build_requires"
+    // object under session_options, in which case behavior is byte-for-byte unchanged.
+    std::optional<RuntimeFeatures> runtime;
+    std::optional<BuildRequires> build_requires;
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
@@ -613,6 +662,13 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
+
+// v2.1 (issue #2114, PR-F, design §7): validate the runtime-vs-build-time feature namespace of a
+// session_options block. Throws a clear std::runtime_error when a feature value is unknown or when a
+// build-time-only feature is declared in the runtime namespace (or vice versa). No-op when neither
+// the "runtime" nor the "build_requires" block is present, guaranteeing back-compat. `context` is a
+// human-readable label for the owning session (e.g. "decoder", "pipeline session 'draft'").
+void ValidateSessionOptionsFeatures(const Config::SessionOptions& session_options, std::string_view context);
 
 // Pipeline-as-Config (issue #2114) helpers.
 // Derives an introspective Config::Pipeline from a legacy (v1) config without altering config.model.*.

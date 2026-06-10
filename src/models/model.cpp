@@ -700,6 +700,20 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
+  // v2.1 (issue #2114, PR-F, design §7): runtime-vs-build-time feature namespace plumbing point.
+  // The schema is parsed and validated in config.cpp (ValidateSessionOptionsFeatures). This is the
+  // single place a session_options block flows into ORT session creation, so it is where any future
+  // per-feature RUNTIME application would land (KV dtype/quant -> cache constructors, paging/prefix
+  // cache -> the engine cache manager, chunked prefill -> search.chunk_size). Per the design's
+  // explicit "KV-quant/paging numeric parity is out of PR-F scope" note, those numeric effects are
+  // DEFERRED: the features are declared and validated, but NOT yet acted upon here. build_requires.*
+  // is "declared, never synthesized" by contract and is intentionally never applied at runtime.
+  if (config_session_options.runtime.has_value() && g_log.enabled && g_log.warning) {
+    Log("warning",
+        "session_options.runtime feature namespace is present; it is parsed and validated but its "
+        "per-feature runtime effects are not yet applied (declared-only, see design §7 / PR-F).");
+  }
+
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   *config_, disable_graph_capture);
