@@ -1,12 +1,10 @@
 {
   "schema_version": 1,
+  "package_name": "bad-overlay-component",
+  "package_version": "1.0",
+  "description": "consumer_metadata overlay introduces a new component reference -> NormalizePackageIntoConfig must throw.",
   "layout": "portable",
   "components": {
-    "decoder": "models/decoder/component.json"
-  },
-  "additional_metadata": {
-    "package_name": "bad-overlay-component",
-    "package_version": "1.0",
-    "description": "consumer_metadata overlay introduces a new component reference -> NormalizePackageIntoConfig must throw."
+    "decoder": "models/decoder"
   }
 }

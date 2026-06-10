@@ -19,9 +19,8 @@ namespace Generators {
 // --- Package detection ---
 
 bool IsModelPackage(const fs::path& path) {
-  // A model package is identified by a top-level manifest.json. The redesigned ORT
-  // model_package library makes this file mandatory: it carries schema_version, layout,
-  // and the components map. No subdirectory probing or reserved-name carve-outs.
+  // A model package is identified by a top-level manifest.json carrying schema_version,
+  // layout, and the components map.
   return fs::exists(path / "manifest.json");
 }
 

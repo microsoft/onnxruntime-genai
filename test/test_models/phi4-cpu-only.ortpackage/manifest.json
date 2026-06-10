@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "package_name": "pipeline-test-cpu",
+  "package_name": "phi-4-mini-reasoning-cpu-only",
   "package_version": "1.0",
-  "description": "Test package: 3-stage decoder pipeline, CPU only.",
+  "description": "Test package: single CPU variant only.",
   "layout": "portable",
   "components": {
     "decoder": "models/decoder"

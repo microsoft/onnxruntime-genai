@@ -284,8 +284,8 @@ TEST(IsModelPackage, PackageDirectoryWithManifest) {
 }
 
 TEST(IsModelPackage, ManifestlessIsNotPackage) {
-  // The redesigned ORT model_package schema requires a top-level manifest.json. Component
-  // directories alone (with or without a per-component file) no longer qualify.
+  // A model package requires a top-level manifest.json; component directories alone do not
+  // qualify.
   ScopedTempDir tmp("manifestless_package");
   tmp.touch("decoder/component.json");
   EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp.string())));
