@@ -118,6 +118,12 @@ struct DecoderOnlyPipelineState : State {
   void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                    DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
+  // Rewinds all per-step state owned by the pipeline (KV cache(s), position inputs, and
+  // recurrent state) back to `index` tokens, so the next Run() produces correct results
+  // starting from that length. Mirrors DecoderOnly_State::RewindTo. Throws (via the owned
+  // cache) if a sub-cache cannot be rewound rather than silently corrupting state.
+  void RewindTo(size_t index) override;
+
  protected:
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).

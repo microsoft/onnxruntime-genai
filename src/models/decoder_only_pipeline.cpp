@@ -576,6 +576,26 @@ void DecoderOnlyPipelineState::Finalize(int current_length) {
   }
 }
 
+void DecoderOnlyPipelineState::RewindTo(size_t index) {
+  // Before mutating cache state, drain any outstanding asynchronous partial KV cache updates.
+  // A partial update worker may otherwise write into KV cache tensors after we rewind them,
+  // racing with and corrupting the rolled-back state.
+  for (auto& record : partial_kv_cache_update_records_) {
+    if (record.outstanding_update.valid()) {
+      record.outstanding_update.get();
+    }
+  }
+
+  // Mirror DecoderOnly_State::RewindTo: roll back the position inputs and, when present, the
+  // KV cache and recurrent state. If an owned cache cannot be rewound (e.g. LFM2Cache), its
+  // RewindTo throws a clear error rather than leaving the pipeline in a corrupt state.
+  position_inputs_->RewindTo(index);
+  if (key_value_cache_)
+    key_value_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
 void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length) {
   if (key_value_cache_) {
     const bool outstanding_key_value_cache_partial_update =

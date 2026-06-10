@@ -1373,6 +1373,62 @@ TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
   // RewindTo should throw for LFM2 because conv state cannot be rewound
   EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
 }
+
+// PR-A: KV-cache rollback (RewindTo) for the decoder-pipeline path.
+// Before PR-A, Generator::RewindToLength threw for model.type == "decoder-pipeline" and
+// DecoderOnlyPipelineState did not override State::RewindTo. This test exercises the new
+// DecoderOnlyPipelineState::RewindTo on a tiny, fully-causal decoder-pipeline model
+// (embeddings + transformer-with-KV-cache + lm_head) and asserts round-trip correctness:
+// rewinding to an earlier length then regenerating must reproduce the original tokens, which
+// only holds if the underlying KV cache and position inputs were actually rolled back.
+TEST(CAPITests, RewindDecoderPipelineFp32CAPI) {
+  std::vector<int32_t> input_ids{1, 2, 3, 4};
+  const int max_length = 12;
+
+  auto model = OgaModel::Create(MODEL_PATH "pipeline-model-tiny");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  const auto full_length = generator->GetSequenceCount(0);
+  const auto* full_data = generator->GetSequenceData(0);
+  std::vector<int32_t> expected(full_data, full_data + full_length);
+  ASSERT_GT(full_length, input_ids.size());
+
+  // Rewind to a length between the prompt and the end, then regenerate. This must NOT throw
+  // (it previously did for decoder-pipeline) and must reproduce the original continuation.
+  const size_t rewind_length = input_ids.size() + 1;
+  ASSERT_LT(rewind_length, full_length);
+  generator->RewindTo(rewind_length);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto length_after = generator->GetSequenceCount(0);
+  const auto* data_after = generator->GetSequenceData(0);
+  ASSERT_EQ(length_after, full_length);
+  EXPECT_TRUE(0 == std::memcmp(expected.data(), data_after, full_length * sizeof(int32_t)))
+      << "Decoder-pipeline output differs after RewindTo to length " << rewind_length;
+
+  // Full rewind to 0, re-append the prompt, and regenerate: must match the original run.
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  length_after = generator->GetSequenceCount(0);
+  data_after = generator->GetSequenceData(0);
+  ASSERT_EQ(length_after, full_length);
+  EXPECT_TRUE(0 == std::memcmp(expected.data(), data_after, full_length * sizeof(int32_t)))
+      << "Decoder-pipeline output differs after full RewindTo(0)";
+}
 #endif
 
 // Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
