@@ -12,6 +12,13 @@ struct Logits {
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
   DeviceSpan<float> Get();
 
+  // Returns the full, un-sliced logits from the most recent model run as fp32, shape
+  // [batch*beams, seq, vocab] (written to out_shape). Unlike Get() -- which slices to the last
+  // token of each beam -- this exposes the per-position logits for every token in the run. The
+  // speculative-decoding verify pass (issue #2114 v2.1) needs these to score all K draft
+  // candidates from a single target forward pass.
+  DeviceSpan<float> GetAll(std::array<int64_t, 3>& out_shape);
+
   // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
 
@@ -28,6 +35,10 @@ struct Logits {
   // 2. token gen: store the converted fp32 logits if output_raw_ is fp16.
   std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
+
+  // fp32 copy of the full (un-sliced) logits, materialized on demand by GetAll().
+  std::unique_ptr<OrtValue> all_logits_fp32_;
+  DeviceSpan<float> all_logits_;
 
   std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
 

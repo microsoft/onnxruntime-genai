@@ -38,6 +38,8 @@ examples/csharp/ModelChat/models
 !test/models/pipeline-model/*.json
 !test/models/pipeline-model-tiny/
 !test/models/pipeline-model-tiny/*
+!test/models/speculative-tiny/
+!test/models/speculative-tiny/**
 !test/models/pipeline-v2-decoder/
 !test/models/pipeline-v2-decoder/*
 !test/models/pipeline-v2-vlm-override/

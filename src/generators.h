@@ -107,6 +107,11 @@ struct Generator : LeakChecked<Generator> {
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
+
+  // Returns the full per-position logits from the most recent model run as fp32, shape
+  // [batch*beams, seq, vocab] (written to out_shape), or empty when the underlying state does
+  // not expose them. Used by the speculative-decoding verify pass (issue #2114 v2.1).
+  DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
 

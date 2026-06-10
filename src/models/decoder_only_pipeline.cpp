@@ -596,6 +596,10 @@ void DecoderOnlyPipelineState::RewindTo(size_t index) {
     recurrent_state_->RewindTo(index);
 }
 
+DeviceSpan<float> DecoderOnlyPipelineState::GetRawLogits(std::array<int64_t, 3>& out_shape) {
+  return logits_.GetAll(out_shape);
+}
+
 void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length) {
   if (key_value_cache_) {
     const bool outstanding_key_value_cache_partial_update =

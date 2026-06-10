@@ -465,6 +465,53 @@ struct Config {
     std::vector<Wire> dataflow;
     State state;
     std::optional<Plugin> plugin;
+
+    // v2.1 (issue #2114): logical role -> session name. Lets >=2 sessions be referenced by a
+    // stable role (target/draft/...) independent of their `sessions[]` key. Speculative decoding
+    // and contrastive/CFG decoding resolve their sessions through these roles.
+    struct Roles {
+      std::optional<std::string> target;
+      std::optional<std::string> draft;
+      std::optional<std::string> amateur;
+      std::optional<std::string> expert;
+      std::optional<std::string> unconditional;
+    };
+    std::optional<Roles> roles;
+
+    // v2.1 (issue #2114): the `speculative` flow strategy. When present, the executor runs a
+    // parameterized draft -> verify -> accept/reject loop instead of the single per-token DAG.
+    // Only the linear-K vanilla draft-target shape is honored today (PR-B); `tree` topology and
+    // hidden-state-coupled drafts (EAGLE/Medusa) are parsed-but-deferred (PR-C).
+    struct Speculative {
+      std::string kind{"speculative"};
+      struct Draft {
+        std::string producer{"draft_model"};  // draft_model | self_speculative | ngram | extra_heads
+        std::optional<std::string> session;    // role/session name producing the draft tokens
+        std::optional<int> depth;              // self_speculative early-exit depth (build property)
+        std::optional<std::string> heads;      // extra_heads/medusa/mtp head group (build property)
+        struct Ngram {
+          int min_match{2};
+          int max_draft{8};
+          int window{256};
+        };
+        std::optional<Ngram> ngram;
+      } draft;
+      struct Verify {
+        std::string session;  // role/session name whose single forward pass verifies the K candidates
+      } verify;
+      int num_speculative_tokens{5};      // K: draft length per outer step
+      std::string acceptance{"greedy"};   // greedy | rejection_sampling | typical
+      std::optional<float> typical_threshold;
+      struct Tree {
+        std::string topology;  // medusa_choices | dynamic (PR-C)
+        int max_nodes{0};
+        int max_depth{0};
+        std::vector<std::vector<int>> medusa_choices;
+      };
+      std::optional<Tree> tree;
+    };
+    std::optional<Speculative> strategy;
+
     bool present{false};  // True only when the pipeline was explicitly parsed (v2) or translated (v1).
   };
   Pipeline pipeline;

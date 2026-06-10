@@ -32,6 +32,17 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+
+  // Returns the full per-position logits of the most recent Run as fp32, shape
+  // [batch*beams, seq, vocab] (written to out_shape), or an empty span when the concrete state
+  // does not expose them. Used by the speculative-decoding verify pass (issue #2114 v2.1) to
+  // score all K draft candidates from a single forward pass; ordinary decoding uses the sliced
+  // last-token logits returned by Run().
+  virtual DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape) {
+    out_shape = {0, 0, 0};
+    return {};
+  }
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 

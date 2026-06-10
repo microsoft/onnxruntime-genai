@@ -124,6 +124,10 @@ struct DecoderOnlyPipelineState : State {
   // cache) if a sub-cache cannot be rewound rather than silently corrupting state.
   void RewindTo(size_t index) override;
 
+  // Exposes the full per-position logits from the most recent Run (issue #2114 v2.1 speculative
+  // verify). Forwards to the owned Logits, which retains the un-sliced model output.
+  DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape) override;
+
  protected:
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).

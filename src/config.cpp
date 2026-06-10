@@ -1751,6 +1751,160 @@ struct Plugin_Element : JSON::Element {
   Config::Pipeline::Plugin& v_;
 };
 
+// v2.1 (issue #2114): "roles" maps a logical role to a session name, e.g.
+// {"target": "target_session", "draft": "draft_session"}.
+struct Roles_Element : JSON::Element {
+  explicit Roles_Element(Config::Pipeline::Roles& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto s = std::string(JSON::Get<std::string_view>(value));
+    if (name == "target") {
+      v_.target = s;
+    } else if (name == "draft") {
+      v_.draft = s;
+    } else if (name == "amateur") {
+      v_.amateur = s;
+    } else if (name == "expert") {
+      v_.expert = s;
+    } else if (name == "unconditional") {
+      v_.unconditional = s;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Roles& v_;
+};
+
+struct Ngram_Element : JSON::Element {
+  explicit Ngram_Element(Config::Pipeline::Speculative::Draft::Ngram& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "min_match") {
+      v_.min_match = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_draft") {
+      v_.max_draft = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "window") {
+      v_.window = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Speculative::Draft::Ngram& v_;
+};
+
+struct SpeculativeDraft_Element : JSON::Element {
+  explicit SpeculativeDraft_Element(Config::Pipeline::Speculative::Draft& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "producer") {
+      v_.producer = JSON::Get<std::string_view>(value);
+    } else if (name == "session") {
+      v_.session = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "depth") {
+      v_.depth = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "heads") {
+      v_.heads = std::string(JSON::Get<std::string_view>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "ngram") {
+      v_.ngram = Config::Pipeline::Speculative::Draft::Ngram{};
+      ngram_ = std::make_unique<Ngram_Element>(*v_.ngram);
+      return *ngram_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Pipeline::Speculative::Draft& v_;
+  std::unique_ptr<Ngram_Element> ngram_;
+};
+
+struct SpeculativeVerify_Element : JSON::Element {
+  explicit SpeculativeVerify_Element(Config::Pipeline::Speculative::Verify& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "session") {
+      v_.session = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Speculative::Verify& v_;
+};
+
+struct SpeculativeTree_Element : JSON::Element {
+  explicit SpeculativeTree_Element(Config::Pipeline::Speculative::Tree& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "topology") {
+      v_.topology = JSON::Get<std::string_view>(value);
+    } else if (name == "max_nodes") {
+      v_.max_nodes = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_depth") {
+      v_.max_depth = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  // medusa_choices is an array-of-int-arrays consumed by the (deferred) PR-C tree-verify path.
+  // Parse-and-ignore here so a tree config loads, without claiming tree support in PR-B.
+  Element& OnArray(std::string_view name) override {
+    if (name == "medusa_choices") return ignore_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Pipeline::Speculative::Tree& v_;
+  Ignore_Element ignore_;
+};
+
+// v2.1 (issue #2114): the `speculative` flow strategy block.
+struct Strategy_Element : JSON::Element {
+  explicit Strategy_Element(Config::Pipeline::Speculative& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "kind") {
+      v_.kind = JSON::Get<std::string_view>(value);
+    } else if (name == "num_speculative_tokens") {
+      v_.num_speculative_tokens = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "acceptance") {
+      v_.acceptance = JSON::Get<std::string_view>(value);
+    } else if (name == "typical_threshold") {
+      v_.typical_threshold = static_cast<float>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "draft") return draft_;
+    if (name == "verify") return verify_;
+    if (name == "tree") {
+      v_.tree = Config::Pipeline::Speculative::Tree{};
+      tree_ = std::make_unique<SpeculativeTree_Element>(*v_.tree);
+      return *tree_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Pipeline::Speculative& v_;
+  SpeculativeDraft_Element draft_{v_.draft};
+  SpeculativeVerify_Element verify_{v_.verify};
+  std::unique_ptr<SpeculativeTree_Element> tree_;
+};
+
 struct PipelineConfig_Element : JSON::Element {
   explicit PipelineConfig_Element(Config::Pipeline& v) : v_{v} {}
 
@@ -1765,6 +1919,16 @@ struct PipelineConfig_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "sessions") return sessions_;
     if (name == "state") return state_;
+    if (name == "roles") {
+      v_.roles = Config::Pipeline::Roles{};
+      roles_ = std::make_unique<Roles_Element>(*v_.roles);
+      return *roles_;
+    }
+    if (name == "strategy") {
+      v_.strategy = Config::Pipeline::Speculative{};
+      strategy_ = std::make_unique<Strategy_Element>(*v_.strategy);
+      return *strategy_;
+    }
     if (name == "plugin") {
       v_.plugin = Config::Pipeline::Plugin{};
       plugin_ = std::make_unique<Plugin_Element>(*v_.plugin);
@@ -1790,6 +1954,8 @@ struct PipelineConfig_Element : JSON::Element {
   Flow_Element flow_{v_.flow};
   Dataflow_Element dataflow_{v_.dataflow};
   PipelineState_Element state_{v_.state};
+  std::unique_ptr<Roles_Element> roles_;
+  std::unique_ptr<Strategy_Element> strategy_;
   std::unique_ptr<Plugin_Element> plugin_;
   Ignore_Element ignore_;
 };
