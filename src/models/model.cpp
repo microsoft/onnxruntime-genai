@@ -24,6 +24,7 @@
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "plugin_loader.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
 #include "videochat_flash_processor.h"
@@ -782,48 +783,197 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
   return CreateModel(ort_env, std::move(config));
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  // Check if it's a pipeline model by checking if decoder.pipeline is configured
-  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
-    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "lfm2")
-    return std::make_shared<LFM2_Model>(std::move(config), ort_env);
-  if (config->model.type == "gpt2")
-    return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (ModelType::IsLLM(config->model.type))
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (ModelType::IsRNNT(config->model.type))
-    return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
-  if (ModelType::IsTDT(config->model.type))
-    return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
-  if (ModelType::IsALM(config->model.type))
-    return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (ModelType::IsMMM(config->model.type)) {
-    // Auto-detect speech support: require both the speech ONNX model filename
-    // and the preprocessing config to be present. If only one is set, throw
-    // a clear error so misconfigurations don't silently disable audio.
-    bool has_speech_model = !config->model.speech.filename.empty();
-    bool has_speech_config = !config->model.speech.config_filename.empty();
-    if (has_speech_model && !has_speech_config) {
-      throw std::runtime_error(
-          "speech.filename is set but speech.config_filename is missing. "
-          "Both are required for audio support.");
-    }
-    if (!has_speech_model && has_speech_config) {
-      throw std::runtime_error(
-          "speech.config_filename is set but speech.filename is missing. "
-          "Both are required for audio support.");
-    }
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
-  }
-  if (config->model.type == "marian-ssru")
-    return std::make_shared<MarianModel>(std::move(config), ort_env);
+namespace {
 
-  throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
+// Construct the concrete Model subclass for a resolved ModelRoute. Centralizing construction here
+// guarantees that the legacy (CreateModelFromType) and structural (CreatePipeline) routers build the
+// identical class for the same route -- the invariant the PR5 equivalence gate asserts.
+std::shared_ptr<Model> ConstructModel(ModelRoute route, std::unique_ptr<Config> config, OrtEnv& ort_env) {
+  switch (route) {
+    case ModelRoute::Qwen2_5_VL_Pipeline:
+      return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
+    case ModelRoute::LFM2:
+      return std::make_shared<LFM2_Model>(std::move(config), ort_env);
+    case ModelRoute::Gpt:
+      return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+    case ModelRoute::DecoderOnly:
+      return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    case ModelRoute::NemotronSpeech:
+      return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+    case ModelRoute::ParakeetTdt:
+      return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
+    case ModelRoute::Whisper:
+      return std::make_shared<WhisperModel>(std::move(config), ort_env);
+    case ModelRoute::Marian:
+      return std::make_shared<MarianModel>(std::move(config), ort_env);
+    case ModelRoute::DecoderOnlyPipeline:
+      return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
+    case ModelRoute::MultiModal: {
+      // Auto-detect speech support: require both the speech ONNX model filename and the preprocessing
+      // config to be present. If only one is set, throw a clear error so misconfigurations don't
+      // silently disable audio. (Was the IsMMM branch pre-#2114; VLMs set neither, so this is a no-op
+      // for them.)
+      bool has_speech_model = !config->model.speech.filename.empty();
+      bool has_speech_config = !config->model.speech.config_filename.empty();
+      if (has_speech_model && !has_speech_config) {
+        throw std::runtime_error(
+            "speech.filename is set but speech.config_filename is missing. "
+            "Both are required for audio support.");
+      }
+      if (!has_speech_model && has_speech_config) {
+        throw std::runtime_error(
+            "speech.config_filename is set but speech.filename is missing. "
+            "Both are required for audio support.");
+      }
+      return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+    }
+    case ModelRoute::Unsupported:
+    default:
+      throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
+  }
+}
+
+// Legacy model.type-based dispatch (the pre-#2114 behavior), refactored to compute a ModelRoute via
+// ClassifyLegacyRoute(). Kept reachable in the binary as the ground-truth oracle that the PR5
+// equivalence test compares CreatePipeline()'s structural routing against. It is NO LONGER the
+// decision-maker on the production path: CreateModel() always goes through CreatePipeline().
+std::shared_ptr<Model> CreateModelFromType(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  // Classify before moving `config`: the route must be computed while the Config is still owned here
+  // (argument evaluation order is unspecified, so inlining the classify call into the ConstructModel
+  // argument list could move-null `config` first).
+  const ModelRoute route = ClassifyLegacyRoute(*config);
+  return ConstructModel(route, std::move(config), ort_env);
+}
+
+}  // namespace
+
+// Legacy pre-#2114 dispatch decision, expressed as a pure function over the config so it can be tested
+// without loading any ONNX. Mirrors the historical if/else chain order EXACTLY -- this is the oracle
+// the zero-regression gate trusts; do not "improve" it.
+ModelRoute ClassifyLegacyRoute(const Config& config) {
+  const auto& model = config.model;
+  const std::string& type = model.type;
+  if ((type == "fara" || type == "qwen2_5_vl" || type == "qwen3_vl") && !model.decoder.pipeline.empty())
+    return ModelRoute::Qwen2_5_VL_Pipeline;
+  if (type == "lfm2")
+    return ModelRoute::LFM2;
+  if (type == "gpt2")
+    return ModelRoute::Gpt;
+  if (ModelType::IsLLM(type))
+    return ModelRoute::DecoderOnly;
+  if (ModelType::IsRNNT(type))
+    return ModelRoute::NemotronSpeech;
+  if (ModelType::IsTDT(type))
+    return ModelRoute::ParakeetTdt;
+  if (ModelType::IsALM(type))
+    return ModelRoute::Whisper;
+  if (ModelType::IsVLM(type))
+    return ModelRoute::MultiModal;
+  if (ModelType::IsPipe(type))
+    return ModelRoute::DecoderOnlyPipeline;
+  if (ModelType::IsMMM(type))
+    return ModelRoute::MultiModal;
+  if (type == "marian-ssru")
+    return ModelRoute::Marian;
+  return ModelRoute::Unsupported;
+}
+
+// Pipeline-as-Config (issue #2114, PR5): the production dispatch decision, made on config STRUCTURE
+// (which ONNX sessions exist, cross-attention, combined KV, multi-stage) instead of model.type. Only
+// signals with no structural equivalent remain keyed on type:
+//   * transducers (RNNT/TDT) -- a custom encoder/decoder/joiner bypass with no session-shape tell;
+//   * lfm2 -- a hybrid conv-state cache that is otherwise structurally a plain decoder;
+//   * marian-ssru vs whisper -- both are encoder-decoder; the class is a pure naming tie-break;
+//   * the fara/qwen2_5_vl/qwen3_vl pipeline variant -- vision + decoder.pipeline is shared with other
+//     VLMs, so the specific type guards which of the two multimodal classes runs.
+// These residuals are documented in the PR5 decision note. Verified equivalent to ClassifyLegacyRoute
+// for every test fixture by PipelineDispatchTests (the zero-regression gate).
+ModelRoute ClassifyStructuralRoute(const Config& config) {
+  const auto& model = config.model;
+  const std::string& type = model.type;
+  const bool has_encoder = !model.encoder.filename.empty();
+  const bool has_vision = !model.vision.filename.empty() || !model.vision.pipeline.empty();
+  const bool has_speech = !model.speech.filename.empty();
+  const bool has_embedding = !model.embedding.filename.empty();
+  const bool has_decoder_pipeline = !model.decoder.pipeline.empty();
+  const bool has_cross_attention =
+      config.pipeline.state.cross_cache.has_value() ||
+      std::any_of(config.pipeline.flow.begin(), config.pipeline.flow.end(),
+                  [](const Config::Pipeline::FlowStep& step) { return step.cross_attention_from.has_value(); });
+  const bool combined_kv = config.pipeline.state.kv_cache.format == "combined";
+
+  // Transducer bypass (RNNT/TDT): residual predicate -- these drive a custom encoder/decoder/joiner
+  // loop via TransducerState and carry no distinguishing session shape. Kept per Rusty's map.
+  if (ModelType::IsRNNT(type))
+    return ModelRoute::NemotronSpeech;
+  if (ModelType::IsTDT(type))
+    return ModelRoute::ParakeetTdt;
+
+  // Encoder-decoder: structural (an encoder session / a frozen cross-attention cache exists). The two
+  // dedicated classes stay for v2.0; whisper vs marian is a pure type tie-break with no structural tell.
+  if (has_encoder || has_cross_attention)
+    return (type == "marian-ssru") ? ModelRoute::Marian : ModelRoute::Whisper;
+
+  // Multimodal: structural (a vision / speech / embedding session exists). A vision session may be a
+  // single vision.onnx OR a multi-stage vision.pipeline[] (Qwen-VL's patch_embed/vision_attn/
+  // patch_merger), so both count as a vision signal. The Qwen-VL *pipeline* variant additionally
+  // carries decoder.pipeline; restricted to its three types (raw tie-break) so other VLMs that might
+  // gain a pipeline still route to the general MultiModalLanguageModel.
+  if (has_vision || has_speech || has_embedding) {
+    if (has_decoder_pipeline && (type == "fara" || type == "qwen2_5_vl" || type == "qwen3_vl"))
+      return ModelRoute::Qwen2_5_VL_Pipeline;
+    return ModelRoute::MultiModal;
+  }
+
+  // gpt2: structural -- the only family using a single combined past/present KV tensor per layer.
+  if (combined_kv)
+    return ModelRoute::Gpt;
+
+  // lfm2: residual predicate -- a hybrid attention/conv model whose conv-state cache is its only
+  // distinguishing trait, and that is not yet surfaced as a structural signal. Kept per "shrink not
+  // delete"; documented in the decision note.
+  if (ModelType::IsLFM2(type))
+    return ModelRoute::LFM2;
+
+  // Multi-stage decoder pipeline: structural (decoder.pipeline enumerates >1 session, no vision above).
+  if (has_decoder_pipeline)
+    return ModelRoute::DecoderOnlyPipeline;
+
+  // Plain single-session autoregressive decoder -> the standard decoder model. Structural default for
+  // any remaining single-decoder config (qwen2, llama, ... and unknown decoder-only types).
+  return ModelRoute::DecoderOnly;
+}
+
+// Pipeline-as-Config (issue #2114): the production entry point. Dispatches on config STRUCTURE via
+// ClassifyStructuralRoute() rather than model.type strings, reusing the existing concrete Model
+// classes. Used whenever Config::pipeline.present is true (always, post-PR1: v2 parses the pipeline,
+// v1 derives it via TranslateV1ToPipeline).
+std::shared_ptr<Model> CreatePipeline(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  // External pipeline plugins (issue #2114 §4.5): a plugin config must never be silently misrouted to
+  // a built-in model. The loader is build-gated by USE_GENAI_PLUGINS; when disabled it throws a clear
+  // "plugin support is not enabled" error (see plugin_loader.cpp).
+  if (config->pipeline.plugin.has_value()) {
+    // Bind the plugin reference before moving `config` so the pointer dereference is sequenced before
+    // the unique_ptr is moved out (argument evaluation order is otherwise unspecified). The Config
+    // object stays alive (ownership just transfers), so the reference remains valid in the loader.
+    const auto& plugin = *config->pipeline.plugin;
+    return LoadPluginPipeline(plugin, std::move(config), ort_env);
+  }
+
+  // Classify before moving `config`: the route must be computed while the Config is still owned here
+  // (argument evaluation order is unspecified, so inlining the classify call into the ConstructModel
+  // argument list could move-null `config` first).
+  const ModelRoute route = ClassifyStructuralRoute(*config);
+  return ConstructModel(route, std::move(config), ort_env);
+}
+
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  // When a normalized pipeline view is available (always true post-PR1: v2 parses it, v1 derives it),
+  // route via structural dispatch. Otherwise fall through to the legacy model.type dispatch oracle.
+  if (config->pipeline.present) {
+    return CreatePipeline(ort_env, std::move(config));
+  }
+  return CreateModelFromType(ort_env, std::move(config));
 }
 
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {

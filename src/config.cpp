@@ -4,6 +4,7 @@
 // Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
+#include "pipeline_presets.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
@@ -1530,17 +1531,392 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pipeline-as-Config (issue #2114) schema v2 parsing elements.
+// These mirror the existing per-struct SAX visitor style (one *_Element per JSON object).
+// They populate Config::Pipeline; they do not change any runtime behavior in PR1.
+// ---------------------------------------------------------------------------
+
+// Swallows an object/array subtree without error. Used for v2 sections not consumed in PR1
+// (e.g. "preprocessing") so that forward-looking configs still parse.
+struct Ignore_Element : JSON::Element {
+  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {}
+  Element& OnObject(std::string_view /*name*/) override { return *this; }
+  Element& OnArray(std::string_view /*name*/) override { return *this; }
+};
+
+struct PipelineSession_Element : JSON::Element {
+  explicit PipelineSession_Element(Config::Pipeline::Session& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "file") {
+      v_.file = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Pipeline::Session& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+};
+
+// "sessions" is an object keyed by logical session name: {"decoder": {"file": "..."}}.
+struct PipelineSessions_Element : JSON::Element {
+  explicit PipelineSessions_Element(std::vector<Config::Pipeline::Session>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& session = v_.emplace_back();
+    session.name = name;
+    elements_.emplace_back(session);
+    return elements_.back();
+  }
+
+ private:
+  std::vector<Config::Pipeline::Session>& v_;
+  std::vector<PipelineSession_Element> elements_;
+};
+
+struct FlowStep_Element : JSON::Element {
+  explicit FlowStep_Element(Config::Pipeline::FlowStep& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "run") {
+      v_.run = JSON::Get<std::string_view>(value);
+    } else if (name == "when") {
+      v_.when = JSON::Get<std::string_view>(value);
+    } else if (name == "loop") {
+      v_.loop = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_attention_from") {
+      v_.cross_attention_from = std::string(JSON::Get<std::string_view>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::FlowStep& v_;
+};
+
+// "flow" is an array of step objects.
+struct Flow_Element : JSON::Element {
+  explicit Flow_Element(std::vector<Config::Pipeline::FlowStep>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& step = v_.emplace_back();
+    elements_.emplace_back(step);
+    return elements_.back();
+  }
+
+ private:
+  std::vector<Config::Pipeline::FlowStep>& v_;
+  std::vector<FlowStep_Element> elements_;
+};
+
+struct Wire_Element : JSON::Element {
+  explicit Wire_Element(Config::Pipeline::Wire& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "from") {
+      v_.from = JSON::Get<std::string_view>(value);
+    } else if (name == "to") {
+      v_.to = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Wire& v_;
+};
+
+// "dataflow" is an array of {from,to} wire objects.
+struct Dataflow_Element : JSON::Element {
+  explicit Dataflow_Element(std::vector<Config::Pipeline::Wire>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& wire = v_.emplace_back();
+    elements_.emplace_back(wire);
+    return elements_.back();
+  }
+
+ private:
+  std::vector<Config::Pipeline::Wire>& v_;
+  std::vector<Wire_Element> elements_;
+};
+
+struct KvCache_Element : JSON::Element {
+  explicit KvCache_Element(Config::Pipeline::State::KvCache& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "format") {
+      v_.format = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_pattern") {
+      v_.past_key_pattern = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_pattern") {
+      v_.present_key_pattern = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_pattern") {
+      v_.past_value_pattern = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_pattern") {
+      v_.present_value_pattern = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::State::KvCache& v_;
+};
+
+struct CrossCache_Element : JSON::Element {
+  explicit CrossCache_Element(Config::Pipeline::State::CrossCache& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "source") {
+      v_.source = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "frozen") {
+      v_.frozen = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::State::CrossCache& v_;
+};
+
+struct PositionIds_Element : JSON::Element {
+  explicit PositionIds_Element(Config::Pipeline::State::PositionIds& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "strategy") {
+      v_.strategy = JSON::Get<std::string_view>(value);
+    } else if (name == "input_name") {
+      v_.input_name = JSON::Get<std::string_view>(value);
+    } else if (name == "grid_source") {
+      v_.grid_source = std::string(JSON::Get<std::string_view>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::State::PositionIds& v_;
+};
+
+struct PipelineState_Element : JSON::Element {
+  explicit PipelineState_Element(Config::Pipeline::State& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "kv_cache") return kv_cache_;
+    if (name == "position_ids") return position_ids_;
+    if (name == "cross_cache") {
+      v_.cross_cache = Config::Pipeline::State::CrossCache{};
+      cross_cache_ = std::make_unique<CrossCache_Element>(*v_.cross_cache);
+      return *cross_cache_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Pipeline::State& v_;
+  KvCache_Element kv_cache_{v_.kv_cache};
+  PositionIds_Element position_ids_{v_.position_ids};
+  std::unique_ptr<CrossCache_Element> cross_cache_;
+};
+
+struct Plugin_Element : JSON::Element {
+  explicit Plugin_Element(Config::Pipeline::Plugin& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "library") {
+      v_.library = JSON::Get<std::string_view>(value);
+    } else if (name == "entry_point") {
+      v_.entry_point = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Plugin& v_;
+};
+
+struct PipelineConfig_Element : JSON::Element {
+  explicit PipelineConfig_Element(Config::Pipeline& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "extends") {
+      v_.extends = std::string(JSON::Get<std::string_view>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "sessions") return sessions_;
+    if (name == "state") return state_;
+    if (name == "plugin") {
+      v_.plugin = Config::Pipeline::Plugin{};
+      plugin_ = std::make_unique<Plugin_Element>(*v_.plugin);
+      return *plugin_;
+    }
+    if (name == "preprocessing") return ignore_;  // Consumed by preprocessor in a later PR.
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "flow") return flow_;
+    if (name == "dataflow") return dataflow_;
+    throw JSON::unknown_value_error{};
+  }
+
+  void OnComplete(bool /*empty*/) override {
+    v_.present = true;
+  }
+
+ private:
+  Config::Pipeline& v_;
+  PipelineSessions_Element sessions_{v_.sessions};
+  Flow_Element flow_{v_.flow};
+  Dataflow_Element dataflow_{v_.dataflow};
+  PipelineState_Element state_{v_.state};
+  std::unique_ptr<Plugin_Element> plugin_;
+  Ignore_Element ignore_;
+};
+
+// v2 top-level "tokens" section (issue #2114 §4). Lowers directly into the legacy model.* token ids
+// so the rest of the runtime keeps reading config.model.*.
+struct Tokens_Element : JSON::Element {
+  explicit Tokens_Element(Config::Model& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "eos") {  // Scalar form; the array form is handled by OnArray.
+      v_.eos_token_id.assign(1, static_cast<int>(JSON::Get<double>(value)));
+    } else if (name == "pad") {
+      v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "bos") {
+      v_.bos_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "decoder_start") {
+      v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sep") {
+      v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "image_token") {
+      v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "audio_token") {
+      v_.audio_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "video_token") {
+      v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "eos") {
+      v_.eos_token_id.clear();
+      return eos_token_id_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Config::Model& v_;
+  Int_Array_Element eos_token_id_{v_.eos_token_id};
+};
+
+// v2 "generation.sampling" sub-section -> search.* sampling parameters.
+struct Sampling_Element : JSON::Element {
+  explicit Sampling_Element(Config::Search& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "temperature") {
+      v_.temperature = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "top_k") {
+      v_.top_k = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "top_p") {
+      v_.top_p = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "do_sample") {
+      v_.do_sample = JSON::Get<bool>(value);
+    } else if (name == "repetition_penalty") {
+      v_.repetition_penalty = static_cast<float>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Config::Search& v_;
+};
+
+// v2 top-level "generation" section -> search.*.
+struct Generation_Element : JSON::Element {
+  explicit Generation_Element(Config::Search& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_length") {
+      v_.max_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "min_length") {
+      v_.min_length = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_beams") {
+      v_.num_beams = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "sampling") return sampling_;
+    if (name == "stop") return ignore_;  // Stop-sequence handling is owned by a later PR.
+    throw JSON::unknown_value_error{};
+  }
+
+  Config::Search& v_;
+  Sampling_Element sampling_{v_};
+  Ignore_Element ignore_;
+};
+
+// v2 top-level "metadata" section. Human-facing; only model_type is consumed (and only to seed the
+// legacy model.type used by the CreatePipeline fallback dispatch). All other keys are ignored.
+struct Metadata_Element : JSON::Element {
+  explicit Metadata_Element(Config::Model& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "model_type" && v_.type.empty()) {
+      v_.type = JSON::Get<std::string_view>(value);
+    }
+    // source, export_version, and any other metadata keys are human-only; ignore silently.
+  }
+
+  Config::Model& v_;
+};
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
-  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
-    // No top-level scalar values currently supported
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "version") {
+      config_.version = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
     if (name == "engine") return engine_element_;
+    if (name == "pipeline") return pipeline_element_;
+    if (name == "tokens") return tokens_element_;
+    if (name == "generation") return generation_element_;
+    if (name == "metadata") return metadata_element_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1548,6 +1924,10 @@ struct Root_Element : JSON::Element {
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
   Engine_Element engine_element_{config_.engine};
+  PipelineConfig_Element pipeline_element_{config_.pipeline};
+  Tokens_Element tokens_element_{config_.model};
+  Generation_Element generation_element_{config_.search};
+  Metadata_Element metadata_element_{config_.model};
 };
 
 struct RootObject_Element : JSON::Element {
@@ -1600,8 +1980,223 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
+void ResolvePipelineExtends(Config::Pipeline& pipeline) {
+  if (!pipeline.extends.has_value()) {
+    return;
+  }
+  const Config::Pipeline* preset = GetPipelinePreset(*pipeline.extends);
+  if (!preset) {
+    throw std::runtime_error("Unknown pipeline preset in 'extends': " + *pipeline.extends);
+  }
+  // Override semantics (documented in pipeline_presets.h): explicit top-level arrays in the config
+  // replace the preset's arrays wholesale; omitted arrays inherit the preset's. Sub-objects of
+  // `state` are inherited only when the config left them untouched.
+  if (pipeline.flow.empty()) {
+    pipeline.flow = preset->flow;
+  }
+  if (pipeline.dataflow.empty()) {
+    pipeline.dataflow = preset->dataflow;
+  }
+  if (!pipeline.state.cross_cache.has_value() && preset->state.cross_cache.has_value()) {
+    pipeline.state.cross_cache = preset->state.cross_cache;
+  }
+}
+
+namespace {
+
+// Best-effort v2 lowering: map pipeline session files onto the legacy config.model.* filenames so
+// existing consumers keep working. Only fills fields the config left empty (never clobbers an
+// explicit model block).
+void LowerPipelineToModel(Config& config) {
+  for (const auto& session : config.pipeline.sessions) {
+    if (session.file.empty()) {
+      continue;
+    }
+    if (session.name == "decoder" && config.model.decoder.filename.empty()) {
+      config.model.decoder.filename = session.file;
+    } else if (session.name == "encoder" && config.model.encoder.filename.empty()) {
+      config.model.encoder.filename = session.file;
+    } else if (session.name == "vision" && config.model.vision.filename.empty()) {
+      config.model.vision.filename = session.file;
+    } else if (session.name == "speech" && config.model.speech.filename.empty()) {
+      config.model.speech.filename = session.file;
+    } else if (session.name == "embedding" && config.model.embedding.filename.empty()) {
+      config.model.embedding.filename = session.file;
+    }
+  }
+
+  // Pure-v2 configs (issue #2114 §4.1) omit the legacy `model` block, so model.context_length is
+  // never set directly. The v2 schema only carries generation.max_length (lowered into
+  // search.max_length). Derive a context_length from it so Config::Config's validation passes and the
+  // KV cache / generation loop have a bound to work with. Never clobber an explicit value.
+  if (config.model.context_length == 0 && config.search.max_length > 0) {
+    config.model.context_length = config.search.max_length;
+  }
+}
+
+}  // namespace
+
+void TranslateV1ToPipeline(Config& config) {
+  auto& pipeline = config.pipeline;
+  const auto& model = config.model;
+  const std::string& type = model.type;
+
+  const bool is_qwen_vl = ModelType::IsQwenVLFamily(type);
+  const bool is_pixtral = ModelType::IsPixtralFamily(type);
+  const bool is_pipe = ModelType::IsPipe(type) || !model.decoder.pipeline.empty();
+  const bool is_vlm = ModelType::IsVLM(type) || ModelType::IsMMM(type);
+  const bool is_encoder_decoder = ModelType::IsALM(type) || type == "marian-ssru";
+
+  auto add_session = [&](const std::string& name, const std::string& file) -> bool {
+    if (file.empty()) {
+      return false;
+    }
+    Config::Pipeline::Session session;
+    session.name = name;
+    session.file = file;
+    pipeline.sessions.push_back(std::move(session));
+    return true;
+  };
+
+  if (is_pipe) {
+    // Passthrough: the multi-session pipeline is already enumerated by decoder.pipeline[].
+    pipeline.extends = "autoregressive-decoder";
+    for (const auto& stage : model.decoder.pipeline) {
+      const std::string name = !stage.model_id.empty() ? stage.model_id : stage.filename;
+      add_session(name, stage.filename);
+      Config::Pipeline::FlowStep step;
+      step.run = name;
+      // A stage that only runs during prompt processing maps to "init"; otherwise it is part of
+      // the per-token "step" loop.
+      step.when = (stage.run_on_prompt && !stage.run_on_token_gen) ? "init" : "step";
+      pipeline.flow.push_back(std::move(step));
+    }
+  } else if (is_encoder_decoder) {
+    pipeline.extends = "encoder-decoder";
+    const bool has_encoder = add_session("encoder", model.encoder.filename);
+    add_session("decoder", model.decoder.filename);
+    if (has_encoder) {
+      Config::Pipeline::FlowStep encoder_step;
+      encoder_step.run = "encoder";
+      encoder_step.when = "init";
+      pipeline.flow.push_back(std::move(encoder_step));
+    }
+    Config::Pipeline::FlowStep decoder_step;
+    decoder_step.run = "decoder";
+    decoder_step.when = "step";
+    if (has_encoder) {
+      decoder_step.cross_attention_from = "encoder";
+      Config::Pipeline::State::CrossCache cross_cache;
+      cross_cache.source = "encoder";
+      cross_cache.frozen = true;
+      pipeline.state.cross_cache = cross_cache;
+      pipeline.dataflow.push_back({"encoder." + model.encoder.outputs.hidden_states,
+                                   "decoder." + model.decoder.inputs.encoder_hidden_states});
+    }
+    pipeline.flow.push_back(std::move(decoder_step));
+  } else if (is_vlm) {
+    const bool has_vision = add_session("vision", model.vision.filename);
+    const bool has_speech = add_session("speech", model.speech.filename);
+    const bool has_embedding = add_session("embedding", model.embedding.filename);
+    add_session("decoder", model.decoder.filename);
+    pipeline.extends = has_vision ? "vision-language" : (has_speech ? "speech-language" : "vision-language");
+
+    const std::string vision_loop = (is_qwen_vl || is_pixtral) ? "per_image" : "batched";
+    if (has_vision) {
+      Config::Pipeline::FlowStep step;
+      step.run = "vision";
+      step.when = "init";
+      step.loop = vision_loop;
+      // Pixtral runs a per-image loop with variable image resolution; this structural flag lets
+      // CreateVisionState() pick PixtralVisionState vs QwenVisionState without consulting model.type.
+      step.variable_resolution = is_pixtral;
+      pipeline.flow.push_back(std::move(step));
+    }
+    if (has_speech) {
+      Config::Pipeline::FlowStep step;
+      step.run = "speech";
+      step.when = "init";
+      pipeline.flow.push_back(std::move(step));
+    }
+    if (has_embedding) {
+      Config::Pipeline::FlowStep step;
+      step.run = "embedding";
+      step.when = "init";
+      pipeline.flow.push_back(std::move(step));
+    }
+    Config::Pipeline::FlowStep decoder_step;
+    decoder_step.run = "decoder";
+    decoder_step.when = "step";
+    pipeline.flow.push_back(std::move(decoder_step));
+
+    if (has_vision && has_embedding) {
+      pipeline.dataflow.push_back({"vision." + model.vision.outputs.image_features,
+                                   "embedding." + model.embedding.inputs.image_features});
+    }
+    if (has_speech && has_embedding) {
+      pipeline.dataflow.push_back({"speech." + model.speech.outputs.audio_features,
+                                   "embedding." + model.embedding.inputs.audio_features});
+    }
+    if (has_embedding) {
+      pipeline.dataflow.push_back({"embedding." + model.embedding.outputs.embeddings,
+                                   "decoder." + model.decoder.inputs.embeddings});
+    }
+  } else {
+    // Default: a plain autoregressive decoder (IsLLM / IsLFM2 / gpt2 / etc.).
+    pipeline.extends = "autoregressive-decoder";
+    add_session("decoder", model.decoder.filename);
+    Config::Pipeline::FlowStep step;
+    step.run = "decoder";
+    step.when = "step";
+    pipeline.flow.push_back(std::move(step));
+  }
+
+  // KV cache format: gpt2 uses a single combined past/present tensor per layer; everything else uses
+  // the standard separate key/value tensors.
+  auto& kv_cache = pipeline.state.kv_cache;
+  if (type == "gpt2") {
+    kv_cache.format = "combined";
+    kv_cache.past_key_pattern = model.decoder.inputs.past_names;
+    kv_cache.present_key_pattern = model.decoder.outputs.present_names;
+  } else {
+    kv_cache.format = "separate";
+    kv_cache.past_key_pattern = model.decoder.inputs.past_key_names;
+    kv_cache.past_value_pattern = model.decoder.inputs.past_value_names;
+    kv_cache.present_key_pattern = model.decoder.outputs.present_key_names;
+    kv_cache.present_value_pattern = model.decoder.outputs.present_value_names;
+  }
+
+  // Position-id strategy mirrors CreatePositionInputs(): 3D mRoPE for the Qwen-VL family, windowed
+  // when a sliding window is configured, otherwise standard 1D position ids.
+  auto& position_ids = pipeline.state.position_ids;
+  position_ids.input_name = model.decoder.inputs.position_ids;
+  if (is_qwen_vl) {
+    position_ids.strategy = "mrope_3d";
+  } else if (model.decoder.sliding_window.has_value()) {
+    position_ids.strategy = "windowed";
+  } else {
+    position_ids.strategy = "default";
+  }
+
+  pipeline.present = true;
+}
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+
+  // Pipeline-as-Config (issue #2114): produce a normalized, introspectable Config::Pipeline.
+  // For v2 inputs we resolve `extends` and lower session files + top-level tokens/generation/metadata
+  // back into config.model.* / config.search.* so existing consumers keep working AND so a pure v2
+  // config (no legacy `model` block) populates the fields validated just below. For v1 inputs we only
+  // DERIVE the pipeline view (translator) and leave config.model.* exactly as parsed -- the safest
+  // backward-compatible path (no behavior change). This runs BEFORE validation so pure-v2 lowering
+  // (e.g. context_length from generation.max_length) takes effect in time.
+  if (version >= 2 && pipeline.present) {
+    ResolvePipelineExtends(pipeline);
+    LowerPipelineToModel(*this);
+  } else if (version < 2 && !pipeline.present) {
+    TranslateV1ToPipeline(*this);
+  }
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

@@ -114,6 +114,7 @@ include(cmake/cxx_standard.cmake)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 
 add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
+add_compile_definitions(USE_GENAI_PLUGINS=$<BOOL:${USE_GENAI_PLUGINS}>)
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake

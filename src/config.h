@@ -407,6 +407,68 @@ struct Config {
 
   } model;
 
+  int version{1};  // Config schema version. v1 (default) is the legacy `model.*` layout; v2 adds the `pipeline` section.
+
+  // Pipeline-as-Config (issue #2114) schema v2 surface.
+  // This is a normalized, introspectable description of the model's execution pipeline.
+  // It is populated for BOTH v1 (via TranslateV1ToPipeline) and v2 (via direct parsing + preset
+  // resolution) inputs. In PR1 it does not change any runtime behavior; default consumers continue
+  // to read `config.model.*`.
+  struct Pipeline {
+    struct Session {
+      std::string name;  // Logical session name (the JSON key under "sessions"), e.g. "decoder".
+      std::string file;  // ONNX model file for this session.
+      std::optional<SessionOptions> session_options;
+    };
+
+    struct FlowStep {
+      std::string run;            // Session name to run.
+      std::string when{"step"};   // Lifecycle phase: "init" | "step" | "final".
+      std::string loop{"batched"};  // Loop mode: "batched" | "per_image".
+      bool variable_resolution{false};  // Per-image vision slicing with variable resolution (Pixtral family).
+      std::optional<std::string> cross_attention_from;  // Session providing cross-attention KV (encoder-decoder).
+    };
+
+    struct Wire {
+      std::string from;  // "session.tensor" producing the value.
+      std::string to;    // "session.tensor" consuming the value.
+    };
+
+    struct State {
+      struct KvCache {
+        std::string format{"auto"};  // "auto" | "separate" | "combined".
+        std::string past_key_pattern, present_key_pattern,
+            past_value_pattern, present_value_pattern;
+      };
+      struct CrossCache {
+        std::optional<std::string> source;  // Session that produces the (frozen) cross-attention cache.
+        bool frozen{true};
+      };
+      struct PositionIds {
+        std::string strategy{"auto"};  // "auto" | "default" | "mrope_3d" | "windowed".
+        std::string input_name{"position_ids"};
+        std::optional<std::string> grid_source;
+      };
+      KvCache kv_cache;
+      std::optional<CrossCache> cross_cache;
+      PositionIds position_ids;
+    };
+
+    struct Plugin {
+      std::string library;
+      std::string entry_point;
+    };
+
+    std::optional<std::string> extends;  // Built-in preset name to inherit from.
+    std::vector<Session> sessions;
+    std::vector<FlowStep> flow;
+    std::vector<Wire> dataflow;
+    State state;
+    std::optional<Plugin> plugin;
+    bool present{false};  // True only when the pipeline was explicitly parsed (v2) or translated (v1).
+  };
+  Pipeline pipeline;
+
   struct Search {
     bool do_sample{};                  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};                  // Minimum length for final sequence length
@@ -459,6 +521,14 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
+
+// Pipeline-as-Config (issue #2114) helpers.
+// Derives an introspective Config::Pipeline from a legacy (v1) config without altering config.model.*.
+void TranslateV1ToPipeline(Config& config);
+// Resolves config.pipeline.extends against the built-in presets, lowering preset defaults into any
+// fields the parsed config left empty. Explicit top-level arrays in the config replace preset arrays
+// wholesale (see pipeline_presets.h for the override semantics).
+void ResolvePipelineExtends(Config::Pipeline& pipeline);
 
 void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type);
 void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id);

@@ -14,6 +14,17 @@
 
 namespace Generators {
 
+// model.type predicate table. As of issue #2114 PR5 these are NO LONGER the runtime model-CLASS
+// dispatch: production routing is structural (see Generators::ClassifyStructuralRoute / CreatePipeline
+// in model.cpp). They are retained because every one still has a non-dispatch caller:
+//   * TranslateV1ToPipeline (config.cpp) uses Is{QwenVLFamily,Pixtral,VLM,MMM,ALM,Pipe} to SYNTHESIZE
+//     the structural pipeline signals from a legacy v1 config -- the one legitimate type->structure map;
+//   * the transducer bypass uses Is{RNNT,TDT,Transducer} (generators.cpp, ClassifyStructuralRoute);
+//   * config.cpp's context_length guard uses IsRNNT;
+//   * kv_cache.cpp's conv-state cache uses IsLFM2 (also the ClassifyStructuralRoute lfm2 residual);
+//   * ClassifyLegacyRoute (model.cpp) keeps the full table as the ground-truth oracle the PR5
+//     zero-regression test (PipelineDispatchTests) compares the structural router against.
+// None became unused, so none were deleted (issue §5's "delete model_type.h" reduces to "keep").
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)

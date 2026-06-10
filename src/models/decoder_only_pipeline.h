@@ -5,6 +5,11 @@
 
 #include <future>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "../worker_thread.h"
 #include "model.h"
@@ -17,6 +22,45 @@
 #include "recurrent_state.h"
 
 namespace Generators {
+
+// PipelineFlow (issue #2114 PR3): resolves `config.pipeline.flow`/`dataflow` into the single source
+// of truth for stage lifecycle gating and cross-stage wiring inside DecoderOnlyPipelineState.
+//
+// Each decoder.pipeline[] stage is classified into a lifecycle phase derived from the matching
+// flow step's `when`:
+//   * "init"  -> Phase::Init  (prompt-processing only; preserved via run_on_prompt/run_on_token_gen)
+//   * "step"  -> Phase::Step  (every token; the default)
+//   * "final" -> Phase::Final (NEW: executed once after the generation loop, via State::Finalize)
+//
+// Backward compatibility: for v1-derived configs the existing run_on_prompt/run_on_token_gen fields
+// (populated by PR1 lowering) still drive init-vs-step gating, so behavior is byte-for-byte preserved.
+// The flow only additionally identifies "final" stages (no in-tree model uses them yet) and supplies
+// explicit `dataflow[]` wires that override the name-based auto-match.
+struct PipelineFlow {
+  enum class Phase { Init, Step, Final };
+
+  PipelineFlow() = default;
+
+  // Resolves the flow against config.model.decoder.pipeline[] order. Applies the issue §3.2
+  // load-time guardrails: throws on a dataflow cycle or when the stage count exceeds 10.
+  explicit PipelineFlow(const Config& config);
+
+  Phase PhaseForStage(size_t stage_id) const;
+  bool IsFinal(size_t stage_id) const;
+  bool HasFinalStages() const { return has_final_; }
+
+  // Explicit dataflow override (issue §3.3): returns the producing tensor (ortvalue_store_ key) that
+  // should feed input `input` of session `session`, or nullptr when no explicit wire exists.
+  const std::string* ExplicitSource(const std::string& session, const std::string& input) const;
+
+ private:
+  static std::string WireKey(std::string_view session, std::string_view input);
+  static std::pair<std::string, std::string> SplitWire(const std::string& endpoint);
+
+  std::vector<Phase> stage_phase_;  // indexed by decoder.pipeline[] stage id
+  bool has_final_{false};
+  std::unordered_map<std::string, std::string> explicit_wires_;  // WireKey(to_session,to_input) -> from_tensor
+};
 
 struct DecoderOnlyPipelineModel : Model {
   DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
@@ -65,6 +109,10 @@ struct DecoderOnlyPipelineState : State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
+  // Post-loop hook (issue #2114 PR3): executes flow stages whose `when=="final"` once generation
+  // has completed. No-op when the resolved flow has no final stages (all in-tree models today).
+  void Finalize(int current_length) override;
+
   OrtValue* GetOutput(const char* name) override;
 
   void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -83,11 +131,22 @@ struct DecoderOnlyPipelineState : State {
  private:
   void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);
 
+  // Binds managed/explicit/auto-matched IO for a single pipeline stage and runs it.
+  // Shared by the per-token RunPipeline loop and the post-loop final-stage path.
+  void RunStage(IntermediatePipelineState& pipeline_state, int total_length,
+                DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices);
+
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int total_length);
 
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
+
+  PipelineFlow flow_;
+
+  // Saved from the last Run() so Finalize() can replay managed indices into the final stages.
+  DeviceSpan<int32_t> last_next_indices_{};
+  int last_total_length_{};
 
   struct PartialKeyValueCacheUpdateRecord {
     std::vector<size_t> layer_indices{};     // indicates which layers of the KV cache are to be updated

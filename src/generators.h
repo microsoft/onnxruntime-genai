@@ -175,6 +175,33 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+// Pipeline-as-Config (issue #2114): structural dispatch entry point. Delegated to by CreateModel
+// whenever config.pipeline.present is true.
+std::shared_ptr<Model> CreatePipeline(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Pipeline-as-Config (issue #2114, PR5): the concrete Model subclass a config dispatches to. Exposed
+// so the dispatch decision can be tested in isolation (no ONNX load) and so the structural router and
+// the legacy model.type router can be proven equivalent for every fixture (the zero-regression gate).
+enum class ModelRoute {
+  Unsupported,
+  DecoderOnly,          // DecoderOnly_Model
+  Gpt,                  // Gpt_Model (combined KV)
+  LFM2,                 // LFM2_Model (hybrid conv-state cache)
+  DecoderOnlyPipeline,  // DecoderOnlyPipelineModel (multi-stage decoder)
+  Qwen2_5_VL_Pipeline,  // Qwen2_5_VL_PipelineModel (vision + decoder.pipeline)
+  MultiModal,           // MultiModalLanguageModel (VLM / MMM)
+  Whisper,              // WhisperModel (encoder-decoder)
+  Marian,               // MarianModel (encoder-decoder)
+  NemotronSpeech,       // NemotronSpeechModel (RNNT transducer)
+  ParakeetTdt,          // ParakeetTdtModel (TDT transducer)
+};
+// Legacy pre-#2114 model.type dispatch decision. Kept as the ground-truth oracle for the PR5
+// equivalence test; CreateModelFromType() constructs from it.
+ModelRoute ClassifyLegacyRoute(const Config& config);
+// Structural/config dispatch decision used by CreatePipeline(): routes by which ONNX sessions exist,
+// cross-attention, combined-KV and multi-stage structure, with only the transducer/lfm2 residual
+// predicates and a couple of raw-type tie-breakers that have no structural signal.
+ModelRoute ClassifyStructuralRoute(const Config& config);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

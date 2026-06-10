@@ -36,7 +36,13 @@ examples/csharp/ModelChat/models
 !test/models/multimodal-decoder-with-input-ids/*
 !test/models/phi3-v/*
 !test/models/pipeline-model/*.json
+!test/models/pipeline-v2-decoder/
+!test/models/pipeline-v2-decoder/*
+!test/models/pipeline-v2-vlm-override/
+!test/models/pipeline-v2-vlm-override/*
 !test/models/qwen2-5-vl/*
+!test/models/qwen2-5-vl-pipeline/
+!test/models/qwen2-5-vl-pipeline/*
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
