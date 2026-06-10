@@ -11,6 +11,9 @@ using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
 using Microsoft.Extensions.AI;
+#if USE_WEBGPU_EP
+using Microsoft.ML.OnnxRuntime;
+#endif
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -91,12 +94,47 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static string _adaptersPath => _lazyAdaptersPath.Value;
         private static OgaHandle ogaHandle;
 
+#if USE_WEBGPU_EP
+        private static int _webGpuEpRegistered = 0;
+
+        // ONNX Runtime's environment is a process-wide singleton, so registering the WebGPU EP
+        // plugin library with it (via ONNX Runtime's managed API) also makes the provider available
+        // to ONNX Runtime GenAI. The plugin library is the one already downloaded by the pipeline;
+        // its path is supplied via the ORTGENAI_TEST_WEBGPU_EP_LIBRARY environment variable.
+        private static void EnsureWebGpuEpRegistered()
+        {
+            string libraryPath = Environment.GetEnvironmentVariable("ORTGENAI_TEST_WEBGPU_EP_LIBRARY");
+            if (string.IsNullOrEmpty(libraryPath) || !File.Exists(libraryPath))
+            {
+                return;
+            }
+
+            if (System.Threading.Interlocked.Exchange(ref _webGpuEpRegistered, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                OrtEnv.Instance().RegisterExecutionProviderLibrary("webgpu", libraryPath);
+                Console.WriteLine("**** Registered WebGPU EP plugin library: " + libraryPath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("**** Warning: failed to register WebGPU EP plugin library: " + ex.Message);
+            }
+        }
+#endif
+
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
+#if USE_WEBGPU_EP
+            EnsureWebGpuEpRegistered();
+#endif
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }

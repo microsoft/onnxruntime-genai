@@ -137,6 +137,17 @@ def _parse_args():
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     parser.add_argument(
+        "--use_winml", action="store_true", help="Whether to use WinML. Default is to not use WinML."
+    )
+    parser.add_argument(
+        "--winml_sdk_version",
+        type=str,
+        default="2.1.1",
+        help="Version of the Microsoft.Windows.AI.MachineLearning NuGet package to use. "
+        "Only used when --use_winml is specified. Default is 2.1.1.",
+    )
+
+    parser.add_argument(
         "--use_guidance", action="store_true", help="Whether to add guidance support. Default is False."
     )
 
@@ -291,6 +302,17 @@ def _validate_trt_rtx_args(args: argparse.Namespace):
         args.cuda_home = cuda_home.resolve(strict=True)
 
 
+def _validate_winml_args(args: argparse.Namespace):
+    if args.use_winml:
+        if not util.is_windows():
+            raise RuntimeError("--use_winml is only supported on Windows.")
+
+        if not args.winml_sdk_version:
+            # Fall back to the default so the CMake FATAL_ERROR for a missing
+            # WINML_SDK_VERSION is never hit through the normal build.py flow.
+            args.winml_sdk_version = "2.1.1"
+
+
 def _validate_android_args(args: argparse.Namespace):
     if args.android:
         if not args.android_home:
@@ -367,6 +389,7 @@ def _validate_args(args: argparse.Namespace):
     _validate_build_dir(args)
     _validate_cuda_args(args)
     _validate_trt_rtx_args(args)
+    _validate_winml_args(args)
     _validate_android_args(args)
     _validate_ios_args(args)
     _validate_cmake_args(args)
@@ -401,9 +424,8 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     native_lib_path = (
         f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
     )
-    ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path, ort_lib_path]
+    props = [configuration, platform, native_lib_path]
 
     return props
 
@@ -534,6 +556,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_TRT_RTX={'ON' if args.use_trt_rtx else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
+        f"-DUSE_WINML={'ON' if args.use_winml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
@@ -542,6 +565,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]
+
+    if args.use_winml:
+        command += [f"-DWINML_SDK_VERSION={args.winml_sdk_version}"]
 
     if args.use_cuda or args.use_trt_rtx:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
@@ -644,6 +670,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             command += ["-A", "ARM64"]
         elif args.arm64ec:
             command += ["-A", "ARM64EC"]
+        elif args.use_winml:
+            # WinML resolves its ONNX Runtime artifacts based on the generator
+            # platform (see cmake/ortlib.cmake). For a default x64 build the
+            # platform is otherwise left unset, so set it explicitly.
+            command += ["-A", "x64"]
 
     if args.arm64 or args.arm64ec:
         if args.test:
