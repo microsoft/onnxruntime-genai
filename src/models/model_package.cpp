@@ -19,32 +19,10 @@ namespace Generators {
 // --- Package detection ---
 
 bool IsModelPackage(const fs::path& path) {
-  // Fast path: an explicit top-level manifest.json marks a v4 package.
-  if (fs::exists(path / "manifest.json"))
-    return true;
-
-  // Per the v4 spec, manifest.json is optional. A path is still a model package when any
-  // non-reserved immediate child directory contains a metadata.json (i.e. a component dir).
-  // The only reserved top-level directory name in v4 is "configs/".
-  //
-  // Use std::filesystem here because the in-tree fs:: wrapper does not provide directory
-  // iteration. The platform-correct path string (UTF-16 on Windows, UTF-8 on POSIX) is
-  // pulled from fs::path::c_str().
-  std::filesystem::path root(path.c_str());
-  std::error_code ec;
-  if (!std::filesystem::is_directory(root, ec) || ec)
-    return false;
-
-  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
-    if (ec) break;
-    std::error_code ec_dir;
-    if (!entry.is_directory(ec_dir) || ec_dir) continue;
-    if (entry.path().filename() == "configs") continue;  // reserved
-    std::error_code ec_meta;
-    if (std::filesystem::exists(entry.path() / "metadata.json", ec_meta) && !ec_meta)
-      return true;
-  }
-  return false;
+  // A model package is identified by a top-level manifest.json. The redesigned ORT
+  // model_package library makes this file mandatory: it carries schema_version, layout,
+  // and the components map. No subdirectory probing or reserved-name carve-outs.
+  return fs::exists(path / "manifest.json");
 }
 
 // --- EP defaulting ---
@@ -505,7 +483,7 @@ std::string ModelPackageState::GetGenAIConfigOverlay(const std::string& componen
   }
 
   // The overlay lives at <variant_dir>/<kVariantOverlayFilename>. ORT itself doesn't read
-  // this file — it's a GenAI consumer convention recorded in the v4 model-package spec.
+  // this file — it's a GenAI consumer convention layered on top of the model_package schema.
   // Use std::filesystem here (not the in-tree fs::path wrapper) so we can pass through the
   // ORTCHAR_T-typed path returned by the ORT package API uniformly on Windows and POSIX.
   std::filesystem::path variant_dir(cix->GetSelectedVariantFolderPath());

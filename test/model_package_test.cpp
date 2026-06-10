@@ -283,18 +283,17 @@ TEST(IsModelPackage, PackageDirectoryWithManifest) {
   EXPECT_TRUE(Generators::IsModelPackage(fs::path(tmp.string())));
 }
 
-TEST(IsModelPackage, ManifestlessPackageWithComponentMetadata) {
-  // v4 spec: manifest.json is optional. A directory is still a package when a non-reserved
-  // child dir contains a metadata.json (i.e. it's a component dir).
+TEST(IsModelPackage, ManifestlessIsNotPackage) {
+  // The redesigned ORT model_package schema requires a top-level manifest.json. Component
+  // directories alone (with or without a per-component file) no longer qualify.
   ScopedTempDir tmp("manifestless_package");
-  tmp.touch("decoder/metadata.json");
-  EXPECT_TRUE(Generators::IsModelPackage(fs::path(tmp.string())));
+  tmp.touch("decoder/component.json");
+  EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp.string())));
 }
 
 TEST(IsModelPackage, ConfigsOnlyIsNotPackage) {
-  // configs/ is the one reserved top-level dir. A directory containing only configs/ (no
-  // component dir, no manifest) must NOT be flagged as a package — that would shadow
-  // legitimate flat-dir layouts that happen to ship a configs/ subdir.
+  // A directory containing only configs/ (no manifest) must not be flagged as a package.
+  // configs/ is a GenAI-side convention, not a model_package marker.
   ScopedTempDir tmp("configs_only");
   tmp.touch("configs/genai_config.json");
   EXPECT_FALSE(Generators::IsModelPackage(fs::path(tmp.string())));

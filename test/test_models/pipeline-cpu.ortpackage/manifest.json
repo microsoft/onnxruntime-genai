@@ -1,10 +1,12 @@
 {
   "schema_version": 1,
-  "package_name": "pipeline-test-cpu",
-  "package_version": "1.0",
-  "description": "Test package: 3-stage decoder pipeline, CPU only.",
-  "components": [
-    "decoder"
-  ],
-  "configs_dir": "configs"
+  "layout": "portable",
+  "components": {
+    "decoder": "models/decoder/component.json"
+  },
+  "additional_metadata": {
+    "package_name": "pipeline-test-cpu",
+    "package_version": "1.0",
+    "description": "Test package: 3-stage decoder pipeline, CPU only."
+  }
 }

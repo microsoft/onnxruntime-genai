@@ -1,8 +1,12 @@
 {
   "schema_version": 1,
-  "package_name": "kitchen-sink-cpu",
-  "package_version": "1.0",
-  "description": "Variant SO + genai_config_overlay covering all typed Config::SessionOptions fields. Used by drift / merge regression tests.",
-  "components": ["decoder"],
-  "configs_dir": "configs"
+  "layout": "portable",
+  "components": {
+    "decoder": "models/decoder/component.json"
+  },
+  "additional_metadata": {
+    "package_name": "kitchen-sink-cpu",
+    "package_version": "1.0",
+    "description": "Variant SO + genai_config_overlay covering all typed Config::SessionOptions fields. Used by drift / merge regression tests."
+  }
 }

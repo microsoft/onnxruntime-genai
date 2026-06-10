@@ -1,0 +1,7 @@
+{
+  "model": {
+    "decoder": {
+      "filename": "model.onnx"
+    }
+  }
+}

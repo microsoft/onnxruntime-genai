@@ -1,8 +1,7 @@
 {
-  "schema_version": 1,
-  "component_name": "decoder",
   "variants": {
     "cpu": {
+      "variant_directory": "cpu",
       "ep": "CPUExecutionProvider"
     }
   }

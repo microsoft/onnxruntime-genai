@@ -81,7 +81,7 @@ void NormalizePackageIntoConfig(Config& config, ModelPackageState& package_state
 /// Name of the GenAI overlay file that may sit alongside the per-variant ONNX artifacts.
 /// When present at `<variant_dir>/genai_config_overlay.json`, its contents are JSON-merged
 /// onto the package's pre-merged genai_config.json. ORT itself does not interpret this file;
-/// it is a GenAI consumer convention recorded in the v4 model-package spec.
+/// it is a GenAI consumer convention layered on top of the model_package schema.
 inline constexpr std::string_view kVariantOverlayFilename = "genai_config_overlay.json";
 
 /// Holds the lifetime state for a single model-package load. Constructed by
