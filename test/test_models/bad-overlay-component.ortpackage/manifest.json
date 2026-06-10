@@ -5,6 +5,6 @@
   "description": "consumer_metadata overlay introduces a new component reference -> NormalizePackageIntoConfig must throw.",
   "layout": "portable",
   "components": {
-    "decoder": "models/decoder"
+    "decoder": "decoder"
   }
 }

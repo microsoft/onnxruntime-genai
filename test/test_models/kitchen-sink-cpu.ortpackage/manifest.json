@@ -5,6 +5,6 @@
   "description": "Variant SO + genai_config_overlay covering all typed Config::SessionOptions fields. Used by drift / merge regression tests.",
   "layout": "portable",
   "components": {
-    "decoder": "models/decoder"
+    "decoder": "decoder"
   }
 }

@@ -5,6 +5,6 @@
   "description": "Test package: 3-stage decoder pipeline, CPU only.",
   "layout": "portable",
   "components": {
-    "decoder": "models/decoder"
+    "decoder": "decoder"
   }
 }

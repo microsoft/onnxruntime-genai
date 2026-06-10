@@ -5,6 +5,6 @@
   "description": "Test package: single CPU variant only.",
   "layout": "portable",
   "components": {
-    "decoder": "models/decoder"
+    "decoder": "decoder"
   }
 }
