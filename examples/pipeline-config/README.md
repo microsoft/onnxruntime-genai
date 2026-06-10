@@ -7,7 +7,7 @@ lifecycle phase they run in (`flow`), how their tensors are wired together (`dat
 state it carries (KV cache, cross-attention cache, position ids) — instead of relying on a hard-coded
 `model.type` string.
 
-Every example here is a real, parseable config. Examples 1, 2, 3 and 5 are covered by unit tests
+Every example here is a real, parseable config. Examples 1, 2, 3, 5, 6 and 7 are covered by unit tests
 (`ExamplePipelineConfigs.*` in `test/pipeline_config_tests.cpp`) that load each config, lower it, and
 assert it routes to the expected model class. (They reference ONNX files by name but the tests only
 exercise config parsing/lowering/dispatch, so no model weights are required.)
@@ -19,6 +19,103 @@ exercise config parsing/lowering/dispatch, so no model weights are required.)
 | 3 | VLM per-image flow | [`03-vlm-per-image/`](03-vlm-per-image/) | The Qwen-VL style vision pipeline (`loop: "per_image"`, 3D mRoPE) |
 | 4 | Plugin escape hatch | [`04-plugin-escape-hatch/`](04-plugin-escape-hatch/) | The opaque-handle plugin shape (**syntax only — requires `USE_GENAI_PLUGINS=ON`**) |
 | 5 | v1 → v2 side by side | [`05-v1-to-v2/`](05-v1-to-v2/) | A legacy v1 config and its hand-written v2 equivalent |
+| 6 | Single-pass multimodal | [`06-multimodal-single-pass/`](06-multimodal-single-pass/) | The gemma4 style tri-modal multimodal: vision + audio encode once → embedding merges → decoder |
+| 7 | Prefill / decode split | [`07-prefill-decode/`](07-prefill-decode/) | Separate context (`prefill`) and generation (`decode`) stages gated by `run_on_prompt` / `run_on_token_gen` |
+
+---
+
+## Standard single-pass multimodal vs. per-image (examples 6 and 3)
+
+There are two multimodal shapes in this schema, and the difference is the **flow**, not the route — both
+land on the general `MultiModalLanguageModel` (`ClassifyStructuralRoute == MultiModal`) because each has a
+`vision` (or `speech`) + `embedding` session.
+
+* **Example 6 — standard single-pass tri-modal** (the gemma4 shape, text + vision + audio). The vision
+  encoder runs **once** over all pixels to produce `image_features`; the speech encoder runs **once** over
+  the audio to produce `audio_features`; the embedding session merges `input_ids` + `image_features` +
+  `audio_features` into `inputs_embeds`; the decoder consumes `inputs_embeds`. It extends the
+  `vision-language` preset but specifies an explicit single-pass `flow`/`dataflow` that adds the **speech**
+  stage alongside vision (both `init`, **`batched`** loop, **no** special position-id strategy):
+
+  ```json
+  "pipeline": {
+    "extends": "vision-language",
+    "sessions": {
+      "vision": {"file": "vision.onnx"},
+      "speech": {"file": "speech.onnx"},
+      "embedding": {"file": "embedding.onnx"},
+      "decoder": {"file": "decoder.onnx"}
+    },
+    "flow": [
+      {"run": "vision", "when": "init", "loop": "batched"},
+      {"run": "speech", "when": "init", "loop": "batched"},
+      {"run": "embedding", "when": "init"},
+      {"run": "decoder", "when": "step"}
+    ],
+    "dataflow": [
+      {"from": "vision.image_features", "to": "embedding.image_features"},
+      {"from": "speech.audio_features", "to": "embedding.audio_features"},
+      {"from": "embedding.inputs_embeds", "to": "decoder.inputs_embeds"}
+    ]
+  }
+  ```
+
+* **Example 3 — per-image** (the Qwen-VL shape). It starts from the same preset but **overrides** the
+  flow so the vision stage runs once **per input image** (`"loop": "per_image"`) and adds a 3D mRoPE
+  position-id strategy sourced from the vision grid (`"strategy": "mrope_3d"`,
+  `"grid_source": "vision.image_grid_thw"`). That extra per-image loop and mRoPE state is the only
+  structural difference — reach for it only when the model genuinely needs per-image vision passes.
+
+---
+
+## Prefill / decode split (example 7)
+
+A decoder can be split into a **prefill (context) stage** that processes the whole prompt once and a
+**decode (generation) stage** that runs once per generated token, continuing the shared KV cache. This
+is how you ship a *context-processing* ONNX model separately from a *token-generation* model (for
+example a chunked-prefill graph optimized for large batched contexts paired with a single-token decode
+graph), while the runtime still keeps one KV cache flowing between them.
+
+The split is expressed with the per-stage gating flags on a multi-stage `model.decoder.pipeline[]`
+(these `run_on_prompt` / `run_on_token_gen` flags are the canonical, parseable mechanism — they live on
+the decoder pipeline stage list, not in the v2 `flow`):
+
+```json
+"pipeline": [
+  {
+    "prefill": {
+      "filename": "prefill.onnx",
+      "run_on_prompt": true,
+      "run_on_token_gen": false,
+      "inputs":  ["input_ids", "attention_mask", "past_key_values.0.key", "past_key_values.0.value"],
+      "outputs": ["logits", "present.0.key", "present.0.value"]
+    },
+    "decode": {
+      "filename": "decode.onnx",
+      "run_on_prompt": false,
+      "run_on_token_gen": true,
+      "inputs":  ["input_ids", "attention_mask", "past_key_values.0.key", "past_key_values.0.value"],
+      "outputs": ["logits", "present.0.key", "present.0.value"]
+    }
+  }
+]
+```
+
+* `run_on_prompt: true, run_on_token_gen: false` → a **prefill / context** stage. It runs during the
+  initial prompt pass and is skipped on every token-generation step. The pipeline runtime gates it in
+  `DecoderOnlyPipelineState::RunPipeline` — `first_run_ && !run_on_prompt` and `!first_run_ &&
+  !run_on_token_gen` are the two skip predicates (`src/models/decoder_only_pipeline.cpp`).
+* `run_on_prompt: false, run_on_token_gen: true` → a **decode / generation** stage. It is skipped on
+  the prompt pass and runs once per generated token.
+* The two stages share the KV cache: the prefill stage writes `present.0.*` while consuming the prompt,
+  and the decode stage reads `past_key_values.0.*` (with `past_present_share_buffer` the present buffer
+  *is* the next step's past), so generation continues exactly where prefill stopped.
+
+These flags map directly onto the `init`/`step` **flow phases** described below: on load,
+`TranslateV1ToPipeline()` derives a flow where the prefill stage (`run_on_prompt` only) becomes a
+`"when": "init"` step and the decode stage becomes a `"when": "step"` step. Because the config carries a
+multi-stage `decoder.pipeline[]` (and no vision/speech/encoder session), it routes to the multi-stage
+`DecoderOnlyPipeline` (`ClassifyStructuralRoute == DecoderOnlyPipeline`).
 
 ---
 

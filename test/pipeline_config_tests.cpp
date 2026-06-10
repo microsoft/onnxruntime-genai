@@ -283,6 +283,47 @@ TEST(ExamplePipelineConfigs, VlmPerImage) {
   EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::MultiModal);
 }
 
+// Example 6 -- standard single-pass tri-modal multimodal (gemma4 style): vision encodes once ->
+// image_features, speech encodes once -> audio_features, embedding merges input_ids + image_features +
+// audio_features -> inputs_embeds, decoder consumes inputs_embeds. Unlike example 3 there is NO
+// per_image loop and NO mrope_3d; it is a single-pass flow over the vision-language preset extended with
+// a speech stage. A vision (or speech) session (without a decoder.pipeline) routes to the general
+// multimodal class.
+TEST(ExamplePipelineConfigs, MultiModalSinglePass) {
+  auto config = LoadExample("06-multimodal-single-pass");
+
+  EXPECT_EQ(config.version, 2);
+  ASSERT_TRUE(config.pipeline.extends.has_value());
+  EXPECT_EQ(*config.pipeline.extends, "vision-language");
+
+  // Tri-modal single-pass flow: vision (init) -> speech (init) -> embedding (init) -> decoder (step),
+  // with the default batched loop (not per_image) and no mrope_3d position-id strategy.
+  ASSERT_EQ(config.pipeline.flow.size(), 4u);
+  EXPECT_EQ(config.pipeline.flow[0].run, "vision");
+  EXPECT_EQ(config.pipeline.flow[0].when, "init");
+  EXPECT_EQ(config.pipeline.flow[0].loop, "batched");
+  EXPECT_EQ(config.pipeline.flow[1].run, "speech");
+  EXPECT_EQ(config.pipeline.flow[1].when, "init");
+  EXPECT_EQ(config.pipeline.flow[1].loop, "batched");
+  EXPECT_EQ(config.pipeline.flow[2].run, "embedding");
+  EXPECT_EQ(config.pipeline.flow[3].run, "decoder");
+  EXPECT_NE(config.pipeline.state.position_ids.strategy, "mrope_3d");
+
+  // The speech session is present and wired to the embedding's audio_features input.
+  const auto* speech = FindSession(config.pipeline, "speech");
+  ASSERT_NE(speech, nullptr);
+  EXPECT_EQ(speech->file, "speech.onnx");
+
+  // Sessions lower into model.* so the vision/speech/embedding signals are present for dispatch.
+  EXPECT_EQ(config.model.vision.filename, "vision.onnx");
+  EXPECT_EQ(config.model.speech.filename, "speech.onnx");
+  EXPECT_EQ(config.model.embedding.filename, "embedding.onnx");
+  EXPECT_EQ(config.model.decoder.filename, "decoder.onnx");
+  EXPECT_TRUE(config.model.decoder.pipeline.empty());
+
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::MultiModal);
+}
+
 // Example 5 -- v1 -> v2 side by side: the legacy v1 gpt2 config and its hand-written v2 equivalent must
 // both load, and both must derive/produce the same structural route (Gpt, via the combined KV cache).
 TEST(ExamplePipelineConfigs, V1ToV2Equivalence) {
@@ -305,4 +346,40 @@ TEST(ExamplePipelineConfigs, V1ToV2Equivalence) {
   // Same structural decision from both schema versions: the equivalence the README claims.
   EXPECT_EQ(Generators::ClassifyStructuralRoute(v2), Generators::ClassifyStructuralRoute(v1));
   EXPECT_EQ(Generators::ClassifyStructuralRoute(v2), Generators::ModelRoute::Gpt);
+}
+
+// Example 7 -- prefill / decode split: a multi-stage decoder.pipeline[] whose two stages are gated by
+// run_on_prompt / run_on_token_gen. The "prefill" (context) stage runs once over the full prompt
+// (run_on_prompt:true, run_on_token_gen:false) and the "decode" (generation) stage runs once per
+// generated token (run_on_prompt:false, run_on_token_gen:true), continuing the shared KV cache. A
+// decoder.pipeline with no vision/speech/encoder session routes to the multi-stage DecoderOnlyPipeline.
+TEST(ExamplePipelineConfigs, PrefillDecodeSplit) {
+  auto config = LoadExample("07-prefill-decode");
+
+  // Two enumerated stages carrying the prefill/decode gating flags after parse.
+  ASSERT_EQ(config.model.decoder.pipeline.size(), 2u);
+
+  const auto& prefill = config.model.decoder.pipeline[0];
+  EXPECT_EQ(prefill.model_id, "prefill");
+  EXPECT_EQ(prefill.filename, "prefill.onnx");
+  EXPECT_TRUE(prefill.run_on_prompt);
+  EXPECT_FALSE(prefill.run_on_token_gen);
+
+  const auto& decode = config.model.decoder.pipeline[1];
+  EXPECT_EQ(decode.model_id, "decode");
+  EXPECT_EQ(decode.filename, "decode.onnx");
+  EXPECT_FALSE(decode.run_on_prompt);
+  EXPECT_TRUE(decode.run_on_token_gen);
+
+  // v1 -> pipeline lowering derives the flow from the gating flags: prefill-only -> "init" (prompt
+  // pass), token-gen -> "step" (per-token loop).
+  EXPECT_TRUE(config.pipeline.present);
+  ASSERT_EQ(config.pipeline.flow.size(), 2u);
+  EXPECT_EQ(config.pipeline.flow[0].run, "prefill");
+  EXPECT_EQ(config.pipeline.flow[0].when, "init");
+  EXPECT_EQ(config.pipeline.flow[1].run, "decode");
+  EXPECT_EQ(config.pipeline.flow[1].when, "step");
+
+  // A multi-stage decoder.pipeline (no vision/speech/encoder session) is the multi-stage decoder route.
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::DecoderOnlyPipeline);
 }
