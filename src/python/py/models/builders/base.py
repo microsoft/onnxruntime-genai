@@ -381,23 +381,65 @@ class Model:
         else:
             del self.input_names["inputs_embeds"]
 
+    def _parse_hidden_states_layers(self):
+        layers = self.extra_options.get("hidden_states_layers")
+        if layers is None:
+            return None
+        if isinstance(layers, str):
+            return tuple(int(x.strip()) for x in layers.split(",") if x.strip())
+        if isinstance(layers, (list, tuple)):
+            return tuple(int(x) for x in layers)
+        raise ValueError("hidden_states_layers must be a comma-separated string or a list of integers.")
+
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
+        self.hidden_states_layers = self._parse_hidden_states_layers()
+        self.captured_hidden_states = [] if self.hidden_states_layers else None
+        self.max_prompt_embeds_layer = max(self.hidden_states_layers) if self.hidden_states_layers else None
+
+        self.use_cache = self.extra_options.get("use_cache", True)
+        if not self.use_cache:
+            for key in ("past_key_values.key", "past_key_values.value"):
+                if key in self.input_names:
+                    del self.input_names[key]
+            for key in ("present.key", "present.value"):
+                if key in self.output_names:
+                    del self.output_names[key]
+
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
-        if self.prune_lm_head and self.exclude_lm_head:
+        if self.hidden_states_layers:
+            if self.include_hidden_states:
+                raise ValueError(
+                    "include_hidden_states cannot be used with hidden_states_layers. "
+                    "Use hidden_states_layers to export prompt_embeds for Stable Diffusion text encoders."
+                )
+            self.exclude_lm_head = True
+            self.extra_options["exclude_lm_head"] = True
+            if "hidden_states" in self.output_names:
+                del self.output_names["hidden_states"]
+            if "logits" in self.output_names:
+                del self.output_names["logits"]
+            self.output_names["prompt_embeds"] = "prompt_embeds"
+            self.output_types["prompt_embeds"] = self.io_dtype
+            self.output_shapes["prompt_embeds"] = [
+                "batch_size",
+                "sequence_length",
+                self.hidden_size * len(self.hidden_states_layers),
+            ]
+        elif self.prune_lm_head and self.exclude_lm_head:
             print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
             self.prune_lm_head = False
 
-        if not (self.include_hidden_states or self.exclude_lm_head):
+        if not self.hidden_states_layers and not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
 
-        if self.exclude_lm_head:
+        if self.exclude_lm_head and not self.hidden_states_layers:
             del self.output_names["logits"]
 
     def make_rope_init(self, config):
@@ -580,6 +622,10 @@ class Model:
             outputs["present_key_names"] = "present.%d.key"
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
+        if "prompt_embeds" in self.output_names:
+            outputs["prompt_embeds"] = self.output_names["prompt_embeds"]
+        if "hidden_states" in self.output_names:
+            outputs["hidden_states"] = self.output_names["hidden_states"]
 
         bos_token_id = config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1
         eos_token_id = config.eos_token_id
@@ -665,11 +711,28 @@ class Model:
         """
         Make input and output names for key/value cache based on layer id
         """
+        if not self.use_cache:
+            # GroupQueryAttention still requires present_k/present_v node outputs even when
+            # KV cache is not exposed as graph I/O (Stable Diffusion text encoder exports).
+            present_k = f"/model/layers.{layer_id}/attn/present_k"
+            present_v = f"/model/layers.{layer_id}/attn/present_v"
+            return "", "", present_k, present_v
         past_k = self.input_names["past_key_values.key"][layer_id]
         past_v = self.input_names["past_key_values.value"][layer_id]
         present_k = self.output_names["present.key"][layer_id]
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
+
+    def _capture_prompt_embeds_hidden_state(self, layer_id, location):
+        if location == "input" and self.hidden_states_layers and layer_id in self.hidden_states_layers:
+            self.captured_hidden_states.append(self.layernorm_attrs["output_0"])
+
+    def _finish_prompt_embeds_layer_if_needed(self, layer_id):
+        """Stop building decoder layers once the last prompt_embeds capture is done."""
+        if self.max_prompt_embeds_layer is not None and layer_id >= self.max_prompt_embeds_layer:
+            self.layernorm_attrs["first_layernorm"] = False
+            return True
+        return False
 
     def make_key_value_cache_shape(self, layer_id, shape):
         """
@@ -1561,6 +1624,8 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+        self._capture_prompt_embeds_hidden_state(layer_id, location)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
@@ -2466,6 +2531,12 @@ class Model:
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
+        present_k = kwargs.get("present_k", "")
+        present_v = kwargs.get("present_v", "")
+        if present_k and present_v and not self.use_cache:
+            kv_shape = ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]
+            self.make_value(present_k, self.io_dtype, shape=kv_shape)
+            self.make_value(present_v, self.io_dtype, shape=kv_shape)
 
     def make_causal_conv_with_state(self, name, **kwargs):
         inputs = [
@@ -3634,6 +3705,8 @@ class Model:
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> output_layernorm --> MLP
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        if self._finish_prompt_embeds_layer_if_needed(layer_id):
+            return
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
@@ -3741,12 +3814,18 @@ class Model:
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 
             elif self.is_layer(module) and self.layer_id < self.num_layers:
-                # Each layer of model
-                print(f"Reading layer {self.layer_id}")
-                self.make_layer(self.layer_id, module)
+                if self.max_prompt_embeds_layer is None or self.layer_id <= self.max_prompt_embeds_layer:
+                    print(f"Reading layer {self.layer_id}")
+                    self.make_layer(self.layer_id, module)
+                else:
+                    print(f"Skipping layer {self.layer_id} (not needed for prompt_embeds)")
                 self.layer_id += 1
 
-            elif self.layer_id == self.num_layers and self.has_final_norm(module, self.weights):
+            elif (
+                self.layer_id == self.num_layers
+                and self.has_final_norm(module, self.weights)
+                and not self.hidden_states_layers
+            ):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(
@@ -4242,5 +4321,60 @@ class Model:
         return self.input_names["position_ids"]
 
     def make_postprocessing_nodes(self):
-        # For most models, no postprocessing subgraph is needed
-        return
+        if not self.hidden_states_layers:
+            return
+
+        if len(self.captured_hidden_states) != len(self.hidden_states_layers):
+            raise RuntimeError(
+                "Expected to capture "
+                f"{len(self.hidden_states_layers)} hidden states for prompt_embeds, "
+                f"but captured {len(self.captured_hidden_states)}."
+            )
+
+        basename = "/model/prompt_embeds"
+        num_layers = len(self.hidden_states_layers)
+        unsqueezed = []
+        for i, hidden_state in enumerate(self.captured_hidden_states):
+            unsqueeze_name = f"{basename}/Unsqueeze_{i}"
+            self.make_unsqueeze(
+                unsqueeze_name,
+                [hidden_state, "/model/constants/INT64/[1]"],
+                dtype=self.io_dtype,
+                shape=["batch_size", 1, "sequence_length", self.hidden_size],
+            )
+            unsqueezed.append(f"{unsqueeze_name}/output_0")
+
+        concat_name = f"{basename}/Concat"
+        self.make_concat(
+            concat_name,
+            unsqueezed,
+            dtype=self.io_dtype,
+            shape=["batch_size", num_layers, "sequence_length", self.hidden_size],
+            axis=1,
+        )
+
+        transpose_name = f"{basename}/Transpose"
+        self.make_transpose(
+            transpose_name,
+            f"{concat_name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", num_layers, self.hidden_size],
+            [0, 2, 1, 3],
+        )
+
+        prompt_embeds_output = self.output_names["prompt_embeds"]
+        reshape_name = f"{basename}/Reshape"
+        self.make_node(
+            "Reshape",
+            inputs=[
+                f"{transpose_name}/output_0",
+                f"/model/constants/INT64/{[0, 0, num_layers * self.hidden_size]}",
+            ],
+            outputs=[prompt_embeds_output],
+            name=reshape_name,
+        )
+        self.make_value(
+            prompt_embeds_output,
+            self.io_dtype,
+            shape=["batch_size", "sequence_length", num_layers * self.hidden_size],
+        )
