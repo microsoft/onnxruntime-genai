@@ -542,6 +542,27 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+
+    // v2.1 (issue #2114 §6): an ordered, declarative logit-processor / sampler chain. Each entry is a
+    // typed `op` applied to the logits in declared order before the terminal `sample` op. This
+    // generalizes the single fixed guidance->penalty->sampling sequence in GenerateNextToken into a
+    // data-driven pipeline. Parsed from `generation.logits` (v2). BACKWARD-COMPATIBLE: when this
+    // vector is empty (no `logits` block), GenerateNextToken runs the legacy fixed order byte-for-byte
+    // unchanged. The chain is opt-in and additive; version stays 2 (block-presence is the discriminator).
+    struct LogitsProcessor {
+      std::string op;                              // repetition_penalty | min_length | logit_bias | grammar | temperature | top_k | top_p | combine | sample
+      std::optional<float> value;                  // scalar param (repetition_penalty, temperature, top_p)
+      std::optional<int> int_value;                // integer param (top_k, min_length)
+      std::vector<std::pair<int32_t, float>> bias; // logit_bias: token_id -> additive delta, applied in declared order
+      std::optional<std::string> backend;          // grammar backend, e.g. "llguidance"
+      // combine (contrastive / CFG, §5/§6) is parsed for forward-compat but DEFERRED: it requires
+      // multi-session role logits which are not wired into the non-speculative GenerateNextToken path.
+      std::optional<std::string> mode;             // combine mode: "contrastive" | "cfg"
+      std::optional<float> alpha;                  // combine weight
+      std::optional<std::string> expert;           // combine: positive/expert role
+      std::optional<std::string> amateur;          // combine: negative/amateur role
+    };
+    std::vector<LogitsProcessor> logits_processors;  // Empty => legacy fixed order (no behavior change).
   } search;
 
   struct Engine {

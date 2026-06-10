@@ -2015,6 +2015,71 @@ struct Tokens_Element : JSON::Element {
   Int_Array_Element eos_token_id_{v_.eos_token_id};
 };
 
+// v2.1 (issue #2114 §6): "logit_bias" map { "<token_id>": <delta>, ... } inside a chain entry.
+struct LogitsBias_Element : JSON::Element {
+  explicit LogitsBias_Element(std::vector<std::pair<int32_t, float>>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.emplace_back(static_cast<int32_t>(std::stol(std::string(name))),
+                    static_cast<float>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<std::pair<int32_t, float>>& v_;
+};
+
+// v2.1 (issue #2114 §6): a single typed entry of the ordered logit-processor / sampler chain.
+struct LogitsProcessor_Element : JSON::Element {
+  explicit LogitsProcessor_Element(Config::Search::LogitsProcessor& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "op") {
+      v_.op = JSON::Get<std::string_view>(value);
+    } else if (name == "value") {
+      v_.value = static_cast<float>(JSON::Get<double>(value));
+      v_.int_value = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "backend") {
+      v_.backend = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "mode") {
+      v_.mode = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "alpha") {
+      v_.alpha = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "expert") {
+      v_.expert = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "amateur") {
+      v_.amateur = std::string(JSON::Get<std::string_view>(value));
+    } else if (name == "grammar" || name == "stateful") {
+      // Grammar payload keys are consumed by the guidance backend, not stored on the spec here.
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "map") return bias_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Search::LogitsProcessor& v_;
+  LogitsBias_Element bias_{v_.bias};
+};
+
+// v2.1 (issue #2114 §6): "generation.logits" is an ordered array of typed processor entries.
+struct LogitsProcessors_Element : JSON::Element {
+  explicit LogitsProcessors_Element(std::vector<Config::Search::LogitsProcessor>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& entry = v_.emplace_back();
+    elements_.emplace_back(entry);
+    return elements_.back();
+  }
+
+ private:
+  std::vector<Config::Search::LogitsProcessor>& v_;
+  std::vector<LogitsProcessor_Element> elements_;
+};
+
 // v2 "generation.sampling" sub-section -> search.* sampling parameters.
 struct Sampling_Element : JSON::Element {
   explicit Sampling_Element(Config::Search& v) : v_{v} {}
@@ -2060,8 +2125,14 @@ struct Generation_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "logits") return logits_;  // v2.1 §6: ordered logit-processor / sampler chain.
+    throw JSON::unknown_value_error{};
+  }
+
   Config::Search& v_;
   Sampling_Element sampling_{v_};
+  LogitsProcessors_Element logits_{v_.logits_processors};
   Ignore_Element ignore_;
 };
 

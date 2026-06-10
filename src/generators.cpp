@@ -15,6 +15,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
+#include "logits_processor_chain.h"
 #include "search.h"
 #include "tracing.h"
 #include "cpu/interface.h"
@@ -389,6 +390,15 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
+  // v2.1 (issue #2114 §6): build the ordered logit-processor / sampler chain only when the config
+  // declares one. When absent, logits_chain_ stays null and GenerateNextToken runs the legacy fixed
+  // order byte-for-byte unchanged (back-compat guarantee).
+  if (!params.search.logits_processors.empty()) {
+    logits_chain_ = std::make_unique<LogitsProcessorChain>(
+        params.search, *search_, guidance_logits_processor_.get(),
+        params.config.model.vocab_size, params.search.batch_size);
+  }
+
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
 }
@@ -664,6 +674,19 @@ void Generator::GenerateNextToken() {
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
+
+  // v2.1 (issue #2114 §6): when a logit-processor / sampler chain is configured, it owns the
+  // logits-processing + sampling step (declared-order ops followed by the terminal sampler),
+  // replacing the fixed guidance -> min_length -> repetition_penalty -> sampling-switch sequence
+  // below. When no chain is configured, logits_chain_ is null and the legacy path runs unchanged.
+  if (logits_chain_) {
+    auto logits = GetLogits();
+    computed_logits_ = false;
+    last_action_ = Action::generated;
+    logits_chain_->Apply(logits);
+    return;
+  }
+
   if (guidance_logits_processor_) {
     auto logits = GetLogits();
     guidance_logits_processor_->ProcessLogits(logits);
@@ -716,6 +739,9 @@ void Generator::RewindToLength(size_t new_length) {
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
+  }
+  if (logits_chain_) {
+    logits_chain_->Reset();
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;

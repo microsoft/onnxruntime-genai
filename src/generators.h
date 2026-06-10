@@ -31,6 +31,7 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
+#include "logits_processor_chain.h"
 #include "logging.h"
 #include "runtime_settings.h"
 #include "tensor.h"
@@ -130,6 +131,7 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
+  std::unique_ptr<LogitsProcessorChain> logits_chain_;  // v2.1 §6: non-null only when config declares a chain.
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
