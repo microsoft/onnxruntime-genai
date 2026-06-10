@@ -1525,7 +1525,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
-#if ORT_API_VERSION >= 27
+#if ORT_API_VERSION >= 28
 // OrtModelPackageOptions
 inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
                                                                               const OrtSessionOptions& session_options) {

@@ -576,8 +576,8 @@ std::shared_ptr<ModelPackageState> OpenAndPrepareModelPackage(
     std::string_view base_json,
     const std::string& explicit_ep,
     std::string& out_resolved_ep) {
-  if (Ort::runtime_api_version < 27) {
-    throw std::runtime_error("Model packages require ONNX Runtime API version 27 or newer at runtime");
+  if (Ort::runtime_api_version < 28) {
+    throw std::runtime_error("Model packages require ONNX Runtime API version 28 or newer at runtime");
   }
 
   auto pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());

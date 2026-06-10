@@ -9,7 +9,7 @@
 
 // Must match the definition in models/model_package.h.
 #if !defined(ORT_HAS_MODEL_PACKAGE)
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 27
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28
 #define ORT_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_HAS_MODEL_PACKAGE 0

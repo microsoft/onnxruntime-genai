@@ -74,6 +74,9 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28
+#include "onnxruntime_experimental_c_api.h"
+#endif
 #include "../span.h"
 #include "../logging.h"
 #include "env_utils.h"
@@ -139,17 +142,63 @@ inline const OrtModelEditorApi& GetModelEditorApi() {
   return *model_editor_api;
 }
 
-#if ORT_API_VERSION >= 27
-/// <summary>
-/// This returns a reference to the ORT C Model Package API. Used for loading models from model packages.
-/// </summary>
-/// <returns>ORT C Model Package API reference</returns>
-inline const OrtModelPackageApi& GetModelPackageApi() {
-  auto* model_package_api = api->GetModelPackageApi();
-  if (model_package_api == nullptr) {
-    throw std::runtime_error("Model Package API is not available in this build");
+#if ORT_API_VERSION >= 28
+/// Typed function pointers for the OrtModelPackageApi_* experimental entries
+/// GenAI consumes. Resolved lazily through the experimental name-based lookup
+/// the first time `GetModelPackageApi()` is called. Member names match what a
+/// future stable `OrtModelPackageApi` struct would expose so call sites do not
+/// have to change at promotion time.
+struct ModelPackageApi {
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn
+      CreateModelPackageOptionsFromSessionOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn
+      ReleaseModelPackageOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn
+      CreateModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn
+      ReleaseModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn
+      ModelPackage_GetVariantNames{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
+      ModelPackage_GetVariantEpName{nullptr};
+  OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
+      SelectComponent{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
+      ReleaseModelPackageComponentContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
+      ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
+};
+
+inline const ModelPackageApi& GetModelPackageApi() {
+  static const ModelPackageApi fns = []() {
+    ModelPackageApi f;
+    if (api == nullptr || runtime_api_version < 28) {
+      return f;
+    }
+    f.CreateModelPackageOptionsFromSessionOptions =
+        Ort::Experimental::Get_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn(api);
+    f.ReleaseModelPackageOptions =
+        Ort::Experimental::Get_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn(api);
+    f.CreateModelPackageContext =
+        Ort::Experimental::Get_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn(api);
+    f.ReleaseModelPackageContext =
+        Ort::Experimental::Get_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantNames =
+        Ort::Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantEpName =
+        Ort::Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
+    f.SelectComponent =
+        Ort::Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
+    f.ReleaseModelPackageComponentContext =
+        Ort::Experimental::Get_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn(api);
+    f.ModelPackageComponent_GetSelectedVariantFolderPath =
+        Ort::Experimental::Get_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn(api);
+    return f;
+  }();
+  if (fns.CreateModelPackageContext == nullptr) {
+    throw std::runtime_error("Model Package API is not available in this ONNX Runtime build");
   }
-  return *model_package_api;
+  return fns;
 }
 #endif
 
@@ -1475,7 +1524,7 @@ struct OrtLoraAdapter {
   Ort::Abstract make_abstract;
 };
 
-#if ORT_API_VERSION >= 27
+#if ORT_API_VERSION >= 28
 /** \brief Model Package Options
  *
  * Created from an OrtEnv and OrtSessionOptions to capture the EP configuration for variant selection.
@@ -1498,7 +1547,7 @@ struct OrtModelPackageContext {
   std::vector<std::string> GetVariantNames(const char* component_name) const;
 
   /// Returns the EP name declared for a (component, variant) pair, or std::nullopt when the
-  /// variant does not declare an EP. Each variant targets a single EP under the v4 schema.
+  /// variant does not declare an EP.
   std::optional<std::string> GetVariantEpName(const char* component_name, const char* variant_name) const;
 
   std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(const char* component_name,
