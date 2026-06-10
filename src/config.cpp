@@ -381,6 +381,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs_length") {
       v_.outputs_length = JSON::Get<std::string_view>(value);
     } else {
@@ -1857,16 +1859,30 @@ struct SpeculativeTree_Element : JSON::Element {
     }
   }
 
-  // medusa_choices is an array-of-int-arrays consumed by the (deferred) PR-C tree-verify path.
-  // Parse-and-ignore here so a tree config loads, without claiming tree support in PR-B.
+  // medusa_choices is an array-of-int-arrays describing the static token tree (each inner array is a
+  // root-to-node path of child indices). PR-C parses it into the struct; the executor degrades the
+  // tree to its best linear chain (linear-K fallback) because the in-tree decoder graph cannot
+  // express a tree-attention mask (see docs/pipeline-config-v2.1-design.md §11.2 and the PR-C note).
   Element& OnArray(std::string_view name) override {
-    if (name == "medusa_choices") return ignore_;
+    if (name == "medusa_choices") return medusa_choices_;
     throw JSON::unknown_value_error{};
   }
 
  private:
+  // Parses the outer array of medusa_choices: each element is itself an int array (a tree path).
+  struct MedusaChoices_Element : JSON::Element {
+    explicit MedusaChoices_Element(std::vector<std::vector<int>>& v) : v_{v} {}
+    Element& OnArray(std::string_view /*name*/) override {
+      v_.emplace_back();
+      inner_ = std::make_unique<IntArray_Element>(v_.back());
+      return *inner_;
+    }
+    std::vector<std::vector<int>>& v_;
+    std::unique_ptr<IntArray_Element> inner_;
+  };
+
   Config::Pipeline::Speculative::Tree& v_;
-  Ignore_Element ignore_;
+  MedusaChoices_Element medusa_choices_{v_.medusa_choices};
 };
 
 // v2.1 (issue #2114): the `speculative` flow strategy block.

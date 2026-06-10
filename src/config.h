@@ -379,6 +379,13 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
 
+        // v2.1 (issue #2114, PR-C): name of the intermediate hidden-state activation a pipeline
+        // stage exposes (e.g. the transformer's "hidden_states" output that feeds the lm_head).
+        // Empty when the graph does not expose one. When set, DecoderOnlyPipelineState forwards this
+        // tensor out of its ortvalue_store_ via GetHiddenStates() so hidden-state-coupled drafts
+        // (EAGLE/EAGLE-3/MTP, design §5/§4e) can consume it as a dataflow edge.
+        std::string hidden_states;
+
         // Parakeet TDT decoder (prediction network) extra outputs
         std::string outputs_length;
       } outputs;

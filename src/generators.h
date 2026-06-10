@@ -112,6 +112,11 @@ struct Generator : LeakChecked<Generator> {
   // [batch*beams, seq, vocab] (written to out_shape), or empty when the underlying state does
   // not expose them. Used by the speculative-decoding verify pass (issue #2114 v2.1).
   DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape);
+
+  // Returns the intermediate hidden-state activation from the most recent model run as fp32, shape
+  // [batch*beams, seq, hidden] (written to out_shape), or empty when the underlying state does not
+  // expose one. Used by hidden-state-coupled (EAGLE/MTP) drafts (issue #2114 v2.1, PR-C).
+  DeviceSpan<float> GetHiddenStates(std::array<int64_t, 3>& out_shape);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
 

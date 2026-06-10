@@ -629,6 +629,10 @@ DeviceSpan<float> Generator::GetRawLogits(std::array<int64_t, 3>& out_shape) {
   return state_->GetRawLogits(out_shape);
 }
 
+DeviceSpan<float> Generator::GetHiddenStates(std::array<int64_t, 3>& out_shape) {
+  return state_->GetHiddenStates(out_shape);
+}
+
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 

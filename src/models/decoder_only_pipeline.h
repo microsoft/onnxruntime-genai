@@ -128,6 +128,14 @@ struct DecoderOnlyPipelineState : State {
   // verify). Forwards to the owned Logits, which retains the un-sliced model output.
   DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape) override;
 
+  // Exposes the configured intermediate hidden-state activation (config.model.decoder.outputs
+  // .hidden_states) from the most recent Run (issue #2114 v2.1, PR-C). This is the dataflow edge an
+  // EAGLE/EAGLE-3/MTP draft consumes (design §5/§4e). The tensor is read straight out of the
+  // ortvalue_store_ where the producing stage left it, kept on its native device (the CPU-only
+  // forwarded-output assumption is relaxed for this read), and converted to fp32 for the caller.
+  // Returns an empty span when no hidden-state output is configured or none was produced this Run.
+  DeviceSpan<float> GetHiddenStates(std::array<int64_t, 3>& out_shape) override;
+
  protected:
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).
@@ -167,6 +175,12 @@ struct DecoderOnlyPipelineState : State {
   std::vector<PartialKeyValueCacheUpdateRecord> partial_kv_cache_update_records_;
 
   Logits logits_{*this};
+
+  // Holds the fp32 view/copy of the configured intermediate hidden-state output materialized on
+  // demand by GetHiddenStates() (issue #2114 v2.1, PR-C). Kept alive between the call and the
+  // caller's read; refreshed each time GetHiddenStates() runs.
+  std::unique_ptr<OrtValue> hidden_states_fp32_;
+  DeviceSpan<float> hidden_states_;
 
   std::unique_ptr<KeyValueCache> key_value_cache_;
   const bool do_key_value_cache_partial_update_;

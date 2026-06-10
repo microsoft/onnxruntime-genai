@@ -600,6 +600,58 @@ DeviceSpan<float> DecoderOnlyPipelineState::GetRawLogits(std::array<int64_t, 3>&
   return logits_.GetAll(out_shape);
 }
 
+DeviceSpan<float> DecoderOnlyPipelineState::GetHiddenStates(std::array<int64_t, 3>& out_shape) {
+  out_shape = {0, 0, 0};
+  hidden_states_ = {};
+  hidden_states_fp32_.reset();
+
+  // The configured name of the intermediate hidden-state activation a pipeline stage exposes
+  // (e.g. the transformer's "hidden_states" output that feeds the lm_head). When unset, no
+  // hidden-state dataflow edge is declared and there is nothing to expose.
+  const std::string& name = model_.config_->model.decoder.outputs.hidden_states;
+  if (name.empty()) {
+    return {};
+  }
+
+  // The producing stage left the tensor in the ortvalue_store_ (it is a non-managed inter-stage
+  // output). Unlike logits/KV, hidden states may be large and device-resident; we read them in
+  // place (relaxing the historical CPU-only forwarded-output assumption, design §11.4) and convert
+  // to fp32 for the caller. GetOutput() also covers managed outputs for completeness.
+  OrtValue* raw = GetOutput(name.c_str());
+  if (!raw) {
+    return {};
+  }
+
+  auto type_info = raw->GetTensorTypeAndShapeInfo();
+  const ONNXTensorElementDataType type = type_info->GetElementType();
+  const std::vector<int64_t> shape = type_info->GetShape();
+
+  // Convert fp16/bfloat16 -> fp32 so callers always get float hidden states.
+  if (type == Ort::TypeToTensorType<Ort::Float16_t> || type == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    hidden_states_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape);
+    Cast(*raw, hidden_states_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
+    raw = hidden_states_fp32_.get();
+  } else if (type != Ort::TypeToTensorType<float>) {
+    return {};  // Unsupported element type for a hidden-state edge.
+  }
+
+  // Normalize the reported shape to [batch*beams, seq, hidden]; collapse any leading dims into batch.
+  std::array<int64_t, 3> normalized{1, 1, 1};
+  if (shape.size() >= 3) {
+    int64_t lead = 1;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) lead *= shape[i];
+    normalized = {lead, shape[shape.size() - 2], shape[shape.size() - 1]};
+  } else if (shape.size() == 2) {
+    normalized = {shape[0], 1, shape[1]};
+  } else if (shape.size() == 1) {
+    normalized = {1, 1, shape[0]};
+  }
+  out_shape = normalized;
+
+  hidden_states_ = WrapTensor<float>(*model_.p_device_inputs_, *raw);
+  return hidden_states_;
+}
+
 void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length) {
   if (key_value_cache_) {
     const bool outstanding_key_value_cache_partial_update =

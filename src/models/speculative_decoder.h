@@ -9,8 +9,12 @@
 // accepted, and the per-role KV caches are rolled back on the first mismatch using PR-A's
 // State::RewindTo (via Generator::RewindToLength).
 //
-// Scope (PR-B):
-//   * Linear-K drafting (no token tree -- that is PR-C).
+// Scope (PR-B, extended in PR-C):
+//   * Linear-K drafting (no token tree). When the config requests a token tree (strategy.tree),
+//     PR-C degrades it to the verified best-linear-chain path (linear-K fallback) rather than
+//     faking tree-attention -- the in-tree decoder graph cannot express a tree-attention mask
+//     without a model-side 2D additive mask input (design §11.2; see the constructor). This is the
+//     design's stated degradation and preserves the greedy-equivalence invariant.
 //   * Greedy acceptance (argmax). `rejection_sampling`/`typical` are parsed but not yet driven
 //     here (see the deferred list in the PR-B decision note).
 //   * Multi-session roles are realized as two independent Generators (target + draft), each owning
@@ -56,6 +60,11 @@ struct SpeculativeDecoder {
   int committed_token_count() const { return committed_token_count_; }
   int accepted_draft_count() const { return accepted_draft_count_; }
 
+  // True when the config requested a token tree (strategy.tree) but the executor degraded it to the
+  // verified best-linear-chain path (linear-K fallback). See the constructor for why true
+  // tree-attention is deferred (needs a model-side 2D mask input). Output remains greedy-equivalent.
+  bool tree_linear_k_fallback() const { return tree_linear_k_fallback_; }
+
  private:
   int ArgMax(std::span<const float> logits_row) const;
   bool IsEos(int32_t token) const;
@@ -79,6 +88,7 @@ struct SpeculativeDecoder {
   int verify_passes_{0};
   int committed_token_count_{0};
   int accepted_draft_count_{0};
+  bool tree_linear_k_fallback_{false};
 };
 
 }  // namespace Generators

@@ -30,7 +30,7 @@
             "pipeline": [
                 {
                     "embeddings": {
-                        "filename": "embeds.onnx",
+                        "filename": "../target/embeds.onnx",
                         "inputs": [
                             "input_ids"
                         ],
@@ -39,7 +39,7 @@
                         ]
                     },
                     "transformer": {
-                        "filename": "transformer.onnx",
+                        "filename": "../target/transformer.onnx",
                         "inputs": [
                             "/model/embed_tokens/Gather/output_0",
                             "attention_mask",
@@ -53,7 +53,7 @@
                         ]
                     },
                     "language_model_head": {
-                        "filename": "lm_head.onnx",
+                        "filename": "../target/lm_head.onnx",
                         "inputs": [
                             "hidden_states"
                         ],
@@ -72,21 +72,27 @@
     "pipeline": {
         "sessions": {
             "target": {
-                "file": "transformer.onnx"
+                "file": "../target/transformer.onnx"
             },
-            "draft": {
+            "eagle_draft": {
                 "file": "../draft/transformer.onnx"
             }
         },
         "roles": {
             "target": "target",
-            "draft": "draft"
+            "draft": "eagle_draft"
         },
+        "dataflow": [
+            {
+                "from": "target.hidden_states",
+                "to": "eagle_draft.prev_hidden"
+            }
+        ],
         "strategy": {
             "kind": "speculative",
             "draft": {
                 "producer": "draft_model",
-                "session": "draft"
+                "session": "eagle_draft"
             },
             "verify": {
                 "session": "target"

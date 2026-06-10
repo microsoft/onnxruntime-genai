@@ -30,7 +30,7 @@
             "pipeline": [
                 {
                     "embeddings": {
-                        "filename": "embeds.onnx",
+                        "filename": "../target/embeds.onnx",
                         "inputs": [
                             "input_ids"
                         ],
@@ -39,7 +39,7 @@
                         ]
                     },
                     "transformer": {
-                        "filename": "transformer.onnx",
+                        "filename": "../target/transformer.onnx",
                         "inputs": [
                             "/model/embed_tokens/Gather/output_0",
                             "attention_mask",
@@ -53,7 +53,7 @@
                         ]
                     },
                     "language_model_head": {
-                        "filename": "lm_head.onnx",
+                        "filename": "../target/lm_head.onnx",
                         "inputs": [
                             "hidden_states"
                         ],
@@ -72,7 +72,7 @@
     "pipeline": {
         "sessions": {
             "target": {
-                "file": "transformer.onnx"
+                "file": "../target/transformer.onnx"
             },
             "draft": {
                 "file": "../draft/transformer.onnx"
@@ -92,7 +92,20 @@
                 "session": "target"
             },
             "num_speculative_tokens": 4,
-            "acceptance": "greedy"
+            "acceptance": "greedy",
+            "tree": {
+                "topology": "medusa_choices",
+                "max_nodes": 7,
+                "max_depth": 3,
+                "medusa_choices": [
+                    [0],
+                    [0, 0],
+                    [0, 1],
+                    [1],
+                    [1, 0],
+                    [2]
+                ]
+            }
         }
     },
     "search": {

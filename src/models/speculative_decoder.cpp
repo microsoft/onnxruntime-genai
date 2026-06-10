@@ -29,7 +29,16 @@ SpeculativeDecoder::SpeculativeDecoder(std::shared_ptr<const Model> target_model
         "SpeculativeDecoder: only 'greedy' acceptance is implemented in PR-B (got '" + strategy.acceptance + "').");
   }
   if (strategy.tree.has_value()) {
-    throw std::runtime_error("SpeculativeDecoder: token-tree verify is deferred to PR-C.");
+    // Token-tree verify needs a non-causal tree-attention mask supplied to the target's forward
+    // pass. The in-tree decoder-pipeline graph cannot express that: its `attention_mask` input is a
+    // 1D [batch, total] padding mask (runtime PositionInputs only ever build a 2D {batch, seq}
+    // mask -- src/models/position_inputs.h:62), and causal masking is hardcoded *inside* the graph
+    // via Trilu, so a caller cannot supply a per-(query,key) 2D additive mask without a model-side
+    // graph change. This is exactly the design's flagged unknown (docs/pipeline-config-v2.1-design
+    // .md §11.2). Rather than fake it, we degrade the tree to its best linear chain and run the
+    // verified linear-K path below -- the design's stated fallback (§11.2) -- which still covers
+    // vanilla/PLD/self-spec and preserves the greedy-equivalence invariant.
+    tree_linear_k_fallback_ = true;
   }
   if (strategy.draft.producer != "draft_model") {
     throw std::runtime_error(
