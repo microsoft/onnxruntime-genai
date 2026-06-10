@@ -466,12 +466,29 @@ struct Config {
       std::string entry_point;
     };
 
+    // v2.1 (issue #2114 §8): the controller-plugin escape hatch (bucket C). When present, a custom
+    // plugin OWNS the per-step decode loop -- it is handed the runtime's step primitives (get/append
+    // tokens, run a forward step, read logits + hidden states, rewind/rollback, query EOS/length) via
+    // a stable C ABI (see src/models/plugin_api.h) and decides the control flow itself. This is the
+    // home for irregular, stateful controllers that cannot be expressed as a static DAG or the
+    // parameterized `speculative` strategy (e.g. Lookahead's Jacobi n-gram pool, nested cascades).
+    //
+    // Block-presence gated and additive: an absent `controller` block leaves every existing path
+    // byte-for-byte unchanged. Loading the controller requires USE_GENAI_PLUGINS (a real external
+    // .so); a default (plugins-OFF) build throws a clear "not enabled" error when one is declared.
+    struct Controller {
+      std::string library;      // Path to the controller plugin shared library (.so/.dll).
+      std::string entry_point;  // Exported symbol of the OgaCreateDecodeControllerFn entry point.
+      std::string config;       // Opaque controller-defined config (passed through verbatim as a C string).
+    };
+
     std::optional<std::string> extends;  // Built-in preset name to inherit from.
     std::vector<Session> sessions;
     std::vector<FlowStep> flow;
     std::vector<Wire> dataflow;
     State state;
     std::optional<Plugin> plugin;
+    std::optional<Controller> controller;  // v2.1 §8: custom decode-loop controller plugin (bucket C).
 
     // v2.1 (issue #2114): logical role -> session name. Lets >=2 sessions be referenced by a
     // stable role (target/draft/...) independent of their `sessions[]` key. Speculative decoding

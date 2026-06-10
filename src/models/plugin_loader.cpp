@@ -9,6 +9,7 @@
 
 #include "model.h"
 #include "plugin_api.h"
+#include "controller_host.h"
 
 #if USE_GENAI_PLUGINS
 #ifdef _WIN32
@@ -108,6 +109,24 @@ std::shared_ptr<Model> LoadPluginPipeline(const Config::Pipeline::Plugin& plugin
   });
 }
 
+std::unique_ptr<ControllerHook> LoadDecodeController(const Config::Pipeline::Controller& controller) {
+  if (controller.library.empty())
+    throw std::runtime_error("pipeline.controller.library is empty; a controller plugin library path is required.");
+  if (controller.entry_point.empty())
+    throw std::runtime_error("pipeline.controller.entry_point is empty; a controller entry-point symbol name is required.");
+
+  auto library = OpenLibrary(controller.library);
+
+  auto entry = reinterpret_cast<OgaCreateDecodeControllerFn>(library->GetSymbol(controller.entry_point.c_str()));
+  if (!entry)
+    throw std::runtime_error("Controller plugin '" + controller.library + "' does not export entry point '" +
+                             controller.entry_point + "'.");
+
+  // The library handle must outlive the controller (its code/vtable/destructor live inside the
+  // module), so it is captured as the controller hook's keepalive.
+  return CreateControllerHook(entry, controller.config, library);
+}
+
 #else  // USE_GENAI_PLUGINS
 
 std::shared_ptr<Model> LoadPluginPipeline(const Config::Pipeline::Plugin& plugin,
@@ -118,6 +137,13 @@ std::shared_ptr<Model> LoadPluginPipeline(const Config::Pipeline::Plugin& plugin
       "Pipeline plugin support is not enabled in this build (rebuild with USE_GENAI_PLUGINS=ON). "
       "Requested plugin library: '" +
       plugin.library + "'.");
+}
+
+std::unique_ptr<ControllerHook> LoadDecodeController(const Config::Pipeline::Controller& controller) {
+  throw std::runtime_error(
+      "Controller plugin support is not enabled in this build (rebuild with USE_GENAI_PLUGINS=ON). "
+      "Requested controller library: '" +
+      controller.library + "'.");
 }
 
 #endif  // USE_GENAI_PLUGINS

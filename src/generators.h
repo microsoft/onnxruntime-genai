@@ -45,6 +45,7 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+class ControllerHook;
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -100,12 +101,19 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();  // Defined out-of-line in generators.cpp so unique_ptr members may be forward-declared.
 
   bool IsDone();
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+
+  // Commit caller-chosen `tokens` as the accepted next tokens WITHOUT forcing a new forward pass
+  // (the next ComputeLogits re-evaluates against the extended sequence). Mirrors Search::SelectTop's
+  // append step but with externally-chosen tokens; used by the controller-plugin loop hook
+  // (issue #2114 §8, PR-E). Leaves computed_logits_ = false so IsDone()/the next step re-evaluate.
+  void AppendAcceptedTokens(cpu_span<const int32_t> tokens);
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
 
@@ -132,6 +140,11 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<LogitsProcessorChain> logits_chain_;  // v2.1 §6: non-null only when config declares a chain.
+
+  // v2.1 §8 (issue #2114, PR-E): the controller-plugin escape hatch. Non-null only when the config
+  // declares a `pipeline.controller`; when set, the controller OWNS the per-step decode loop and
+  // GenerateNextToken delegates to it. Default (no controller) builds leave this null and unchanged.
+  std::unique_ptr<ControllerHook> controller_;
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once

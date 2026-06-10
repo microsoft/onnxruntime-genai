@@ -63,6 +63,102 @@ typedef int (*OgaCreatePipelineFn)(void* ort_env,
                                    OgaPipelinePluginModel** model_out,
                                    OgaPipelinePluginModelDestroyFn* destroy_out);
 
+// =====================================================================================================
+// Controller-plugin escape hatch (issue #2114, PR-E / design §8) — bucket C.
+//
+// The entry point above hands over *model construction only*; the generation loop stays in the
+// runtime's Generator. The controller surface below lets a plugin instead OWN the per-step decode
+// loop: irregular, stateful control flow (Lookahead's Jacobi n-gram pool, nested cascades, novel
+// research) that cannot be expressed as a static DAG or the parameterized `speculative` strategy.
+//
+// Same ABI contract as above: STABLE C ONLY — opaque handles, plain pointers, int status. No C++
+// types, smart pointers, RTTI or exceptions cross the boundary. The runtime adapts its C++ Generator
+// to the C `OgaDecodeStepContext` primitive surface on its own side; the controller never sees a
+// Generators C++ type. Status convention: 0 == success, non-zero == failure (surfaced as a
+// std::runtime_error by the runtime).
+// =====================================================================================================
+
+// Opaque handle to the controller object the plugin constructs. Private to the plugin; the runtime
+// only passes it back to the plugin's step/destroy callbacks.
+typedef struct OgaDecodeController OgaDecodeController;
+
+// Opaque handle to the runtime-side decode state (a `Generators::Generator*` adapter) the controller
+// drives. The controller never dereferences it; it only passes it back into the primitive callbacks
+// in OgaDecodeStepContext below.
+typedef struct OgaDecodeContext OgaDecodeContext;
+
+// The runtime-provided step-primitive vtable. The runtime fills this in (with `host` bound to the
+// current decode state) and passes it to the controller's step function. Every callback takes the
+// opaque `host` as its first argument and returns an int status (0 == ok) unless noted. Pointers
+// returned via out-params (`GetLogits`/`GetHiddenStates`) point into runtime-owned scratch that
+// stays valid only until the next callback on the same context.
+typedef struct OgaDecodeStepContext {
+  OgaDecodeContext* host;  // Pass this back to every callback below. Borrowed; do not free.
+
+  // Current committed sequence length (token count) for batch index 0.
+  size_t (*GetSequenceLength)(OgaDecodeContext* host);
+
+  // The model's primary end-of-stream token id, or -1 if none is configured. Query primitive.
+  int32_t (*GetEosTokenId)(OgaDecodeContext* host);
+
+  // Non-zero if the runtime considers generation finished (EOS reached / max length). Query primitive.
+  int (*IsDone)(OgaDecodeContext* host);
+
+  // Copy up to `capacity` tokens of the committed sequence (batch 0) into `out`; writes the true
+  // token count to `*count_out`. Returns 0 on success, non-zero if `out`/`capacity` is insufficient.
+  int (*GetTokens)(OgaDecodeContext* host, int32_t* out, size_t capacity, size_t* count_out);
+
+  // Run a forward step on the current next-token(s) if needed and expose the next-position logits.
+  // Writes a pointer to the fp32 logits ([vocab] for batch 0) to `*logits_out` and the vocab size to
+  // `*vocab_out`. This is the controller's "read logits" + lazy "run a forward step" primitive.
+  int (*GetLogits)(OgaDecodeContext* host, const float** logits_out, size_t* vocab_out);
+
+  // Expose the most recent intermediate hidden-state activation (fp32) for batch 0, last position.
+  // Writes a pointer to `*hidden_out` and the hidden size to `*hidden_size_out`. Returns non-zero
+  // when the model does not expose hidden states.
+  int (*GetHiddenStates)(OgaDecodeContext* host, const float** hidden_out, size_t* hidden_size_out);
+
+  // Commit `count` caller-chosen tokens as the accepted next tokens WITHOUT forcing a recompute
+  // (the next GetLogits re-evaluates against the extended sequence). This is the controller's
+  // "append tokens" / advance primitive. Returns 0 on success.
+  int (*AppendTokens)(OgaDecodeContext* host, const int32_t* tokens, size_t count);
+
+  // Roll the runtime state (search sequences + owned KV caches + position state) back to `length`
+  // tokens. The rewind/rollback primitive used by speculative / lookahead controllers. Returns 0
+  // on success.
+  int (*RewindTo)(OgaDecodeContext* host, size_t length);
+} OgaDecodeStepContext;
+
+// The controller's per-outer-step callback. The runtime calls this once per Generator::GenerateNextToken
+// when a controller is configured, instead of running the built-in sampling step. The controller uses
+// the `ctx` primitives to drive its own loop and MUST commit at least progress toward termination
+// (typically >= 1 token via ctx->AppendTokens). Writes the number of tokens it emitted this step to
+// `*tokens_emitted_out`. Returns 0 on success, non-zero on failure.
+typedef int (*OgaControllerStepFn)(OgaDecodeController* self,
+                                   OgaDecodeStepContext* ctx,
+                                   int* tokens_emitted_out);
+
+// Destructor for the controller handle. Called exactly once by the runtime when the owning Generator
+// is destroyed. Must tolerate the handle written to `controller_out` and must not throw.
+typedef void (*OgaDecodeControllerDestroyFn)(OgaDecodeController* self);
+
+// Optional second entry point a controller plugin MAY export (alongside OgaCreatePipelineFn), named
+// by `pipeline.controller.entry_point`.
+//
+// Parameters:
+//   config       [in]  Opaque, controller-defined config C string from `pipeline.controller.config`
+//                      (may be NULL/empty). Borrowed for the duration of the call; the controller
+//                      must copy anything it needs to retain.
+//   controller_out [out] On success the plugin writes its opaque controller handle here (non-NULL).
+//   step_out     [out] On success the plugin writes its per-step callback here (non-NULL).
+//   destroy_out  [out] On success the plugin writes the destructor for the handle here (non-NULL).
+//
+// Returns 0 on success, non-zero on failure. Must not throw across the boundary.
+typedef int (*OgaCreateDecodeControllerFn)(void* config,
+                                           OgaDecodeController** controller_out,
+                                           OgaControllerStepFn* step_out,
+                                           OgaDecodeControllerDestroyFn* destroy_out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

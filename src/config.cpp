@@ -1753,6 +1753,28 @@ struct Plugin_Element : JSON::Element {
   Config::Pipeline::Plugin& v_;
 };
 
+// v2.1 (issue #2114 §8): "controller" declares the controller-plugin escape hatch (bucket C). It
+// names the plugin library + entry-point symbol and carries an opaque, controller-defined config
+// string passed through verbatim. Block-presence gated; an absent block leaves all paths unchanged.
+struct Controller_Element : JSON::Element {
+  explicit Controller_Element(Config::Pipeline::Controller& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "library") {
+      v_.library = JSON::Get<std::string_view>(value);
+    } else if (name == "entry_point") {
+      v_.entry_point = JSON::Get<std::string_view>(value);
+    } else if (name == "config") {
+      v_.config = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Pipeline::Controller& v_;
+};
+
 // v2.1 (issue #2114): "roles" maps a logical role to a session name, e.g.
 // {"target": "target_session", "draft": "draft_session"}.
 struct Roles_Element : JSON::Element {
@@ -1950,6 +1972,11 @@ struct PipelineConfig_Element : JSON::Element {
       plugin_ = std::make_unique<Plugin_Element>(*v_.plugin);
       return *plugin_;
     }
+    if (name == "controller") {
+      v_.controller = Config::Pipeline::Controller{};
+      controller_ = std::make_unique<Controller_Element>(*v_.controller);
+      return *controller_;
+    }
     if (name == "preprocessing") return ignore_;  // Consumed by preprocessor in a later PR.
     throw JSON::unknown_value_error{};
   }
@@ -1973,6 +2000,7 @@ struct PipelineConfig_Element : JSON::Element {
   std::unique_ptr<Roles_Element> roles_;
   std::unique_ptr<Strategy_Element> strategy_;
   std::unique_ptr<Plugin_Element> plugin_;
+  std::unique_ptr<Controller_Element> controller_;
   Ignore_Element ignore_;
 };
 

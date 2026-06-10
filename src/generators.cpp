@@ -16,6 +16,8 @@
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "logits_processor_chain.h"
+#include "models/plugin_loader.h"
+#include "models/controller_host.h"
 #include "search.h"
 #include "tracing.h"
 #include "cpu/interface.h"
@@ -399,9 +401,19 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
         params.config.model.vocab_size, params.search.batch_size);
   }
 
+  // v2.1 (issue #2114 §8, PR-E): when the config declares a controller plugin, load it now so it can
+  // own the decode loop. Loading requires USE_GENAI_PLUGINS; LoadDecodeController throws a clear
+  // "not enabled" error in a default build. When no controller is declared, controller_ stays null
+  // and GenerateNextToken runs the built-in path unchanged.
+  if (params.config.pipeline.controller) {
+    controller_ = LoadDecodeController(*params.config.pipeline.controller);
+  }
+
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
 }
+
+Generator::~Generator() = default;
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
   // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
@@ -504,6 +516,35 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
+}
+
+void Generator::AppendAcceptedTokens(cpu_span<const int32_t> tokens) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (tokens.size() == 0)
+    return;
+
+  // Commit each caller-chosen token by reusing the proven built-in greedy append path: ensure the
+  // logits for the current position exist (running a forward step if needed), spike the chosen
+  // token's score so Search::SelectTop selects exactly it, then commit via SelectTop. SelectTop
+  // appends to the sequence and updates the done/EOS state correctly and -- unlike
+  // Search::AppendTokens -- never resets the done flag, so loop termination and max_length bounds are
+  // preserved. The KV cache is advanced lazily on the next forward step, exactly as the built-in
+  // sampling loop does (SelectTop appends; the next ComputeLogits processes the new token).
+  const int vocab_size = model_->config_->model.vocab_size;
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    GetLogits();  // computes a forward step if needed; leaves computed_logits_ = true
+    auto scores = search_->GetLogits().CpuSpan();  // batch 0 next-token scores, on CPU
+    const int32_t token = tokens[i];
+    if (token < 0 || token >= vocab_size || static_cast<size_t>(token) >= scores.size())
+      throw std::runtime_error("AppendAcceptedTokens: token id " + std::to_string(token) + " is out of range.");
+    float max_score = scores[0];
+    for (int v = 1; v < vocab_size && static_cast<size_t>(v) < scores.size(); ++v)
+      if (scores[v] > max_score) max_score = scores[v];
+    scores[token] = max_score + 1.0f;  // force argmax == token
+    computed_logits_ = false;
+    last_action_ = Action::generated;
+    search_->SelectTop();  // appends `token`; sets done_/eos correctly, no ResetDone
+  }
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -659,6 +700,16 @@ void Generator::GenerateNextToken() {
 
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
+
+  // v2.1 (issue #2114 §8, PR-E): when a controller plugin is configured it OWNS this decode step. It
+  // drives its own loop through the exposed step primitives (get/append tokens, run a forward step,
+  // read logits + hidden states, rewind/rollback, query EOS/length) and commits the accepted
+  // token(s) itself, replacing the entire built-in sampling path below. When no controller is
+  // configured, controller_ is null and the legacy path runs byte-for-byte unchanged.
+  if (controller_) {
+    controller_->Step(*this);
+    return;
+  }
 
   // Phi3 model switches from short factor to long factor at the ROPE threshold token,
   // needs recomputation of Position IDs and KV Cache via rewind + re-append.
