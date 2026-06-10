@@ -71,26 +71,16 @@ python -c "from transformers import AutoConfig; c=AutoConfig.from_pretrained('<h
 
 - `make_moe_op` emits `MoE` (fp16) or `QMoE` (int4/int8). `make_qmoe_weights`
   quantizes and packs each expert weight `[N, K]`.
-- **CUDA QMoE weight encoding (critical):** the kernel is a CUTLASS fpA_intB
-  mixed GEMM that consumes **offline-prepacked** weights. The proven recipe
-  (see `_cutlass_prepacked_blockwise_quantize` in `base.py`):
-  1. transpose weight to `[K, N]`;
-  2. `onnxruntime...quantize_matmul_4bits(qw, w_T, scales, zp, block, N, K, is_symmetric=True)`;
-  3. **keep the SIGNED scales** — do NOT `abs()` them. The kernel dequantizes as
-     `(q - 8) * scale`, and `quantize_matmul_4bits` folds the block-anchor sign
-     into the scale. Taking `abs()` corrupts every block whose anchor is negative
-     and produces garbage (this is a real bug that masquerades as "int4 quality
-     loss");
-  4. `pack_weights_for_cuda_mixed_gemm(qw_reshaped, N, K, bits, force_arch=80)` —
-     **always force_arch=80**: all int4 QMoE prepacking assumes the SM80-style
-     interleaved layout, which is correct for every SM ≥ 80 (Ampere/Ada/Hopper,
-     incl. RTX 4090 = SM89 and H100/H200 = SM90);
-  5. reshape to `[K, N/pack]`. Stack experts → weights `[E, K, N/pack]`, scales
-     `[E, N, K/block]`.
-- The QMoE node then uses the **default** `weights_prepacked` (omit the attribute;
-  default = prepacked). Do **not** set `weights_prepacked=0` (the raw-weight +
-  runtime-PrePack-hook path is finiteness-checked only and is not bit-correct).
-- **CUDA QMoE only supports `block_size` 64 or 128.** Assert this in the builder.
+- **CUDA QMoE weight packing (requires `onnxruntime-gpu >= 1.27`):** the kernel is a
+  CUTLASS fpA_intB mixed GEMM that consumes offline-prepacked weights. The preferred
+  recipe (no TensorRT-LLM dependency):
+  1. quantize block-wise with `_symmetric_blockwise_quantize(weights, block_size)`;
+  2. call `pack_weights_for_cuda_mixed_gemm` (available in `onnxruntime-gpu >= 1.27`)
+     to produce the CUTLASS-interleaved layout the kernel expects;
+  3. stack experts → weights `[E, K, N/pack]`, scales `[E, N, K/block]`.
+- **`qmoe_block_size` supports values 16, 32, 64, 128, or 256** (default 128 for
+  CUDA/TRT-RTX, 32 otherwise). `_symmetric_blockwise_quantize` pads the last
+  dimension to a multiple of `block_size` automatically.
 - Emit the activation attributes that match the model's activation: for standard
   SwiGLU `silu(gate)*up`, use `activation_alpha=1.0, activation_beta=0.0` and no
   `swiglu_limit`. GPT-OSS-style clamped SwiGLU uses `alpha=1.702, beta=1.0,
