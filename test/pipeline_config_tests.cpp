@@ -22,6 +22,14 @@ Generators::Config LoadConfig(const std::string& relative_path) {
   return Generators::Config(fs::path(std::string(MODEL_PATH) + relative_path), /*json_overlay*/ "");
 }
 
+// Loads a shipped example config from examples/pipeline-config/ (outside test/models/ so it is not
+// gitignored). Used by the ExamplePipelineConfigs tests below to prove every shipped example actually
+// parses, lowers and routes with the current build.
+Generators::Config LoadExample(const std::string& relative_path) {
+  return Generators::Config(fs::path(std::string(EXAMPLES_PATH) + "pipeline-config/" + relative_path),
+                            /*json_overlay*/ "");
+}
+
 const Generators::Config::Pipeline::Session* FindSession(const Generators::Config::Pipeline& pipeline,
                                                          const std::string& name) {
   for (const auto& session : pipeline.sessions) {
@@ -185,4 +193,116 @@ TEST(PipelineConfigTests, V1GoldenPhi3V) {
   // phi3v uses the standard separate KV cache and default (1D) position ids.
   EXPECT_EQ(config.pipeline.state.kv_cache.format, "separate");
   EXPECT_EQ(config.pipeline.state.position_ids.strategy, "default");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Shipped examples (examples/pipeline-config/). These prove that every documented example config under
+// examples/pipeline-config/ actually parses + lowers with THIS build and routes to the model class the
+// README claims. The plugin escape-hatch example (04) is intentionally NOT exercised here: its ON-path
+// (USE_GENAI_PLUGINS=ON) is not linked into this build, so it is a documented syntax example only.
+// ---------------------------------------------------------------------------------------------------
+
+// Example 1 -- preset usage: the smallest possible v2 decoder, selecting a built-in preset by name.
+TEST(ExamplePipelineConfigs, PresetDecoder) {
+  auto config = LoadExample("01-preset-decoder");
+
+  EXPECT_EQ(config.version, 2);
+  EXPECT_TRUE(config.pipeline.present);
+  ASSERT_TRUE(config.pipeline.extends.has_value());
+  EXPECT_EQ(*config.pipeline.extends, "autoregressive-decoder");
+
+  // The preset supplies the flow; the config only named the session file.
+  ASSERT_EQ(config.pipeline.flow.size(), 1u);
+  EXPECT_EQ(config.pipeline.flow[0].run, "decoder");
+  EXPECT_EQ(config.pipeline.flow[0].when, "step");
+
+  // Pure-v2 lowering: decoder file + context_length (from generation.max_length).
+  EXPECT_EQ(config.model.decoder.filename, "model.onnx");
+  EXPECT_EQ(config.model.context_length, 4096);
+
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::DecoderOnly);
+}
+
+// Example 2 -- explicit multi-stage dataflow: an encoder/decoder graph written out by hand (no
+// preset), demonstrating the init/step phases, explicit dataflow wiring and a frozen cross cache.
+TEST(ExamplePipelineConfigs, ExplicitEncoderDecoder) {
+  auto config = LoadExample("02-explicit-encoder-decoder");
+
+  EXPECT_EQ(config.version, 2);
+  EXPECT_FALSE(config.pipeline.extends.has_value());
+
+  // Two stages, acyclic, well under the 10-stage guard.
+  ASSERT_EQ(config.pipeline.flow.size(), 2u);
+  EXPECT_EQ(config.pipeline.flow[0].run, "encoder");
+  EXPECT_EQ(config.pipeline.flow[0].when, "init");
+  EXPECT_EQ(config.pipeline.flow[1].run, "decoder");
+  EXPECT_EQ(config.pipeline.flow[1].when, "step");
+  ASSERT_TRUE(config.pipeline.flow[1].cross_attention_from.has_value());
+  EXPECT_EQ(*config.pipeline.flow[1].cross_attention_from, "encoder");
+
+  // Explicit dataflow wiring.
+  ASSERT_EQ(config.pipeline.dataflow.size(), 1u);
+  EXPECT_EQ(config.pipeline.dataflow[0].from, "encoder.encoder_hidden_states");
+  EXPECT_EQ(config.pipeline.dataflow[0].to, "decoder.encoder_hidden_states");
+
+  // Frozen cross-attention cache.
+  ASSERT_TRUE(config.pipeline.state.cross_cache.has_value());
+  ASSERT_TRUE(config.pipeline.state.cross_cache->source.has_value());
+  EXPECT_EQ(*config.pipeline.state.cross_cache->source, "encoder");
+  EXPECT_TRUE(config.pipeline.state.cross_cache->frozen);
+
+  // Lowering populated both session filenames; the encoder session makes this an encoder-decoder route.
+  EXPECT_EQ(config.model.encoder.filename, "encoder.onnx");
+  EXPECT_EQ(config.model.decoder.filename, "decoder.onnx");
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::Whisper);
+}
+
+// Example 3 -- VLM per-image flow: the Qwen-VL style vision pipeline (loop "per_image" + 3D mRoPE).
+TEST(ExamplePipelineConfigs, VlmPerImage) {
+  auto config = LoadExample("03-vlm-per-image");
+
+  EXPECT_EQ(config.version, 2);
+  ASSERT_TRUE(config.pipeline.extends.has_value());
+  EXPECT_EQ(*config.pipeline.extends, "vision-language");
+
+  ASSERT_EQ(config.pipeline.flow.size(), 3u);
+  EXPECT_EQ(config.pipeline.flow[0].run, "vision");
+  EXPECT_EQ(config.pipeline.flow[0].when, "init");
+  EXPECT_EQ(config.pipeline.flow[0].loop, "per_image");
+
+  EXPECT_EQ(config.pipeline.state.position_ids.strategy, "mrope_3d");
+  ASSERT_TRUE(config.pipeline.state.position_ids.grid_source.has_value());
+  EXPECT_EQ(*config.pipeline.state.position_ids.grid_source, "vision.image_grid_thw");
+
+  ASSERT_EQ(config.pipeline.dataflow.size(), 2u);
+  EXPECT_EQ(config.pipeline.dataflow[0].from, "vision.image_features");
+  EXPECT_EQ(config.pipeline.dataflow[1].to, "decoder.inputs_embeds");
+
+  // A vision session present (without a decoder.pipeline) routes to the general multimodal class.
+  EXPECT_EQ(config.model.vision.filename, "vision.onnx");
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(config), Generators::ModelRoute::MultiModal);
+}
+
+// Example 5 -- v1 -> v2 side by side: the legacy v1 gpt2 config and its hand-written v2 equivalent must
+// both load, and both must derive/produce the same structural route (Gpt, via the combined KV cache).
+TEST(ExamplePipelineConfigs, V1ToV2Equivalence) {
+  auto v1 = LoadExample("05-v1-to-v2/v1");
+  EXPECT_EQ(v1.version, 1);
+  EXPECT_EQ(v1.model.type, "gpt2");
+  // The translator derives a pipeline view from v1 without altering model.* ...
+  EXPECT_TRUE(v1.pipeline.present);
+  EXPECT_EQ(v1.pipeline.state.kv_cache.format, "combined");
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(v1), Generators::ModelRoute::Gpt);
+
+  auto v2 = LoadExample("05-v1-to-v2/v2");
+  EXPECT_EQ(v2.version, 2);
+  ASSERT_TRUE(v2.pipeline.extends.has_value());
+  EXPECT_EQ(*v2.pipeline.extends, "autoregressive-decoder");
+  EXPECT_EQ(v2.pipeline.state.kv_cache.format, "combined");
+  EXPECT_EQ(v2.pipeline.state.kv_cache.past_key_pattern, "past_%d");
+  EXPECT_EQ(v2.pipeline.state.kv_cache.present_key_pattern, "present_%d");
+
+  // Same structural decision from both schema versions: the equivalence the README claims.
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(v2), Generators::ClassifyStructuralRoute(v1));
+  EXPECT_EQ(Generators::ClassifyStructuralRoute(v2), Generators::ModelRoute::Gpt);
 }

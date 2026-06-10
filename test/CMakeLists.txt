@@ -57,6 +57,7 @@ endif()
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/")
 
 add_compile_definitions(MODEL_PATH="${TEST_MODEL_SRC_DIR}")
+add_compile_definitions(EXAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../examples/")
 set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
 get_target_property(all_test_srcs unit_tests SOURCES)
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${all_test_srcs})
