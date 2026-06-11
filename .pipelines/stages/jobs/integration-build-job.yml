@@ -128,7 +128,7 @@ jobs:
           --parallel `
           --use_cuda `
           --cuda_home "$(Build.Repository.LocalPath)\cuda_sdk\v12.8" `
-          --cmake_extra_defines "CMAKE_CUDA_ARCHITECTURES=86-real" `
+          --cmake_extra_defines "CMAKE_CUDA_ARCHITECTURES=120-real" `
           --skip_tests `
           --skip_examples
       displayName: 'Build wheel'

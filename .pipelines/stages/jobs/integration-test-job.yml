@@ -29,7 +29,9 @@ jobs:
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
-    ${{ if or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'webgpu')) }}:
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      pool: 'FoundryLocal-GPU-5090'
+    ${{ elseif eq(parameters.ep, 'webgpu') }}:
       pool: 'onnxruntime-Win2022-GPU-A10'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'

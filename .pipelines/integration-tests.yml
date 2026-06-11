@@ -13,8 +13,9 @@
 #
 # What gets built
 #   ORT GenAI is built from source on each run, once per (os, arch):
-#     - Windows x64: built with --use_cuda (CUDA 12.8, sm_86 for A10). The
-#                    same wheel exercises the CPU, CUDA, and WebGPU lanes.
+#     - Windows x64: built with --use_cuda (CUDA 12.8, sm_120 for the
+#                    RTX 5090). The same wheel exercises the CPU, CUDA,
+#                    and WebGPU lanes.
 #     - Linux x64:   built with --use_cuda (CUDA 12.8, sm_90 for H100)
 #                    inside the manylinux container. The same wheel
 #                    exercises the CPU and CUDA lanes.

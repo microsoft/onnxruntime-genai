@@ -17,7 +17,6 @@ ADO job per model.
 
 from __future__ import annotations
 
-import sys
 import warnings
 
 import onnxruntime_genai as og
@@ -26,15 +25,6 @@ import pytest
 _PROMPT = "The capital of France is"
 _EXPECTED_SUBSTRING = "paris"
 _MAX_NEW_TOKENS = 64
-
-# Known (platform, device, model) combinations that don't fit on the
-# agent's GPU memory. TODO: re-enable these once the GPU agents have
-# more VRAM. The current Windows CUDA pool
-# (onnxruntime-Win2022-GPU-A10) only exposes ~4 GB to the job.
-_VRAM_CONSTRAINED_SKIPS: set[tuple[str, str, str]] = {
-    ("win32", "cuda", "ministral-3-3b-Instruct-2512"),
-    ("win32", "cuda", "Phi-4-mini-instruct"),
-}
 
 
 def _register_webgpu_plugin_once() -> bool:
@@ -69,11 +59,6 @@ def _ep_available(device: str) -> bool:
 def test_generates_text(device, model, model_path):
     if not _ep_available(device):
         pytest.skip(f"Execution provider '{device}' is not available in this build.")
-    if (sys.platform, device, model) in _VRAM_CONSTRAINED_SKIPS:
-        pytest.skip(
-            f"Model '{model}' on device '{device}' ({sys.platform}) "
-            "is skipped pending more VRAM on the test agent."
-        )
 
     config = og.Config(str(model_path))
     config.clear_providers()
