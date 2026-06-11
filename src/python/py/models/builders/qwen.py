@@ -1163,7 +1163,6 @@ class Qwen35TextModel(Model):
     def make_layer(self, layer_id, layer):
         """Override to pass ``linear_attn`` instead of ``self_attn`` for
         linear-attention layers (the base class assumes ``self_attn``)."""
-        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
         self.make_layernorm(
             layer_id,
             layer.input_layernorm,
@@ -1171,6 +1170,9 @@ class Qwen35TextModel(Model):
             simple=self.layernorm_attrs["simple"],
             location="input",
         )
+        if self._finish_prompt_embeds_layer_if_needed(layer_id):
+            return
+        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
         self.make_attention(layer_id, attn_module, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(
             layer_id,
@@ -2127,7 +2129,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
-        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
         self.make_layernorm(
             layer_id,
             layer.input_layernorm,
@@ -2135,6 +2136,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             simple=self.layernorm_attrs["simple"],
             location="input",
         )
+        if self._finish_prompt_embeds_layer_if_needed(layer_id):
+            return
+        attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
         self.make_attention(layer_id, attn_module, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(
             layer_id,

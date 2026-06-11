@@ -66,6 +66,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "exclude_embeds",
         "exclude_lm_head",
         "include_hidden_states",
+        "use_cache",
         "enable_cuda_graph",
         "enable_webgpu_graph",
         "use_8bits_moe",
@@ -95,11 +96,22 @@ def check_extra_options(kv_pairs, execution_provider):
     if "int4_nodes_to_exclude" in kv_pairs:
         kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
 
+    if "hidden_states_layers" in kv_pairs:
+        kv_pairs["hidden_states_layers"] = tuple(
+            int(x.strip()) for x in kv_pairs["hidden_states_layers"].split(",") if x.strip()
+        )
+
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError(
             "Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once."
+        )
+
+    if "hidden_states_layers" in kv_pairs and "include_hidden_states" in kv_pairs:
+        raise ValueError(
+            "Both 'hidden_states_layers' and 'include_hidden_states' cannot be used together. "
+            "Use hidden_states_layers to export prompt_embeds for Stable Diffusion text encoders."
         )
 
     if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
@@ -460,6 +472,11 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                use_cache = Include past/present key-value cache inputs and outputs in your ONNX model. Default is true.
+                    Set to false for Stable Diffusion text encoder exports that run full-sequence encoding without KV cache.
+                hidden_states_layers = Comma-separated **decoder block indices** (0-based ``model.layers.{i}``) whose
+                    **input** layernorm Skip output (``.../input_layernorm/output_3``) is stacked into ``prompt_embeds``,
+                    matching Flux Klein reference ONNX (e.g. ``9,18,27``). Implies exclude_lm_head and skips unused upper layers.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
