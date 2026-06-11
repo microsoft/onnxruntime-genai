@@ -48,10 +48,10 @@ class HunyuanDenseV1Model(Model):
         # Force explicit RotaryEmbedding nodes so QK norms can be placed after them.
         return False
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
     def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
         """

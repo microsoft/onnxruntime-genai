@@ -58,7 +58,7 @@ WinML integration downloads `Microsoft.WindowsAppSDK.ML` via NuGet and copies he
 
 ```bash
 # Python tests with test models
-python -m pytest -sv test_onnxruntime_genai_api.py -k "test_name" --test_models ..\test_models
+python -m pytest -sv test_onnxruntime_genai_api.py -k "test_name" --test_models ..\models
 
 # C++ unit tests via CMake/CTest
 ctest --build-config Release --output-on-failure
@@ -160,4 +160,4 @@ Tests are organized by language binding:
 - **Python tests**: `test/python/`, includes end-to-end model testing
 - **Platform tests**: Android/iOS tests run via emulator/simulator
 
-Always test with actual model files from `test/test_models/` directory rather than mock data.
+Always test with actual model files from `test/models/` directory rather than mock data.

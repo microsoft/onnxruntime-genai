@@ -11,7 +11,7 @@ like Mistral3 whose decoder has no input_ids input — causing an ORT error
 
 Fix: use a decoder-only SessionInfo for the HasInput('input_ids') check.
 
-Two test model variants (in test/test_models/):
+Two test model variants (in test/models/):
   - multimodal-decoder-no-input-ids/   Mistral3-like: embedding has input_ids,
                                         decoder does NOT.
   - multimodal-decoder-with-input-ids/ Gemma4-like:   both embedding and decoder

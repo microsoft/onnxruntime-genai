@@ -660,7 +660,7 @@ def get_guidance_args(parser: argparse.ArgumentParser) -> None:
         "--tools_file",
         type=str,
         default="",
-        help="Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json",
+        help="Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json",
     )
     guidance.add_argument(
         "-text", "--text_output", action="store_true", default=False, help="Produce a text response in the output"

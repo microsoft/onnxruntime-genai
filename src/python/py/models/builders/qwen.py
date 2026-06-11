@@ -29,10 +29,10 @@ class Qwen3Model(QwenModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
 
 class Qwen25VLTextModel(Model):
@@ -945,6 +945,8 @@ class VideoChatFlashQwenModel(QwenModel):
             token=self.hf_token,
             **extra_kwargs,
         )
+
+
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
@@ -2095,19 +2097,29 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.model_type = "Qwen3_5_MoeForConditionalGeneration"
+        # The base builder derives the GenAI model.type by stripping the suffix
+        # after "For" and lowercasing, matching Qwen3.5 text-only export.
+        self.model_type = (
+            "Qwen3_5_Moe_textForCausalLM"
+            if self.is_text_only
+            else "Qwen3_5_MoeForConditionalGeneration"
+        )
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
+        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
+            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
+            # use +inf to preserve the "no clamp" behavior when the model omits it.
+            self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
-        algo_config = self.quant_attrs["int4"].get("algo_config")
+        algo_config = self.quant_attrs.get("algo_config")
         if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
@@ -2246,7 +2258,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
                           shape=["batch_size", "sequence_length", 1])
 
-        gated_mul_name = f"{basename}/GatedMul"
+        gated_mul_name = f"{basename}/Mul"
         self.make_mul(gated_mul_name,
                       [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
                       dtype=self.io_dtype,

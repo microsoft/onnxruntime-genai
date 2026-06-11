@@ -19,7 +19,9 @@ namespace Generators {
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "qnn") {
+  if (lower_name == "cpu" || lower_name == "cpuexecutionprovider") {
+    return "CPU";
+  } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
     return "WebGPU";
@@ -29,7 +31,7 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "OpenVINO";
   } else if (lower_name == "vitisai") {
     return "VitisAI";
-  } else if (lower_name == "nvtensorrtrtx") {
+  } else if (lower_name == "nvtensorrtrtx" || lower_name == "nvtensorrtrtxexecutionprovider") {
     return "NvTensorRtRtx";
   }
   return name;  // Return name unchanged
@@ -343,6 +345,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else if (name == "targets_length") {
       v_.targets_length = JSON::Get<std::string_view>(value);
     } else {
@@ -1048,6 +1052,8 @@ struct EmbeddingOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
