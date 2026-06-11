@@ -883,6 +883,30 @@ effect is within the run-to-run band (the MTP forward itself, ~0.5 ms under grap
 it removes a provably-unnecessary argmax + sync per accepted step. In-engine `og.MtpGenerator`
 holds at **~1.18× (128 tok) / ~1.22× (200 tok)**.
 
+### Fuse the post-accept KV-advance + next draft into one 2-token MTP forward (implemented)
+
+The accept path was running **two** MTP-head forwards per step: one to draft `d` from `t`, and a
+second single-token forward only to fold the accepted `d` into the head's KV cache. Those two feeds
+are sequential and consecutive — `(hidden@L, d)` for the KV-advance and `(hidden@L+1, t_next)` for
+the next step's draft — so they fuse into a **single 2-token MTP forward** (reusing the 2-token
+graph capture; the MTP head is full-attention, so its 2-token forward is identical to two
+sequential 1-token feeds). The next step's draft is computed ahead and stashed in `pending_draft_`;
+the next `GenerateNextToken` reuses it instead of issuing a fresh draft forward. On reject the
+pending draft is invalidated and the loop falls back to a single-token draft.
+
+This removes one full MTP-head forward on every accepted step. The MTP hidden-states **input**
+feeder was made static-buffer aware (pre-sized to 2 tokens, mirroring the output) so the head's
+1-token and 2-token captures keep stable buffer addresses.
+
+| Decoder (CUDA graph ON) | 128 tok | 200 tok | notes |
+|---|---|---|---|
+| on-device argmax (prior) | ~1.18× | ~1.22× | 2 MTP forwards/accept |
+| **+ fused 2-token draft** | **~1.26×** | **~1.20–1.25×** | 1 MTP forward/accept; speedup scales with accept rate |
+
+Output unchanged (bit-identical accept stats: 90/97% on the two validation prompts). The speedup
+scales with the accept rate (1.25× at 86% accept, 1.20× at 82%) because the saving lands on
+accepted steps.
+
 ### Memory-saving future work (embedding / lm_head sharing)
 
 The MTP head reuses the main model's token embedding and `lm_head`. In the exported `mtp.onnx`
@@ -906,8 +930,10 @@ saving is cross-model duplication (main ↔ MTP), not an embed/lm_head tie.
    graph-on correctness + recovers the eager verify).
 2. **On-device argmax** via the genai Top-K kernel (no full-logits D2H) — **DONE** (break-even →
    1.14–1.24×).
-3. **Share embedding + `lm_head` main ↔ MTP** (`AddInitializer` / export) — ~2 GB saving.
-4. **INT4 MTP head + main** — match the deployed INT4 model and raise the amortized baseline.
-5. **Speculative sampling** (`do_sample=true`) and **tree/multi-token drafts** to lift the
+3. **Fuse the post-accept KV-advance + next draft into one 2-token MTP forward** — **DONE**
+   (removes one MTP forward per accept; → ~1.20–1.26×).
+4. **Share embedding + `lm_head` main ↔ MTP** (`AddInitializer` / export) — ~2 GB saving.
+5. **INT4 MTP head + main** — match the deployed INT4 model and raise the amortized baseline.
+6. **Speculative sampling** (`do_sample=true`) and **tree/multi-token drafts** to lift the
    tokens-per-forward ceiling.
 

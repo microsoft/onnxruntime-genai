@@ -44,6 +44,14 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
       main_model_.session_info_.GetOutputDataType(main_model_.config_->model.decoder.outputs.hidden_states));
   const std::array<int64_t, 3> slice_shape{1, 1, hidden_size_};
   hidden_slice_->CreateTensor(slice_shape);
+
+  // Reusable [1, 2, hidden] device buffer for the batched 2-token draft (post-accept KV-advance
+  // fused with the next step's draft into one MTP forward).
+  hidden_slice2_ = std::make_shared<Tensor>(
+      main_model_.p_device_inputs_,
+      main_model_.session_info_.GetOutputDataType(main_model_.config_->model.decoder.outputs.hidden_states));
+  const std::array<int64_t, 3> slice2_shape{1, 2, hidden_size_};
+  hidden_slice2_->CreateTensor(slice2_shape);
 }
 
 void MtpGenerator::ExtractHiddenPosition(OrtValue* hidden, int position) {
@@ -93,6 +101,28 @@ int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token, bool n
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
+int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
+  // Populate the [1,2,H] hidden buffer: row 0 = hidden@position L (pairs with tok0), row 1 =
+  // hidden@position L+1 (pairs with tok1). `hidden` is the main model's [1,S,H] verify output.
+  auto src = ByteWrapTensor(*main_model_.p_device_, *hidden);
+  const size_t row_bytes = hidden_slice_->GetByteSpan().size();  // bytes of one [1,1,H] row
+  auto dst = hidden_slice2_->GetByteSpan();
+  dst.subspan(0, row_bytes).CopyFrom(src.subspan(0, row_bytes));            // row 0 <- hidden@0
+  dst.subspan(row_bytes, row_bytes).CopyFrom(src.subspan(row_bytes, row_bytes));  // row 1 <- hidden@1
+
+  // One 2-token MTP forward: feeds tok0 (KV-advance) and tok1 (the next committed token); the
+  // last-position logits give the draft for the token after tok1.
+  mtp_->SetHiddenStates(hidden_slice2_);
+  std::array<int32_t, 2> toks{tok0, tok1};
+  mtp_->AppendTokens(cpu_span<const int32_t>(toks));
+  auto logits_span = mtp_->GetLogits();              // fp32, last token, [1, V]
+  int32_t draft = 0;
+  if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
+    return draft;
+  auto logits = logits_span.CopyDeviceToCpu();        // host fallback
+  return ArgmaxRow(logits.data(), vocab_size_);
+}
+
 void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   main_->AppendTokens(input_ids);
   length_ = input_ids.size();
@@ -102,6 +132,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   const int last = static_cast<int>(input_ids.size()) - 1;
   ExtractHiddenPosition(hidden, last);             // h for the token we are about to predict
   ArgmaxMainRows(last, 1, &next_token_);           // token predicted for position length_
+  has_pending_draft_ = false;
   primed_ = true;
 }
 
@@ -117,8 +148,16 @@ void MtpGenerator::GenerateNextToken() {
     return;
   }
 
-  // 1. Draft the next token with the MTP head (hidden_slice_ holds h paired with t).
-  const int32_t d = DraftNextToken(nullptr, t);
+  // 1. Draft the next token for t. After an accepted step the draft was already computed ahead
+  //    (fused into that step's KV-advance as one 2-token MTP forward), so reuse it; otherwise the
+  //    MTP head is at the right point and we issue a fresh single-token draft.
+  int32_t d;
+  if (has_pending_draft_) {
+    d = pending_draft_;
+    has_pending_draft_ = false;
+  } else {
+    d = DraftNextToken(nullptr, t);  // hidden_slice_ holds h paired with t
+  }
 
   // 2. Snapshot the recurrent state at length L, then verify [t, d] in a single main forward.
   main_->SnapshotState();
@@ -142,18 +181,17 @@ void MtpGenerator::GenerateNextToken() {
       return;
     }
     OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
-    // Feed the accepted pair (hidden@L, d) to the MTP head so its KV stays aligned. The next token
-    // to commit is the verify pass's row-1 argmax (harvested above), so this draft is KV-advance
-    // only -- skip its full-vocab argmax + stream sync.
-    ExtractHiddenPosition(hidden, 0);
-    DraftNextToken(nullptr, d, /*need_draft=*/false);
-    // Next token to commit is argmax(logits@L+1) (harvested above); its hidden is row 1.
+    // Next token to commit is argmax(logits@L+1) (harvested above).
     next_token_ = verify_argmax[1];
-    ExtractHiddenPosition(hidden, 1);
+    // Fuse the post-accept KV-advance (hidden@L, d) and the next step's draft (hidden@L+1,
+    // next_token_) into ONE 2-token MTP forward, and stash the resulting draft for the next step.
+    pending_draft_ = DraftTwo(hidden, d, next_token_);
+    has_pending_draft_ = true;
     length_ += 2;
   } else {
     // 2b. Reject: roll back the speculative forward (restore recurrent state + crop KV to L),
-    //     then re-run the single correct token t.
+    //     then re-run the single correct token t. The pipelined draft (if any) is invalid.
+    has_pending_draft_ = false;
     main_->RewindToLength(length_);
     std::array<int32_t, 1> rerun{t};
     main_->AppendTokens(cpu_span<const int32_t>(rerun));

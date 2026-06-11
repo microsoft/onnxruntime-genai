@@ -28,7 +28,13 @@ void HiddenStatesInputs::Update(int sequence_length) {
   // Resize the device tensor to [batch, sequence_length, hidden_size] if needed.
   if (static_cast<int64_t>(sequence_length) != shape_[1]) {
     shape_[1] = sequence_length;
-    value_->CreateTensor(shape_);
+    // Static buffer when graph capture is active so the captured graph binds to a stable input
+    // address. Pre-size to the max captured length (e.g. the 2-token MTP draft batched with the
+    // post-accept KV-advance) so the base address is stable across the 1- and 2-token captures.
+    const int max_cap = state_.params_->max_graph_capture_length;
+    const bool use_static = state_.params_->use_graph_capture && shape_[1] >= 1 && shape_[1] <= max_cap;
+    const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * shape_[2] * Ort::SizeOf(type_) : 0;
+    value_->CreateTensor(shape_, use_static, static_cap_bytes);
     state_.inputs_[input_index_] = value_->GetOrtTensor();
   }
 

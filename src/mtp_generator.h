@@ -49,6 +49,11 @@ struct MtpGenerator {
   // 248K-vocab argmax + its stream sync) and returns 0. The KV-advance-only mode is used after an
   // accepted draft, where the next token comes from the verify pass rather than a fresh draft.
   int32_t DraftNextToken(OrtValue* hidden_last_position, int32_t token, bool need_draft = true);
+  // Feed the MTP head two tokens in one forward: (hidden@row0, tok0) then (hidden@row1, tok1),
+  // where hidden rows come from `hidden` (a [1,S,H] verify output). Returns the greedy argmax of
+  // the last (tok1) position -- the draft for the token after tok1. This fuses the post-accept
+  // KV-advance (tok0) and the next step's draft (tok1) into a single 2-token MTP forward.
+  int32_t DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1);
   // Copy one [1,1,H] position out of a [1,S,H] hidden_states OrtValue into hidden_slice_ (D2D).
   void ExtractHiddenPosition(OrtValue* hidden, int position);
   // Greedy argmax over `num_rows` consecutive vocab rows of the main model's raw logits output
@@ -63,6 +68,7 @@ struct MtpGenerator {
   std::unique_ptr<Generator> mtp_;   // MTP head generator (drafts)
 
   std::shared_ptr<Tensor> hidden_slice_;  // reusable [1,1,hidden] device buffer for the handoff
+  std::shared_ptr<Tensor> hidden_slice2_;  // reusable [1,2,hidden] buffer for the batched 2-token draft
   std::unique_ptr<OrtValue> logits_fp32_;  // reusable fp32 cast of the main model's raw logits
 
   std::vector<int32_t> sequence_;  // committed tokens (batch 0)
@@ -75,6 +81,11 @@ struct MtpGenerator {
   size_t length_{};        // committed cache length L
   bool primed_{false};     // whether AppendTokens has run the prompt
   bool done_{false};
+  // Pipelined draft: on an accepted step the next step's draft is computed ahead (fused into the
+  // post-accept KV-advance as one 2-token MTP forward), so the next GenerateNextToken reuses it
+  // instead of issuing a separate draft forward.
+  int32_t pending_draft_{};
+  bool has_pending_draft_{false};
 
   size_t forwards_{};
   size_t accepts_{};
