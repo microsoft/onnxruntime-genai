@@ -249,9 +249,22 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 // Matches HuggingFace transformers implementation:
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L367
 std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w) {
+  // Validate config-derived divisors before any division
+  if (spatial_merge_size_ <= 0) {
+    throw std::runtime_error("CalculateWindowIndex: spatial_merge_size must be positive");
+  }
+  if (patch_size_ <= 0) {
+    throw std::runtime_error("CalculateWindowIndex: patch_size must be positive");
+  }
+
   // Validate grid dimensions are positive and within reasonable bounds
   if (grid_t <= 0 || grid_h <= 0 || grid_w <= 0) {
     throw std::runtime_error("CalculateWindowIndex: grid dimensions must be positive");
+  }
+
+  // Require grid_h/grid_w to be divisible by spatial_merge_size to avoid truncation
+  if (grid_h % spatial_merge_size_ != 0 || grid_w % spatial_merge_size_ != 0) {
+    throw std::runtime_error("CalculateWindowIndex: grid_h and grid_w must be divisible by spatial_merge_size");
   }
 
   // Calculate LLM grid dimensions after spatial merging
