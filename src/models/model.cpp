@@ -411,9 +411,9 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const char* provider_name = device_type_names[static_cast<int>(type)];
   Config::ProviderOptions init_session_provider_options{provider_name, {}};
 
-  // Forward only global/singleton WebGPU options to the dummy session so that the
+  // Forward only global/singleton WebGPU options to the init session so that the
   // process-wide WebGpuContext singleton is initialized with the correct settings.
-  // Per-session options (enableGraphCapture, bufferCacheMode, etc.) are excluded
+  // Per-session options (enableGraphCapture, enableInt64, etc.) are excluded
   // because they are meaningless for the trivial initialization model.
   if (type == DeviceType::WEBGPU) {
     constexpr std::array<std::string_view, 7> kWebGpuGlobalOptions = {
