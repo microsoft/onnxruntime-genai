@@ -729,16 +729,32 @@ def test_qwen3_5_hybrid_text_generation_cuda(test_data_path):
 # ---------------------------------------------------------------------------
 
 
+def _register_webgpu_plugin():
+    """Register the onnxruntime-ep-webgpu plugin with ONNX Runtime GenAI.
+
+    The base onnxruntime package doesn't ship a WebGPU EP; the plugin package provides it as a
+    separate shared library that must be registered before is_webgpu_available()/
+    append_provider("webgpu") work. Returns True if the plugin was registered, False if the
+    package is not installed.
+    """
+    try:
+        import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
+    except ImportError:
+        return False
+    og.register_execution_provider_library("webgpu", webgpu_ep.get_library_path())
+    return True
+
+
+# Register the WebGPU EP plugin once at import time so the gating check below and the tests can use it.
+_webgpu_plugin_registered = _register_webgpu_plugin()
+
+
 def _is_webgpu_test_enabled():
-    """WebGPU tests require both runtime support and explicit opt-in via TEST_WEBGPU env var."""
-    return (
-        hasattr(og, "is_webgpu_available")
-        and og.is_webgpu_available()
-        and os.environ.get("TEST_WEBGPU", "").lower() in ("true", "1", "yes")
-    )
+    """WebGPU tests run when the onnxruntime-ep-webgpu plugin package is installed."""
+    return _webgpu_plugin_registered
 
 
-@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="onnxruntime-ep-webgpu plugin not installed")
 def test_qwen3_5_hybrid_generator_creates_webgpu(test_data_path):
     """Test that a Generator can be created for the hybrid model on WebGPU.
     Validates RecurrentState separate-buffer path (WebGPU cannot alias
@@ -757,7 +773,7 @@ def test_qwen3_5_hybrid_generator_creates_webgpu(test_data_path):
     assert generator is not None
 
 
-@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="onnxruntime-ep-webgpu plugin not installed")
 def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
     """Test that the hybrid model generator constructs and prefill executes on WebGPU.
     RecurrentState uses separate past/present buffers to avoid the WebGPU

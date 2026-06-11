@@ -17,7 +17,6 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   binaryDir: 'build/cpu/win-x64'
-  TEST_WEBGPU: 'true'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
   WEBGPU_EP_PACKAGE_VERSION: '0.1.0'
   # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).

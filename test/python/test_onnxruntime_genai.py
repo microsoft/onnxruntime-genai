@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -14,6 +15,12 @@ from models.test_qwen_fara_models import run_qwen_fara_vision_tests
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
+
+
+def _is_webgpu_ep_available() -> bool:
+    """WebGPU ships as a separate plugin package (onnxruntime-ep-webgpu) rather than in the base
+    onnxruntime build, so its availability is determined by whether that package is installed."""
+    return importlib.util.find_spec("onnxruntime_ep_webgpu") is not None
 
 
 def run_onnxruntime_genai_api_tests(
@@ -95,8 +102,8 @@ def main():
             eps_to_build.append("cuda")
         if og.is_dml_available():
             eps_to_build.append("dml")
-        # Only build WebGPU models if TEST_WEBGPU environment variable is set
-        if og.is_webgpu_available() and os.environ.get("TEST_WEBGPU", "").lower() in ["true", "1", "yes"]:
+        # Only build WebGPU models if the WebGPU EP plugin package is installed
+        if _is_webgpu_ep_available():
             eps_to_build.append("webgpu")
         log.info(f"Auto-detected available EPs: {eps_to_build}")
 
