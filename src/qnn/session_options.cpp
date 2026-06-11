@@ -32,7 +32,7 @@ static bool IsAllocatorAvailable(const Config& config) {
                                           session_options.get());
 
   try {
-    const auto memory_info = GetQNNInterface()->GetMemoryInfo(config);
+    const auto memory_info = GetQNNInterface()->GetMemoryInfo();
     const auto allocator = Ort::Allocator::Create(*session, *memory_info);
     return allocator != nullptr;
   } catch (const Ort::Exception&) {
@@ -57,22 +57,17 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
 
   static const bool allocator_available = IsAllocatorAvailable(config);
 
-  if (Generators::IsQNNGPUBackend(config)) {
-    if (allocator_available) {
-      device = GetDeviceInterface(DeviceType::QNN);
-    } else if (allocator_requested) {
-      // Only warn if allocator requested but not available
-      Log("warning",
-          "Shared memory allocator for QNN GPU is not available!"
-          " Falling back to CPU allocations for the KV cache. This will reduce performance."
-          " To avoid this, try updating the QNN EP package and the graphics drivers on your system.");
-    }
-  } else {
-    if (allocator_available) {
-      device = GetDeviceInterface(DeviceType::QNN);
-    }
-    // No extra warning for HTP, as the gfx drivers apply only to GPU
+  if (allocator_available) {
+    device = GetDeviceInterface(DeviceType::QNN);
+  } else if (Generators::IsQNNGPUBackend(config) && allocator_requested && g_log.enabled) {
+    // Only warn if allocator requested but not available
+    // Warn for GPU and not HTP, as the gfx drivers apply only to GPU
+    Log("warning",
+        "Shared memory allocator for QNN GPU is not available!"
+        " Falling back to CPU allocations for the KV cache. This will reduce performance."
+        " To avoid this, try updating the QNN EP package and the graphics drivers on your system.");
   }
+
   // is_primary_session_options is set to false because the device is set based on
   // the presence of the "enable_htp_shared_memory_allocator" option,
   // not based on whether this is the primary session options or not.

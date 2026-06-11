@@ -160,7 +160,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::WEBGPU; }
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo(const Config& /* config */) const override {
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     try {
       return OrtMemoryInfo::Create("WebGPU_Buf", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     } catch (const Ort::Exception& e) {

@@ -100,38 +100,13 @@ enum struct DeviceType {
   MAX
 };
 
-static inline std::string DeviceTypeToString(DeviceType type) {
-  switch (type) {
-    case DeviceType::CPU:
-      return "CPU";
-    case DeviceType::CUDA:
-      return "CUDA";
-    case DeviceType::DML:
-      return "DML";
-    case DeviceType::WEBGPU:
-      return "WEBGPU";
-    case DeviceType::QNN:
-      return "QNN";
-    case DeviceType::OpenVINO:
-      return "OpenVINO";
-    case DeviceType::NvTensorRtRtx:
-      return "NvTensorRtRtx";
-    case DeviceType::RyzenAI:
-      return "RyzenAI";
-    case DeviceType::MAX:
-      [[fallthrough]];
-    default:
-      return "(Unknown)";
-  }
-}
-
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
-  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo(const Config& /* config */) const {
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const {
     // Names for the device memory types used by 'OrtMemoryInfo::Create'
     static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
     static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));

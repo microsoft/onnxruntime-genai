@@ -394,18 +394,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-std::span<const uint8_t> GetTrivialModel() {
-  static const auto trivial_model = std::array<uint8_t, 96>{
-      0x08, 0x0a, 0x12, 0x01, 0x61, 0x3a, 0x53, 0x0a, 0x38, 0x12, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65,
-      0x73, 0x22, 0x08, 0x43, 0x6f, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x74, 0x2a, 0x24, 0x0a, 0x05, 0x76,
-      0x61, 0x6c, 0x75, 0x65, 0x2a, 0x18, 0x08, 0x01, 0x10, 0x01, 0x42, 0x0c, 0x63, 0x6f, 0x6e, 0x73,
-      0x74, 0x5f, 0x74, 0x65, 0x6e, 0x73, 0x6f, 0x72, 0x4a, 0x04, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01,
-      0x04, 0x12, 0x01, 0x62, 0x62, 0x14, 0x0a, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x12, 0x0a,
-      0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x04, 0x0a, 0x00, 0x10, 0x15};
-
-  return std::span<const uint8_t>{trivial_model};
-}
-
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
@@ -442,14 +430,14 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
                                           session_options.get());
 
   try {
-    auto memory_info = device.GetMemoryInfo(config);
+    auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
-    throw std::runtime_error("Failed to create allocator for " + DeviceTypeToString(type) + ": " + std::string(e.what()));
+    throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + DeviceTypeToString(type));
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
 }
