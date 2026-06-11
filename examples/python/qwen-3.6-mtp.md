@@ -190,6 +190,15 @@ The runtime pieces are exposed through every binding layer:
 | Feed the MTP head's hidden input | `SetHiddenStates` | `SetHiddenStates` | `OgaGenerator_SetHiddenStates` | `set_hidden_states` |
 | Snapshot recurrent state | `SnapshotState` | `SnapshotState` | `OgaGenerator_SnapshotState` | `snapshot_state` |
 | Roll back on reject | `RewindTo` | `RewindToLength` | `OgaGenerator_RewindTo` | `rewind_to` |
+| **In-engine draft/verify** | — | `MtpGenerator` | `OgaCreateMtpGenerator` / `OgaMtpGenerator_*` | `og.MtpGenerator` |
+
+The **first-class in-engine `MtpGenerator`** (`src/mtp_generator.{h,cpp}`) composes a main-model
+generator and an MTP-head generator and runs the whole draft/verify loop in C++. It keeps the
+hidden-state handoff on-device — the C++ `State::GetOutput` returns the on-device `OrtValue`
+(only the C API clones to CPU), which is sliced to the last position and fed straight to the MTP
+head — so there is no per-step host round-trip. Use it via `og.MtpGenerator(main_model,
+mtp_model, params)` with `append_tokens` / `generate_next_token` / `is_done` / `get_sequence` /
+`get_stats`. The pure-Python loop below is an equivalent reference (`--reference`).
 
 `get_output("hidden_states")` needs no special handling: `State::Run` auto-registers any graph
 output not otherwise managed by GenAI, so once the main model is exported with
@@ -204,8 +213,7 @@ models without an MTP head are unaffected.
 
 ## Running the example
 
-[`qwen-3.6-mtp.py`](qwen-3.6-mtp.py) drives the whole loop through the Python API with both
-models loaded as `og.Model` (no raw onnxruntime):
+[`qwen-3.6-mtp.py`](qwen-3.6-mtp.py) runs the built-in in-engine `og.MtpGenerator` by default:
 
 ```bash
 python qwen-3.6-mtp.py \
@@ -215,24 +223,29 @@ python qwen-3.6-mtp.py \
     -p "Describe the main causes of the fall of the Roman Empire."
 ```
 
-The `MtpGenerator` class encapsulates the draft/verify loop; `generate(prompt_tokens,
-max_new_tokens)` returns the tokens plus stats (accept rate, tokens/forward).
+Pass `--reference` to run the equivalent pure-Python `ReferenceMtpGenerator` loop instead — it
+documents the algorithm step by step but is slower (per-step Python + host round-trips).
 
 ## Measured results
 
-Single-stream, batch 1, greedy, on one H200 (fp16):
+Single-stream, batch 1, greedy, on one H200 (fp16). See [`qwen_3.6.md`](../../qwen_3.6.md) for
+the full benchmark log.
 
 | Metric | Value |
 |---|---|
 | MTP greedy acceptance (offline, PyTorch & ONNX) | ~88% |
-| Acceptance, all-in-engine draft/verify | ~82–88% |
+| Acceptance, in-engine draft/verify | ~83–88% |
 | Effective tokens per main forward | ~1.5–1.7× |
+| Wall-clock, Python reference loop | ~0.3× baseline |
+| Wall-clock, in-engine `og.MtpGenerator` (CUDA graph off) | ~1.0× baseline (break-even) |
 
-The output matches plain greedy decoding except for occasional late divergences caused by fp16
-near-ties: the batched 2-token verify forward and the 1-token baseline can round a near-tie
-logit differently and pick a different argmax. This is a documented property of greedy
-speculative decoding, not a correctness bug — every emitted token is still one the main model
-produced.
+The in-engine generator removes the per-step Python and host round-trips, recovering ~3× over the
+reference loop to reach parity. It is **break-even, not yet a speedup**, because the 2-token
+verify forward runs eagerly (see the CUDA-graph note below) — the dominant cost gets no graph
+acceleration. The output matches plain greedy decoding except for occasional late divergences
+caused by fp16 near-ties (the batched 2-token verify and the 1-token baseline can round a near-tie
+logit differently); this is a documented property of greedy speculative decoding, not a
+correctness bug — every emitted token is still one the main model produced.
 
 ## Synchronization and CUDA graph
 
@@ -254,26 +267,46 @@ Two CUDA-graph caveats matter for MTP:
 2. **The draft benefits enormously, the verify shape does not yet.** Graph-capturing the tiny
    one-layer MTP draft step drops it from ~18 ms to ~0.5 ms (it is launch-overhead bound). But
    genai only graph-captures single-token (`sequence_length == 1`) steps, so the 2-token verify
-   forward still runs eagerly. Capturing the verify shape too — and an in-engine generator that
-   keeps `hidden_states` on-device — is what turns the proven ~1.5–1.7 tokens/forward into a
-   wall-clock win. CUDA-graph replay currently also synchronizes on each step (onnxruntime
-   PR \#28686 adds async replay), so a fully async speculative loop depends on that landing.
+   forward still runs eagerly — and that is the dominant cost, which is why the in-engine
+   generator is currently break-even rather than a speedup. Worse, enabling CUDA graph on the
+   main model while the verify runs eagerly **corrupts output** (degenerate repetition): the
+   graphed 1-token path and the eager 2-token path share the same captured static buffers.
+
+   **The fix — and the main remaining wall-clock lever — is to graph-capture the 2-token verify
+   shape too.** ONNX Runtime already supports holding multiple captured graphs keyed by
+   `gpu_graph_id` and replaying a chosen id, so the 1-token decode and the 2-token verify can
+   each have their own captured graph bound to their own (different-shape) buffers. genai today
+   uses a single `graph_id_` per `State` and only captures `shape[1] == 1`
+   (`DecoderOnly_State::Run`); extending it to allocate a second graph id for the
+   `shape[1] == 2` verify (with its own static I/O buffers) would let both the decode and the
+   verify replay from CUDA graph. CUDA-graph replay also synchronizes on each step today
+   (onnxruntime PR \#28686 adds async replay), so a fully async speculative loop depends on that
+   landing too.
 
 ## Limitations and future work
 
-* **First-class `MtpGenerator`.** Today the draft/verify orchestration lives in the Python
-  example. Folding it into a C++ `MtpGenerator` (loading the `mtp` section of the main config
-  directly, so a single `generate_next_token` does the draft/verify internally) would remove the
-  per-step Python overhead, keep the hidden-state handoff on-device (device-to-device on the
-  shared stream, no host sync), and give a clean C/C#/Java surface.
-* **Graph-capture the verify step.** genai captures only single-token steps; capturing the
-  2-token verify shape is the main remaining lever for a wall-clock speedup.
-* **Wall-clock benchmark.** The current numbers report effective *tokens per main forward*; an
-  in-engine generator is needed for a true end-to-end tok/s comparison against the ~158 tok/s
-  INT4 baseline.
+* **Graph-capture the verify step (top wall-clock lever).** genai captures only single-token
+  steps; capturing the 2-token verify shape under its own `gpu_graph_id` is what turns the
+  proven ~1.5–1.7 tokens/forward and the current break-even into an actual speedup. This is the
+  single most impactful remaining change (see the CUDA-graph note above).
+* **Memory saving — share the embedding and `lm_head` between the main model and the MTP head.**
+  The MTP head reuses the main model's token embedding and `lm_head`; in the exported `mtp.onnx`
+  these two tensors are **bit-identical** to the main model's and together account for ~2 GB of
+  the head's ~3.8 GB (fp16). They can be shared instead of duplicated:
+    * *Runtime sharing:* inject the main session's already-loaded weight `OrtValue`s into the MTP
+      session via `OrtSessionOptions::AddInitializer(name, ort_value)` so the head does not
+      allocate its own copies. (Needs a model-load hook, since `og.Model` binds initializers at
+      session creation.)
+    * *Export sharing:* emit `mtp.onnx` without the `embed_tokens` / `lm_head` initializers
+      (referenced by name) when sharing is enabled, shrinking the file too.
+  Note `embed_tokens` and `lm_head` are **not** tied to each other for Qwen3.6
+  (`tie_word_embeddings = False`; they are independently trained, max abs diff ~0.3), so they
+  cannot be collapsed into a single transposed tensor — the saving is cross-model duplication,
+  not an embed/lm_head tie.
 * **INT4.** This example uses fp16 for fast iteration. The same export/runtime path works for the
-  INT4 (QMoE) model; only the build precision changes.
+  INT4 (QMoE) model; only the build precision changes. INT4 also raises the per-token baseline
+  that speculation amortizes against.
 * **Sampling.** The loop shown is greedy. Speculative sampling (accept/reject with the draft and
   target distributions) would extend it to `do_sample=true`.
-* **Weight sharing.** `mtp.onnx` currently duplicates the embedding + `lm_head` (~2 GB in fp16);
-  sharing them with the main model would shrink the head.
+* **Multi-token / tree drafts.** The head drafts one token; a small EAGLE-style tree (multiple
+  draft tokens verified together) could raise the tokens-per-forward ceiling.

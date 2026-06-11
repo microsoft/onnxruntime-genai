@@ -9,13 +9,21 @@ given the main model's last hidden state and the just-emitted token, predicts th
 per forward pass and accept the draft when it matches greedy decoding -- a lossless
 speedup over plain autoregressive decoding.
 
-This example drives the loop entirely through the onnxruntime-genai Python API using
-two ``og.Model`` instances:
+Two ways to run it are shown:
 
-  * the main Qwen3.6 decoder (exported with ``include_hidden_states=true`` so it
-    exposes a ``hidden_states`` output), and
-  * the MTP head (``mtp.onnx``, exported with ``enable_mtp=true``), loaded as a
-    standalone model whose ``hidden_states`` input is fed via ``set_hidden_states``.
+  * the built-in ``og.MtpGenerator`` (default) -- a first-class C++ generator that runs
+    the whole draft/verify loop in-engine, keeping the hidden-state handoff on-device
+    (no per-step host round-trip). This is the recommended, fastest path.
+  * ``--reference`` -- an equivalent hand-rolled Python loop (``ReferenceMtpGenerator``)
+    that drives two ``og.Model`` instances through the public API. It documents the
+    algorithm and is useful for experimentation, but is slower (per-step Python +
+    host round-trips).
+
+Both require:
+  * the main Qwen3.6 decoder exported with ``include_hidden_states=true`` (so it exposes
+    a ``hidden_states`` output), and
+  * the MTP head (``mtp.onnx``, exported with ``enable_mtp=true``), loaded as a standalone
+    model whose ``hidden_states`` input is fed the main model's last hidden state.
 
 See ``qwen-3.6-mtp.md`` for the design and export instructions.
 """
@@ -27,8 +35,10 @@ import numpy as np
 import onnxruntime_genai as og
 
 
-class MtpGenerator:
-    """Single-stream MTP self-speculative decoder (greedy, 1 draft token).
+class ReferenceMtpGenerator:
+    """Reference (educational) MTP self-speculative decoder in pure Python (greedy, 1 draft
+    token). It mirrors what the built-in ``og.MtpGenerator`` does in C++, but drives two
+    ``og.Model`` generators through the public API. Prefer ``og.MtpGenerator`` in production.
 
     Wraps a main-model generator and an MTP-head generator and exposes a simple
     ``generate(prompt_tokens, max_new_tokens)`` that returns the decoded tokens.
@@ -125,6 +135,29 @@ class MtpGenerator:
         return out_tokens, stats
 
 
+def run_builtin(main_model, mtp_model, tokenizer, prompt_tokens, args):
+    """Run the built-in in-engine og.MtpGenerator (recommended path)."""
+    params = og.GeneratorParams(main_model)
+    params.set_search_options(max_length=args.max_length, do_sample=False)
+    gen = og.MtpGenerator(main_model, mtp_model, params)
+    n_prompt = len(prompt_tokens)
+
+    gen.append_tokens(np.asarray(prompt_tokens, dtype=np.int32))
+    start = time.perf_counter()
+    while not gen.is_done() and len(gen.get_sequence()) < n_prompt + args.max_new_tokens:
+        gen.generate_next_token()
+    elapsed = time.perf_counter() - start
+
+    tokens = gen.get_sequence().tolist()[n_prompt:]
+    s = gen.get_stats()
+    stats = {
+        "forwards": s["forwards"], "accepts": s["accepts"], "trials": s["trials"],
+        "accept_rate": s["accepts"] / max(s["trials"], 1),
+        "tokens_per_forward": len(tokens) / max(s["forwards"], 1),
+    }
+    return tokens, stats, elapsed
+
+
 def main(args):
     print("Loading main model...")
     main_model = og.Model(args.main_model_path)
@@ -132,7 +165,7 @@ def main(args):
     print("Loading MTP head...")
     mtp_model = og.Model(args.mtp_model_path)
 
-    mtp = MtpGenerator(main_model, mtp_model, max_length=args.max_length)
+    reference = ReferenceMtpGenerator(main_model, mtp_model, max_length=args.max_length) if args.reference else None
 
     prompts = args.prompts or [
         "Explain how photosynthesis works in plants, step by step.",
@@ -141,9 +174,12 @@ def main(args):
         text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         prompt_tokens = tokenizer.encode(text)
 
-        start = time.perf_counter()
-        tokens, stats = mtp.generate(prompt_tokens, args.max_new_tokens)
-        elapsed = time.perf_counter() - start
+        if args.reference:
+            start = time.perf_counter()
+            tokens, stats = reference.generate(prompt_tokens, args.max_new_tokens)
+            elapsed = time.perf_counter() - start
+        else:
+            tokens, stats, elapsed = run_builtin(main_model, mtp_model, tokenizer, prompt_tokens, args)
 
         print("\n" + "=" * 80)
         print(f"Prompt: {prompt}")
@@ -168,4 +204,6 @@ if __name__ == "__main__":
                         help="Number of tokens to generate per prompt")
     parser.add_argument("--max_length", type=int, default=4096, help="Max sequence length")
     parser.add_argument("-p", "--prompts", nargs="*", default=None, help="Prompt(s) to run")
+    parser.add_argument("--reference", action="store_true",
+                        help="Use the pure-Python ReferenceMtpGenerator instead of the built-in og.MtpGenerator")
     main(parser.parse_args())
