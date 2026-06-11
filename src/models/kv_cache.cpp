@@ -294,29 +294,23 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     constexpr size_t kHeadDimAxis = 3;
     std::vector<int64_t> per_layer_kv_heads(layer_count_, shape_[kKvHeadsAxis]);
     std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[kHeadDimAxis]);
-    // Determine variation from the distinct *concrete* (positive) dims observed across
-    // layers — not by comparing against the base shape_. This avoids a false positive
-    // when a base dim is unknown/dynamic (e.g. -1) but every layer is in fact identical.
-    int64_t first_kv_heads = -1, first_head_dim = -1;
-    bool varying_kv_heads = false, varying_head_dim = false;
+    // num_kv_heads and head_dim are static per-layer model properties known ahead of
+    // time, and shape_ already holds the config defaults (decoder.num_key_value_heads /
+    // .head_size), so a single flag suffices: set it if any layer's KV shape differs from
+    // those defaults. (The > 0 checks ignore any non-concrete dim, leaving that layer at
+    // the config default.)
+    bool has_per_layer_variation = false;
     for (int i = 0; i < layer_count_; ++i) {
-      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
-      if (input_shape.size() >= 4) {
-        const int64_t layer_kv_heads = input_shape[kKvHeadsAxis];
-        const int64_t layer_head_dim = input_shape[kHeadDimAxis];
-        if (layer_kv_heads > 0) {
-          per_layer_kv_heads[i] = layer_kv_heads;
-          if (first_kv_heads < 0) first_kv_heads = layer_kv_heads;
-          else if (layer_kv_heads != first_kv_heads) varying_kv_heads = true;
-        }
-        if (layer_head_dim > 0) {
-          per_layer_head_dim[i] = layer_head_dim;
-          if (first_head_dim < 0) first_head_dim = layer_head_dim;
-          else if (layer_head_dim != first_head_dim) varying_head_dim = true;
-        }
+      const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (input_shape.size() == 4) {
+        if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
+        if (input_shape[kHeadDimAxis] > 0) per_layer_head_dim[i] = input_shape[kHeadDimAxis];
+        if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
+            per_layer_head_dim[i] != shape_[kHeadDimAxis])
+          has_per_layer_variation = true;
       }
     }
-    if (varying_kv_heads || varying_head_dim) {
+    if (has_per_layer_variation) {
       if (layer_shapes_.empty()) {
         layer_shapes_.resize(layer_count_);
         for (int i = 0; i < layer_count_; ++i) {
