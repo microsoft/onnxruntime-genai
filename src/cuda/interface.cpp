@@ -7,7 +7,9 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"
+#include "cuda_topk.h"
 #include <cstdarg>
+#include <cstring>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -129,6 +131,52 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return true;
   }
 
+  bool ArgMax(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size, int32_t* out_tokens) override {
+    if (num_rows <= 0 || vocab_size <= 0)
+      return false;
+
+    cudaStream_t stream = GetStream();
+
+    // The Top-K kernel consumes fp32 scores. Cast fp16 input into a cached fp32 scratch buffer;
+    // fp32 input is used directly (no copy).
+    const float* scores = nullptr;
+    const size_t element_count = static_cast<size_t>(num_rows) * vocab_size;
+    if (logits_type == Ort::TypeToTensorType<float>) {
+      scores = reinterpret_cast<const float*>(logits);
+    } else if (logits_type == Ort::TypeToTensorType<Ort::Float16_t>) {
+      if (argmax_fp32_count_ < element_count) {
+        argmax_fp32_ = CudaMallocArray<float>(element_count);
+        argmax_fp32_count_ = element_count;
+      }
+      cuda::LaunchFp16ToFp32(reinterpret_cast<const uint16_t*>(logits), argmax_fp32_.get(), static_cast<int>(element_count), stream);
+      scores = argmax_fp32_.get();
+    } else {
+      return false;  // Unsupported logits dtype -> caller falls back to host argmax.
+    }
+
+    // (Re)allocate the Top-K working set if the problem size grew.
+    if (!topk_data_ || topk_batch_ < num_rows || topk_vocab_ != vocab_size) {
+      topk_data_ = std::make_unique<cuda::TopkData>(num_rows, vocab_size, stream);
+      topk_batch_ = num_rows;
+      topk_vocab_ = vocab_size;
+    }
+
+    // k=1 dispatches to distributed_select_sort, the fastest path for argmax over a large vocab.
+    cuda::RunTopK(topk_data_.get(), stream, scores, vocab_size, num_rows, /*k=*/1);
+
+    // Copy only the small per-row top-1 indices back to the host (strided -> contiguous), then sync.
+    if (!argmax_host_ || argmax_host_count_ < static_cast<size_t>(num_rows)) {
+      argmax_host_ = CudaMallocHostArray<int32_t>(num_rows);
+      argmax_host_count_ = num_rows;
+    }
+    CUDA_CHECK(cudaMemcpy2DAsync(argmax_host_.get(), sizeof(int32_t),
+                                 topk_data_->topk_indices, static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
+                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    std::memcpy(out_tokens, argmax_host_.get(), static_cast<size_t>(num_rows) * sizeof(int32_t));
+    return true;
+  }
+
   bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     if (type == Ort::TypeToTensorType<int32_t>)
       cuda::Launch_UpdatePositionIds(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
@@ -176,6 +224,15 @@ struct CudaInterfaceImplBase : DeviceInterface {
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     cudaMemGetInfo(&free_bytes, &total_bytes);
   }
+
+  // Cached working set for the on-device ArgMax (Top-K, k=1) path.
+  std::unique_ptr<cuda::TopkData> topk_data_;
+  int topk_batch_{0};
+  int topk_vocab_{0};
+  cuda_unique_ptr<float> argmax_fp32_;          // fp16 -> fp32 scratch (device)
+  size_t argmax_fp32_count_{0};
+  cuda_host_unique_ptr<int32_t> argmax_host_;   // pinned host buffer for the small index copy
+  size_t argmax_host_count_{0};
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {

@@ -834,6 +834,45 @@ The next lever is therefore **on-device argmax** (avoid the per-step ~2 MB logit
 host argmax) and trimming the snapshot cost, not the GPU forward.
 
 
+### On-device argmax via the genai Top-K kernel (implemented)
+
+The break-even/0.90× result above was dominated by **host-side token selection**: each MTP step
+casts the main model's `[1, S, 248320]` logits to fp32, copies the whole row(s) (~2 MB each, up to
+3 per step) to the CPU, and runs a 248K-element `std::max_element` — a synchronizing D2H plus a
+serial host scan on the critical path. genai already ships a high-performance on-device Top-K
+(`src/cuda/cuda_topk.*`); for `k = 1` it dispatches to `distributed_select_sort`, which is
+"unbeatable for k=1" (one shard-reduce over the vocab). Running argmax there means **only the
+4-byte token id crosses the bus**, not the logits.
+
+What changed:
+
+| Change | Where |
+|---|---|
+| `DeviceInterface::ArgMax(logits, type, num_rows, vocab, out_tokens)` — device hook, default returns false (CPU fallback). **Added at the end of the struct to preserve vtable/ABI.** | `src/smartptrs.h` |
+| CUDA impl: fp16→fp32 cast scratch (only when needed) → `RunTopK(k=1)` → strided `cudaMemcpy2DAsync` of just the row indices → host. Caches `TopkData` + scratch across steps. | `src/cuda/interface.cpp` |
+| `MtpGenerator` uses `p_device_->ArgMax` for both the main verify rows (batched, both rows in one launch) and the MTP-head draft; host argmax kept as a fallback. | `src/mtp_generator.{h,cpp}` |
+
+The verify step now argmaxes **both** rows (`logits@L`, `logits@L+1`) in a single `RunTopK(num_rows=2)`
+launch, so an accepted step does zero full-logits D2H.
+
+### Result (fp16, 1× H200, batch 1, greedy, **CUDA graph ON**)
+
+Output stays coherent and acceptance is unchanged (the argmax is numerically identical), while the
+per-step host overhead is removed:
+
+| Decoder (CUDA graph ON) | tok/s | vs baseline | notes |
+|---|---|---|---|
+| Baseline greedy (no MTP) | ~140–143 | 1.00× | |
+| In-engine `og.MtpGenerator`, host argmax | ~127 | 0.90× | prior result |
+| **In-engine `og.MtpGenerator`, on-device argmax** | **~160 (128 tok) / ~177 (200 tok)** | **1.14× / 1.24×** | accept 80–88%, 1.5–1.7 tok/main-fwd |
+
+This is the change that turned MTP from break-even into a **real wall-clock speedup**: removing the
+~2 MB×(1–3) logits D2H + 248K-element host scan per step recovered ~26–34% over the host-argmax
+in-engine generator and crossed 1× versus the (graph-accelerated) baseline. The remaining
+host-side cost is the recurrent-state snapshot/restore on reject and the per-step CUDA-graph replay
+sync (onnxruntime PR #28686).
+
+
 ### Memory-saving future work (embedding / lm_head sharing)
 
 The MTP head reuses the main model's token embedding and `lm_head`. In the exported `mtp.onnx`
@@ -853,10 +892,12 @@ saving is cross-model duplication (main ↔ MTP), not an embed/lm_head tie.
 
 ### Updated MTP next steps (priority order)
 
-1. **Graph-capture the 2-token verify shape** under its own `gpu_graph_id` — the top wall-clock
-   lever; also fixes graph-on correctness. Target: break-even → ~1.4–1.5×.
-2. **Share embedding + `lm_head` main ↔ MTP** (`AddInitializer` / export) — ~2 GB saving.
-3. **INT4 MTP head + main** — match the deployed INT4 model and raise the amortized baseline.
-4. **Speculative sampling** (`do_sample=true`) and **tree/multi-token drafts** to lift the
+1. **Graph-capture the 2-token verify shape** under its own `gpu_graph_id` — **DONE** (fixes
+   graph-on correctness + recovers the eager verify).
+2. **On-device argmax** via the genai Top-K kernel (no full-logits D2H) — **DONE** (break-even →
+   1.14–1.24×).
+3. **Share embedding + `lm_head` main ↔ MTP** (`AddInitializer` / export) — ~2 GB saving.
+4. **INT4 MTP head + main** — match the deployed INT4 model and raise the amortized baseline.
+5. **Speculative sampling** (`do_sample=true`) and **tree/multi-token drafts** to lift the
    tokens-per-forward ceiling.
 

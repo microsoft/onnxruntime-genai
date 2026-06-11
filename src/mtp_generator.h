@@ -48,8 +48,10 @@ struct MtpGenerator {
   int32_t DraftNextToken(OrtValue* hidden_last_position, int32_t token);
   // Copy one [1,1,H] position out of a [1,S,H] hidden_states OrtValue into hidden_slice_ (D2D).
   void ExtractHiddenPosition(OrtValue* hidden, int position);
-  // Greedy argmax over a single vocab row of the main model's raw logits output ([1,S,V]).
-  int32_t ArgmaxLogitsRow(int row);
+  // Greedy argmax over `num_rows` consecutive vocab rows of the main model's raw logits output
+  // ([1,S,V]), starting at `first_row`, writing the token ids to `out`. Uses the device's
+  // on-device Top-K kernel when available (no full-logits host copy); falls back to a host argmax.
+  void ArgmaxMainRows(int first_row, int num_rows, int32_t* out);
 
   const Model& main_model_;
   const Model& mtp_model_;

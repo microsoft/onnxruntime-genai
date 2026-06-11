@@ -54,15 +54,25 @@ void MtpGenerator::ExtractHiddenPosition(OrtValue* hidden, int position) {
   hidden_slice_->GetByteSpan().CopyFrom(src_row);
 }
 
-int32_t MtpGenerator::ArgmaxLogitsRow(int row) {
-  // Cast the main model's raw logits output ([1, S, V], io dtype) to fp32 and argmax row `row`.
+void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
   OrtValue* raw = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.logits.c_str());
+  auto info = raw->GetTensorTypeAndShapeInfo();
+  const ONNXTensorElementDataType type = info->GetElementType();
+
+  // Fast path: argmax the rows on-device with the high-performance Top-K kernel (k=1). Only the
+  // small token ids are copied to the host -- the full [1,S,V] logits never leave the GPU.
+  const uint8_t* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
+  const void* row_ptr = base + static_cast<size_t>(first_row) * vocab_size_ * Ort::SizeOf(type);
+  if (main_model_.p_device_->ArgMax(row_ptr, type, num_rows, vocab_size_, out))
+    return;
+
+  // Host fallback (e.g. CPU device): cast the logits to fp32, copy to the host, argmax each row.
   Cast(*raw, logits_fp32_, *main_model_.p_device_, Ort::TypeToTensorType<float>);
-  // Keep the wrapping span alive while we read its CPU copy (it owns the pinned host buffer).
   auto span = ByteWrapTensor(*main_model_.p_device_, *logits_fp32_);
   auto cpu = span.CopyDeviceToCpu();
   const float* data = reinterpret_cast<const float*>(cpu.data());
-  return ArgmaxRow(data + static_cast<size_t>(row) * vocab_size_, vocab_size_);
+  for (int r = 0; r < num_rows; ++r)
+    out[r] = ArgmaxRow(data + static_cast<size_t>(first_row + r) * vocab_size_, vocab_size_);
 }
 
 int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token) {
@@ -73,7 +83,10 @@ int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token) {
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
   auto logits_span = mtp_->GetLogits();              // fp32, last token, [1, V]
-  auto logits = logits_span.CopyDeviceToCpu();
+  int32_t draft = 0;
+  if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
+    return draft;
+  auto logits = logits_span.CopyDeviceToCpu();        // host fallback
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
@@ -85,7 +98,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
   const int last = static_cast<int>(input_ids.size()) - 1;
   ExtractHiddenPosition(hidden, last);             // h for the token we are about to predict
-  next_token_ = ArgmaxLogitsRow(last);             // token predicted for position length_
+  ArgmaxMainRows(last, 1, &next_token_);           // token predicted for position length_
   primed_ = true;
 }
 
@@ -110,7 +123,11 @@ void MtpGenerator::GenerateNextToken() {
   main_->AppendTokens(cpu_span<const int32_t>(verify));
   ++forwards_;
 
-  const int32_t m = ArgmaxLogitsRow(0);  // main model's real token after t
+  // Argmax both verify rows on-device in one launch: row 0 = main's real token after t,
+  // row 1 = the free prediction harvested when the draft is accepted.
+  int32_t verify_argmax[2];
+  ArgmaxMainRows(0, 2, verify_argmax);
+  const int32_t m = verify_argmax[0];
   ++trials_;
 
   if (d == m) {
@@ -125,8 +142,8 @@ void MtpGenerator::GenerateNextToken() {
     // Feed the accepted pair (hidden@L, d) to the MTP head so its KV stays aligned.
     ExtractHiddenPosition(hidden, 0);
     DraftNextToken(nullptr, d);
-    // Next token to commit is argmax(logits@L+1); its hidden is row 1.
-    next_token_ = ArgmaxLogitsRow(1);
+    // Next token to commit is argmax(logits@L+1) (harvested above); its hidden is row 1.
+    next_token_ = verify_argmax[1];
     ExtractHiddenPosition(hidden, 1);
     length_ += 2;
   } else {
@@ -137,7 +154,7 @@ void MtpGenerator::GenerateNextToken() {
     main_->AppendTokens(cpu_span<const int32_t>(rerun));
     ++forwards_;
     OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
-    next_token_ = ArgmaxLogitsRow(0);
+    ArgmaxMainRows(0, 1, &next_token_);
     ExtractHiddenPosition(hidden, 0);
     length_ += 1;
   }
