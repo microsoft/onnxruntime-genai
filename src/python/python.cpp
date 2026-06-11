@@ -278,6 +278,10 @@ struct PyGenerator {
     generator_->RewindTo(new_length);
   }
 
+  void SnapshotState() {
+    generator_->SnapshotState();
+  }
+
   bool IsDone() {
     return generator_->IsDone();
   }
@@ -493,6 +497,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindTo)
+      .def("snapshot_state", &PyGenerator::SnapshotState)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)

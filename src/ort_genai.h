@@ -508,6 +508,10 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
+  void SnapshotState() {
+    OgaCheckResult(OgaGenerator_SnapshotState(this));
+  }
+
   void SetRuntimeOption(const char* key, const char* value) {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }

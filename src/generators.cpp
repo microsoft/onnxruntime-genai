@@ -720,6 +720,11 @@ DeviceSpan<float> Generator::GetLogits() {
   return search_->GetLogits();
 }
 
+void Generator::SnapshotState() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  state_->SnapshotState();
+}
+
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }

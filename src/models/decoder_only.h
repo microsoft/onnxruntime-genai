@@ -26,6 +26,8 @@ struct DecoderOnly_State : State {
 
   void RewindTo(size_t index) override;
 
+  void SnapshotState() override;
+
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size);

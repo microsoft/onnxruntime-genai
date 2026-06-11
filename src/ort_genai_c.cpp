@@ -504,6 +504,13 @@ OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t ne
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator) {
+  OGA_TRY
+  generator->SnapshotState();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value) {
   OGA_TRY
   generator->SetRuntimeOption(key, value);

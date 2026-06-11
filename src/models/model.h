@@ -32,6 +32,14 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+
+  // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
+  // for models without recurrent state. SnapshotState() captures the conv/linear-attention
+  // state at the current length; a later RewindTo(length) restores it (the attention KV
+  // cache is rolled back the usual way). Used by MTP self-speculative decoding to undo a
+  // rejected draft, since recurrent state cannot be partially cropped like KV cache.
+  virtual void SnapshotState() {}
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 

@@ -90,6 +90,11 @@ void DecoderOnly_State::RewindTo(size_t index) {
     recurrent_state_->RewindTo(index);
 }
 
+void DecoderOnly_State::SnapshotState() {
+  if (recurrent_state_)
+    recurrent_state_->Snapshot();
+}
+
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);

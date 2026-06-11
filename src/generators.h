@@ -105,6 +105,7 @@ struct Generator : LeakChecked<Generator> {
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+  void SnapshotState();                     // Snapshot recurrent state for speculative rollback (e.g. MTP)
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
