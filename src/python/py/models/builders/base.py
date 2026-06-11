@@ -1558,19 +1558,29 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
+    def _capture_prompt_embeds_hidden_if_needed(self, layer_id, location, skip):
+        """Record hidden state tensors for prompt_embeds / SD text encoder exports.
+
+        Flux / Klein reference ONNX stacks ``/model/layers.N/input_layernorm/output_3`` (the
+        Skip*LayerNorm residual output after layer N's **input** layernorm), not the
+        pre-norm ``root_input`` (which is on the previous block's residual path, e.g. after
+        ``layers.(N-1)/post_attention_layernorm``).
+        """
+        if (
+            location != "input"
+            or self.captured_hidden_states is None
+            or not self.hidden_states_layers
+            or layer_id not in self.hidden_states_layers
+        ):
+            return
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.captured_hidden_states.append(self.layernorm_attrs["output_3"])
+        else:
+            self.captured_hidden_states.append(self.layernorm_attrs["output_0"])
+
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
-
-        # Match HuggingFace `output_hidden_states=True`: `hidden_states[k]` is the residual stream
-        # *before* layer k runs (before that layer's input RMSNorm / input layernorm).
-        if (
-            location == "input"
-            and self.captured_hidden_states is not None
-            and self.hidden_states_layers
-            and layer_id in self.hidden_states_layers
-        ):
-            self.captured_hidden_states.append(root_input)
 
         # Get precision types to use
         old_io_dtype = self.io_dtype
@@ -1630,6 +1640,8 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+        self._capture_prompt_embeds_hidden_if_needed(layer_id, location, skip)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist

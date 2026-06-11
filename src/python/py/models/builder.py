@@ -474,8 +474,9 @@ def get_args():
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
                 use_cache = Include past/present key-value cache inputs and outputs in your ONNX model. Default is true.
                     Set to false for Stable Diffusion text encoder exports that run full-sequence encoding without KV cache.
-                hidden_states_layers = Comma-separated Hugging Face hidden_states indices to concatenate into `prompt_embeds`.
-                    Example: 9,18,27 for Flux/Qwen3 text encoders. Implies exclude_lm_head and skips unused upper layers.
+                hidden_states_layers = Comma-separated **decoder block indices** (0-based ``model.layers.{i}``) whose
+                    **input** layernorm Skip output (``.../input_layernorm/output_3``) is stacked into ``prompt_embeds``,
+                    matching Flux Klein reference ONNX (e.g. ``9,18,27``). Implies exclude_lm_head and skips unused upper layers.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
