@@ -260,6 +260,15 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
 
   // Calculate window size at the merged resolution
   int64_t vit_merger_window_size = window_size_ / spatial_merge_size_ / patch_size_;
+  if (vit_merger_window_size <= 0) {
+    throw std::runtime_error("CalculateWindowIndex: vit_merger_window_size must be positive (check window_size, spatial_merge_size, patch_size config)");
+  }
+
+  // Validate merged grid dimensions before computing padding and allocation
+  constexpr int64_t kMaxElements = static_cast<int64_t>(1) << 30;  // ~1 billion elements, ~8GB
+  if (llm_grid_h > kMaxElements || llm_grid_w > kMaxElements || grid_t > kMaxElements) {
+    throw std::runtime_error("CalculateWindowIndex: grid dimensions are too large");
+  }
 
   // Calculate padding needed to fit into windows
   int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
@@ -268,15 +277,11 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
   int64_t padded_h = llm_grid_h + pad_h;
   int64_t padded_w = llm_grid_w + pad_w;
 
-  // Check for integer overflow in allocation size: grid_t * padded_h * padded_w
-  constexpr int64_t kMaxElements = static_cast<int64_t>(1) << 30;  // ~1 billion elements, ~8GB
-  if (padded_h > kMaxElements || padded_w > kMaxElements || grid_t > kMaxElements) {
-    throw std::runtime_error("CalculateWindowIndex: grid dimensions are too large");
-  }
-  int64_t alloc_size = grid_t * padded_h * padded_w;
-  if (alloc_size > kMaxElements) {
+  // Use division-based overflow check: grid_t * padded_h * padded_w <= kMaxElements
+  if (padded_h > 0 && padded_w > 0 && grid_t > kMaxElements / padded_h / padded_w) {
     throw std::runtime_error("CalculateWindowIndex: total grid size exceeds maximum allowed");
   }
+  int64_t alloc_size = grid_t * padded_h * padded_w;
 
   int64_t num_windows_h = padded_h / vit_merger_window_size;
   int64_t num_windows_w = padded_w / vit_merger_window_size;
