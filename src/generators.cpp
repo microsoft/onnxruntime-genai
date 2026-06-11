@@ -380,10 +380,20 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
-  if (params.search.batch_size < 1 || params.search.batch_size > 256)
-    throw std::runtime_error("batch_size (" + std::to_string(params.search.batch_size) + ") must be in [1, 256]");
-  if (params.search.num_beams < 1 || params.search.num_beams > 256)
-    throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, 256]");
+
+  constexpr int kMaxBatchSize = 256;
+  constexpr int kMaxNumBeams = 256;
+  constexpr int kMaxNumBeamsCuda = 32;
+
+  if (params.search.batch_size < 1 || params.search.batch_size > kMaxBatchSize)
+    throw std::runtime_error("batch_size (" + std::to_string(params.search.batch_size) + ") must be in [1, " + std::to_string(kMaxBatchSize) + "]");
+
+  const int max_num_beams = (params.search.num_beams > 1 &&
+                             (params.p_device->GetType() == DeviceType::CUDA || params.p_device->GetType() == DeviceType::NvTensorRtRtx))
+                                ? kMaxNumBeamsCuda
+                                : kMaxNumBeams;
+  if (params.search.num_beams < 1 || params.search.num_beams > max_num_beams)
+    throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
