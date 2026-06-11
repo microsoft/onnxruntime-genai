@@ -4,8 +4,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -19,15 +19,39 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Platform-specific file name of the WebGPU execution provider plugin library.
-std::string WebGpuProviderLibraryName() {
+// Shared file-name stem of every ONNX Runtime execution provider plugin library, e.g.
+// "onnxruntime_providers_webgpu.dll" or "libonnxruntime_providers_cuda.so".
 #if defined(_WIN32)
-  return "onnxruntime_providers_webgpu.dll";
+constexpr const char* kProviderPrefix = "onnxruntime_providers_";
+constexpr const char* kProviderSuffix = ".dll";
 #elif defined(__APPLE__)
-  return "libonnxruntime_providers_webgpu.dylib";
+constexpr const char* kProviderPrefix = "libonnxruntime_providers_";
+constexpr const char* kProviderSuffix = ".dylib";
 #else
-  return "libonnxruntime_providers_webgpu.so";
+constexpr const char* kProviderPrefix = "libonnxruntime_providers_";
+constexpr const char* kProviderSuffix = ".so";
 #endif
+
+// Provider libraries that match the naming convention but are not registrable EP plugins.
+bool IsNonPluginProviderLibrary(const std::string& ep_name) {
+  return ep_name == "shared";
+}
+
+// Derives the execution provider name from a plugin library file name, following the
+// "<prefix>onnxruntime_providers_<ep><suffix>" convention. Returns nullopt when the file name does
+// not match the convention.
+std::optional<std::string> EpNameFromLibraryFile(const fs::path& file) {
+  const std::string name = file.filename().string();
+  const std::string prefix = kProviderPrefix;
+  const std::string suffix = kProviderSuffix;
+  if (name.size() <= prefix.size() + suffix.size()) {
+    return std::nullopt;
+  }
+  if (name.compare(0, prefix.size(), prefix) != 0 ||
+      name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+    return std::nullopt;
+  }
+  return name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
 }
 
 // Registers an execution provider plugin library with ONNX Runtime, logging the outcome.
@@ -46,42 +70,34 @@ void RegisterEpLibrary(const std::string& registration_name, const std::string& 
   }
 }
 
-// Locates the WebGPU provider library so it can be registered without explicit configuration.
-// Checks, in order: an explicit env var, the test executable's directory, and the cwd.
-std::string FindWebGpuProviderLibrary(const fs::path& exe_dir) {
-  if (const char* env_path = std::getenv("ORTGENAI_TEST_WEBGPU_EP_LIBRARY"); env_path && *env_path) {
-    if (fs::exists(env_path)) {
-      return env_path;
-    }
-    std::cerr << "Warning: ORTGENAI_TEST_WEBGPU_EP_LIBRARY is set to '" << env_path
-              << "' but the file does not exist." << std::endl;
+// Enumerates every execution provider plugin library in `ep_dir` (following the ORT provider
+// naming convention) and registers it under the EP name derived from its file name. A pipeline
+// only needs to drop the EP plugin(s) it wants to exercise (e.g. the WebGPU, CUDA or
+// NvTensorRtRtx provider library) into this single directory.
+void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
+  std::error_code ec;
+  if (ep_dir.empty()) {
+    return;
+  }
+  if (!fs::is_directory(ep_dir, ec)) {
+    std::cerr << "Warning: --ep_dir '" << ep_dir.string() << "' is not a directory." << std::endl;
+    return;
   }
 
-  const std::string library_name = WebGpuProviderLibraryName();
-  for (const fs::path& dir : {exe_dir, fs::current_path()}) {
-    if (dir.empty()) {
+  for (const auto& entry : fs::directory_iterator(ep_dir, ec)) {
+    if (!entry.is_regular_file(ec)) {
       continue;
     }
-    const fs::path candidate = dir / library_name;
-    if (fs::exists(candidate)) {
-      return candidate.string();
+    const std::optional<std::string> ep_name = EpNameFromLibraryFile(entry.path());
+    if (!ep_name) {
+      continue;
     }
-  }
-
-  return {};
-}
-
-// Registers execution provider plugin libraries requested via:
-//   * repeatable CLI args: --register_ep_library <name> <path>
-//   * the WebGPU provider library discovered on the filesystem / via env var (as "webgpu").
-void RegisterRequestedEpLibraries(const std::vector<std::pair<std::string, std::string>>& explicit_libraries,
-                                  const fs::path& exe_dir) {
-  for (const auto& [name, path] : explicit_libraries) {
-    RegisterEpLibrary(name, path);
-  }
-
-  if (const std::string webgpu_path = FindWebGpuProviderLibrary(exe_dir); !webgpu_path.empty()) {
-    RegisterEpLibrary("webgpu", webgpu_path);
+    if (IsNonPluginProviderLibrary(*ep_name)) {
+      std::cout << "Skipping non-plugin provider library: " << entry.path().filename().string()
+                << std::endl;
+      continue;
+    }
+    RegisterEpLibrary(*ep_name, entry.path().string());
   }
 }
 
@@ -96,25 +112,20 @@ int main(int argc, char** argv) {
     std::cout << "done" << std::endl;
     ::testing::InitGoogleTest(&argc, argv);
 
-    const fs::path exe_dir = (argc > 0 && argv[0] != nullptr)
-                                 ? std::filesystem::absolute(argv[0]).parent_path()
-                                 : std::filesystem::path{};
-
     // Parse custom args after InitGoogleTest (it strips its own flags).
-    std::vector<std::pair<std::string, std::string>> ep_libraries;
+    //   --ep_dir <dir>  register every EP plugin library found in <dir>
+    fs::path ep_dir;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--model_path" && i + 1 < argc) {
         g_custom_model_path = argv[++i];
         std::cout << "Using custom model path: " << g_custom_model_path << std::endl;
-      } else if (arg == "--register_ep_library" && i + 2 < argc) {
-        const std::string name = argv[++i];
-        const std::string path = argv[++i];
-        ep_libraries.emplace_back(name, path);
+      } else if (arg == "--ep_dir" && i + 1 < argc) {
+        ep_dir = argv[++i];
       }
     }
 
-    RegisterRequestedEpLibraries(ep_libraries, exe_dir);
+    RegisterEpLibrariesFromDirectory(ep_dir);
 
     int result = RUN_ALL_TESTS();
     std::cout << "Shutting down OnnxRuntime... ";

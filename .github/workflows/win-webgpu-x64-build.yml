@@ -52,17 +52,22 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download test-time ONNX Runtime and WebGPU EP plugin
+      - name: Download test-time ONNX Runtime and execution provider plugins
         shell: pwsh
         run: |
+          # ort/lib holds the ONNX Runtime runtime (onnxruntime.dll) used at test time; ort/ep holds
+          # the execution provider plugin libraries (and their native dependencies) that the test
+          # harnesses enumerate and register. GenAI itself is built against the cmake-default ORT.
           mkdir ort/lib
+          mkdir ort/ep
           Write-Host "Downloading $env:ORT_PACKAGE_NAME version: $env:ORT_TEST_VERSION"
           nuget install $env:ORT_PACKAGE_NAME -version $env:ORT_TEST_VERSION -Source https://api.nuget.org/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
           Copy-Item "$env:ORT_PACKAGE_NAME/runtimes/win-x64/native/*" ort/lib/ -Force
           Write-Host "Downloading $env:WEBGPU_EP_PACKAGE_NAME version: $env:WEBGPU_EP_PACKAGE_VERSION"
           nuget install $env:WEBGPU_EP_PACKAGE_NAME -version $env:WEBGPU_EP_PACKAGE_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
-          Copy-Item "$env:WEBGPU_EP_PACKAGE_NAME/runtimes/win-x64/native/*" ort/lib/ -Force
-          Get-ChildItem ort/lib
+          Copy-Item "$env:WEBGPU_EP_PACKAGE_NAME/runtimes/win-x64/native/*" ort/ep/ -Force
+          Write-Host "=== ort/lib ==="; Get-ChildItem ort/lib
+          Write-Host "=== ort/ep ==="; Get-ChildItem ort/ep
 
       - name: Install Rust Toolchain
         run: |
@@ -106,15 +111,9 @@ jobs:
           python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
 
       - name: Run the C# Tests
-        env:
-          # Register the WebGPU EP plugin already downloaded into ort/lib (its dxil/dxcompiler
-          # dependencies sit next to it). The tests register it via ONNX Runtime's managed API.
-          ORTGENAI_TEST_WEBGPU_EP_LIBRARY: ${{ github.workspace }}\ort\lib\onnxruntime_providers_webgpu.dll
         run: |
-          # ONNX Runtime (native + managed API) comes from nuget.org; EnableWebGpuEpTests turns on
-          # those package references and the plugin-registration code path in the tests.
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EnableWebGpuEpTests=true --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EnableEpPluginTests=true /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
 
       - name: Verify Build Artifacts
         if: always()
@@ -124,8 +123,5 @@ jobs:
 
       - name: Run C++ Unit Tests
         run: |-
-          # Copy the ORT runtime libraries and the WebGPU EP plugin (plus its dxil/dxcompiler
-          # dependencies) next to unit_tests.exe so the test can auto-detect and register the
-          # provider, and so Windows can resolve the plugin's dependent DLLs at load time.
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-          & .\$env:binaryDir\Release\unit_tests.exe
+          & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep

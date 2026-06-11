@@ -17,6 +17,11 @@
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
     <OrtPackageVersion>1.26.0</OrtPackageVersion>
+    <!-- EP-plugin pipelines (e.g. WebGPU) set EnableEpPluginTests=true to compile the EP plugin
+         registration code path. The plugin libraries themselves are the ones the pipeline already
+         downloaded and are registered at runtime by enumerating the directory passed via /p:EPDir;
+         no extra package feed is required (ONNX Runtime comes from nuget.org). -->
+    <DefineConstants Condition="'$(EnableEpPluginTests)' == 'true'">$(DefineConstants);USE_EP_PLUGINS</DefineConstants>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -63,7 +68,28 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
     <PackageReference Include="xunit" Version="2.4.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <!-- EP-plugin pipelines only: the managed ONNX Runtime API (OrtEnv) used to register plugin
+       libraries, plus the native ONNX Runtime runtime copied next to the test binary so GenAI's
+       native library can resolve onnxruntime.dll at load time. Both come from nuget.org. The EP
+       plugin libraries (and their native dependencies) are loaded at runtime from the directory
+       passed via /p:EPDir. -->
+  <ItemGroup Condition="'$(EnableEpPluginTests)' == 'true'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="$(OrtPackageVersion)" />
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\win-x64\native\*.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. -->
+  <ItemGroup Condition="'$(EnableEpPluginTests)' == 'true' and '$(EPDir)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>EPDir</_Parameter1>
+      <_Parameter2>$(EPDir)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>

@@ -11,7 +11,8 @@ using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
 using Microsoft.Extensions.AI;
-#if USE_WEBGPU_EP
+#if USE_EP_PLUGINS
+using System.Reflection;
 using Microsoft.ML.OnnxRuntime;
 #endif
 
@@ -94,34 +95,75 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static string _adaptersPath => _lazyAdaptersPath.Value;
         private static OgaHandle ogaHandle;
 
-#if USE_WEBGPU_EP
-        private static int _webGpuEpRegistered = 0;
+#if USE_EP_PLUGINS
+        private static int _epLibrariesRegistered = 0;
 
-        // ONNX Runtime's environment is a process-wide singleton, so registering the WebGPU EP
-        // plugin library with it (via ONNX Runtime's managed API) also makes the provider available
-        // to ONNX Runtime GenAI. The plugin library is the one already downloaded by the pipeline;
-        // its path is supplied via the ORTGENAI_TEST_WEBGPU_EP_LIBRARY environment variable.
-        private static void EnsureWebGpuEpRegistered()
+        // Resolves the directory containing the execution provider plugin libraries to register.
+        // Prefers the EPDir MSBuild property (surfaced as assembly metadata, set via /p:EPDir),
+        // falling back to the ORTGENAI_TEST_EP_DIR environment variable.
+        private static string GetEpDirectory()
         {
-            string libraryPath = Environment.GetEnvironmentVariable("ORTGENAI_TEST_WEBGPU_EP_LIBRARY");
-            if (string.IsNullOrEmpty(libraryPath) || !File.Exists(libraryPath))
+            string dir = typeof(OnnxRuntimeGenAITests).Assembly
+                .GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(a => a.Key == "EPDir")?.Value;
+            if (string.IsNullOrEmpty(dir))
+            {
+                dir = Environment.GetEnvironmentVariable("ORTGENAI_TEST_EP_DIR");
+            }
+            return dir;
+        }
+
+        // ONNX Runtime's environment is a process-wide singleton, so registering an execution
+        // provider plugin library with it (via ONNX Runtime's managed API) also makes the provider
+        // available to ONNX Runtime GenAI. Every plugin library in the directory is enumerated using
+        // the ORT provider naming convention (onnxruntime_providers_<ep>.dll) and registered under
+        // the EP name derived from its file name, so a pipeline only needs to drop the relevant EP
+        // plugin(s) into a single directory (the one downloaded by the pipeline).
+        private static void RegisterEpLibrariesFromDirectory()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _epLibrariesRegistered, 1) != 0)
             {
                 return;
             }
 
-            if (System.Threading.Interlocked.Exchange(ref _webGpuEpRegistered, 1) != 0)
+            string epDir = GetEpDirectory();
+            if (string.IsNullOrEmpty(epDir) || !Directory.Exists(epDir))
             {
                 return;
             }
 
-            try
+            bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+            bool isMac = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+            string prefix = isWindows ? "onnxruntime_providers_" : "libonnxruntime_providers_";
+            string suffix = isWindows ? ".dll" : (isMac ? ".dylib" : ".so");
+
+            foreach (string path in Directory.GetFiles(epDir, "*" + suffix))
             {
-                OrtEnv.Instance().RegisterExecutionProviderLibrary("webgpu", libraryPath);
-                Console.WriteLine("**** Registered WebGPU EP plugin library: " + libraryPath);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("**** Warning: failed to register WebGPU EP plugin library: " + ex.Message);
+                string fileName = Path.GetFileName(path);
+                if (!fileName.StartsWith(prefix, StringComparison.Ordinal) ||
+                    !fileName.EndsWith(suffix, StringComparison.Ordinal) ||
+                    fileName.Length <= prefix.Length + suffix.Length)
+                {
+                    continue;
+                }
+
+                string epName = fileName.Substring(prefix.Length, fileName.Length - prefix.Length - suffix.Length);
+                // Provider libraries that match the naming convention but are not registrable EP plugins.
+                if (epName == "shared")
+                {
+                    Console.WriteLine("**** Skipping non-plugin provider library: " + fileName);
+                    continue;
+                }
+
+                try
+                {
+                    OrtEnv.Instance().RegisterExecutionProviderLibrary(epName, path);
+                    Console.WriteLine($"**** Registered execution provider library '{epName}' -> {path}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"**** Warning: failed to register execution provider library '{epName}': {ex.Message}");
+                }
             }
         }
 #endif
@@ -132,8 +174,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
-#if USE_WEBGPU_EP
-            EnsureWebGpuEpRegistered();
+#if USE_EP_PLUGINS
+            RegisterEpLibrariesFromDirectory();
 #endif
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
