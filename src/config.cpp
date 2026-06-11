@@ -1111,7 +1111,7 @@ struct Model_Element : JSON::Element {
     } else if (name == "vocab_size") {
       v_.vocab_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "context_length") {
-      v_.context_length = static_cast<int>(JSON::Get<double>(value));
+      v_.context_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "pad_token_id") {
       v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "eos_token_id") {
@@ -1248,11 +1248,11 @@ struct Search_Element : JSON::Element {
     if (name == "min_length") {
       v_.min_length = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_length") {
-      v_.max_length = static_cast<int>(JSON::Get<double>(value));
+      v_.max_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "batch_size") {
-      v_.batch_size = static_cast<int>(JSON::Get<double>(value));
+      v_.batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_beams") {
-      v_.num_beams = static_cast<int>(JSON::Get<double>(value));
+      v_.num_beams = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_return_sequences") {
       v_.num_return_sequences = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "top_k") {
