@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "../generators.h"
 #include "../search.h"
@@ -771,6 +772,66 @@ bool Model::IsPruned() const {
     return false;
   const auto logits_shape = session_info_.GetOutputShape(logits_name);
   return logits_shape[1] == 1;
+}
+
+namespace {
+
+struct FallbackTokens {
+  std::string tool_call_start;
+  std::string tool_call_end;
+  std::string reasoning_start;
+  std::string reasoning_end;
+};
+
+// Fallback map for models whose genai_config.json doesn't yet have tool_calling/reasoning sections.
+// Keyed by model.type string from genai_config.json.
+const FallbackTokens* GetFallbackTokens(const std::string& model_type) {
+  static const std::unordered_map<std::string, FallbackTokens> fallback_map = {
+      {"qwen2", {"<tool_call>", "</tool_call>", "", ""}},
+      {"qwen3", {"<tool_call>", "</tool_call>", "<think>", "</think>"}},
+      {"phi3", {"<tool_call>", "</tool_call>", "", ""}},
+      {"gptoss", {"<|start|>", "<|call|>", "", ""}},
+  };
+  auto it = fallback_map.find(model_type);
+  return it != fallback_map.end() ? &it->second : nullptr;
+}
+
+}  // namespace
+
+const std::string& Model::GetToolCallStartToken() const {
+  if (!config_->tool_calling.tool_call_start_token.empty())
+    return config_->tool_calling.tool_call_start_token;
+  const auto* fallback = GetFallbackTokens(config_->model.type);
+  if (fallback) return fallback->tool_call_start;
+  static const std::string empty;
+  return empty;
+}
+
+const std::string& Model::GetToolCallEndToken() const {
+  if (!config_->tool_calling.tool_call_end_token.empty())
+    return config_->tool_calling.tool_call_end_token;
+  const auto* fallback = GetFallbackTokens(config_->model.type);
+  if (fallback) return fallback->tool_call_end;
+  static const std::string empty;
+  return empty;
+}
+
+const std::string& Model::GetReasoningStartToken() const {
+  if (!config_->reasoning.reasoning_start_token.empty())
+    return config_->reasoning.reasoning_start_token;
+  const auto* fallback = GetFallbackTokens(config_->model.type);
+  if (fallback && !fallback->reasoning_start.empty()) return fallback->reasoning_start;
+  static const std::string empty;
+  return empty;
+}
+
+const std::string& Model::GetReasoningEndToken() const {
+  if (!config_->reasoning.reasoning_end_token.empty())
+    return config_->reasoning.reasoning_end_token;
+  const auto* fallback = GetFallbackTokens(config_->model.type);
+  if (fallback && !fallback->reasoning_end.empty()) return fallback->reasoning_end;
+  static const std::string empty;
+  return empty;
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {

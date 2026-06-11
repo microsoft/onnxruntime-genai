@@ -163,6 +163,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   bool IsPruned() const;
 
+  // Tool calling and reasoning token accessors (reads from config with fallback map)
+  const std::string& GetToolCallStartToken() const;
+  const std::string& GetToolCallEndToken() const;
+  const std::string& GetReasoningStartToken() const;
+  const std::string& GetReasoningEndToken() const;
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 

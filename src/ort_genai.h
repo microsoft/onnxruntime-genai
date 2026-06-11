@@ -253,6 +253,30 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
+  OgaString GetToolCallStartToken() const {
+    const char* p;
+    OgaCheckResult(OgaModelGetToolCallStartToken(this, &p));
+    return p;
+  }
+
+  OgaString GetToolCallEndToken() const {
+    const char* p;
+    OgaCheckResult(OgaModelGetToolCallEndToken(this, &p));
+    return p;
+  }
+
+  OgaString GetReasoningStartToken() const {
+    const char* p;
+    OgaCheckResult(OgaModelGetReasoningStartToken(this, &p));
+    return p;
+  }
+
+  OgaString GetReasoningEndToken() const {
+    const char* p;
+    OgaCheckResult(OgaModelGetReasoningEndToken(this, &p));
+    return p;
+  }
+
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

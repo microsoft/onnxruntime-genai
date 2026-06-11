@@ -443,6 +443,16 @@ struct Config {
     std::optional<StaticBatching> static_batching;  // Static batching settings
   } engine;                                         // Engine settings
 
+  struct ToolCalling {
+    std::string tool_call_start_token;  // e.g., "<tool_call>"
+    std::string tool_call_end_token;    // e.g., "</tool_call>"
+  } tool_calling;
+
+  struct Reasoning {
+    std::string reasoning_start_token;  // e.g., "<think>"
+    std::string reasoning_end_token;    // e.g., "</think>"
+  } reasoning;
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
