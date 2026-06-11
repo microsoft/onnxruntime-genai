@@ -3,7 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-# Copyright (C)  [2026]  Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI generated content.
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 # --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
@@ -24,6 +25,7 @@ from builders import (
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
+    HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
     LlamaModel,
@@ -44,8 +46,10 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
+    Qwen35MoeTextModel,
     QwenModel,
     SmolLM3Model,
+    VideoChatFlashQwenModel,
     WhisperModel,
 )
 from transformers import (
@@ -242,6 +246,8 @@ def create_model(
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
+        onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
@@ -289,6 +295,10 @@ def create_model(
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
@@ -301,6 +311,8 @@ def create_model(
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        onnx_model = Qwen35MoeTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
@@ -404,7 +416,7 @@ def get_args():
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
-                    Default is 128 for trt-rtx, 32 for others. Supported EPs: cpu, webgpu, trt-rtx.
+                    Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.

@@ -10,15 +10,11 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime
 import onnxruntime_genai as og
 import pytest
 
-if not sysconfig.get_platform().endswith("arm64"):
-    # Skip importing onnx if running on ARM64
-    # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
-    # there is a version bump
-    import onnx
 
 devices = ["cpu"]
 
@@ -38,8 +34,13 @@ if og.is_webgpu_available():
     devices.append("webgpu")
 
 
+@pytest.fixture
+def test_data_path(request):
+    return os.fspath(Path(request.config.getoption("--test_models")).parent)
+
+
 def test_config(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -59,7 +60,7 @@ def test_log_callback(test_data_path):
     og.set_log_options(enabled=True, generate_next_token=True)
     og.set_log_callback(_log_callback)
 
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     model = og.Model(config)
 
@@ -86,7 +87,7 @@ def test_log_filename(test_data_path):
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as log_file:
         og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
 
-        model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+        model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
         config = og.Config(model_path)
         model = og.Model(config)
 
@@ -139,7 +140,7 @@ def test_NamedTensors():
     ),
 )
 def test_greedy_search(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     config = og.Config(model_path)  # Test using config vs path directly
     model = og.Model(config)
@@ -189,7 +190,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     ),
 )
 def test_rewind_cuda(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -246,7 +247,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
 )
 def test_rewind(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -479,7 +480,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     ),
 )
 def test_model_device_type(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path[0])
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path[0])
 
     model = og.Model(model_path)
 
@@ -501,7 +502,7 @@ def test_model_device_type(test_data_path, relative_model_path):
     ),
 )
 def test_get_output(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -619,10 +620,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
     _split(
         Path(phi2_for("cuda")) / "model.onnx",
-        Path(test_data_path) / relative_model_path,
+        Path(test_data_path) / "models" / relative_model_path,
     )
 
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
@@ -656,10 +657,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         assert equal
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -671,10 +672,10 @@ def test_vision_preprocessing(test_data_path, relative_model_path, relative_imag
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -689,13 +690,13 @@ def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_mod
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_vision_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -723,7 +724,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     def _prepare_adapter_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "multiple_adapters" if multiple_adapters else "adapters"
-        adapter_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        adapter_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
         if os.path.exists(adapter_model_path):
             shutil.rmtree(adapter_model_path)
 
@@ -852,7 +853,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     def _prepare_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "preset_extra_inputs"
-        extra_inputs_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        extra_inputs_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
         shutil.copytree(phi2_model_path, extra_inputs_model_path, dirs_exist_ok=True)
 
@@ -924,10 +925,10 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
             generator.generate_next_token()
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -941,10 +942,10 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     _ = processor(prompts, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -957,13 +958,13 @@ def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, 
     _ = processor(prompt, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
 )
-def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 
 namespace Generators {
@@ -67,6 +68,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view LangIdName = "lang_id";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -145,6 +147,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -153,6 +156,11 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Parakeet TDT (Token-and-Duration Transducer) parameters
+    int left_context_samples{};
+    int right_context_samples{};
+    std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
     struct Encoder {
       std::string filename;
@@ -176,6 +184,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string lang_id{Defaults::LangIdName};
       } inputs;
 
       struct Outputs {
@@ -203,6 +212,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
 
@@ -218,10 +228,11 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
-                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
+                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -346,6 +357,12 @@ struct Config {
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Gemma4 per-layer inputs (e.g. per-layer embeddings from embedding model)
+        std::string per_layer_inputs;
+
+        // Parakeet TDT decoder (prediction network) extra inputs
+        std::string targets_length;
       } inputs;
 
       struct Outputs {
@@ -361,6 +378,9 @@ struct Config {
         std::string outputs;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Parakeet TDT decoder (prediction network) extra outputs
+        std::string outputs_length;
       } outputs;
 
       struct PipelineModel {

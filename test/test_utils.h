@@ -10,7 +10,7 @@
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
+#define MODEL_PATH "../../test/models/"
 #endif
 
 namespace test_utils {

@@ -189,13 +189,13 @@ class TestTokenExpansionIntegration:
         """Verify C++ processor produces correct token counts.
 
         Requires onnxruntime_genai, the pre-exported Mistral3 model under
-        test_data_path/mistral3-vision-preprocessing, and a test image.
+        test_data_path/mistral3, and a test image.
         """
         from pathlib import Path
 
         import numpy as np
 
-        model_path = Path(test_data_path) / "mistral3-vision-preprocessing"
+        model_path = Path(test_data_path) / "mistral3"
         image_path = Path(test_data_path) / "images" / "australia.jpg"
         if not (model_path / "genai_config.json").is_file():
             pytest.skip(f"Mistral3 model not found at {model_path} (missing genai_config.json)")

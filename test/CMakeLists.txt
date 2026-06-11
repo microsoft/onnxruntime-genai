@@ -54,7 +54,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   add_dependencies(unit_tests onnxruntime-genai-cuda)
 endif()
 
-set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
+set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/")
 
 add_compile_definitions(MODEL_PATH="${TEST_MODEL_SRC_DIR}")
 set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
