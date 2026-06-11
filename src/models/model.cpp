@@ -636,8 +636,18 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    // If relative path, try to resolve using multiple search locations
+    // Security: reject absolute paths and path traversal to prevent loading arbitrary libraries
     fs::path custom_library_path{custom_library_file_prefix};
+    if (custom_library_path.is_absolute()) {
+      throw std::runtime_error("custom_ops_library must be a relative path, got absolute path: " + custom_library_file_prefix);
+    }
+    for (const auto& component : custom_library_path) {
+      if (component == "..") {
+        throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
+      }
+    }
+
+    // If relative path, try to resolve using multiple search locations
     if (custom_library_path.is_relative()) {
       bool resolved = false;
 
