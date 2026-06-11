@@ -281,25 +281,42 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  // Auto-detect per-layer head_dim from ONNX session input shapes.
-  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
-  // full-attention layers use global_head_dim=512.
+  // Auto-detect per-layer KV cache shape from ONNX session input shapes.
+  // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
+  // (e.g. num_kv_heads=8, head_dim=256) while global/full-attention layers are MQA
+  // (num_kv_heads=1, head_dim=512). Both the KV-head count and the head_dim can vary
+  // per layer, so detect and store both. (Previously only head_dim was handled, which
+  // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
+  // "past_key_values.5.key index 1 Got 8 Expected 1".)
   {
-    bool has_varying_head_dim = false;
-    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
+    constexpr size_t kKvHeadsAxis = 1;
+    constexpr size_t kHeadDimAxis = 3;
+    std::vector<int64_t> per_layer_kv_heads(layer_count_, shape_[kKvHeadsAxis]);
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[kHeadDimAxis]);
+    // Determine variation from the distinct *concrete* (positive) dims observed across
+    // layers — not by comparing against the base shape_. This avoids a false positive
+    // when a base dim is unknown/dynamic (e.g. -1) but every layer is in fact identical.
+    int64_t first_kv_heads = -1, first_head_dim = -1;
+    bool varying_kv_heads = false, varying_head_dim = false;
     for (int i = 0; i < layer_count_; ++i) {
       auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
-      if (!input_shape.empty()) {
-        int64_t layer_head_dim = input_shape.back();
-        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
-          has_varying_head_dim = true;
+      if (input_shape.size() >= 4) {
+        const int64_t layer_kv_heads = input_shape[kKvHeadsAxis];
+        const int64_t layer_head_dim = input_shape[kHeadDimAxis];
+        if (layer_kv_heads > 0) {
+          per_layer_kv_heads[i] = layer_kv_heads;
+          if (first_kv_heads < 0) first_kv_heads = layer_kv_heads;
+          else if (layer_kv_heads != first_kv_heads) varying_kv_heads = true;
         }
         if (layer_head_dim > 0) {
           per_layer_head_dim[i] = layer_head_dim;
+          if (first_head_dim < 0) first_head_dim = layer_head_dim;
+          else if (layer_head_dim != first_head_dim) varying_head_dim = true;
         }
       }
     }
-    if (has_varying_head_dim) {
+    if (varying_kv_heads || varying_head_dim) {
       if (layer_shapes_.empty()) {
         layer_shapes_.resize(layer_count_);
         for (int i = 0; i < layer_count_; ++i) {
@@ -307,14 +324,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         }
       }
       for (int i = 0; i < layer_count_; ++i) {
-        layer_shapes_[i][3] = per_layer_head_dim[i];
+        layer_shapes_[i][kKvHeadsAxis] = per_layer_kv_heads[i];
+        layer_shapes_[i][kHeadDimAxis] = per_layer_head_dim[i];
       }
       if (g_log.enabled) {
-        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
-                        std::to_string(layer_count_) + " KV cache layers");
+        Log("info",
+            "DefaultKeyValueCache: Detected per-layer KV shape variation "
+            "(num_kv_heads/head_dim) across " +
+                std::to_string(layer_count_) + " KV cache layers");
       }
 
-      // Create per-layer empty past tensors since head_dim varies across layers
+      // Create per-layer empty past tensors since the KV shape varies across layers
       empty_pasts_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
         std::array<int64_t, 4> empty_shape = layer_shapes_[i];
