@@ -109,7 +109,7 @@ class GenAITelemetry:
     """
 
     _instance: Optional["GenAITelemetry"] = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     def __new__(cls):
         if cls._instance is None:
@@ -121,32 +121,33 @@ class GenAITelemetry:
         return cls._instance
 
     def __init__(self):
-        if self._initialized:
-            return
+        with self._lock:
+            if self._initialized:
+                return
 
-        self._initialized = True
-        self._enabled = True
+            self._initialized = True
+            self._enabled = True
 
-        # Check opt-out conditions
-        if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1":
-            self._enabled = False
-        elif _is_ci_environment():
-            self._enabled = False
+            # Check opt-out conditions
+            if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1":
+                self._enabled = False
+            elif _is_ci_environment():
+                self._enabled = False
 
-        if not self._enabled:
-            self._logger = None
-            return
+            if not self._enabled:
+                self._logger = None
+                return
 
-        try:
-            version = _get_app_version()
-            set_app_version(version)
-            connection_string = base64.b64decode(CONNECTION_STRING).decode()
-            self._logger = get_telemetry_logger(connection_string)
-            event_source.disable()
-            self._log_heartbeat()
-        except Exception:
-            self._logger = None
-            self._enabled = False
+            try:
+                version = _get_app_version()
+                set_app_version(version)
+                connection_string = base64.b64decode(CONNECTION_STRING).decode()
+                self._logger = get_telemetry_logger(connection_string)
+                event_source.disable()
+                self._log_heartbeat()
+            except Exception:
+                self._logger = None
+                self._enabled = False
 
     def _log_heartbeat(self) -> None:
         """Log initial heartbeat with system info for MAD/DAD tracking."""

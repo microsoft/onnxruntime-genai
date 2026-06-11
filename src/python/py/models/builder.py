@@ -173,6 +173,35 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+_PATH_OPTION_KEYS = {"adapter_path"}
+
+
+def _sanitize_path_value(value):
+    """Reduce a filesystem path to its basename to avoid leaking usernames/local paths.
+
+    Hugging Face repo IDs (e.g. "microsoft/phi-3-mini") are returned unchanged because
+    they are neither absolute nor existing local paths.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if os.path.isabs(value) or os.path.exists(value):
+        return os.path.basename(os.path.normpath(value))
+    return value
+
+
+def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, str]:
+    """Stringify extra options for telemetry, excluding secrets and redacting local paths."""
+    sanitized = {}
+    for key, value in extra_options.items():
+        if key == "hf_token":
+            continue
+        if key in _PATH_OPTION_KEYS:
+            sanitized[key] = _sanitize_path_value(str(value))
+        else:
+            sanitized[key] = _sanitize_path_value(value) if isinstance(value, str) else str(value)
+    return sanitized
+
+
 def _emit_model_build_telemetry(
     action_name: str,
     duration_ms: float,
@@ -235,7 +264,7 @@ def _emit_model_build_telemetry(
             action=action_name,
             duration_ms=duration_ms,
             success=success,
-            model_name=getattr(config, "_name_or_path", "") or "",
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or ""),
             model_type=str(model_type),
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -252,7 +281,7 @@ def _emit_model_build_telemetry(
             has_custom_ops=has_custom_ops,
             source_format=source_format,
             has_adapter="adapter_path" in extra_options,
-            extra_options={key: str(value) for key, value in extra_options.items() if key != "hf_token"},
+            extra_options=_sanitize_extra_options(extra_options),
         )
     except Exception:
         pass

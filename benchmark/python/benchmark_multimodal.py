@@ -334,7 +334,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
             sampling_throughput=avg_sampling_thrpt,
             wall_clock_time_ms=avg_wall_clock_time * 1000,
             wall_clock_throughput=avg_wall_clock_thrpt,
-            time_to_first_token_ms=avg_sampling_latency_ms,
+            time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
             peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
             peak_memory_cpu_mb=peak_cpu_memory * 1024,
         )

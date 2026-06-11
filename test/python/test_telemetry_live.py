@@ -22,6 +22,13 @@ import sys
 import threading
 import time
 
+# Ensure console output works on non-UTF-8 terminals (e.g. Windows cp1252).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Add the telemetry source to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 
