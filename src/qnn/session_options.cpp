@@ -50,8 +50,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   bool allocator_requested = false;
   if (const auto opt_it = std::find_if(
           provider_options.options.begin(), provider_options.options.end(),
-          [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"
-                                        || pair.first == "enable_dx12_shared_memory_allocator"; });
+          [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator" || pair.first == "enable_dx12_shared_memory_allocator"; });
       opt_it != provider_options.options.end() && opt_it->second == "1") {
     allocator_requested = true;
   }

@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 #include "span.h"
-#include "config.h" // for Config and Config::ProviderOptions
+#include "config.h"                  // for Config and Config::ProviderOptions
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 namespace Ort {
 struct Allocator;
@@ -102,18 +102,26 @@ enum struct DeviceType {
 
 static inline std::string DeviceTypeToString(DeviceType type) {
   switch (type) {
-  case DeviceType::CPU:           return "CPU";
-  case DeviceType::CUDA:          return "CUDA";
-  case DeviceType::DML:           return "DML";
-  case DeviceType::WEBGPU:        return "WEBGPU";
-  case DeviceType::QNN:           return "QNN";
-  case DeviceType::OpenVINO:      return "OpenVINO";
-  case DeviceType::NvTensorRtRtx: return "NvTensorRtRtx";
-  case DeviceType::RyzenAI:       return "RyzenAI";
-  case DeviceType::MAX:
-    [[fallthrough]];
-  default:
-    return "(Unknown)";
+    case DeviceType::CPU:
+      return "CPU";
+    case DeviceType::CUDA:
+      return "CUDA";
+    case DeviceType::DML:
+      return "DML";
+    case DeviceType::WEBGPU:
+      return "WEBGPU";
+    case DeviceType::QNN:
+      return "QNN";
+    case DeviceType::OpenVINO:
+      return "OpenVINO";
+    case DeviceType::NvTensorRtRtx:
+      return "NvTensorRtRtx";
+    case DeviceType::RyzenAI:
+      return "RyzenAI";
+    case DeviceType::MAX:
+      [[fallthrough]];
+    default:
+      return "(Unknown)";
   }
 }
 

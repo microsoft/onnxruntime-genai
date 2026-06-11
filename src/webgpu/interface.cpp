@@ -171,7 +171,8 @@ struct InterfaceImpl : DeviceInterface {
       } catch (const Ort::Exception& fallback_e) {
         throw std::runtime_error(
             "Failed to create memory info for WebGPU. "
-            "Primary name 'WebGPU_Buf' error: " + std::string(e.what()) +
+            "Primary name 'WebGPU_Buf' error: " +
+            std::string(e.what()) +
             "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
       }
     }
