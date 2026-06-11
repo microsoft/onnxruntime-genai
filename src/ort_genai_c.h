@@ -387,6 +387,38 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
 /**
+ * \brief Returns the tool call start token for this model (empty string if model doesn't support tool calling).
+ * \param[in] model The model to query.
+ * \param[out] out The token string. Must be destroyed with OgaDestroyString.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetToolCallStartToken(const OgaModel* model, const char** out);
+
+/**
+ * \brief Returns the tool call end token for this model (empty string if model doesn't support tool calling).
+ * \param[in] model The model to query.
+ * \param[out] out The token string. Must be destroyed with OgaDestroyString.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetToolCallEndToken(const OgaModel* model, const char** out);
+
+/**
+ * \brief Returns the reasoning start token for this model (empty string if model doesn't support reasoning).
+ * \param[in] model The model to query.
+ * \param[out] out The token string. Must be destroyed with OgaDestroyString.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetReasoningStartToken(const OgaModel* model, const char** out);
+
+/**
+ * \brief Returns the reasoning end token for this model (empty string if model doesn't support reasoning).
+ * \param[in] model The model to query.
+ * \param[out] out The token string. Must be destroyed with OgaDestroyString.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetReasoningEndToken(const OgaModel* model, const char** out);
+
+/**
  * \brief Destroys the given config
  * \param[in] config The config to be destroyed.
  */
