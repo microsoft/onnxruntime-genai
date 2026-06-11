@@ -6,6 +6,7 @@
 """High-level telemetry logger facade."""
 
 import logging
+import threading
 import uuid
 from typing import Any, Callable, Optional
 
@@ -31,14 +32,19 @@ class TelemetryLogger:
 
     _instance: Optional["TelemetryLogger"] = None
     _default_logger: Optional["TelemetryLogger"] = None
+    _instance_lock = threading.RLock()
+    _default_logger_lock = threading.RLock()
     _logger: Optional[logging.Logger] = None
     _logger_exporter: Optional[OneCollectorLogExporter] = None
     _logger_provider: Optional[LoggerProvider] = None
 
     def __new__(cls, options: Optional[OneCollectorExporterOptions] = None):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialize(options)
+            with cls._instance_lock:
+                if cls._instance is None:
+                    instance = super().__new__(cls)
+                    instance._initialize(options)
+                    cls._instance = instance
         return cls._instance
 
     def _initialize(self, options: Optional[OneCollectorExporterOptions]) -> None:
@@ -109,17 +115,20 @@ class TelemetryLogger:
     @classmethod
     def get_default_logger(cls, connection_string: Optional[str] = None) -> "TelemetryLogger":
         if cls._default_logger is None:
-            options = None
-            if connection_string:
-                options = OneCollectorExporterOptions(connection_string=connection_string)
-            cls._default_logger = cls(options=options)
+            with cls._default_logger_lock:
+                if cls._default_logger is None:
+                    options = None
+                    if connection_string:
+                        options = OneCollectorExporterOptions(connection_string=connection_string)
+                    cls._default_logger = cls(options=options)
         return cls._default_logger
 
     @classmethod
     def shutdown_default_logger(cls) -> None:
-        if cls._default_logger:
-            cls._default_logger.shutdown()
-            cls._default_logger = None
+        with cls._default_logger_lock:
+            if cls._default_logger:
+                cls._default_logger.shutdown()
+                cls._default_logger = None
 
 
 def get_telemetry_logger(connection_string: Optional[str] = None) -> TelemetryLogger:

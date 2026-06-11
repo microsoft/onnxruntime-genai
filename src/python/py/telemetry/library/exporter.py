@@ -36,6 +36,8 @@ class OneCollectorLogExporter(LogRecordExporter):
         options: Optional[OneCollectorExporterOptions] = None,
         excluded_attributes: Optional[set[str]] = None,
     ):
+        if options is None:
+            raise ValueError("OneCollectorExporterOptions is required")
         options.validate()
 
         self._options = options
@@ -58,29 +60,36 @@ class OneCollectorLogExporter(LogRecordExporter):
 
         if transport_opts.http_client_factory:
             self._session = transport_opts.http_client_factory()
+            self._owns_session = False
         else:
             self._session = requests.Session()
+            self._owns_session = True
 
-        self._ikey = f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
+        try:
+            self._ikey = f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
 
-        self._callback_manager = CallbackManager()
+            self._callback_manager = CallbackManager()
 
-        self._transport = HttpJsonPostTransport(
-            endpoint=transport_opts.endpoint,
-            ikey=options.instrumentation_key,
-            compression=transport_opts.compression,
-            session=self._session,
-            callback_manager=self._callback_manager,
-        )
+            self._transport = HttpJsonPostTransport(
+                endpoint=transport_opts.endpoint,
+                ikey=options.instrumentation_key,
+                compression=transport_opts.compression,
+                session=self._session,
+                callback_manager=self._callback_manager,
+            )
 
-        self._payload_builder = PayloadBuilder(
-            max_size_bytes=transport_opts.max_payload_size_bytes, max_items=transport_opts.max_items_per_payload
-        )
+            self._payload_builder = PayloadBuilder(
+                max_size_bytes=transport_opts.max_payload_size_bytes, max_items=transport_opts.max_items_per_payload
+            )
 
-        self._retry_handler = RetryHandler(max_retries=6)
+            self._retry_handler = RetryHandler(max_retries=6)
 
-        self._metadata: dict[str, Any] = {}
-        self._resource: Optional[Resource] = None
+            self._metadata: dict[str, Any] = {}
+            self._resource: Optional[Resource] = None
+        except Exception:
+            if self._owns_session:
+                self._session.close()
+            raise
 
     def add_metadata(self, metadata: dict[str, Any]) -> None:
         self._metadata.update(metadata)
@@ -121,7 +130,7 @@ class OneCollectorLogExporter(LogRecordExporter):
                 item_count = payload.count(b"\n") + 1 if payload else 0
                 success = self._retry_handler.execute_with_retry(
                     operation=lambda payload=payload, item_count=item_count: self._transport.send(
-                        payload, deadline_sec - time(), item_count=item_count
+                            payload, max(0.1, deadline_sec - time()), item_count=item_count
                     ),
                     deadline_sec=deadline_sec,
                     shutdown_event=self._shutdown_event,
@@ -203,7 +212,8 @@ class OneCollectorLogExporter(LogRecordExporter):
             self._shutdown = True
             self._shutdown_event.set()
 
-        if hasattr(self, "_session"):
+        # Close HTTP session (only if we own it)
+        if hasattr(self, "_session") and getattr(self, "_owns_session", True):
             self._session.close()
         if hasattr(self, "_callback_manager"):
             self._callback_manager.close()
