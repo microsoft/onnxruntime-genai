@@ -43,8 +43,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             return null;
         }
 
-        private static bool _useCudaModel = false;
-
         private static Lazy<string> _lazyPhi2Path = new Lazy<string>(() =>
         {
             string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
@@ -54,11 +52,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             // Prefer CUDA model if available.
             if (System.IO.Directory.Exists(cudaModelPath))
             {
-                _useCudaModel = true;
                 return cudaModelPath;
             }
 
-            _useCudaModel = false;
             return cpuModelPath;
         });
 
@@ -801,16 +797,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 }
 
                 using var logits = generator.GetOutput("logits");
-                if (_useCudaModel)
+                // The adapters model's precision depends on how it was generated (e.g. fp32 for CPU,
+                // fp16 for CUDA/WebGPU), so branch on the actual logits type rather than assuming one.
+                if (logits.Type() == ElementType.float32)
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
-                    // TODO: GetData with float16?
-                }
-                else
-                {
-                    Assert.Equal(ElementType.float32, logits.Type());
                     base_output = logits.GetData<float>().ToArray();
                 }
+                // TODO: GetData with float16 to enable the base/adapter comparison for fp16 models.
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
             }
@@ -828,17 +821,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");
-                if (_useCudaModel)
+                if (logits.Type() == ElementType.float32)
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
-                    // TODO: GetData with float16?
-                }
-                else
-                {
-                    Assert.Equal(ElementType.float32, logits.Type());
                     var adapter_output = logits.GetData<float>().ToArray();
                     Assert.NotEqual(base_output, adapter_output);
                 }
+                // TODO: GetData with float16 to enable the base/adapter comparison for fp16 models.
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
             }
