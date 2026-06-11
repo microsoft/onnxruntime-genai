@@ -160,6 +160,23 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::WEBGPU; }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    try {
+      return OrtMemoryInfo::Create("WebGPU_Buf", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    } catch (const Ort::Exception& e) {
+      // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
+      // Try the old name before giving up.
+      try {
+        return OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      } catch (const Ort::Exception& fallback_e) {
+        throw std::runtime_error(
+            "Failed to create memory info for WebGPU. "
+            "Primary name 'WebGPU_Buf' error: " +
+            std::string(e.what()) +
+            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
+      }
+    }
+  }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
