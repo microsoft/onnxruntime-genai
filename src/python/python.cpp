@@ -282,6 +282,11 @@ struct PyGenerator {
     generator_->SnapshotState();
   }
 
+  void SetHiddenStates(pybind11::array& hidden_states) {
+    hidden_states_holder_ = ToOgaTensor(hidden_states, /*copy*/ true);
+    generator_->SetHiddenStates(*hidden_states_holder_);
+  }
+
   bool IsDone() {
     return generator_->IsDone();
   }
@@ -296,6 +301,7 @@ struct PyGenerator {
 
  private:
   std::unique_ptr<OgaGenerator> generator_;
+  std::unique_ptr<OgaTensor> hidden_states_holder_;  // Keeps the staged hidden_states alive across the next step
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -498,6 +504,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindTo)
       .def("snapshot_state", &PyGenerator::SnapshotState)
+      .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)

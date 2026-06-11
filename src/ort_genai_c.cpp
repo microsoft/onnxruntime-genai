@@ -511,6 +511,13 @@ OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_SetHiddenStates(OgaGenerator* generator, OgaTensor* hidden_states) {
+  OGA_TRY
+  generator->SetHiddenStates(hidden_states->shared_from_this());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value) {
   OGA_TRY
   generator->SetRuntimeOption(key, value);

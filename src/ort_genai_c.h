@@ -573,6 +573,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator);
 
 /**
+ * \brief Stages a hidden_states tensor as the model's hidden_states input for the next step.
+ *        Used by the MTP self-speculative head, which consumes the main model's last hidden
+ *        state. A no-op for models without a hidden_states input. The tensor is [batch,
+ *        sequence_length, hidden_size] of the model's io dtype.
+ * \param[in] generator The generator to set the hidden_states input on.
+ * \param[in] hidden_states The hidden state values to feed on the next step.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetHiddenStates(OgaGenerator* generator, OgaTensor* hidden_states);
+
+/**
  * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
  *       and will be released when the OgaTensor is destroyed
  * \param[in] generator The generator to run the GetInput on the name provided and the out pointer to store the input.

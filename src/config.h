@@ -354,6 +354,10 @@ struct Config {
         std::string block_table{Defaults::BlockTableName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
+        // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
+        // Empty unless the model graph takes a hidden_states input.
+        std::string hidden_states;
+
         // RNNT decoder inputs
         std::string targets;
         std::string lstm_hidden_state;

@@ -25,10 +25,21 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
+  // model's last hidden state. Only created when the config declares the input.
+  if (!model_.config_->model.decoder.inputs.hidden_states.empty()) {
+    hidden_states_ = std::make_unique<HiddenStatesInputs>(*this);
+    hidden_states_->Add();
+  }
 }
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
+}
+
+void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
+  if (hidden_states_)
+    hidden_states_->SetValue(hidden_states);
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -123,6 +134,8 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (hidden_states_)
+    hidden_states_->Update(static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
 }
 

@@ -512,6 +512,10 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_SnapshotState(this));
   }
 
+  void SetHiddenStates(OgaTensor& hidden_states) {
+    OgaCheckResult(OgaGenerator_SetHiddenStates(this, &hidden_states));
+  }
+
   void SetRuntimeOption(const char* key, const char* value) {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }

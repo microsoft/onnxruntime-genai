@@ -40,6 +40,10 @@ struct State {
   // rejected draft, since recurrent state cannot be partially cropped like KV cache.
   virtual void SnapshotState() {}
 
+  // Stage a hidden_states input value for the next Run (models with a hidden_states input,
+  // e.g. the MTP self-speculative head). Default no-op.
+  virtual void SetHiddenStates(OrtValue* hidden_states) { (void)hidden_states; }
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 

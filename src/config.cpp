@@ -337,6 +337,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.block_table = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {

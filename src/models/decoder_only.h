@@ -5,6 +5,7 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "hidden_states_inputs.h"
 #include "recurrent_state.h"
 
 namespace Generators {
@@ -28,6 +29,10 @@ struct DecoderOnly_State : State {
 
   void SnapshotState() override;
 
+  // Stage the hidden_states values for the next Run (for models with a hidden_states input,
+  // e.g. the MTP self-speculative head). No-op if the model has no hidden_states input.
+  void SetHiddenStates(OrtValue* hidden_states) override;
+
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size);
@@ -41,6 +46,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
+  std::unique_ptr<HiddenStatesInputs> hidden_states_;  // Only for models with a hidden_states input (MTP head).
   ExtraInputs extra_inputs_{*this};
 };
 
