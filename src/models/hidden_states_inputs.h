@@ -37,4 +37,28 @@ struct HiddenStatesInputs {
   OrtValue* pending_source_{};
 };
 
+// Manages a `hidden_states` *output* ([batch, sequence_length, hidden_size]) as a first-class
+// model output with a pre-allocated buffer. A plain ORT-allocated extra output cannot be used
+// here because CUDA-graph capture binds outputs to static buffers; owning the tensor (and making
+// it static when graph capture is active) lets the hidden state be exposed under CUDA graph.
+// Created only for models whose graph emits a hidden_states output (e.g. exported with
+// include_hidden_states, to feed the MTP head).
+struct HiddenStatesOutputs {
+  HiddenStatesOutputs(State& state);
+  HiddenStatesOutputs(const HiddenStatesOutputs&) = delete;
+  HiddenStatesOutputs& operator=(const HiddenStatesOutputs&) = delete;
+
+  void Add();                       // Register the hidden_states output (called once at init).
+  void Update(int sequence_length);  // Resize the output buffer to match the step's sequence length.
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
+  size_t output_index_{~0U};
+
+  std::array<int64_t, 3> shape_{};
+  ONNXTensorElementDataType type_;
+  std::unique_ptr<Tensor> value_;
+};
+
 }  // namespace Generators

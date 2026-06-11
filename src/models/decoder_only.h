@@ -47,6 +47,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
   std::unique_ptr<HiddenStatesInputs> hidden_states_;  // Only for models with a hidden_states input (MTP head).
+  std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).
   ExtraInputs extra_inputs_{*this};
 };
 

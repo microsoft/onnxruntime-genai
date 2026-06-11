@@ -51,4 +51,28 @@ void HiddenStatesInputs::Update(int sequence_length) {
   dst.CopyCpuToDevice();
 }
 
+HiddenStatesOutputs::HiddenStatesOutputs(State& state)
+    : state_{state} {
+  const std::string& name = model_.config_->model.decoder.outputs.hidden_states;
+  type_ = model_.session_info_.GetOutputDataType(name);
+  shape_ = {state_.params_->BatchBeamSize(), 0, model_.config_->model.decoder.hidden_size};
+  value_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+}
+
+void HiddenStatesOutputs::Add() {
+  output_index_ = state_.outputs_.size();
+  state_.outputs_.push_back(value_->GetOrtTensor());
+  state_.output_names_.push_back(model_.config_->model.decoder.outputs.hidden_states.c_str());
+}
+
+void HiddenStatesOutputs::Update(int sequence_length) {
+  if (static_cast<int64_t>(sequence_length) != shape_[1]) {
+    shape_[1] = sequence_length;
+    // Static buffer when graph capture is active (single-token steps) so the captured
+    // graph can bind to a stable output address.
+    value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+    state_.outputs_[output_index_] = value_->GetOrtTensor();
+  }
+}
+
 }  // namespace Generators

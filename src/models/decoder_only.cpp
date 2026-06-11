@@ -31,6 +31,12 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     hidden_states_ = std::make_unique<HiddenStatesInputs>(*this);
     hidden_states_->Add();
   }
+  // Models that emit a hidden_states output (exported with include_hidden_states, e.g. to feed
+  // the MTP head) register it as a managed output so it survives CUDA-graph capture.
+  if (!model_.config_->model.decoder.outputs.hidden_states.empty()) {
+    hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
+    hidden_states_output_->Add();
+  }
 }
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -136,6 +142,8 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     recurrent_state_->Update();
   if (hidden_states_)
     hidden_states_->Update(static_cast<int>(new_length));
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
 }
 
