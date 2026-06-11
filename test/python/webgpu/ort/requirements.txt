@@ -1,3 +1,2 @@
--i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
 onnxruntime==1.26.0
-onnxruntime-ep-webgpu==0.2.0.dev20260610
+onnxruntime-ep-webgpu==0.1.0

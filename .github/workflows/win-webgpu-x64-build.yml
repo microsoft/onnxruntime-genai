@@ -19,8 +19,7 @@ env:
   binaryDir: 'build/cpu/win-x64'
   TEST_WEBGPU: 'true'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  # NuGet ignores '+build' metadata, so the restorable version is 0.2.0-dev.20260610.
-  WEBGPU_EP_PACKAGE_VERSION: '0.2.0-dev.20260610'
+  WEBGPU_EP_PACKAGE_VERSION: '0.1.0'
   # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
   ORT_TEST_VERSION: '1.26.0'
 

@@ -86,6 +86,7 @@ else()
   set(ORT_NIGHTLY_FEED_ID "7982ae20-ed19-4a35-a362-a96ac99897b7")
 
   if (USE_DML)
+    set(ORT_VERSION "1.24.4")
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.DirectML")
   elseif(USE_CUDA)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
