@@ -82,6 +82,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  // Largest per-step input length captured as a CUDA graph. Defaults to 1 (single-token decode).
+  // MTP speculative decoding sets this to 2 so the 2-token verify shape is also graph-captured.
+  int max_graph_capture_length{1};
   bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 

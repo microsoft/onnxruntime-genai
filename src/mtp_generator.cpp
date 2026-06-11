@@ -26,6 +26,11 @@ int32_t ArgmaxRow(const float* row, int vocab_size) {
 
 MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, const GeneratorParams& params)
     : main_model_{main_model}, mtp_model_{mtp_model} {
+  // MTP runs both a 1-token decode and a 2-token verify on the main model. Allow CUDA graph
+  // capture of both shapes (each captured under its own annotation id with pre-sized static
+  // buffers). Harmless for the MTP head, which only ever runs a single token per step.
+  const_cast<GeneratorParams&>(params).max_graph_capture_length = 2;
+
   main_ = CreateGenerator(main_model_, params);
   mtp_ = CreateGenerator(mtp_model_, params);
 

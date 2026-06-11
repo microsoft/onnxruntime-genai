@@ -770,33 +770,69 @@ The Python orchestrator is far below 1× because it pays per-step Python + host 
 runs the MTP draft in a separate session. The in-engine generator removes all of that (~3×
 recovery) and reaches **break-even**.
 
-### Why it is break-even, not yet a speedup (measured)
+### Why it was break-even (measured, before verify-shape capture)
 
 Per-step latency (graph state matters):
 
-| Step | CUDA graph OFF | CUDA graph ON |
+| Step | CUDA graph OFF | CUDA graph ON (1-token only) |
 |---|---|---|
 | Main 1-token decode | ~8.8 ms | ~6.8 ms |
 | MTP head 1-token draft | ~18 ms | **~0.5 ms** |
-| Main 2-token verify | ~9.5 ms | (not captured — runs eager) |
+| Main 2-token verify | ~9.5 ms | ~9.5 ms (was not captured — ran eager) |
 
-CUDA graph collapses the launch-overhead-bound MTP draft by ~35×. But genai only graph-captures
-single-token (`shape[1] == 1`) steps, so the **2-token verify forward runs eagerly** — and it is
-the dominant cost. At ~1.6 tokens/forward with an eager verify ≈ a full main step, the loop lands
-at break-even. Enabling CUDA graph on the main model while the verify runs eagerly also **corrupts
-output** (the graphed 1-token path and the eager 2-token path share captured static buffers), so
-graph is kept off.
+CUDA graph collapses the launch-overhead-bound MTP draft by ~35×. Originally genai only
+graph-captured single-token (`shape[1] == 1`) steps, so the **2-token verify forward ran eagerly**
+— and it is the dominant cost. Enabling CUDA graph on the main model while the verify ran eagerly
+also **corrupted output** (the graphed 1-token path and the eager 2-token path shared captured
+static buffers — "Empire Empire" degeneration), so graph had to be kept off.
 
-### The remaining wall-clock lever: graph-capture the verify shape
+### Implemented: graph-capture the verify shape
 
-ONNX Runtime can hold **multiple captured graphs keyed by `gpu_graph_id`** and replay a chosen id,
-so the 1-token decode and the 2-token verify can each have their own captured graph bound to their
-own (different-shape) static buffers. genai today uses a single `graph_id_` per `State` and
-captures only `shape[1] == 1` (`DecoderOnly_State::Run` / `State::Run`). Extending it to allocate a
-second graph id for the `shape[1] == 2` verify (with its own static I/O) is the single most
-impactful remaining change — it both removes the eager-verify cost and fixes the graph-on
-correctness bug. (CUDA-graph replay also synchronizes per step today; onnxruntime PR #28686 adds
-async replay for a fully async loop.)
+ONNX Runtime's CUDA EP holds **multiple captured graphs keyed by `gpu_graph_id`** (a
+`graph_id_to_run_count_` map; per-id capture-after-`min_num_runs` then replay), so the 1-token
+decode and the 2-token verify can each have their own captured graph bound to their own
+(different-shape) static buffers.
+
+What changed:
+
+| Change | Where |
+|---|---|
+| `State` keeps a CUDA-graph annotation id **per captured length** (`graph_ids_` map, lazily generated) | `src/models/model.{h,cpp}` |
+| `State::Run(session, capture?, capture_length)` selects the id for the captured length | `src/models/model.cpp` |
+| `DecoderOnly_State::Run` captures `shape[1] ∈ [1, max_graph_capture_length]`, passing the length | `src/models/decoder_only.cpp` |
+| `GeneratorParams::max_graph_capture_length` (default 1; MTP sets 2) | `src/generators.h`, `src/mtp_generator.cpp` |
+| `Tensor::CreateTensor(shape, make_static, static_capacity_bytes)` pre-sizes the static buffer to the **max** captured shape so its base address stays stable across the 1- and 2-token graphs | `src/tensor.{h,cpp}` |
+| Shape-dependent static I/O (input_ids, position_ids, logits, hidden_states output) pre-size to 2 tokens under MTP | `src/models/{input_ids,position_inputs,logits,hidden_states_inputs}.cpp` |
+
+Each distinct captured length gets its own annotation id, so ORT captures and replays an
+independent graph for the 1-token decode and the 2-token verify. The static buffers are pre-sized
+to the 2-token width up front, keeping the buffer base address stable across both captured graphs
+(the KV/recurrent state already use fixed-size shared buffers, a precondition for graph capture).
+
+### Result (fp16, 1× H200, batch 1, greedy, **CUDA graph ON**)
+
+- **Output is coherent** with the verify captured — the earlier graph-on "Empire Empire"
+  corruption is gone; acceptance **~83–97%**, **~1.56–1.94 tokens per main forward**.
+- The 2-token verify now replays from its own captured graph (separate annotation id + static
+  buffers); enabling graph lifts the in-engine generator from ~115 → **~127 tok/s (+10%)**.
+
+| Decoder (CUDA graph ON) | tok/s | vs baseline |
+|---|---|---|
+| Baseline greedy (no MTP) | ~140 | 1.00× |
+| **In-engine `og.MtpGenerator`** | **~127** | **0.90×** |
+
+The verify-shape capture is necessary (it fixes correctness and recovers the eager-verify cost),
+but graph capture helps the *pure-GPU* baseline even more (114 → 140 tok/s, +23%), so the relative
+ratio is below 1×. The bottleneck has now shifted to **host-side orchestration overhead** that is
+intrinsic to the draft/verify loop and cannot be graph-captured:
+
+- two/three full-vocab logits **D2H copies + CPU argmax** per step (vocab 248320 × up to 2 rows),
+- recurrent-state snapshot/restore for reject rollback,
+- per-step CUDA-graph replay synchronization (onnxruntime PR #28686 adds async replay).
+
+The next lever is therefore **on-device argmax** (avoid the per-step ~2 MB logits D2H + 248K-element
+host argmax) and trimming the snapshot cost, not the GPU forward.
+
 
 ### Memory-saving future work (embedding / lm_head sharing)
 

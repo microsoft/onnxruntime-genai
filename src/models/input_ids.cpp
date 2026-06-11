@@ -74,7 +74,10 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
-    value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+    const int max_cap = state_.params_->max_graph_capture_length;
+    const bool use_static = state_.params_->use_graph_capture && shape_[1] >= 1 && shape_[1] <= max_cap;
+    const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * Ort::SizeOf(type_) : 0;
+    value_->CreateTensor(shape_, use_static, static_cap_bytes);
     state_.inputs_[input_index_] = value_->GetOrtTensor();
   }
 
@@ -94,8 +97,12 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   }
 
   if (type_ == Ort::TypeToTensorType<int64_t>) {
-    if (!cast_value_->ort_tensor_ || static_cast<size_t>(cast_value_->GetShape()[1]) != sequence_length)
-      cast_value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+    if (!cast_value_->ort_tensor_ || static_cast<size_t>(cast_value_->GetShape()[1]) != sequence_length) {
+      const int max_cap = state_.params_->max_graph_capture_length;
+      const bool use_static = state_.params_->use_graph_capture && shape_[1] >= 1 && shape_[1] <= max_cap;
+      const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * sizeof(int64_t) : 0;
+      cast_value_->CreateTensor(shape_, use_static, static_cap_bytes);
+    }
     Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *model_.p_device_inputs_, type_);
     state_.inputs_[input_index_] = cast_value_->GetOrtTensor();
   }
