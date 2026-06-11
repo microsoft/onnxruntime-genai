@@ -1102,6 +1102,8 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+int SafeDoubleToInt(double x, std::string_view name);
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -1112,6 +1114,8 @@ struct Model_Element : JSON::Element {
       v_.vocab_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "context_length") {
       v_.context_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.context_length <= 0)
+        throw std::out_of_range("context_length must be > 0, got " + std::to_string(v_.context_length));
     } else if (name == "pad_token_id") {
       v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "eos_token_id") {
@@ -1236,8 +1240,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
     throw std::overflow_error(ss.str());
   }
 
-  // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
-  // If rounding is desired, use `return static_cast<int>(std::round(x));`
+  // 3. Reject fractional values — these fields must be integral.
+  if (x != std::trunc(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is not an integer";
+    throw std::invalid_argument(ss.str());
+  }
+
+  // 4. Perform the cast.
   return static_cast<int>(x);
 }
 
