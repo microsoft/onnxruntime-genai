@@ -112,8 +112,11 @@ jobs:
 
       - name: Run the C# Tests
         run: |
+          # ONNX Runtime comes from nuget.org. Passing EPDir is the single switch that turns on the
+          # EP-plugin registration code path; the tests enumerate and register every EP plugin in
+          # that directory (the one the pipeline downloaded them to).
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EnableEpPluginTests=true /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
 
       - name: Verify Build Artifacts
         if: always()

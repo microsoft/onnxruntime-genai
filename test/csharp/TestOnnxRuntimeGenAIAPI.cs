@@ -11,10 +11,8 @@ using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
 using Microsoft.Extensions.AI;
-#if USE_EP_PLUGINS
 using System.Reflection;
 using Microsoft.ML.OnnxRuntime;
-#endif
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -95,28 +93,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static string _adaptersPath => _lazyAdaptersPath.Value;
         private static OgaHandle ogaHandle;
 
-#if USE_EP_PLUGINS
         private static int _epLibrariesRegistered = 0;
 
         // Resolves the directory containing the execution provider plugin libraries to register.
-        // Prefers the EPDir MSBuild property (surfaced as assembly metadata, set via /p:EPDir),
-        // falling back to the ORTGENAI_TEST_EP_DIR environment variable.
+        // This is the EPDir MSBuild property (set via /p:EPDir), surfaced as assembly metadata. When
+        // it is not set (no EP-plugin pipeline), registration is a no-op.
         private static string GetEpDirectory()
         {
-            string dir = typeof(OnnxRuntimeGenAITests).Assembly
+            return typeof(OnnxRuntimeGenAITests).Assembly
                 .GetCustomAttributes<AssemblyMetadataAttribute>()
                 .FirstOrDefault(a => a.Key == "EPDir")?.Value;
-            if (string.IsNullOrEmpty(dir))
-            {
-                dir = Environment.GetEnvironmentVariable("ORTGENAI_TEST_EP_DIR");
-            }
-            return dir;
         }
 
         // ONNX Runtime's environment is a process-wide singleton, so registering an execution
-        // provider plugin library with it (via ONNX Runtime's managed API) also makes the provider
-        // available to ONNX Runtime GenAI. Every plugin library in the directory is enumerated using
-        // the ORT provider naming convention (onnxruntime_providers_<ep>.dll) and registered under
+        // provider plugin library with it, also makes the provider available to ONNX Runtime GenAI.
+        // Every plugin library in the directory is enumerated using the ORT provider naming
+        // convention (onnxruntime_providers_<ep>.dll) and registered under
         // the EP name derived from its file name, so a pipeline only needs to drop the relevant EP
         // plugin(s) into a single directory (the one downloaded by the pipeline).
         private static void RegisterEpLibrariesFromDirectory()
@@ -166,7 +158,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 }
             }
         }
-#endif
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
@@ -174,9 +165,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
-#if USE_EP_PLUGINS
             RegisterEpLibrariesFromDirectory();
-#endif
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
@@ -228,7 +217,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using (var model = new Model(config))
                 {
                     Assert.NotNull(model);
-                    using(var generatorParams = new GeneratorParams(model))
+                    using (var generatorParams = new GeneratorParams(model))
                     {
                         Assert.NotNull(generatorParams);
 
@@ -284,7 +273,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     config.RemoveModelData("past.onnx");
                     Assert.NotNull(model);
-                    using(var generatorParams = new GeneratorParams(model))
+                    using (var generatorParams = new GeneratorParams(model))
                     {
                         Assert.NotNull(generatorParams);
 
@@ -486,7 +475,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    
+
                     using (var generator = new Generator(model, generatorParams))
                     {
                         Assert.NotNull(generator);

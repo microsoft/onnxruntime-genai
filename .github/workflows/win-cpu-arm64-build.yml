@@ -119,7 +119,7 @@ jobs:
       - name: Build the C# API and Run the C# Tests
         run: |
           cd test\csharp
-          dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
       - name: Build the C# Examples
         run: |

@@ -171,7 +171,7 @@ jobs:
         run: |
           $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           cd test\csharp
-          dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
       - name: Build the C# Examples
         run: |

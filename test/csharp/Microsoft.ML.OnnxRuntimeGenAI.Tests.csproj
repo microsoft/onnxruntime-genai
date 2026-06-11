@@ -17,17 +17,23 @@
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
     <OrtPackageVersion>1.26.0</OrtPackageVersion>
-    <!-- EP-plugin pipelines (e.g. WebGPU) set EnableEpPluginTests=true to compile the EP plugin
-         registration code path. The plugin libraries themselves are the ones the pipeline already
-         downloaded and are registered at runtime by enumerating the directory passed via /p:EPDir;
-         no extra package feed is required (ONNX Runtime comes from nuget.org). -->
-    <DefineConstants Condition="'$(EnableEpPluginTests)' == 'true'">$(DefineConstants);USE_EP_PLUGINS</DefineConstants>
+    <!-- EP-plugin pipelines (e.g. WebGPU) pass /p:EPDir=<dir> pointing at the directory of EP plugin
+         libraries the pipeline downloaded. At runtime the tests enumerate that directory and register
+         each plugin; when EPDir is not set, registration is a no-op. ONNX Runtime comes from
+         nuget.org, so no extra package feed is required.
+         The ONNX Runtime NuGet package ships its native libraries (onnxruntime.dll) as RID-specific
+         runtime assets. Building against a RuntimeIdentifier lets the SDK copy them next to the test
+         binary automatically. The RID defaults to the running SDK's RID but can be overridden from
+         outside (e.g. dotnet test -r <rid> or /p:RuntimeIdentifier=<rid>). -->
+    <RuntimeIdentifier Condition="'$(EPDir)' != '' and '$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+    <SelfContained Condition="'$(EPDir)' != ''">false</SelfContained>
   </PropertyGroup>
 
   <PropertyGroup>
     <!--internal build related properties for Windows -->
     <OnnxRuntimeGenAIBuildDirectory>$(TestsSrcRoot)\..\build</OnnxRuntimeGenAIBuildDirectory>
     <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)</NativeBuildOutputDir>
+    <OrtLibDir></OrtLibDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,6 +43,18 @@
       <Visible>false</Visible>
     </None>
     <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" Include="$(OrtLibDir)\onnxruntime.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
@@ -50,9 +68,25 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime.so')" Include="$(NativeBuildOutputDir)\libonnxruntime.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_shared.so')" Include="$(OrtLibDir)\libonnxruntime_providers_shared.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
 
     <!-- macOS -->
     <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai.dylib')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai.dylib">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime.dylib')" Include="$(OrtLibDir)\libonnxruntime.dylib">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <Visible>false</Visible>
     </None>
@@ -68,24 +102,16 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
     <PackageReference Include="xunit" Version="2.4.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" />
   </ItemGroup>
 
-  <!-- EP-plugin pipelines only: the managed ONNX Runtime API (OrtEnv) used to register plugin
-       libraries, plus the native ONNX Runtime runtime copied next to the test binary so GenAI's
-       native library can resolve onnxruntime.dll at load time. Both come from nuget.org. The EP
-       plugin libraries (and their native dependencies) are loaded at runtime from the directory
-       passed via /p:EPDir. -->
-  <ItemGroup Condition="'$(EnableEpPluginTests)' == 'true'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="$(OrtPackageVersion)" />
-    <None Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\win-x64\native\*.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Visible>false</Visible>
-    </None>
-  </ItemGroup>
-
-  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. -->
-  <ItemGroup Condition="'$(EnableEpPluginTests)' == 'true' and '$(EPDir)' != ''">
+  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. The
+       managed ONNX Runtime API (OrtEnv, used to register the EP plugin libraries) is pulled in
+       transitively by the Microsoft.ML.OnnxRuntime package, and building against a RuntimeIdentifier
+       (set above when EPDir is provided) makes the SDK copy the native onnxruntime.dll next to the
+       test binary. The EP plugin libraries (and their native dependencies) are loaded at runtime
+       from the EPDir directory. -->
+  <ItemGroup Condition="'$(EPDir)' != ''">
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>EPDir</_Parameter1>
       <_Parameter2>$(EPDir)</_Parameter2>

@@ -415,7 +415,7 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path | None = None):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
@@ -425,7 +425,11 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
         f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
     )
 
-    props = [configuration, platform, native_lib_path]
+    if ort_lib_dir:
+        ort_lib_path = f"/p:OrtLibDir={str(ort_lib_dir)}"
+        props = [configuration, platform, native_lib_path, ort_lib_path]
+    else:
+        props = [configuration, platform, native_lib_path]
 
     return props
 
@@ -724,7 +728,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
             "build",
             ".",
         ]
-        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
+        csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
