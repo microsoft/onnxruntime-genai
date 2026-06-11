@@ -51,6 +51,20 @@ constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath 
 
 }  // namespace
 
+// Validate that a config-specified filename/path does not escape the model directory
+// via absolute paths or path traversal components.
+void ValidateConfigPath(const std::string& path, const char* field_name) {
+  fs::path p{path};
+  if (p.is_absolute()) {
+    throw std::runtime_error(std::string(field_name) + " must be a relative path, got absolute path: " + path);
+  }
+  for (const auto& component : p) {
+    if (component == "..") {
+      throw std::runtime_error(std::string(field_name) + " must not contain path traversal (..): " + path);
+    }
+  }
+}
+
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},
@@ -739,6 +753,8 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  ValidateConfigPath(model_filename, "model filename");
+
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory

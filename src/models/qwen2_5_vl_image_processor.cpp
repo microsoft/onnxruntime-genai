@@ -170,6 +170,7 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
       patch_size_{config.model.vision.patch_size} {
+  ValidateConfigPath(config.model.vision.config_filename, "vision config_filename");
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 

@@ -23,6 +23,7 @@ struct Tokenizer;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
+void ValidateConfigPath(const std::string& path, const char* field_name);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);

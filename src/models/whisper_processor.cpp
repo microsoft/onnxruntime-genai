@@ -8,6 +8,7 @@ namespace Generators {
 
 WhisperProcessor::WhisperProcessor(Config& config, const SessionInfo& session_info)
     : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
+  ValidateConfigPath(config.model.speech.config_filename, "speech config_filename");
   auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
