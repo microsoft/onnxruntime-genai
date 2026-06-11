@@ -12,6 +12,7 @@
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
+#include "mtp_generator.h"
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
@@ -51,6 +52,7 @@ struct OgaAudios : Generators::Audios, OgaAbstract {};
 struct OgaConfig : Generators::Config, OgaAbstract {};
 struct OgaGenerator : Generators::Generator, OgaAbstract {};
 struct OgaGeneratorParams : Generators::GeneratorParams, OgaAbstract {};
+struct OgaMtpGenerator : Generators::MtpGenerator, OgaAbstract {};
 struct OgaImages : Generators::Images, OgaAbstract {};
 struct OgaModel : Generators::Model, OgaAbstract {};
 struct OgaMultiModalProcessor : Generators::MultiModalProcessor, OgaAbstract {};
@@ -420,6 +422,54 @@ OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* p
   return nullptr;
   OGA_CATCH
 }
+
+OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_model, const OgaModel* mtp_model, const OgaGeneratorParams* params, OgaMtpGenerator** out) {
+  OGA_TRY
+  *out = ReturnUnique<OgaMtpGenerator>(std::make_unique<Generators::MtpGenerator>(*main_model, *mtp_model, *params));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count) {
+  OGA_TRY
+  generator->AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator) {
+  OGA_TRY
+  generator->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator) {
+  return generator->IsDone();
+}
+
+size_t OGA_API_CALL OgaMtpGenerator_GetSequenceCount(const OgaMtpGenerator* generator) {
+  return generator->GetSequence().size();
+}
+
+const int32_t* OGA_API_CALL OgaMtpGenerator_GetSequenceData(const OgaMtpGenerator* generator) {
+  return generator->GetSequence().data();
+}
+
+size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGenerator* generator) {
+  return generator->Forwards();
+}
+
+size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator) {
+  return generator->Accepts();
+}
+
+size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator) {
+  return generator->Trials();
+}
+
+void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete p; }
+
 
 bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();

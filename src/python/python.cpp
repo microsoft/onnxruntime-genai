@@ -304,6 +304,37 @@ struct PyGenerator {
   std::unique_ptr<OgaTensor> hidden_states_holder_;  // Keeps the staged hidden_states alive across the next step
 };
 
+struct PyMtpGenerator {
+  PyMtpGenerator(const OgaModel& main_model, const OgaModel& mtp_model, PyGeneratorParams& params) {
+    generator_ = OgaMtpGenerator::Create(main_model, mtp_model, *params.params_);
+  }
+
+  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+    if (tokens.ndim() != 1)
+      throw std::runtime_error("input_ids must be a 1D array");
+    generator_->AppendTokens(tokens.data(), tokens.size());
+  }
+
+  void GenerateNextToken() { generator_->GenerateNextToken(); }
+  bool IsDone() const { return generator_->IsDone(); }
+
+  pybind11::array_t<int32_t> GetSequence() {
+    return pybind11::array_t<int32_t>({static_cast<pybind11::ssize_t>(generator_->GetSequenceCount())},
+                                      generator_->GetSequenceData());
+  }
+
+  pybind11::dict GetStats() {
+    pybind11::dict d;
+    d["forwards"] = generator_->GetForwardCount();
+    d["accepts"] = generator_->GetAcceptCount();
+    d["trials"] = generator_->GetTrialCount();
+    return d;
+  }
+
+ private:
+  std::unique_ptr<OgaMtpGenerator> generator_;
+};
+
 void SetLogOptions(const pybind11::kwargs& dict) {
   for (auto& entry : dict) {
     auto name = entry.first.cast<std::string>();
@@ -509,6 +540,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
       .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
+
+  pybind11::class_<PyMtpGenerator>(m, "MtpGenerator")
+      .def(pybind11::init<const OgaModel&, const OgaModel&, PyGeneratorParams&>())
+      .def("append_tokens", &PyMtpGenerator::AppendTokens)
+      .def("generate_next_token", &PyMtpGenerator::GenerateNextToken)
+      .def("is_done", &PyMtpGenerator::IsDone)
+      .def("get_sequence", &PyMtpGenerator::GetSequence)
+      .def("get_stats", &PyMtpGenerator::GetStats);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
