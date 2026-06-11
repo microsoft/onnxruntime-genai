@@ -44,11 +44,23 @@ void HiddenStatesInputs::Update(int sequence_length) {
                              std::to_string(source_elements) + " elements, expected " +
                              std::to_string(dst_bytes / element_size));
 
-  // Stage through the CPU-accessible span, then push to device (handles host->device for
-  // non-CPU EPs; a no-op copy for CPU).
-  auto dst_cpu = dst.CpuSpan();
-  std::memcpy(dst_cpu.data(), pending_source_->GetTensorRawData(), dst_bytes);
-  dst.CopyCpuToDevice();
+  // Prefer a device-to-device copy on the shared compute stream when the source is already on
+  // the model's device (e.g. the main model's hidden_states output in an in-engine MTP loop).
+  // All CUDA sessions share one stream, so the enqueued D2D copy is correctly ordered after the
+  // producer's Run and before this model's Run -- no host round-trip and no host synchronization
+  // (see onnxruntime issue #28539 on the async IO-binding pattern). Falls back to a host-staged
+  // copy only when the source lives on the CPU.
+  const bool source_on_cpu =
+      pending_source_->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  if (!source_on_cpu) {
+    auto source_span = ByteWrapTensor(*model_.p_device_, *pending_source_);
+    dst.CopyFrom(source_span);
+  } else {
+    // Source is on the CPU: stage through the CPU-accessible span, then push to device.
+    auto dst_cpu = dst.CpuSpan();
+    std::memcpy(dst_cpu.data(), pending_source_->GetTensorRawData(), dst_bytes);
+    dst.CopyCpuToDevice();
+  }
 }
 
 HiddenStatesOutputs::HiddenStatesOutputs(State& state)
