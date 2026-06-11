@@ -234,12 +234,40 @@ logit differently and pick a different argmax. This is a documented property of 
 speculative decoding, not a correctness bug — every emitted token is still one the main model
 produced.
 
+## Synchronization and CUDA graph
+
+All genai CUDA sessions share **one global compute stream** (the `user_compute_stream` passed to
+every session is the same singleton). This is what makes a two-model MTP loop safe: work on the
+main model and the MTP head is serialized on that stream, so the main model's `hidden_states`
+output is fully produced before the MTP head's forward consumes it — without any host
+synchronization. The `hidden_states` feeder exploits this: when its source is already on the
+device, it does a **device-to-device copy on the shared stream** (no host round-trip); it only
+falls back to a host-staged copy when the source lives on the CPU. (See onnxruntime issue
+\#28539 for the general async IO-binding pattern.)
+
+Two CUDA-graph caveats matter for MTP:
+
+1. **Outputs must be statically allocated.** A graph captures fixed buffer addresses, so the
+   `hidden_states` output must be a managed static tensor (it is — see `HiddenStatesOutputs`),
+   not an ORT-dynamically-allocated extra output, which would return an unconstructed tensor
+   under graph capture.
+2. **The draft benefits enormously, the verify shape does not yet.** Graph-capturing the tiny
+   one-layer MTP draft step drops it from ~18 ms to ~0.5 ms (it is launch-overhead bound). But
+   genai only graph-captures single-token (`sequence_length == 1`) steps, so the 2-token verify
+   forward still runs eagerly. Capturing the verify shape too — and an in-engine generator that
+   keeps `hidden_states` on-device — is what turns the proven ~1.5–1.7 tokens/forward into a
+   wall-clock win. CUDA-graph replay currently also synchronizes on each step (onnxruntime
+   PR \#28686 adds async replay), so a fully async speculative loop depends on that landing.
+
 ## Limitations and future work
 
 * **First-class `MtpGenerator`.** Today the draft/verify orchestration lives in the Python
   example. Folding it into a C++ `MtpGenerator` (loading the `mtp` section of the main config
   directly, so a single `generate_next_token` does the draft/verify internally) would remove the
-  per-step Python overhead and give a clean C/C#/Java surface.
+  per-step Python overhead, keep the hidden-state handoff on-device (device-to-device on the
+  shared stream, no host sync), and give a clean C/C#/Java surface.
+* **Graph-capture the verify step.** genai captures only single-token steps; capturing the
+  2-token verify shape is the main remaining lever for a wall-clock speedup.
 * **Wall-clock benchmark.** The current numbers report effective *tokens per main forward*; an
   in-engine generator is needed for a true end-to-end tok/s comparison against the ~158 tok/s
   INT4 baseline.
