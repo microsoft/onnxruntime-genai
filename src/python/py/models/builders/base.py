@@ -723,10 +723,6 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
-    def _capture_prompt_embeds_hidden_state(self, layer_id, location):
-        if location == "input" and self.hidden_states_layers and layer_id in self.hidden_states_layers:
-            self.captured_hidden_states.append(self.layernorm_attrs["output_0"])
-
     def _finish_prompt_embeds_layer_if_needed(self, layer_id):
         """Stop building decoder layers once the last prompt_embeds capture is done."""
         if self.max_prompt_embeds_layer is not None and layer_id >= self.max_prompt_embeds_layer:
@@ -1566,6 +1562,16 @@ class Model:
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
+        # Match HuggingFace `output_hidden_states=True`: `hidden_states[k]` is the residual stream
+        # *before* layer k runs (before that layer's input RMSNorm / input layernorm).
+        if (
+            location == "input"
+            and self.captured_hidden_states is not None
+            and self.hidden_states_layers
+            and layer_id in self.hidden_states_layers
+        ):
+            self.captured_hidden_states.append(root_input)
+
         # Get precision types to use
         old_io_dtype = self.io_dtype
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
@@ -1624,8 +1630,6 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
-
-        self._capture_prompt_embeds_hidden_state(layer_id, location)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
