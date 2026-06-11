@@ -75,13 +75,16 @@ void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
     out[r] = ArgmaxRow(data + static_cast<size_t>(first_row + r) * vocab_size_, vocab_size_);
 }
 
-int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token) {
+int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token, bool need_draft) {
   // hidden_slice_ already holds the hidden state paired with `token`. Feed (hidden, token) to the
-  // MTP head; its KV cache accumulates, so this is an O(1) incremental draft step. Returns the
-  // MTP head's predicted next-next token (greedy argmax of its last-position logits).
+  // MTP head; its KV cache accumulates, so this is an O(1) incremental draft step.
   mtp_->SetHiddenStates(hidden_slice_);
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  if (!need_draft) {
+    // KV-advance only (e.g. after an accepted draft): skip the full-vocab argmax + stream sync.
+    return 0;
+  }
   auto logits_span = mtp_->GetLogits();              // fp32, last token, [1, V]
   int32_t draft = 0;
   if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
@@ -139,9 +142,11 @@ void MtpGenerator::GenerateNextToken() {
       return;
     }
     OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
-    // Feed the accepted pair (hidden@L, d) to the MTP head so its KV stays aligned.
+    // Feed the accepted pair (hidden@L, d) to the MTP head so its KV stays aligned. The next token
+    // to commit is the verify pass's row-1 argmax (harvested above), so this draft is KV-advance
+    // only -- skip its full-vocab argmax + stream sync.
     ExtractHiddenPosition(hidden, 0);
-    DraftNextToken(nullptr, d);
+    DraftNextToken(nullptr, d, /*need_draft=*/false);
     // Next token to commit is argmax(logits@L+1) (harvested above); its hidden is row 1.
     next_token_ = verify_argmax[1];
     ExtractHiddenPosition(hidden, 1);

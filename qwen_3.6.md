@@ -872,6 +872,16 @@ in-engine generator and crossed 1× versus the (graph-accelerated) baseline. The
 host-side cost is the recurrent-state snapshot/restore on reject and the per-step CUDA-graph replay
 sync (onnxruntime PR #28686).
 
+### Skip the wasted argmax on the post-accept KV-advance draft (implemented)
+
+On an accepted step the loop must still run the MTP head once on the accepted `(hidden@L, d)` pair
+to keep its KV cache aligned, but the **next** token to commit comes from the verify pass's row-1
+argmax — not from this draft. The draft's full-vocab (248K) argmax and its stream sync were
+therefore pure waste on ~86% of steps. `DraftNextToken` gained a `need_draft` flag; the post-accept
+call runs KV-advance only (no `GetLogits`, no `ArgMax`, no sync). Output is unchanged; the measured
+effect is within the run-to-run band (the MTP forward itself, ~0.5 ms under graph, still runs), but
+it removes a provably-unnecessary argmax + sync per accepted step. In-engine `og.MtpGenerator`
+holds at **~1.18× (128 tok) / ~1.22× (200 tok)**.
 
 ### Memory-saving future work (embedding / lm_head sharing)
 

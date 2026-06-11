@@ -44,8 +44,11 @@ struct MtpGenerator {
   size_t Trials() const { return trials_; }
 
  private:
-  // Run the MTP head on a single (hidden_state, token) pair and return its drafted next token.
-  int32_t DraftNextToken(OrtValue* hidden_last_position, int32_t token);
+  // Run the MTP head on a single (hidden_state, token) pair. When `need_draft` is true, returns the
+  // head's greedy drafted next token; when false, only advances the head's KV cache (skipping the
+  // 248K-vocab argmax + its stream sync) and returns 0. The KV-advance-only mode is used after an
+  // accepted draft, where the next token comes from the verify pass rather than a fresh draft.
+  int32_t DraftNextToken(OrtValue* hidden_last_position, int32_t token, bool need_draft = true);
   // Copy one [1,1,H] position out of a [1,S,H] hidden_states OrtValue into hidden_slice_ (D2D).
   void ExtractHiddenPosition(OrtValue* hidden, int position);
   // Greedy argmax over `num_rows` consecutive vocab rows of the main model's raw logits output
