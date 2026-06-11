@@ -2232,6 +2232,118 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         super().save_model(out_dir)
         if self.mtp_head is not None:
             self.mtp_head.save_model(out_dir)
+            # Deduplicate the embedding + lm_head weights, which the MTP head shares
+            # bit-identically with the main model: redirect mtp.onnx's copies to the
+            # main model's external data file and pack them out of mtp.onnx.data
+            # (~2 GB on disk; the two sessions then mmap the same bytes on the host).
+            self._share_mtp_embedding_lm_head(out_dir)
+
+    @staticmethod
+    def _share_mtp_embedding_lm_head(out_dir, main_file="model.onnx", mtp_file="mtp.onnx"):
+        """Redirect mtp.onnx's embed_tokens/lm_head external data to model.onnx.data
+        and remove the duplicated bytes from mtp.onnx.data.
+
+        Only tensors that are byte-identical (same name/dtype/shape and matching
+        sampled bytes) are shared; anything that differs (e.g. a quantized main
+        lm_head vs an fp16 MTP lm_head) is left untouched. Failures are non-fatal —
+        the exported models remain valid (just larger) if sharing is skipped.
+        """
+        import onnx
+
+        shared_names = ["model.embed_tokens.weight", "lm_head.MatMul.weight"]
+        main_onnx = os.path.join(out_dir, main_file)
+        mtp_onnx = os.path.join(out_dir, mtp_file)
+        main_data_name = main_file + ".data"
+        mtp_data_name = mtp_file + ".data"
+        main_data = os.path.join(out_dir, main_data_name)
+        mtp_data = os.path.join(out_dir, mtp_data_name)
+        if not (os.path.exists(main_onnx) and os.path.exists(mtp_onnx) and
+                os.path.exists(main_data) and os.path.exists(mtp_data)):
+            return
+
+        def ext_info(tensor):
+            d = {e.key: e.value for e in tensor.external_data}
+            return d.get("location"), int(d.get("offset", 0)), int(d.get("length", 0))
+
+        def set_ext(tensor, location, offset, length):
+            del tensor.external_data[:]
+            tensor.data_location = onnx.TensorProto.EXTERNAL
+            for k, v in (("location", location), ("offset", str(offset)), ("length", str(length))):
+                entry = tensor.external_data.add()
+                entry.key, entry.value = k, str(v)
+
+        def sampled_equal(path_a, off_a, path_b, off_b, length, chunks=8, chunk_size=1 << 20):
+            with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+                for i in range(chunks):
+                    off = (length // chunks) * i
+                    n = min(chunk_size, length - off)
+                    fa.seek(off_a + off); fb.seek(off_b + off)
+                    if fa.read(n) != fb.read(n):
+                        return False
+            return True
+
+        try:
+            main = onnx.load(main_onnx, load_external_data=False)
+            main_info = {}
+            for t in main.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc == main_data_name:
+                    main_info[t.name] = (t.data_type, tuple(t.dims), off, ln)
+
+            mtp = onnx.load(mtp_onnx, load_external_data=False)
+            mtp_inits = {t.name: t for t in mtp.graph.initializer}
+
+            redirect, remove = {}, set()
+            for name in shared_names:
+                if name not in mtp_inits or name not in main_info:
+                    continue
+                t = mtp_inits[name]
+                loc, off, ln = ext_info(t)
+                m_dt, m_dims, m_off, m_len = main_info[name]
+                if loc != mtp_data_name or t.data_type != m_dt or tuple(t.dims) != m_dims or ln != m_len:
+                    continue
+                if not sampled_equal(main_data, m_off, mtp_data, off, ln):
+                    continue
+                redirect[name] = (m_off, m_len)
+                remove.add((off, ln))
+
+            if not redirect:
+                return
+
+            # Rebuild mtp.onnx.data with the redirected tensors packed out, in
+            # ascending-offset order, assigning tight new offsets.
+            kept = []
+            for t in mtp.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc != mtp_data_name or (t.name in redirect and (off, ln) in remove):
+                    continue
+                kept.append((off, ln, t))
+            kept.sort(key=lambda x: x[0])
+
+            tmp_data = mtp_data + ".tmp"
+            with open(mtp_data, "rb") as fin, open(tmp_data, "wb") as fout:
+                new_off = 0
+                for old_off, ln, t in kept:
+                    fin.seek(old_off)
+                    remaining = ln
+                    while remaining:
+                        buf = fin.read(min(1 << 22, remaining))
+                        fout.write(buf)
+                        remaining -= len(buf)
+                    set_ext(t, mtp_data_name, new_off, ln)
+                    new_off += ln
+            for name, (m_off, m_len) in redirect.items():
+                set_ext(mtp_inits[name], main_data_name, m_off, m_len)
+
+            os.replace(tmp_data, mtp_data)
+            onnx.save(mtp, mtp_onnx)  # proto only; external data already written
+            saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
+            print(f"Shared MTP embedding + lm_head with the main model "
+                  f"(saved {saved_mb:.0f} MB from {mtp_data_name})")
+        except Exception as exc:  # noqa: BLE001 - sharing is a best-effort optimization
+            print(f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
+                  f"the duplicated copies remain in {mtp_data_name}.")
+
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""

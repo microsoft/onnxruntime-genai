@@ -907,18 +907,33 @@ Output unchanged (bit-identical accept stats: 90/97% on the two validation promp
 scales with the accept rate (1.25× at 86% accept, 1.20× at 82%) because the saving lands on
 accepted steps.
 
-### Memory-saving future work (embedding / lm_head sharing)
+### Memory-saving: embedding / lm_head sharing (implemented)
 
 The MTP head reuses the main model's token embedding and `lm_head`. In the exported `mtp.onnx`
 those two tensors are **bit-identical** to the main model's and together are ~2 GB of the head's
-~3.8 GB (fp16): `model.embed_tokens.weight` (1017 MB) + `lm_head.MatMul.weight` (1017 MB). They can
-be shared rather than duplicated:
+~3.8 GB (fp16): `model.embed_tokens.weight` (1017 MB) + `lm_head.MatMul.weight` (1017 MB).
 
-- **Runtime sharing** — inject the main session's already-loaded weight `OrtValue`s into the MTP
-  session via `OrtSessionOptions::AddInitializer(name, ort_value)` so the head allocates no copies
-  (needs a model-load hook, since `og.Model` binds initializers at session creation).
-- **Export sharing** — emit `mtp.onnx` without the `embed_tokens` / `lm_head` initializers
-  (referenced by name) when sharing is enabled, shrinking the file too.
+The builder now **deduplicates them across the two ONNX files**. After saving `model.onnx` and
+`mtp.onnx`, `Qwen35MoeTextModel._share_mtp_embedding_lm_head` (in
+`src/python/py/models/builders/qwen.py`) rewrites `mtp.onnx` so those two initializers' external
+data points at the **main model's** `model.onnx.data` (at the main tensor's offset/length), and
+packs their bytes out of `mtp.onnx.data` (rebuilding it with tight offsets). Sharing is applied
+only when a tensor is byte-identical (same name/dtype/shape + matching sampled bytes), so a
+mismatched case (e.g. a quantized main `lm_head` vs an fp16 MTP `lm_head`) is left untouched; any
+failure is non-fatal (the models stay valid, just larger).
+
+Measured (fp16 export): `mtp.onnx.data` **3.79 GB → 1.76 GB** (−2.03 GB on disk). At runtime both
+the main and MTP sessions resolve those two tensors from the same `model.onnx.data`, so the host
+memory-maps a single copy (host-RAM dedup). Output is bit-identical (90/97% accept on the two
+validation prompts) and throughput is unchanged (~1.23× at 128 tok). The `mtp.onnx` must sit in the
+same directory as `model.onnx.data` (the standard single-directory export), which the genai loader
+resolves relative to the model file.
+
+> Scope: this saves **disk + host RAM**. It does **not** reduce GPU VRAM — ONNX Runtime's public
+> API copies each session's initializers to the device independently (an injected `AddInitializer`
+> OrtValue is CPU-side; the CUDA EP still uploads a per-session device copy), so true cross-session
+> device-buffer sharing is not exposed. Reducing the VRAM duplicate would require either an ORT API
+> for shared device initializers or quantizing the MTP head to share the main model's INT4 weights.
 
 Note: for Qwen3.6 `tie_word_embeddings = False` — `embed_tokens` and `lm_head` are independently
 trained (max abs diff ~0.3), so they **cannot** be collapsed into one transposed tensor. The
@@ -932,7 +947,8 @@ saving is cross-model duplication (main ↔ MTP), not an embed/lm_head tie.
    1.14–1.24×).
 3. **Fuse the post-accept KV-advance + next draft into one 2-token MTP forward** — **DONE**
    (removes one MTP forward per accept; → ~1.20–1.26×).
-4. **Share embedding + `lm_head` main ↔ MTP** (`AddInitializer` / export) — ~2 GB saving.
+4. **Share embedding + `lm_head` main ↔ MTP** — **DONE** (builder redirects `mtp.onnx`'s copies to
+   `model.onnx.data`; −2 GB disk + host-RAM dedup; GPU VRAM unchanged — ORT limitation).
 5. **INT4 MTP head + main** — match the deployed INT4 model and raise the amortized baseline.
 6. **Speculative sampling** (`do_sample=true`) and **tree/multi-token drafts** to lift the
    tokens-per-forward ceiling.
