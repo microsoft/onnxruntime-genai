@@ -23,6 +23,10 @@ TEST(ValidateConfigPathTest, RejectsAbsolutePathUnix) {
 TEST(ValidateConfigPathTest, RejectsAbsolutePathWindows) {
   EXPECT_THROW(ValidateConfigPath("C:\\Windows\\System32\\evil.dll", "filename"), std::runtime_error);
 }
+
+TEST(ValidateConfigPathTest, RejectsDriveRelativePathWindows) {
+  EXPECT_THROW(ValidateConfigPath("C:Windows\\System32\\evil.dll", "filename"), std::runtime_error);
+}
 #endif
 
 TEST(ValidateConfigPathTest, RejectsParentTraversal) {

@@ -25,14 +25,14 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
-      window_size_(window_size > 0
-                       ? window_size
-                       : patch_size * spatial_merge_size * 2),
+      window_size_(0),
       env_(env) {
   if (spatial_merge_size_ <= 0)
     throw std::runtime_error("spatial_merge_size must be > 0, got " + std::to_string(spatial_merge_size_));
   if (patch_size_ <= 0)
     throw std::runtime_error("patch_size must be > 0, got " + std::to_string(patch_size_));
+  // Compute window_size_ after validating inputs to avoid signed overflow in the initializer list
+  window_size_ = window_size > 0 ? window_size : patch_size_ * spatial_merge_size_ * 2;
   if (window_size_ <= 0)
     throw std::runtime_error("window_size must be > 0, got " + std::to_string(window_size_));
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)

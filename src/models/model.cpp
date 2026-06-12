@@ -52,11 +52,11 @@ constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath 
 }  // namespace
 
 // Validate that a config-specified filename/path does not escape the model directory
-// via absolute paths or path traversal components.
+// via absolute paths, Windows drive/UNC roots, or path traversal components.
 void ValidateConfigPath(const std::string& path, const char* field_name) {
   fs::path p{path};
-  if (p.is_absolute()) {
-    throw std::runtime_error(std::string(field_name) + " must be a relative path, got absolute path: " + path);
+  if (p.is_absolute() || p.has_root_name()) {
+    throw std::runtime_error(std::string(field_name) + " must be a relative path under the model directory, got: " + path);
   }
   for (const auto& component : p) {
     if (component == "..") {
