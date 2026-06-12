@@ -12,6 +12,11 @@
 
 namespace Generators {
 
+// Validates grid dimensions and config parameters for the Qwen vision window indexing.
+// Throws std::runtime_error on invalid inputs. Exposed for unit testing.
+void ValidateWindowIndexParams(int64_t grid_t, int64_t grid_h, int64_t grid_w,
+                               int64_t spatial_merge_size, int64_t patch_size, int64_t window_size);
+
 // Internal vision pipeline (no external DLL interface required after Python binding removal).
 struct QwenVisionPipeline {
   QwenVisionPipeline(OrtEnv& env,

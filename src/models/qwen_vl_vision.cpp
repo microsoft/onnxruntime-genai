@@ -246,26 +246,39 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 }
 
 // Calculate window indices dynamically based on grid dimensions
+void ValidateWindowIndexParams(int64_t grid_t, int64_t grid_h, int64_t grid_w,
+                               int64_t spatial_merge_size, int64_t patch_size, int64_t window_size) {
+  if (spatial_merge_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: spatial_merge_size must be positive");
+  if (patch_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: patch_size must be positive");
+  if (grid_t <= 0 || grid_h <= 0 || grid_w <= 0)
+    throw std::runtime_error("CalculateWindowIndex: grid dimensions must be positive");
+  if (grid_h % spatial_merge_size != 0 || grid_w % spatial_merge_size != 0)
+    throw std::runtime_error("CalculateWindowIndex: grid_h and grid_w must be divisible by spatial_merge_size");
+
+  int64_t vit_merger_window_size = window_size / spatial_merge_size / patch_size;
+  if (vit_merger_window_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: vit_merger_window_size must be positive (check window_size, spatial_merge_size, patch_size config)");
+
+  constexpr int64_t kMaxElements = static_cast<int64_t>(1) << 30;
+  int64_t llm_grid_h = grid_h / spatial_merge_size;
+  int64_t llm_grid_w = grid_w / spatial_merge_size;
+  if (llm_grid_h > kMaxElements || llm_grid_w > kMaxElements || grid_t > kMaxElements)
+    throw std::runtime_error("CalculateWindowIndex: grid dimensions are too large");
+
+  int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
+  int64_t pad_w = (vit_merger_window_size - (llm_grid_w % vit_merger_window_size)) % vit_merger_window_size;
+  int64_t padded_h = llm_grid_h + pad_h;
+  int64_t padded_w = llm_grid_w + pad_w;
+  if (padded_h > 0 && padded_w > 0 && grid_t > kMaxElements / padded_h / padded_w)
+    throw std::runtime_error("CalculateWindowIndex: total grid size exceeds maximum allowed");
+}
+
 // Matches HuggingFace transformers implementation:
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L367
 std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w) {
-  // Validate config-derived divisors before any division
-  if (spatial_merge_size_ <= 0) {
-    throw std::runtime_error("CalculateWindowIndex: spatial_merge_size must be positive");
-  }
-  if (patch_size_ <= 0) {
-    throw std::runtime_error("CalculateWindowIndex: patch_size must be positive");
-  }
-
-  // Validate grid dimensions are positive and within reasonable bounds
-  if (grid_t <= 0 || grid_h <= 0 || grid_w <= 0) {
-    throw std::runtime_error("CalculateWindowIndex: grid dimensions must be positive");
-  }
-
-  // Require grid_h/grid_w to be divisible by spatial_merge_size to avoid truncation
-  if (grid_h % spatial_merge_size_ != 0 || grid_w % spatial_merge_size_ != 0) {
-    throw std::runtime_error("CalculateWindowIndex: grid_h and grid_w must be divisible by spatial_merge_size");
-  }
+  ValidateWindowIndexParams(grid_t, grid_h, grid_w, spatial_merge_size_, patch_size_, window_size_);
 
   // Calculate LLM grid dimensions after spatial merging
   int64_t llm_grid_h = grid_h / spatial_merge_size_;
@@ -273,15 +286,6 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
 
   // Calculate window size at the merged resolution
   int64_t vit_merger_window_size = window_size_ / spatial_merge_size_ / patch_size_;
-  if (vit_merger_window_size <= 0) {
-    throw std::runtime_error("CalculateWindowIndex: vit_merger_window_size must be positive (check window_size, spatial_merge_size, patch_size config)");
-  }
-
-  // Validate merged grid dimensions before computing padding and allocation
-  constexpr int64_t kMaxElements = static_cast<int64_t>(1) << 30;  // ~1 billion elements, ~8GB
-  if (llm_grid_h > kMaxElements || llm_grid_w > kMaxElements || grid_t > kMaxElements) {
-    throw std::runtime_error("CalculateWindowIndex: grid dimensions are too large");
-  }
 
   // Calculate padding needed to fit into windows
   int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
@@ -290,10 +294,6 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
   int64_t padded_h = llm_grid_h + pad_h;
   int64_t padded_w = llm_grid_w + pad_w;
 
-  // Use division-based overflow check: grid_t * padded_h * padded_w <= kMaxElements
-  if (padded_h > 0 && padded_w > 0 && grid_t > kMaxElements / padded_h / padded_w) {
-    throw std::runtime_error("CalculateWindowIndex: total grid size exceeds maximum allowed");
-  }
   int64_t alloc_size = grid_t * padded_h * padded_w;
 
   int64_t num_windows_h = padded_h / vit_merger_window_size;

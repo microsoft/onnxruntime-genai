@@ -13,6 +13,9 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
+#include "models/model.h"
+#include "models/qwen_vl_vision.h"
+
 #include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
@@ -478,3 +481,61 @@ Print all primes between 1 and n
   std::cout << tokenizer->Decode(result) << "\r\n";
 }
 #endif
+
+// --- Validation tests (no model files required) ---
+
+TEST(ValidationTests, ValidateConfigPathAcceptsRelative) {
+  EXPECT_NO_THROW(Generators::ValidateConfigPath("model.onnx", "filename"));
+  EXPECT_NO_THROW(Generators::ValidateConfigPath("subdir/model.onnx", "filename"));
+  EXPECT_NO_THROW(Generators::ValidateConfigPath("./model.onnx", "filename"));
+}
+
+TEST(ValidationTests, ValidateConfigPathRejectsAbsolute) {
+  EXPECT_THROW(Generators::ValidateConfigPath("/etc/passwd", "filename"), std::runtime_error);
+#if defined(_WIN32)
+  EXPECT_THROW(Generators::ValidateConfigPath("C:\\Windows\\System32\\evil.dll", "filename"), std::runtime_error);
+#endif
+}
+
+TEST(ValidationTests, ValidateConfigPathRejectsTraversal) {
+  EXPECT_THROW(Generators::ValidateConfigPath("../../../etc/passwd", "filename"), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateConfigPath("subdir/../../etc/passwd", "filename"), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateConfigPath("..", "filename"), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexAcceptsValidParams) {
+  EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 14, 112));
+  EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 2, 2, 2, 14, 56));
+}
+
+TEST(ValidationTests, WindowIndexRejectsZeroDivisors) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 0, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, -1, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 0, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, -14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsInvalidGridDims) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(0, 28, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, -28, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 0, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsNonDivisibleGrid) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 27, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 27, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsZeroMergerWindowSize) {
+  // window_size=1 / spatial_merge_size=2 / patch_size=14 = 0
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 14, 1), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsExcessiveDimensions) {
+  int64_t huge = static_cast<int64_t>(1) << 31;
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, huge, 2, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsTotalSizeOverflow) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1000, 2000, 2000, 2, 14, 112), std::runtime_error);
+}
