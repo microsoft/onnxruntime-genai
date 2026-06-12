@@ -460,6 +460,19 @@ TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
       << " Unpenalized per-token avg=" << unpenalized_avg;
 }
 
+TEST(SamplingTests, TopKExceedingVocabSizeIsRejected) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 25);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 5000);  // vocab_size is 1000
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
 #if USE_CUDA
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
