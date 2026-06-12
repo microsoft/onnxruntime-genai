@@ -636,10 +636,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    // Security: reject absolute paths and path traversal to prevent loading arbitrary libraries
+    // Reject absolute paths and any rooted paths (e.g., Windows drive-relative "C:foo.dll"),
+    // since rooted paths can override the intended base directory during path concatenation.
     fs::path custom_library_path{custom_library_file_prefix};
-    if (custom_library_path.is_absolute()) {
-      throw std::runtime_error("custom_ops_library must be a relative path, got absolute path: " + custom_library_file_prefix);
+    if (custom_library_path.is_absolute() || custom_library_path.has_root_name() || custom_library_path.has_root_directory()) {
+      throw std::runtime_error("custom_ops_library must be a relative path (no root name/drive letter), got: " + custom_library_file_prefix);
     }
     for (const auto& component : custom_library_path) {
       if (component == "..") {
