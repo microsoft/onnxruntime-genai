@@ -639,13 +639,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     // Reject absolute paths and any rooted paths (e.g., Windows drive-relative "C:foo.dll"),
     // since rooted paths can override the intended base directory during path concatenation.
     fs::path custom_library_path{custom_library_file_prefix};
-    if (custom_library_path.is_absolute() || custom_library_path.has_root_name() || custom_library_path.has_root_directory()) {
+    if (!custom_library_path.is_relative()) {
       throw std::runtime_error("custom_ops_library must be a relative path (no root name/drive letter), got: " + custom_library_file_prefix);
     }
-    for (const auto& component : custom_library_path) {
-      if (component == "..") {
-        throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
-      }
+    // Reject path traversal components
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
     }
 
     // If relative path, try to resolve using multiple search locations
