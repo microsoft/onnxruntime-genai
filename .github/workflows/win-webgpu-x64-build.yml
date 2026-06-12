@@ -15,6 +15,7 @@ env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_FEED: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   binaryDir: 'build/cpu/win-x64'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
@@ -56,13 +57,14 @@ jobs:
           # ort/lib holds the ONNX Runtime runtime (onnxruntime.dll) used at test time; ort/ep holds
           # the execution provider plugin libraries (and their native dependencies) that the test
           # harnesses enumerate and register. GenAI itself is built against the cmake-default ORT.
+          # Both packages come from the ORT-Nightly ADO feed.
           mkdir ort/lib
           mkdir ort/ep
           Write-Host "Downloading $env:ORT_PACKAGE_NAME version: $env:ORT_TEST_VERSION"
-          nuget install $env:ORT_PACKAGE_NAME -version $env:ORT_TEST_VERSION -Source https://api.nuget.org/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+          nuget install $env:ORT_PACKAGE_NAME -version $env:ORT_TEST_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
           Copy-Item "$env:ORT_PACKAGE_NAME/runtimes/win-x64/native/*" ort/lib/ -Force
           Write-Host "Downloading $env:WEBGPU_EP_PACKAGE_NAME version: $env:WEBGPU_EP_PACKAGE_VERSION"
-          nuget install $env:WEBGPU_EP_PACKAGE_NAME -version $env:WEBGPU_EP_PACKAGE_VERSION -Source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+          nuget install $env:WEBGPU_EP_PACKAGE_NAME -version $env:WEBGPU_EP_PACKAGE_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
           Copy-Item "$env:WEBGPU_EP_PACKAGE_NAME/runtimes/win-x64/native/*" ort/ep/ -Force
           Write-Host "=== ort/lib ==="; Get-ChildItem ort/lib
           Write-Host "=== ort/ep ==="; Get-ChildItem ort/ep
@@ -110,9 +112,9 @@ jobs:
 
       - name: Run the C# Tests
         run: |
-          # ONNX Runtime comes from nuget.org. Passing EPDir is the single switch that turns on the
-          # EP-plugin registration code path; the tests enumerate and register every EP plugin in
-          # that directory (the one the pipeline downloaded them to).
+          # ONNX Runtime comes from the ORT-Nightly ADO feed. Passing EPDir is the single switch that
+          # turns on the EP-plugin registration code path; the tests enumerate and register every EP
+          # plugin in that directory (the one the pipeline downloaded them to).
           cd test\csharp
           dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
 
