@@ -381,8 +381,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
 
-  constexpr int kMaxBatchSize = 256;
-  constexpr int kMaxNumBeams = 256;
+  constexpr int kMaxBatchSize = 32;
+  constexpr int kMaxNumBeams = 32;
   constexpr int kMaxNumBeamsCuda = 32;
 
   if (params.search.batch_size < 1 || params.search.batch_size > kMaxBatchSize)
