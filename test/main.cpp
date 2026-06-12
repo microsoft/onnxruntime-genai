@@ -12,6 +12,14 @@
 
 #include "ort_genai.h"
 
+// On desktop platforms unit_tests links the ONNX Runtime import library directly, so we can use the
+// ORT C API to enumerate the execution provider devices that are actually registered (shared with
+// GenAI's native onnxruntime instance) for diagnostics.
+#if defined(_WIN32)
+#define ORT_GENAI_TEST_HAVE_ORT_C_API 1
+#include <onnxruntime_c_api.h>
+#endif
+
 // Global variable to store custom model base path
 std::string g_custom_model_path;
 
@@ -101,6 +109,48 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
   }
 }
 
+// Enumerates and logs every execution provider device that ONNX Runtime currently has registered.
+// Because EP plugin libraries are stored in ONNX Runtime's process-global environment (shared with
+// GenAI's native onnxruntime instance), this reflects exactly the set of devices that GenAI's V2
+// provider lookup will see when creating a model. This is purely diagnostic and never aborts the run.
+void DumpRegisteredEpDevices() {
+#if defined(ORT_GENAI_TEST_HAVE_ORT_C_API)
+  const OrtApi* ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  if (ort == nullptr) {
+    std::cerr << "Warning: could not obtain the ONNX Runtime C API for EP device enumeration."
+              << std::endl;
+    return;
+  }
+
+  OrtEnv* env = nullptr;
+  if (OrtStatus* status = ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "ep_diag", &env)) {
+    std::cerr << "Warning: could not create an ONNX Runtime environment for EP device enumeration: "
+              << ort->GetErrorMessage(status) << std::endl;
+    ort->ReleaseStatus(status);
+    return;
+  }
+
+  const OrtEpDevice* const* devices = nullptr;
+  size_t num_devices = 0;
+  if (OrtStatus* status = ort->GetEpDevices(env, &devices, &num_devices)) {
+    std::cerr << "Warning: GetEpDevices failed: " << ort->GetErrorMessage(status) << std::endl;
+    ort->ReleaseStatus(status);
+  } else {
+    std::cout << "Registered execution provider devices (" << num_devices << "):" << std::endl;
+    for (size_t i = 0; i < num_devices; ++i) {
+      const char* ep_name = ort->EpDevice_EpName(devices[i]);
+      const char* ep_vendor = ort->EpDevice_EpVendor(devices[i]);
+      std::cout << "  [" << i << "] EP='" << (ep_name ? ep_name : "<null>")
+                << "' vendor='" << (ep_vendor ? ep_vendor : "<null>") << "'" << std::endl;
+    }
+  }
+
+  ort->ReleaseEnv(env);
+#else
+  std::cout << "EP device enumeration is not available on this platform." << std::endl;
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -126,6 +176,7 @@ int main(int argc, char** argv) {
     }
 
     RegisterEpLibrariesFromDirectory(ep_dir);
+    DumpRegisteredEpDevices();
 
     int result = RUN_ALL_TESTS();
     std::cout << "Shutting down OnnxRuntime... ";
