@@ -93,6 +93,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
+    graph_capture_session_ = &session;
     if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
     } else {
@@ -222,6 +223,14 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
 }
 
 State::~State() {
+  // Release captured graph resources in the EP
+  if (graph_capture_session_ && !graph_id_.empty()) {
+    int id = std::atoi(graph_id_.c_str());
+    if (id > 0) {
+      graph_capture_session_->ReleaseCapturedGraph(id);
+    }
+  }
+
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {
       adapters_->ReleaseAdapter(adapter_name);
