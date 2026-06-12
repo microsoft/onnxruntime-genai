@@ -10,8 +10,6 @@
 #include <stdexcept>
 #include <string>
 
-#pragma comment(lib, "dxgi.lib")
-
 namespace benchmark::utils {
 
 size_t GetPeakWorkingSetSizeInBytes() {
