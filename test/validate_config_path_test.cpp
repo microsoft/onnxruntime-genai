@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "models/model.h"
+#include "models/validate_config_path.h"
 
 #include <gtest/gtest.h>
 

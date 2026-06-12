@@ -5,6 +5,7 @@
 #include "../logging.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
+#include "validate_config_path.h"
 #include "windowed_kv_cache.h"
 
 namespace Generators {
