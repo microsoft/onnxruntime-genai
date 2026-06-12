@@ -167,6 +167,12 @@ else()
   add_library(onnxruntime-genai SHARED ${generator_srcs})
 endif()
 
+# Marks internal C++ helpers (declared in model_package.h) for dllexport on Windows so the
+# unit_tests target can link against them. Consumers see dllimport because this define is
+# private to the onnxruntime-genai target.
+target_compile_definitions(onnxruntime-genai PRIVATE BUILDING_ORT_GENAI_DLL)
+
+target_compile_definitions(onnxruntime-genai PRIVATE BUILDING_ORT_GENAI_DLL)
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)

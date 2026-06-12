@@ -162,6 +162,11 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaCreateConfig(config_path, &p));
     return std::unique_ptr<OgaConfig>(p);
   }
+  static std::unique_ptr<OgaConfig> Create(const char* config_path, const char* ep) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfigFromPackage(config_path, ep, &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
 
   void ClearProviders() {
     OgaCheckResult(OgaConfigClearProviders(this));
@@ -228,6 +233,11 @@ struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
     OgaCheckResult(OgaCreateModel(config_path, &p));
+    return std::unique_ptr<OgaModel>(p);
+  }
+  static std::unique_ptr<OgaModel> Create(const char* config_path, const char* ep) {
+    OgaModel* p;
+    OgaCheckResult(OgaCreateModelFromPackage(config_path, ep, &p));
     return std::unique_ptr<OgaModel>(p);
   }
   static std::unique_ptr<OgaModel> Create(const char* config_path, const OgaRuntimeSettings& settings) {

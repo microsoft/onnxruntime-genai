@@ -435,6 +435,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaConfig>(m, "Config")
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
+      .def(pybind11::init([](const std::string& config_path, const std::string& ep) {
+             return OgaConfig::Create(config_path.c_str(), ep.empty() ? nullptr : ep.c_str());
+           }),
+           pybind11::arg("config_path"), pybind11::arg("ep"))
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders)
@@ -473,6 +477,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
       .def(pybind11::init([](const std::string& config_path) { return OgaModel::Create(config_path.c_str()); }))
+      .def(pybind11::init([](const std::string& config_path, const std::string& ep) {
+             return OgaModel::Create(config_path.c_str(), ep.empty() ? nullptr : ep.c_str());
+           }),
+           pybind11::arg("config_path"), pybind11::arg("ep"))
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")

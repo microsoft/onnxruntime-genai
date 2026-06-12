@@ -212,7 +212,7 @@ Mistral3ImageProcessor::Mistral3ImageProcessor(Config& config, const SessionInfo
       patch_size_{config.model.vision.patch_size},
       spatial_merge_size_{config.model.vision.spatial_merge_size} {
   const auto processor_config =
-      (config.config_path / fs::path(config.model.vision.config_filename)).string();
+      config.ResolvePath(config.model.vision.config_filename).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName),
