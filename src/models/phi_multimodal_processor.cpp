@@ -104,7 +104,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
 PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)} {
-  const auto image_processor_config = config.ResolvePath(config.model.vision.config_filename).string();
+  const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
@@ -117,7 +117,7 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
   // the "speech" block cleared (filename + config_filename both empty) loads vision-only and
   // skip the speech ONNX entirely. Matches the Gemma4 processor's pattern.
   if (!config.model.speech.config_filename.empty()) {
-    auto speech_config_path = config.ResolvePath(config.model.speech.config_filename);
+    auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
     if (fs::exists(speech_config_path)) {
       has_speech_ = true;
       audio_features_type_ = session_info.GetInputDataType(config.model.speech.inputs.audio_embeds);

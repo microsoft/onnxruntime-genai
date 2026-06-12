@@ -139,10 +139,10 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
   } else {
     auto variant_eps = CollectVariantEps(*pkg_ctx, component_name);
     constexpr const char* kEpHint =
-        " Specify an execution provider explicitly using one of: "
-        "OgaCreateModelFromPackage or OgaCreateConfigFromPackage (C); "
-        "OgaModel::Create(path, ep) or OgaConfig::Create(path, ep) (C++); "
-        "og.Model(path, ep=...) or og.Config(path, ep=...) (Python).";
+        " Specify an execution provider explicitly using OgaCreateConfigFromPackageEp "
+        "(C) / OgaConfig::CreateFromPackageEp(path, ep) (C++) / "
+        "og.Config.from_package_ep(path, ep) (Python), then load the model from the "
+        "resulting OgaConfig.";
     if (variant_eps.empty()) {
       throw std::runtime_error(
           "Model package at \"" + package_root.string() +

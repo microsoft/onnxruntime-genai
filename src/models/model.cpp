@@ -811,16 +811,11 @@ bool Model::IsPruned() const {
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
-  return CreateModel(ort_env, config_path, /*ep=*/nullptr, settings);
-}
-
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const char* ep,
-                                   const RuntimeSettings* settings /*= nullptr*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = CreateConfig(ort_env, config_path, ep, config_overlay);
+  auto config = CreateConfig(ort_env, config_path, /*ep=*/nullptr, config_overlay);
   return CreateModel(ort_env, std::move(config));
 }
 

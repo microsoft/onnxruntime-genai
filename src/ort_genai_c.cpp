@@ -241,7 +241,7 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateConfigFromPackage(const char* config_path, const char* ep, OgaConfig** out) {
+OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out) {
   OGA_TRY
   if (!Generators::IsModelPackage(fs::path{config_path})) {
     throw std::runtime_error(std::string("\"") + config_path +
@@ -362,18 +362,6 @@ OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaMod
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
-}
-
-OgaResult* OGA_API_CALL OgaCreateModelFromPackage(const char* config_path, const char* ep, OgaModel** out) {
-  OGA_TRY
-  if (!Generators::IsModelPackage(fs::path{config_path})) {
-    throw std::runtime_error(std::string("\"") + config_path +
-                             "\" is not a model package. Use OgaCreateModel for a flat model directory.");
-  }
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, ep, nullptr);
-  *out = ReturnShared<OgaModel>(model);
-  return nullptr;
-  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out) {

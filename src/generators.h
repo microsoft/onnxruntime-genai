@@ -184,11 +184,6 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
                                      const char* ep = nullptr,
                                      std::string_view json_overlay = {});
 
-// Adds the ep parameter to the path-based CreateModel; otherwise identical to the no-ep
-// overload. `ep` is forwarded to CreateConfig and is only valid when `config_path` is a
-// model package.
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const char* ep,
-                                   const RuntimeSettings* settings = nullptr);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

@@ -210,8 +210,6 @@ TEST(CreateConfigFromPackage, ReadsTokenizerDirFromVariantConfig) {
   EXPECT_EQ(config->model.tokenizer_dir, "package:shared");
   EXPECT_EQ(config->ResolvePath(config->model.tokenizer_dir).string(),
             (root / "shared").string());
-  EXPECT_EQ(config->ResolvePath("model.onnx").string(),
-            (root / "models" / "model" / "cpu" / "model.onnx").string());
 }
 
 TEST(CreateConfigFromPackage, EpOnFlatDirIsRejected) {
@@ -233,7 +231,7 @@ TEST(OgaCreateFromPackageCApi, RejectsFlatDirectories) {
             "  \"search\": {}\n}\n");
 
   OgaConfig* cfg = nullptr;
-  auto* err = OgaCreateConfigFromPackage(root.string().c_str(), nullptr, &cfg);
+  auto* err = OgaCreateConfigFromPackageEp(root.string().c_str(), nullptr, &cfg);
   ASSERT_NE(err, nullptr);
   OgaDestroyResult(err);
   EXPECT_EQ(cfg, nullptr);

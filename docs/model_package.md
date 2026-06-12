@@ -97,7 +97,6 @@ value uses the path-scheme syntax described below.
   "model": {
     "type": "phi",
     "tokenizer_dir": "package:shared",
-    "vision": { "config_filename": "package:shared/processor_config.json" },
     ...
   },
   "search": {}
@@ -107,14 +106,13 @@ value uses the path-scheme syntax described below.
 If `tokenizer_dir` is left unset the tokenizer files are looked up alongside
 `genai_config.json` exactly like a flat (non-package) model directory.
 
+Processor-specific configuration (`model.vision.config_filename`,
+`model.speech.config_filename`) is intentionally left per-variant: those files are small
+and keeping them next to the ONNX graphs avoids needing the `package:` resolver for them.
+
 ## Path scheme
 
-The following fields in `genai_config.json` accept either a plain path or a
-scheme-prefixed value:
-
-- `model.tokenizer_dir`
-- `model.vision.config_filename`
-- `model.speech.config_filename`
+`model.tokenizer_dir` accepts either a plain path or a scheme-prefixed value:
 
 | Form | Resolution |
 | --- | --- |
@@ -135,12 +133,11 @@ import onnxruntime_genai as og
 # local hardware.
 model = og.Model("./my-model.ortpackage")
 
-# Pass an explicit execution provider when the package declares more than one ep.
-# Passing ep with a flat (non-package) directory is rejected.
-model = og.Model("./my-model.ortpackage", ep="openvino")
-
-# The same options apply to og.Config.
-config = og.Config("./my-model.ortpackage", ep="openvino")
+# Multiple execution providers across the variants: load an OgaConfig with an explicit
+# ep, then create the Model from it. Passing ep with a flat (non-package) directory is
+# rejected.
+config = og.Config.from_package_ep("./my-model.ortpackage", "openvino")
+model = og.Model(config)
 ```
 
 The execution provider name accepts the short form used in `genai_config.json`
@@ -152,21 +149,20 @@ The execution provider name accepts the short form used in `genai_config.json`
 ```c
 OgaModel* model = NULL;
 
-// Auto-detect the execution provider.
+// Auto-detect.
 OgaCheckResult(OgaCreateModel("./my-model.ortpackage", &model));
 
-// Or specify it explicitly. Only valid for model packages.
-OgaCheckResult(OgaCreateModelFromPackage("./my-model.ortpackage", "openvino", &model));
-
-// Same for OgaConfig.
+// Multi-EP package: create a config with an explicit ep, then the model from it.
 OgaConfig* config = NULL;
-OgaCheckResult(OgaCreateConfigFromPackage("./my-model.ortpackage", "openvino", &config));
+OgaCheckResult(OgaCreateConfigFromPackageEp("./my-model.ortpackage", "openvino", &config));
+OgaCheckResult(OgaCreateModelFromConfig(config, &model));
+OgaDestroyConfig(config);
 ```
 
 `OgaCreateModel` and `OgaCreateConfig` continue to work on flat directories unchanged.
 When passed a package they auto-detect the execution provider; an ambiguous package
-returns an error pointing at `OgaCreateModelFromPackage` or `OgaCreateConfigFromPackage`.
-The `FromPackage` entry points reject flat directories.
+returns an error pointing at `OgaCreateConfigFromPackageEp`. The `FromPackageEp` entry
+point rejects flat directories.
 
 Combining a model package with `OgaRuntimeSettings` is not supported and returns an
 error. Runtime settings work as before with flat directories via
@@ -175,12 +171,14 @@ error. Runtime settings work as before with flat directories via
 ### C++ wrapper
 
 ```cpp
-auto model = OgaModel::Create("./my-model.ortpackage");                  // auto-detect
-auto model_ov = OgaModel::Create("./my-model.ortpackage", "openvino");   // explicit ep
+auto model = OgaModel::Create("./my-model.ortpackage");                                // auto-detect
+
+// Multi-EP package: two-step load.
+auto config = OgaConfig::CreateFromPackageEp("./my-model.ortpackage", "openvino");
+auto model_ov = OgaModel::Create(*config);
 ```
 
-The two-argument `Create` overload routes through `OgaCreateModelFromPackage` and
-therefore requires the path to be a model package.
+`OgaConfig::CreateFromPackageEp` requires the path to be a model package.
 
 ## Authoring notes
 
