@@ -9,6 +9,7 @@ namespace benchmark::utils {
 
 size_t GetPeakWorkingSetSizeInBytes();
 
+#ifdef _WIN32
 struct GpuMemoryInfo {
   size_t dedicated;  // VRAM (DXGI_MEMORY_SEGMENT_GROUP_LOCAL)
   size_t shared;     // System RAM used by GPU (DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL)
@@ -16,5 +17,6 @@ struct GpuMemoryInfo {
 };
 
 GpuMemoryInfo GetGpuMemoryUsage();
+#endif
 
 }  // namespace benchmark::utils

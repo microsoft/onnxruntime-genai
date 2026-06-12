@@ -340,8 +340,10 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
   }
 
+#ifdef _WIN32
   // Capture GPU memory before releasing the generator (while KV cache is still allocated)
   const auto gpu_mem = benchmark::utils::GetGpuMemoryUsage();
+#endif
 
   // Release the generator before printing results
   generator.reset();
@@ -374,9 +376,11 @@ void RunBenchmark(const benchmark::Options& opts) {
 
     auto peak_ws = benchmark::utils::GetPeakWorkingSetSizeInBytes();
     std::cout << "Peak working set size: " << peak_ws << " bytes (" << human_bytes(peak_ws) << ")\n";
+#ifdef _WIN32
     std::cout << "Dedicated GPU memory usage: " << gpu_mem.dedicated << " bytes (" << human_bytes(gpu_mem.dedicated) << ")\n";
     std::cout << "Shared GPU memory usage: " << gpu_mem.shared << " bytes (" << human_bytes(gpu_mem.shared) << ")\n";
     std::cout << "Total GPU memory usage: " << gpu_mem.Total() << " bytes (" << human_bytes(gpu_mem.Total()) << ")\n";
+#endif
   }
 }
 
