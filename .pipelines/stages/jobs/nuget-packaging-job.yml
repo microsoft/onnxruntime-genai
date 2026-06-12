@@ -144,6 +144,13 @@ jobs:
         ArtifactName: onnxruntime-genai-win-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cuda, true), eq(parameters.ep, 'cuda')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-cuda-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-cuda-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - ${{ if and(eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
@@ -314,6 +321,19 @@ jobs:
         $lib = "$outputDir/$rid/$(buildConfig)/$($expected[$rid])"
         if (-not (Test-Path $lib)) {
           throw "Expected native library missing for enabled RID '$rid': $lib"
+        }
+      }
+
+      if ('${{ parameters.ep }}' -eq 'cuda') {
+        $cudaExpected = @{}
+        if ('${{ parameters.enable_win_cuda }}' -eq 'True')   { $cudaExpected['win-x64']   = 'onnxruntime-genai-cuda.dll' }
+        if ('${{ parameters.enable_win_arm64 }}' -eq 'True')  { $cudaExpected['win-arm64'] = 'onnxruntime-genai-cuda.dll' }
+        if ('${{ parameters.enable_linux_cuda }}' -eq 'True') { $cudaExpected['linux-x64'] = 'libonnxruntime-genai-cuda.so' }
+        foreach ($rid in $cudaExpected.Keys) {
+          $lib = "$outputDir/$rid/$(buildConfig)/$($cudaExpected[$rid])"
+          if (-not (Test-Path $lib)) {
+            throw "Expected CUDA native library missing for enabled RID '$rid': $lib"
+          }
         }
       }
 
