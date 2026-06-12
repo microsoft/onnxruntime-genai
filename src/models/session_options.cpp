@@ -9,6 +9,7 @@
 
 #include "../cuda/session_options.h"
 #include "../dml/session_options.h"
+#include "../morphizen_ep/session_options.h"
 #include "../nvtensorrtrtx/session_options.h"
 #include "../openvino/session_options.h"
 #include "../qnn/session_options.h"
@@ -170,6 +171,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       {"NvTensorRtRtx", NvTensorRtRtxExecutionProvider::AppendExecutionProvider},
       {"OpenVINO", OpenVINOExecutionProvider::AppendExecutionProvider},
       {"RyzenAI", RyzenAIExecutionProvider::AppendExecutionProvider},
+      {"MorphiZenEP", MorphiZenEPExecutionProvider::AppendExecutionProvider},
       {"QNN", QNNExecutionProvider::AppendExecutionProvider},
       {"VitisAI", VitisAIExecutionProvider::AppendExecutionProvider},
       {"WebGPU", WebGPUExecutionProvider::AppendExecutionProvider},
