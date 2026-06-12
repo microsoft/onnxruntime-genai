@@ -85,6 +85,7 @@ def _parse_args():
 
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
+    parser.add_argument("--msbuild_extra_options", nargs="+", action="extend", default=[], help="Extra MSBuild properties (/p:key=value). Provide as key=value.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
     parser.add_argument(
         "--publish_java_maven_local",
@@ -403,9 +404,11 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     )
     ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path, ort_lib_path]
+    msbuild_extra_options = list(args.msbuild_extra_options)
+    if args.config == "Release" and not [opt for opt in msbuild_extra_options if 'IsReleaseBuild' in opt]:
+        msbuild_extra_options.append("IsReleaseBuild=True")
 
-    return props
+    return [configuration, platform, native_lib_path, ort_lib_path] + ["/p:" + option for option in msbuild_extra_options]
 
 
 def _run_android_tests(args: argparse.Namespace):
@@ -652,6 +655,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             )
             args.test = False
 
+    if util.is_windows() and 'Ninja' in args.cmake_generator:
+        command += ["--compile-no-warning-as-error"]
+
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
 
@@ -762,13 +768,18 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     Build the examples.
     """
     examples_dir = REPO_ROOT / "examples" / "c"
-    build_dir = examples_dir / "build"
+    build_dir = examples_dir / "build" / args.config
 
-    if build_dir.exists():
-        log.info(f"Removing existing build directory: {build_dir}")
-        shutil.rmtree(build_dir)
-
-    build_dir.mkdir()
+    # Removing the build directory will no longer work because of
+    # the FetchContent used in the examples. It creates the _deps/
+    # directory, which contains .git/ subdirectories. Removing those
+    # requires elevated privileges.
+    # if build_dir.exists():
+    #     log.info(f"Removing existing build directory: {build_dir}")
+    #     shutil.rmtree(build_dir)
+    #
+    # Do not need to create build dir manually. CMake will do that.
+    # build_dir.mkdir(parents=True)
 
     samples_to_build = [
         "-DMODEL_QA=ON",
@@ -778,31 +789,50 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DNEMOTRON_SPEECH=ON"
     ]
 
-    ort_include_dir = REPO_ROOT / "ort" / "include"
-    ort_lib_dir = REPO_ROOT / "ort" / "lib"
-    oga_include_dir = REPO_ROOT / "src"
-    oga_lib_dir = args.build_dir
-    if util.is_windows():
-        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
-        oga_lib_dir = oga_lib_dir / args.config
+    cmake_prefix_path = args.build_dir.as_posix()
+    if args.ort_home:
+        cmake_prefix_path += ";" + (args.ort_home / args.config).as_posix()
+    else:
+        ortlib_src_dir = args.build_dir / "_deps" / "ortlib-src"
+        ort_include_dir = REPO_ROOT / "ort" / "include"
+        if not ort_include_dir.exists():
+            ort_include_dir = ortlib_src_dir / "build" / "native" / "include"
+        ortlib_runtimes_dir = ortlib_src_dir / "runtimes"
+        ort_lib_dir = REPO_ROOT / "ort" / "lib"
+        if not ort_lib_dir.exists():
+            if util.is_windows_arm() or (util.is_windows() and (args.arm64 or args.arm64ec)):
+                ort_lib_dir = ortlib_runtimes_dir / "win-arm64"
+            elif util.is_windows():
+                ort_lib_dir = ortlib_runtimes_dir / "win-x64"
+            elif args.android:
+                ort_lib_dir = ortlib_runtimes_dir / "android"
+            elif util.is_linux_arm() or (util.is_linux() and (args.arm64 or args.arm64ec)):
+                ort_lib_dir = ortlib_runtimes_dir / "linux-arm64"
+            elif util.is_linux():
+                ort_lib_dir = ortlib_runtimes_dir / "linux-x64"
+            elif util.is_mac() or args.macos:
+                ort_lib_dir = ortlib_runtimes_dir / "osx-arm64"
+            elif args.ios:
+                ort_lib_dir = ortlib_runtimes_dir / "ios"
+            elif not util.is_aix():
+                raise RuntimeError("'{}': unsupported operating system to build examples for".format(sys.platform))
+        samples_to_build += [
+            "-DORT_INCLUDE_DIR=" + ort_include_dir.as_posix(),
+            "-DORT_LIB_DIR=" + (ort_lib_dir / "native").as_posix()
+        ]
 
     cmake_command = (
         [
-            str(args.cmake_path),
+            args.cmake_path.as_posix(),
             "-S",
-            str(examples_dir),
+            examples_dir.as_posix(),
             "-B",
-            str(build_dir),
+            build_dir.as_posix(),
             "-G",
             args.cmake_generator,
+            "-DCMAKE_PREFIX_PATH=" + cmake_prefix_path
         ]
         + samples_to_build
-        + [
-            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
-            "-DORT_LIB_DIR=" + str(ort_lib_dir),
-            "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
-            "-DOGA_LIB_DIR=" + str(oga_lib_dir),
-        ]
     )
 
     if args.cmake_generator.startswith("Visual Studio"):
@@ -811,7 +841,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         elif args.arm64ec:
             cmake_command += ["-A", "ARM64EC"]
 
-    if args.cmake_extra_defines != []:
+    if args.cmake_extra_defines:
         cmake_command += args.cmake_extra_defines
 
     util.run(cmake_command, env=env)
