@@ -408,8 +408,17 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
 
 void GreedySearch_Cpu::AppendNextTokensToSequences() {
   // Append next token to each sequence.
-  auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto current_length = sequences_.GetSequenceLength();
+
+  // Bounds check: prevent writing past the allocated sequences buffer.
+  if (current_length >= params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "greedy cpu hit");
+    done_ = true;
+    return;
+  }
+
+  auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto next_tokens = next_tokens_ptr_.Span();  // always on cpu
   auto batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
@@ -428,17 +437,24 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 
 void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
+  ResetDone();
+
   auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
+    if (sequences_.GetSequenceLength() >= sequences_.max_length_)
+      break;
     for (size_t i = 0; i < batch_size; i++) {
       SetNextToken(i, next_tokens_cpu[i * tokens_count_per_batch + j]);
     }
     AppendNextTokensToSequences();
   }
 
-  ResetDone();
+  // Only reset done_ if buffer is not full; unconditional ResetDone() would allow
+  // a subsequent GenerateNextToken to write past the buffer (heap overflow).
+  if (sequences_.GetSequenceLength() < sequences_.max_length_)
+    ResetDone();
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {
@@ -483,10 +499,18 @@ bool BeamSearch_Cpu::IsDone() const {
 }
 
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
-  auto sequences_span = sequences_.GetSequences().CpuSpan();
-  auto sequences_next_span = sequences_.GetNextSequences().CpuSpan();
   auto max_length = sequences_.max_length_;
   auto current_length = sequences_.GetSequenceLength();
+
+  // Bounds check: prevent writing past the allocated sequences buffer.
+  if (current_length >= static_cast<size_t>(params_->search.max_length)) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "beam cpu hit");
+    return;
+  }
+
+  auto sequences_span = sequences_.GetSequences().CpuSpan();
+  auto sequences_next_span = sequences_.GetNextSequences().CpuSpan();
   auto batch_beam_next_tokens = beam_scorer_->GetNextTokens().Span();
   auto batch_beam_indices = beam_scorer_->GetNextIndices().Span();
   auto batch_beam_size = params_->BatchBeamSize();

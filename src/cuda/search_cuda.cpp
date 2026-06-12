@@ -223,17 +223,20 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   ResetDone();
 
   auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
+  if (sequences_.GetSequenceLength() < static_cast<size_t>(params_->search.max_length)) {
+    cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
+  }
 
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
+  // Preserve done_ if buffer is now full; unconditional ResetDone() would allow
+  // a subsequent GenerateNextToken to write past the buffer.
+  if (sequences_.GetSequenceLength() >= static_cast<size_t>(params_->search.max_length)) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
-    return;
+  } else {
+    ResetDone();
   }
-
-  ResetDone();
 }
 
 void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
