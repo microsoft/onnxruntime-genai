@@ -101,8 +101,7 @@ scheme-prefixed value:
 | --- | --- |
 | *(empty)* | Treated as the variant directory (the directory containing `genai_config.json`). |
 | `package:<relative_path>` | Joined with the package root. Only valid when loading from a model package. |
-| Absolute path | Used as-is. |
-| Any other value | Joined with the variant directory. |
+| Any other value | Joined with the variant directory, matching how every other path in `genai_config.json` is resolved. |
 
 ## Loading a package
 

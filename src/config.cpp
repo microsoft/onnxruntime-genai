@@ -1623,10 +1623,6 @@ fs::path Config::ResolvePath(std::string_view value) const {
     const std::string remainder{value.substr(kPackageScheme.size())};
     return remainder.empty() ? package_root : package_root / remainder;
   }
-  fs::path candidate{std::string{value}};
-  if (!candidate.is_relative()) {
-    return candidate;
-  }
   return config_path / std::string{value};
 }
 

@@ -109,10 +109,15 @@ TEST(ConfigResolvePath, PlainRelativeJoinsConfigPath) {
   EXPECT_EQ(config.ResolvePath("tokenizer").string(), "/var/models/flat/tokenizer");
 }
 
-TEST(ConfigResolvePath, AbsoluteReturnedAsIs) {
+TEST(ConfigResolvePath, NonPackageValueJoinsConfigPath) {
+  // Anything that is not a "package:" reference is joined with config_path verbatim. This
+  // intentionally mirrors how genai resolves every other path in genai_config.json: no
+  // validation, no normalization, no special handling for absolute or "scheme-like"
+  // values.
   Generators::Config config;
   config.config_path = fs::path{"/var/models/flat"};
-  EXPECT_EQ(config.ResolvePath("/absolute/elsewhere").string(), "/absolute/elsewhere");
+  EXPECT_EQ(config.ResolvePath("foo:bar").string(), "/var/models/flat/foo:bar");
+  EXPECT_EQ(config.ResolvePath("sha256:abcdef").string(), "/var/models/flat/sha256:abcdef");
 }
 
 TEST(ConfigResolvePath, PackageSchemeJoinsPackageRoot) {
@@ -134,16 +139,6 @@ TEST(ConfigResolvePath, PackageSchemeWithoutPackageRootThrows) {
   Generators::Config config;
   config.config_path = fs::path{"/var/models/flat"};
   EXPECT_THROW(config.ResolvePath("package:shared"), std::runtime_error);
-}
-
-TEST(ConfigResolvePath, UnknownSchemeTreatedAsRelativePath) {
-  // Unknown scheme-like values (anything other than "package:") are treated as ordinary
-  // relative paths joined with config_path. Includes values such as "sha256:..." that may
-  // gain meaning in a future iteration.
-  Generators::Config config;
-  config.config_path = fs::path{"/var/models/flat"};
-  EXPECT_EQ(config.ResolvePath("foo:bar").string(), "/var/models/flat/foo:bar");
-  EXPECT_EQ(config.ResolvePath("sha256:abcdef").string(), "/var/models/flat/sha256:abcdef");
 }
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE

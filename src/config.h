@@ -87,9 +87,9 @@ struct Config {
   fs::path config_path;   // Path of the config directory
   fs::path package_root;  // Package root if loaded from a model package, otherwise empty.
 
-  // Resolves a path-like string from genai_config.json. Empty -> config_path. "package:<rel>"
-  // -> package_root/<rel> (errors when package_root is empty). Absolute paths are returned
-  // as-is. Anything else is joined with config_path.
+  // Resolves a path-like string from genai_config.json. Empty -> config_path.
+  // "package:<rel>" -> package_root/<rel> (errors when package_root is empty). Anything
+  // else is joined with config_path.
   fs::path ResolvePath(std::string_view value) const;
 
   using NamedString = std::pair<std::string, std::string>;
