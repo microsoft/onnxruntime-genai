@@ -249,6 +249,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 // Matches HuggingFace transformers implementation:
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L367
 std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w) {
+  ValidateWindowIndexParams(grid_t, grid_h, grid_w, spatial_merge_size_, patch_size_, window_size_);
+
   // Calculate LLM grid dimensions after spatial merging
   int64_t llm_grid_h = grid_h / spatial_merge_size_;
   int64_t llm_grid_w = grid_w / spatial_merge_size_;
@@ -260,21 +262,26 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
   int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
   int64_t pad_w = (vit_merger_window_size - (llm_grid_w % vit_merger_window_size)) % vit_merger_window_size;
 
-  int64_t num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
-  int64_t num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
+  int64_t padded_h = llm_grid_h + pad_h;
+  int64_t padded_w = llm_grid_w + pad_w;
+
+  int64_t alloc_size = grid_t * padded_h * padded_w;
+
+  int64_t num_windows_h = padded_h / vit_merger_window_size;
+  int64_t num_windows_w = padded_w / vit_merger_window_size;
 
   std::vector<int64_t> window_index;
   window_index.reserve(grid_t * llm_grid_h * llm_grid_w);
 
   // Create initial index grid
-  std::vector<int64_t> index(grid_t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w), -100);
+  std::vector<int64_t> index(alloc_size, -100);
 
   // Fill non-padded positions with sequential indices
   for (int64_t t = 0; t < grid_t; ++t) {
     for (int64_t h = 0; h < llm_grid_h; ++h) {
       for (int64_t w = 0; w < llm_grid_w; ++w) {
         int64_t idx = t * llm_grid_h * llm_grid_w + h * llm_grid_w + w;
-        int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+        int64_t padded_idx = t * padded_h * padded_w + h * padded_w + w;
         index[padded_idx] = idx;
       }
     }
@@ -290,7 +297,7 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
           for (int64_t pw = 0; pw < vit_merger_window_size; ++pw) {
             int64_t h = wh * vit_merger_window_size + ph;
             int64_t w = ww * vit_merger_window_size + pw;
-            int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+            int64_t padded_idx = t * padded_h * padded_w + h * padded_w + w;
 
             // Only add non-padded indices
             if (index[padded_idx] != -100) {

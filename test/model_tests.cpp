@@ -13,6 +13,9 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
+#include "models/model.h"
+#include "models/qwen_vl_vision.h"
+
 #include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
@@ -519,3 +522,42 @@ TEST(ModelTests, BatchSizeZeroThrows) {
   EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
 }
 #endif
+// --- Validation tests (no model files required) ---
+
+TEST(ValidationTests, WindowIndexAcceptsValidParams) {
+  EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 14, 112));
+  EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 2, 2, 2, 14, 56));
+}
+
+TEST(ValidationTests, WindowIndexRejectsZeroDivisors) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 0, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, -1, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 0, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, -14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsInvalidGridDims) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(0, 28, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, -28, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 0, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsNonDivisibleGrid) {
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 27, 28, 2, 14, 112), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 27, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsZeroMergerWindowSize) {
+  // window_size=1 / spatial_merge_size=2 / patch_size=14 = 0
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 14, 1), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsExcessiveDimensions) {
+  int64_t huge = (static_cast<int64_t>(1) << 31) + 2;  // After /2, llm_grid_h > kMaxElements (1<<30)
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1, huge, 2, 2, 14, 112), std::runtime_error);
+}
+
+TEST(ValidationTests, WindowIndexRejectsTotalSizeOverflow) {
+  // Each dim individually <= kMaxElements, but grid_t * padded_h * padded_w > kMaxElements
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1000, 2000000, 2000000, 2, 14, 112), std::runtime_error);
+}
