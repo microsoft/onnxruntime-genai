@@ -1525,7 +1525,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
-#if ORT_API_VERSION >= 28
+#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 
 namespace Ort {
 
@@ -1628,4 +1628,4 @@ inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelected
   return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
 }
 
-#endif  // ORT_API_VERSION >= 28
+#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API

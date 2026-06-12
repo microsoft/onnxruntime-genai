@@ -73,7 +73,20 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
+// Some Apple/iOS toolchains ship the core ONNX Runtime C API but no experimental header.
+// Probe with __has_include so those builds still compile; consumers of the model-package
+// types gate on ORT_GENAI_HAS_EXPERIMENTAL_C_API below.
+#if defined(__has_include)
+#if __has_include("onnxruntime_experimental_c_api.h")
 #include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#else
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 0
+#endif
+#else
+#include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#endif
 #include "../span.h"
 #include "../logging.h"
 #include "env_utils.h"
@@ -1458,7 +1471,7 @@ struct OrtLoraAdapter {
   Ort::Abstract make_abstract;
 };
 
-#if ORT_API_VERSION >= 28
+#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 
 struct OrtModelPackageComponentContext;
 
@@ -1553,6 +1566,6 @@ struct OrtModelPackageComponentContext {
   Ort::Abstract make_abstract;
 };
 
-#endif  // ORT_API_VERSION >= 28
+#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 
 #include "onnxruntime_inline.h"

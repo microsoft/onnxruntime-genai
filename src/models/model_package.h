@@ -8,9 +8,13 @@
 #include "onnxruntime_c_api.h"
 
 // ORT_GENAI_HAS_MODEL_PACKAGE is set when the ORT C API version exposes the
-// OrtModelPackageApi experimental functions (introduced in API version 28).
+// OrtModelPackageApi experimental functions (introduced in API version 28) and the
+// experimental header is available on the build's include path. Some Apple/iOS
+// toolchains ship the core C API but no experimental header; those builds compile with
+// model-package support disabled.
 #if !defined(ORT_GENAI_HAS_MODEL_PACKAGE)
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && \
+    (!defined(__has_include) || __has_include("onnxruntime_experimental_c_api.h"))
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
