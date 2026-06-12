@@ -58,8 +58,8 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
   if (audio_data.size() != audio_data_sizes.size())
     throw std::runtime_error("Number of audio data buffers does not match the number of audio data sizes");
 
-  // Minimum size to hold a valid audio header (WAV=44 bytes, FLAC=42 bytes, MP3 frame=4 bytes header + data).
-  // Reject trivially malformed buffers that cannot contain valid audio.
+  // Conservative minimum buffer size to avoid decoder header parsing reading past the end of the buffer.
+  // 44 bytes matches the standard WAV header size; this is a safety check, not full format validation.
   constexpr size_t kMinAudioBufferSize = 44;
   std::vector<int64_t> sizes;
   for (size_t i = 0; i < audio_data_sizes.size(); ++i) {
