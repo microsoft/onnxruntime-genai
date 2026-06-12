@@ -53,4 +53,3 @@ MODEL_PACKAGE_API PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
 #endif  // ORT_GENAI_HAS_MODEL_PACKAGE
 
 }  // namespace Generators
-

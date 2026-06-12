@@ -2,11 +2,11 @@
 
 onnxruntime-genai can load models from an ONNX Runtime *model package* directory in
 addition to the traditional flat model directory. A package bundles multiple build
-*variants* of the same model (for example one variant per execution provider, precision,
-or hardware target) and lets the runtime pick the variant that matches the requested
-execution provider at load time. Files that are common across variants, such as tokenizer
-or processor configuration, can live in a sibling directory and be referenced from each
-variant's configuration with a path scheme.
+*variants* of the same model — such as 
+execution-provider compile flag — and lets ONNX Runtime pick the variant that best
+matches the local hardware at load time. Files that are common across variants, such as
+tokenizer or processor configuration, can live in a sibling directory and be referenced
+from each variant's configuration with a path scheme.
 
 ## Package layout
 
@@ -23,11 +23,11 @@ my-model.ortpackage/
 ├── models/
 │   └── model/
 │       ├── metadata.json
-│       ├── cpu/
+│       ├── openvino-1/
 │       │   ├── genai_config.json
 │       │   ├── model.onnx
 │       │   └── model.onnx.data
-│       └── cuda-fp16/
+│       └── openvino-2/
 │           ├── genai_config.json
 │           ├── model.onnx
 │           └── model.onnx.data
@@ -52,16 +52,35 @@ ONNX Runtime model package specification. The minimum needed for onnxruntime-gen
 {
   "component_name": "model",
   "variants": {
-    "cpu":      { "ep": "CPUExecutionProvider"  },
-    "cuda-fp16":{ "ep": "CUDAExecutionProvider" }
+    "openvino-1": {
+      "ep": "OpenVINOExecutionProvider",
+      "device": "npu",
+      "compatibility_string": "<compat-string-1>"
+    },
+    "openvino-2": {
+      "ep": "OpenVINOExecutionProvider",
+      "device": "npu",
+      "compatibility_string": "<compat-string-2>"
+    }
   }
 }
 ```
+
+In this example both variants target the same execution provider but compile for
+different hardware or software versions. The OpenVINO EP scores each variant's `compatibility_string` at load time and ORT selects the highest-scoring match — callers do
+not need to know which build is best for their machine.
 
 Each variant directory must contain a `genai_config.json` describing the model to
 onnxruntime-genai. Variant directories are otherwise self-contained: they may hold the
 ONNX graph, external weights, custom op libraries, LoRA adapters, and any other files
 specific to that build.
+
+> **Heads-up.** External weight files (`model.onnx.data`) currently sit inside each
+> variant directory. An upcoming ONNX Runtime change adds content-addressed shared
+> assets, which will let multiple variants of the same model reference a single copy of
+> the weights from the package's `shared_assets/` area. Packages authored under the
+> conventions in this document migrate without genai-side changes: only the weight
+> references inside the variant's `genai_config.json` change form.
 
 ## Sharing tokenizer and processor files across variants
 
@@ -73,7 +92,7 @@ Set `model.tokenizer_dir` to the directory holding `tokenizer.json` and friends.
 value uses the path-scheme syntax described below.
 
 ```jsonc
-// models/model/cpu/genai_config.json
+// models/model/openvino-1/genai_config.json
 {
   "model": {
     "type": "phi",
@@ -111,15 +130,17 @@ scheme-prefixed value:
 import onnxruntime_genai as og
 
 # Auto-detects the execution provider when the package declares only one across its
-# variants. Returns an error directing the caller to specify an ep otherwise.
+# variants. ORT still picks among multiple variants of the same EP using their
+# compatibility strings, so a single Model() call resolves to the right build for the
+# local hardware.
 model = og.Model("./my-model.ortpackage")
 
-# Explicit execution provider. Required when the package declares more than one ep.
+# Pass an explicit execution provider when the package declares more than one ep.
 # Passing ep with a flat (non-package) directory is rejected.
-model = og.Model("./my-model.ortpackage", ep="cuda")
+model = og.Model("./my-model.ortpackage", ep="openvino")
 
 # The same options apply to og.Config.
-config = og.Config("./my-model.ortpackage", ep="cuda")
+config = og.Config("./my-model.ortpackage", ep="openvino")
 ```
 
 The execution provider name accepts the short form used in `genai_config.json`
@@ -135,11 +156,11 @@ OgaModel* model = NULL;
 OgaCheckResult(OgaCreateModel("./my-model.ortpackage", &model));
 
 // Or specify it explicitly. Only valid for model packages.
-OgaCheckResult(OgaCreateModelFromPackage("./my-model.ortpackage", "cuda", &model));
+OgaCheckResult(OgaCreateModelFromPackage("./my-model.ortpackage", "openvino", &model));
 
 // Same for OgaConfig.
 OgaConfig* config = NULL;
-OgaCheckResult(OgaCreateConfigFromPackage("./my-model.ortpackage", "cuda", &config));
+OgaCheckResult(OgaCreateConfigFromPackage("./my-model.ortpackage", "openvino", &config));
 ```
 
 `OgaCreateModel` and `OgaCreateConfig` continue to work on flat directories unchanged.
@@ -154,8 +175,8 @@ error. Runtime settings work as before with flat directories via
 ### C++ wrapper
 
 ```cpp
-auto model = OgaModel::Create("./my-model.ortpackage");              // auto-detect
-auto model_cuda = OgaModel::Create("./my-model.ortpackage", "cuda"); // explicit ep
+auto model = OgaModel::Create("./my-model.ortpackage");                  // auto-detect
+auto model_ov = OgaModel::Create("./my-model.ortpackage", "openvino");   // explicit ep
 ```
 
 The two-argument `Create` overload routes through `OgaCreateModelFromPackage` and
@@ -167,10 +188,14 @@ therefore requires the path to be a model package.
   `genai_config.json`. Variant directories are completely independent — they may differ
   in any genai_config field, including `context_length`, tokenizer-related defaults, or
   the set of ONNX graphs they load.
+- Variants targeting the same execution provider must each declare a distinct
+  `compatibility_string` (and typically a `device`) so the EP can score them against the
+  local hardware. ONNX Runtime treats the string as opaque and forwards it to the EP's
+  validator; the EP defines the syntax.
 - Files outside variant directories (such as the `shared/` directory in the example
   above) are not interpreted by the runtime. Reference them from
   `genai_config.json` with the `package:` scheme to keep them shared across variants.
 - The model package's execution provider names must match what ONNX Runtime expects
-  (`CPUExecutionProvider`, `CUDAExecutionProvider`, `DmlExecutionProvider`, ...). The
-  short forms used by genai_config (`cuda`, `dml`, ...) are not accepted by ORT in this
-  position.
+  (`CPUExecutionProvider`, `CUDAExecutionProvider`, `DmlExecutionProvider`,
+  `OpenVINOExecutionProvider`, ...). The short forms used by genai_config (`cuda`, `dml`,
+  `openvino`, ...) are not accepted by ORT in this position.
