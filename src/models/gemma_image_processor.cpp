@@ -81,7 +81,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
 GemmaImageProcessor::GemmaImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
-  ValidateConfigPath(config.model.vision.config_filename, "vision config_filename");
+  ValidateConfigPath(config.model.vision.config_filename);
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
