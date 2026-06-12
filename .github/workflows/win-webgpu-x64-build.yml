@@ -18,9 +18,9 @@ env:
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   binaryDir: 'build/cpu/win-x64'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  WEBGPU_EP_PACKAGE_VERSION: '0.1.0'
+  WEBGPU_EP_PACKAGE_VERSION: '0.2.0-dev.20260610+50c95100'
   # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
-  ORT_TEST_VERSION: '1.26.0'
+  ORT_TEST_VERSION: '1.28.0-dev-20260610-0510-50c9510000'
 
 jobs:
   windows-webgpu-x64-build:
