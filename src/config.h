@@ -306,10 +306,17 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct RunProfiling {
+      bool enabled{false};
+      std::string output_prefix{"onnxruntime_run_profile"};
+      std::string runs{"0"};  // DSL: "N", "A-B", "A-", "*", comma-separated
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      RunProfiling run_profiling;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
