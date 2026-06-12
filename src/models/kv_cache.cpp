@@ -153,9 +153,16 @@ namespace {
 // Compute the compressed KV cache head dimension for TurboQuant.
 // TurboQuant packs each head into (1 + head_size/8) u32 words: one fp32 scale followed by
 // head_size values quantized to 4 bits. The tensor dimension depends on the element type.
-// Returns the original head_size unchanged when turbo_quant_bits is 0 (disabled).
+// TurboQuant requires head_size >= 8 and a power of 2 (Hadamard transform needs power-of-2,
+// and packing 8 indices per u32 needs head_size >= 8). Silently falls back to regular
+// head_size if those conditions are not met or turbo_quant_bits is 0 (disabled).
 int64_t ComputeTurboQuantHeadSize(int head_size, int turbo_quant_bits, ONNXTensorElementDataType type) {
   if (turbo_quant_bits == 4) {
+    // Silently disable if head_size doesn't meet TurboQuant requirements.
+    const bool is_power_of_two = head_size > 0 && (head_size & (head_size - 1)) == 0;
+    if (head_size < 8 || !is_power_of_two) {
+      return head_size;
+    }
     const int compressed_u32_words = head_size / 8 + 1;
     const int bytes_per_element = static_cast<int>(Ort::SizeOf(type));
     return static_cast<int64_t>(compressed_u32_words * (4 / bytes_per_element));  // 4 bytes per u32
