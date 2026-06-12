@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import shutil
@@ -16,41 +15,15 @@ import onnx
 import onnxruntime
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
 
 logger = logging.getLogger(__name__)
 
 
 devices = ["cpu"]
 
-# Execution providers shipped as separate plug-in libraries that must be registered with
-# ONNX Runtime before use. Maps the GenAI provider name to the Python package that exposes
-# the plug-in library path via get_library_path().
-PLUGIN_EP_PACKAGES = {
-    "webgpu": "onnxruntime_ep_webgpu",
-}
-
-
-def register_plugin_providers() -> None:
-    """Registers each available plug-in execution provider library with ONNX Runtime.
-
-    A provider is skipped if its package is not installed. Other registration failures are
-    logged but not raised so that the absence of an optional EP never blocks the test session.
-    """
-    for provider_name, package_name in PLUGIN_EP_PACKAGES.items():
-        try:
-            ep_module = importlib.import_module(package_name)
-        except ImportError:
-            logger.info("Skipping plug-in EP '%s': package '%s' is not installed.", provider_name, package_name)
-            continue
-
-        try:
-            og.register_execution_provider_library(provider_name, ep_module.get_library_path())
-            logger.info("Registered plug-in EP '%s' from package '%s'.", provider_name, package_name)
-        except Exception as exc:  # noqa: BLE001 - registration is best-effort for optional EPs
-            logger.warning("Failed to register plug-in EP '%s': %s", provider_name, exc)
-
-
-register_plugin_providers()
+# Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
+register_plugin_providers(logger)
 
 if og.is_cuda_available():
     devices.append("cuda")

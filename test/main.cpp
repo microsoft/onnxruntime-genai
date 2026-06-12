@@ -1,12 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
-#include <optional>
 #include <string>
-#include <vector>
+#include <string_view>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -19,39 +20,29 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Shared file-name stem of every ONNX Runtime execution provider plugin library, e.g.
-// "onnxruntime_providers_webgpu.dll" or "libonnxruntime_providers_cuda.so".
+// Platform-specific file-name prefix/suffix of an ONNX Runtime execution provider plugin library,
+// e.g. "onnxruntime_providers_webgpu.dll" or "libonnxruntime_providers_webgpu.so".
 #if defined(_WIN32)
-constexpr const char* kProviderPrefix = "onnxruntime_providers_";
+constexpr const char* kProviderPrefix = "";
 constexpr const char* kProviderSuffix = ".dll";
 #elif defined(__APPLE__)
-constexpr const char* kProviderPrefix = "libonnxruntime_providers_";
+constexpr const char* kProviderPrefix = "lib";
 constexpr const char* kProviderSuffix = ".dylib";
 #else
-constexpr const char* kProviderPrefix = "libonnxruntime_providers_";
+constexpr const char* kProviderPrefix = "lib";
 constexpr const char* kProviderSuffix = ".so";
 #endif
 
-// Provider libraries that match the naming convention but are not registrable EP plugins.
-bool IsNonPluginProviderLibrary(const std::string& ep_name) {
-  return ep_name == "shared";
-}
+// Execution providers that can be loaded as plugin libraries at test time, mapped to the
+// platform-independent stem of their library file. The full file name is built as
+// "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".
+constexpr std::array<std::pair<std::string_view, std::string_view>, 1> kPluginEpLibraries = {{
+    {"WebGpuExecutionProvider", "onnxruntime_providers_webgpu"},
+}};
 
-// Derives the execution provider name from a plugin library file name, following the
-// "<prefix>onnxruntime_providers_<ep><suffix>" convention. Returns nullopt when the file name does
-// not match the convention.
-std::optional<std::string> EpNameFromLibraryFile(const fs::path& file) {
-  const std::string name = file.filename().string();
-  const std::string prefix = kProviderPrefix;
-  const std::string suffix = kProviderSuffix;
-  if (name.size() <= prefix.size() + suffix.size()) {
-    return std::nullopt;
-  }
-  if (name.compare(0, prefix.size(), prefix) != 0 ||
-      name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
-    return std::nullopt;
-  }
-  return name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+// Builds the platform-specific plugin library file name for an EP library stem.
+std::string EpLibraryFileName(std::string_view stem) {
+  return std::string(kProviderPrefix) + std::string(stem) + kProviderSuffix;
 }
 
 // Registers an execution provider plugin library with ONNX Runtime, logging the outcome.
@@ -60,9 +51,6 @@ void RegisterEpLibrary(const std::string& registration_name, const std::string& 
   try {
     std::cout << "Registering execution provider library '" << registration_name << "' -> "
               << library_path << std::endl;
-    // The ORT environment is a singleton shared with ONNX Runtime GenAI, so registering the
-    // plugin library here (via the C API, against the native onnxruntime) makes the EP available
-    // to all models created in this process. No C++ wrapper API is needed for this.
     OgaRegisterExecutionProviderLibrary(registration_name.c_str(), library_path.c_str());
   } catch (const std::exception& e) {
     std::cerr << "Warning: failed to register execution provider library '" << registration_name
@@ -70,10 +58,7 @@ void RegisterEpLibrary(const std::string& registration_name, const std::string& 
   }
 }
 
-// Enumerates every execution provider plugin library in `ep_dir` (following the ORT provider
-// naming convention) and registers it under the EP name derived from its file name. A pipeline
-// only needs to drop the EP plugin(s) it wants to exercise (e.g. the WebGPU, CUDA or
-// NvTensorRtRtx provider library) into this single directory.
+// Registers each execution provider plugin library that is present in `ep_dir`.
 void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
   std::error_code ec;
   if (ep_dir.empty()) {
@@ -84,20 +69,12 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
     return;
   }
 
-  for (const auto& entry : fs::directory_iterator(ep_dir, ec)) {
-    if (!entry.is_regular_file(ec)) {
+  for (const auto& [ep_name, library_stem] : kPluginEpLibraries) {
+    const fs::path library_path = ep_dir / EpLibraryFileName(library_stem);
+    if (!fs::is_regular_file(library_path, ec)) {
       continue;
     }
-    const std::optional<std::string> ep_name = EpNameFromLibraryFile(entry.path());
-    if (!ep_name) {
-      continue;
-    }
-    if (IsNonPluginProviderLibrary(*ep_name)) {
-      std::cout << "Skipping non-plugin provider library: " << entry.path().filename().string()
-                << std::endl;
-      continue;
-    }
-    RegisterEpLibrary(*ep_name, entry.path().string());
+    RegisterEpLibrary(std::string(ep_name), library_path.string());
   }
 }
 

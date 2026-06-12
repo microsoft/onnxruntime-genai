@@ -91,9 +91,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         private static int _epLibrariesRegistered = 0;
 
+        // Execution providers that can be loaded as plugin libraries at test time, mapped to the
+        // platform-independent stem of their library file. The full file name is built as
+        // "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".
+        private static readonly KeyValuePair<string, string>[] _knownEpLibraries = new[]
+        {
+            new KeyValuePair<string, string>("WebGpuExecutionProvider", "onnxruntime_providers_webgpu"),
+        };
+
         // Resolves the directory containing the execution provider plugin libraries to register.
         // This is the EPDir MSBuild property (set via /p:EPDir), surfaced as assembly metadata. When
-        // it is not set (no EP-plugin pipeline), registration is a no-op.
+        // it is not set, no EP-plugins are registered.
         private static string GetEpDirectory()
         {
             return typeof(OnnxRuntimeGenAITests).Assembly
@@ -103,10 +111,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         // ONNX Runtime's environment is a process-wide singleton, so registering an execution
         // provider plugin library with it, also makes the provider available to ONNX Runtime GenAI.
-        // Every plugin library in the directory is enumerated using the ORT provider naming
-        // convention (onnxruntime_providers_<ep>.dll) and registered under
-        // the EP name derived from its file name, so a pipeline only needs to drop the relevant EP
-        // plugin(s) into a single directory (the one downloaded by the pipeline).
         private static void RegisterEpLibrariesFromDirectory()
         {
             if (System.Threading.Interlocked.Exchange(ref _epLibrariesRegistered, 1) != 0)
@@ -122,24 +126,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             bool isMac = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-            string prefix = isWindows ? "onnxruntime_providers_" : "libonnxruntime_providers_";
+            string prefix = isWindows ? "" : "lib";
             string suffix = isWindows ? ".dll" : (isMac ? ".dylib" : ".so");
 
-            foreach (string path in Directory.GetFiles(epDir, "*" + suffix))
+            foreach (KeyValuePair<string, string> ep in _knownEpLibraries)
             {
-                string fileName = Path.GetFileName(path);
-                if (!fileName.StartsWith(prefix, StringComparison.Ordinal) ||
-                    !fileName.EndsWith(suffix, StringComparison.Ordinal) ||
-                    fileName.Length <= prefix.Length + suffix.Length)
+                string epName = ep.Key;
+                string path = Path.Combine(epDir, prefix + ep.Value + suffix);
+                if (!File.Exists(path))
                 {
-                    continue;
-                }
-
-                string epName = fileName.Substring(prefix.Length, fileName.Length - prefix.Length - suffix.Length);
-                // Provider libraries that match the naming convention but are not registrable EP plugins.
-                if (epName == "shared")
-                {
-                    Console.WriteLine("**** Skipping non-plugin provider library: " + fileName);
                     continue;
                 }
 

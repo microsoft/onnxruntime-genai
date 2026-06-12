@@ -19,12 +19,7 @@
     <OrtPackageVersion>1.26.0</OrtPackageVersion>
     <!-- EP-plugin pipelines (e.g. WebGPU) pass /p:EPDir=<dir> pointing at the directory of EP plugin
          libraries the pipeline downloaded. At runtime the tests enumerate that directory and register
-         each plugin; when EPDir is not set, registration is a no-op. ONNX Runtime comes from
-         nuget.org, so no extra package feed is required.
-         The ONNX Runtime NuGet package ships its native libraries (onnxruntime.dll) as RID-specific
-         runtime assets. Building against a RuntimeIdentifier lets the SDK copy them next to the test
-         binary automatically. The RID defaults to the running SDK's RID but can be overridden from
-         outside (e.g. dotnet test -r <rid> or /p:RuntimeIdentifier=<rid>). -->
+         each plugin; when EPDir is not set, registration is a no-op. -->
     <RuntimeIdentifier Condition="'$(EPDir)' != '' and '$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
     <SelfContained Condition="'$(EPDir)' != ''">false</SelfContained>
   </PropertyGroup>
@@ -105,12 +100,7 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" />
   </ItemGroup>
 
-  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. The
-       managed ONNX Runtime API (OrtEnv, used to register the EP plugin libraries) is pulled in
-       transitively by the Microsoft.ML.OnnxRuntime package, and building against a RuntimeIdentifier
-       (set above when EPDir is provided) makes the SDK copy the native onnxruntime.dll next to the
-       test binary. The EP plugin libraries (and their native dependencies) are loaded at runtime
-       from the EPDir directory. -->
+  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. -->
   <ItemGroup Condition="'$(EPDir)' != ''">
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>EPDir</_Parameter1>

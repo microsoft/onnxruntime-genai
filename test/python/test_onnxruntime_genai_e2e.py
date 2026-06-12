@@ -8,29 +8,13 @@ import os
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import download_model, get_ci_data_path, run_subprocess
+from _test_utils import download_model, get_ci_data_path, register_webgpu_plugin, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
 
-
-def _register_webgpu_plugin():
-    """Register the onnxruntime-ep-webgpu plugin with ONNX Runtime GenAI.
-
-    The base onnxruntime package doesn't ship a WebGPU EP; the plugin package provides it as a
-    separate shared library that must be registered before WebGPU models can be loaded. Returns
-    True if the plugin was registered, False if the package is not installed.
-    """
-    try:
-        import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
-    except ImportError:
-        return False
-    og.register_execution_provider_library("webgpu", webgpu_ep.get_library_path())
-    return True
-
-
 # Register the WebGPU EP plugin once at import time so WebGPU models can be loaded when available.
-_webgpu_plugin_registered = _register_webgpu_plugin()
+register_webgpu_plugin(log)
 
 
 def run_model(model_path: str | bytes | os.PathLike):
