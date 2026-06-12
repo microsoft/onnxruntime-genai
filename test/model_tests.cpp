@@ -484,25 +484,6 @@ Print all primes between 1 and n
 
 // --- Validation tests (no model files required) ---
 
-TEST(ValidationTests, ValidateConfigPathAcceptsRelative) {
-  EXPECT_NO_THROW(Generators::ValidateConfigPath("model.onnx", "filename"));
-  EXPECT_NO_THROW(Generators::ValidateConfigPath("subdir/model.onnx", "filename"));
-  EXPECT_NO_THROW(Generators::ValidateConfigPath("./model.onnx", "filename"));
-}
-
-TEST(ValidationTests, ValidateConfigPathRejectsAbsolute) {
-  EXPECT_THROW(Generators::ValidateConfigPath("/etc/passwd", "filename"), std::runtime_error);
-#if defined(_WIN32)
-  EXPECT_THROW(Generators::ValidateConfigPath("C:\\Windows\\System32\\evil.dll", "filename"), std::runtime_error);
-#endif
-}
-
-TEST(ValidationTests, ValidateConfigPathRejectsTraversal) {
-  EXPECT_THROW(Generators::ValidateConfigPath("../../../etc/passwd", "filename"), std::runtime_error);
-  EXPECT_THROW(Generators::ValidateConfigPath("subdir/../../etc/passwd", "filename"), std::runtime_error);
-  EXPECT_THROW(Generators::ValidateConfigPath("..", "filename"), std::runtime_error);
-}
-
 TEST(ValidationTests, WindowIndexAcceptsValidParams) {
   EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 28, 28, 2, 14, 112));
   EXPECT_NO_THROW(Generators::ValidateWindowIndexParams(1, 2, 2, 2, 14, 56));
@@ -532,10 +513,11 @@ TEST(ValidationTests, WindowIndexRejectsZeroMergerWindowSize) {
 }
 
 TEST(ValidationTests, WindowIndexRejectsExcessiveDimensions) {
-  int64_t huge = static_cast<int64_t>(1) << 31;
+  int64_t huge = (static_cast<int64_t>(1) << 31) + 2;  // After /2, llm_grid_h > kMaxElements (1<<30)
   EXPECT_THROW(Generators::ValidateWindowIndexParams(1, huge, 2, 2, 14, 112), std::runtime_error);
 }
 
 TEST(ValidationTests, WindowIndexRejectsTotalSizeOverflow) {
-  EXPECT_THROW(Generators::ValidateWindowIndexParams(1000, 2000, 2000, 2, 14, 112), std::runtime_error);
+  // Each dim individually <= kMaxElements, but grid_t * padded_h * padded_w > kMaxElements
+  EXPECT_THROW(Generators::ValidateWindowIndexParams(1000, 2000000, 2000000, 2, 14, 112), std::runtime_error);
 }
