@@ -58,9 +58,17 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
   if (audio_data.size() != audio_data_sizes.size())
     throw std::runtime_error("Number of audio data buffers does not match the number of audio data sizes");
 
+  // Minimum size to hold a valid audio header (WAV=44 bytes, FLAC=42 bytes, MP3 frame=4 bytes header + data).
+  // Reject trivially malformed buffers that cannot contain valid audio.
+  constexpr size_t kMinAudioBufferSize = 44;
   std::vector<int64_t> sizes;
-  for (size_t i = 0; i < audio_data_sizes.size(); ++i)
+  for (size_t i = 0; i < audio_data_sizes.size(); ++i) {
+    if (audio_data_sizes[i] < kMinAudioBufferSize)
+      throw std::runtime_error("Audio buffer " + std::to_string(i) + " is too small (" +
+                               std::to_string(audio_data_sizes[i]) + " bytes). Minimum size is " +
+                               std::to_string(kMinAudioBufferSize) + " bytes.");
     sizes.push_back(audio_data_sizes[i]);
+  }
 
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
   CheckResult(OrtxCreateRawAudios(audios.ToBeAssigned(), audio_data.data(), sizes.data(), audio_data.size()));
