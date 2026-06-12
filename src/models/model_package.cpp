@@ -138,18 +138,23 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
     ep = NormalizeEpName(explicit_ep);
   } else {
     auto variant_eps = CollectVariantEps(*pkg_ctx, component_name);
+    constexpr const char* kEpHint =
+        " Specify an execution provider explicitly using one of: "
+        "OgaCreateModelFromPackage or OgaCreateConfigFromPackage (C); "
+        "OgaModel::Create(path, ep) or OgaConfig::Create(path, ep) (C++); "
+        "og.Model(path, ep=...) or og.Config(path, ep=...) (Python).";
     if (variant_eps.empty()) {
       throw std::runtime_error(
           "Model package at \"" + package_root.string() +
           "\" does not declare an execution provider for any variant of component \"" +
-          component_name + "\". Specify an execution provider explicitly.");
+          component_name + "\"." + kEpHint);
     }
     if (variant_eps.size() > 1) {
       std::ostringstream oss;
       oss << "Model package at \"" << package_root.string() << "\" declares multiple execution "
           << "providers across the variants of component \"" << component_name << "\":";
       for (const auto& v : variant_eps) oss << " \"" << v << "\"";
-      oss << ". Specify an execution provider explicitly to disambiguate.";
+      oss << "." << kEpHint;
       throw std::runtime_error(oss.str());
     }
     ep = *variant_eps.begin();

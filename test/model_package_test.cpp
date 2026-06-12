@@ -98,15 +98,17 @@ TEST(ModelPackageDetection, RootMetadataAloneIsNotPackage) {
 }
 
 TEST(ConfigResolvePath, EmptyReturnsConfigPath) {
+  const fs::path flat{"/var/models/flat"};
   Generators::Config config;
-  config.config_path = fs::path{"/var/models/flat"};
-  EXPECT_EQ(config.ResolvePath("").string(), "/var/models/flat");
+  config.config_path = flat;
+  EXPECT_EQ(config.ResolvePath("").string(), flat.string());
 }
 
 TEST(ConfigResolvePath, PlainRelativeJoinsConfigPath) {
+  const fs::path flat{"/var/models/flat"};
   Generators::Config config;
-  config.config_path = fs::path{"/var/models/flat"};
-  EXPECT_EQ(config.ResolvePath("tokenizer").string(), "/var/models/flat/tokenizer");
+  config.config_path = flat;
+  EXPECT_EQ(config.ResolvePath("tokenizer").string(), (flat / "tokenizer").string());
 }
 
 TEST(ConfigResolvePath, NonPackageValueJoinsConfigPath) {
@@ -114,25 +116,28 @@ TEST(ConfigResolvePath, NonPackageValueJoinsConfigPath) {
   // intentionally mirrors how genai resolves every other path in genai_config.json: no
   // validation, no normalization, no special handling for absolute or "scheme-like"
   // values.
+  const fs::path flat{"/var/models/flat"};
   Generators::Config config;
-  config.config_path = fs::path{"/var/models/flat"};
-  EXPECT_EQ(config.ResolvePath("foo:bar").string(), "/var/models/flat/foo:bar");
-  EXPECT_EQ(config.ResolvePath("sha256:abcdef").string(), "/var/models/flat/sha256:abcdef");
+  config.config_path = flat;
+  EXPECT_EQ(config.ResolvePath("foo:bar").string(), (flat / "foo:bar").string());
+  EXPECT_EQ(config.ResolvePath("sha256:abcdef").string(), (flat / "sha256:abcdef").string());
 }
 
 TEST(ConfigResolvePath, PackageSchemeJoinsPackageRoot) {
+  const fs::path pkg{"/var/models/pkg"};
   Generators::Config config;
-  config.config_path = fs::path{"/var/models/pkg/variants/cpu"};
-  config.package_root = fs::path{"/var/models/pkg"};
+  config.config_path = pkg / "variants" / "cpu";
+  config.package_root = pkg;
   EXPECT_EQ(config.ResolvePath("package:shared/tokenizers").string(),
-            "/var/models/pkg/shared/tokenizers");
+            (pkg / "shared/tokenizers").string());
 }
 
 TEST(ConfigResolvePath, PackageSchemeBareReturnsPackageRoot) {
+  const fs::path pkg{"/var/models/pkg"};
   Generators::Config config;
-  config.config_path = fs::path{"/var/models/pkg/variants/cpu"};
-  config.package_root = fs::path{"/var/models/pkg"};
-  EXPECT_EQ(config.ResolvePath("package:").string(), "/var/models/pkg");
+  config.config_path = pkg / "variants" / "cpu";
+  config.package_root = pkg;
+  EXPECT_EQ(config.ResolvePath("package:").string(), pkg.string());
 }
 
 TEST(ConfigResolvePath, PackageSchemeWithoutPackageRootThrows) {

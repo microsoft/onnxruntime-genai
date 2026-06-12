@@ -2,11 +2,11 @@
 
 onnxruntime-genai can load models from an ONNX Runtime *model package* directory in
 addition to the traditional flat model directory. A package bundles multiple build
-*variants* of the same model — such as 
-execution-provider compile flag — and lets ONNX Runtime pick the variant that best
-matches the local hardware at load time. Files that are common across variants, such as
-tokenizer or processor configuration, can live in a sibling directory and be referenced
-from each variant's configuration with a path scheme.
+*variants* of the same model — for example builds targeting different hardware or
+compiled with different execution-provider flags — and lets ONNX Runtime pick the variant
+that best matches the local hardware at load time. Files that are common across variants,
+such as tokenizer or processor configuration, can live in a sibling directory and be
+referenced from each variant's configuration with a path scheme.
 
 ## Package layout
 
