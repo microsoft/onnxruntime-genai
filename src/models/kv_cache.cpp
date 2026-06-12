@@ -307,7 +307,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     if (provider.name == "WebGPU") {
       for (const auto& opt : provider.options) {
         if (opt.first == "turboQuant") {
-          turbo_quant_bits = std::stoi(opt.second);
+          std::size_t pos = 0;
+          int parsed_val = 0;
+          try {
+            parsed_val = std::stoi(opt.second, &pos);
+          } catch (const std::exception& e) {
+            throw std::runtime_error("Invalid turboQuant value '" + opt.second + "': " + e.what());
+          }
+          if (pos != opt.second.size()) {
+            throw std::runtime_error("Invalid turboQuant value '" + opt.second + "': must be an integer.");
+          }
+          turbo_quant_bits = parsed_val;
           if (turbo_quant_bits != 0 && turbo_quant_bits != 4) {
             throw std::runtime_error("Unsupported turboQuant value: " + opt.second + ". Only 0 (disabled) and 4 are supported.");
           }
