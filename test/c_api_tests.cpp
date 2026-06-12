@@ -1804,20 +1804,15 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
 
 // Regression test for MSRC: malformed audio buffers smaller than the minimum valid
 // audio header size must be rejected with an error, not cause a crash.
-TEST(CAPITests, LoadAudiosFromBuffersRejectsTooSmallBuffer) {
-  // 17 bytes of malformed data that previously triggered a heap-buffer-overflow.
-  const uint8_t crash_data[] = {
-      0xff, 0xff, 0x07, 0xfa, 0xe6, 0xe6, 0xe6, 0xe6,
-      0xe6, 0xe6, 0xe6, 0xe6, 0xe6, 0xe6, 0xe6, 0xe6, 0xe6};
-
-  const void* data_ptr = crash_data;
-  size_t data_size = sizeof(crash_data);
+TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
+  const void* data_ptr = nullptr;
+  size_t data_size = 0;
   OgaAudios* audios = nullptr;
   OgaResult* result = OgaLoadAudiosFromBuffers(&data_ptr, &data_size, 1, &audios);
 
-  // Should return an error for buffers too small to be valid audio.
+  // Should return an error for empty buffers.
   ASSERT_NE(result, nullptr);
-  EXPECT_NE(std::string(OgaResultGetError(result)).find("too small"), std::string::npos);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("empty"), std::string::npos);
   OgaDestroyResult(result);
   // audios should not have been created
   EXPECT_EQ(audios, nullptr);

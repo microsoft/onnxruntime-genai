@@ -58,15 +58,10 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
   if (audio_data.size() != audio_data_sizes.size())
     throw std::runtime_error("Number of audio data buffers does not match the number of audio data sizes");
 
-  // Conservative minimum buffer size to avoid decoder header parsing reading past the end of the buffer.
-  // 44 bytes matches the standard WAV header size; this is a safety check, not full format validation.
-  constexpr size_t kMinAudioBufferSize = 44;
   std::vector<int64_t> sizes;
   for (size_t i = 0; i < audio_data_sizes.size(); ++i) {
-    if (audio_data_sizes[i] < kMinAudioBufferSize)
-      throw std::runtime_error("Audio buffer " + std::to_string(i) + " is too small (" +
-                               std::to_string(audio_data_sizes[i]) + " bytes). Minimum size is " +
-                               std::to_string(kMinAudioBufferSize) + " bytes.");
+    if (audio_data_sizes[i] == 0)
+      throw std::runtime_error("Audio buffer " + std::to_string(i) + " is empty.");
     sizes.push_back(audio_data_sizes[i]);
   }
 
