@@ -140,6 +140,11 @@ TEST(CAPITests, EncodeBatchEmptyInputThrows) {
 
   // EncodeBatch with zero strings should throw, not crash with SIGFPE
   ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 0), std::runtime_error);
+
+  // Invalid pointers with count > 0 should also be rejected deterministically.
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 1), std::runtime_error);
+  const char* bad_strings[] = {nullptr};
+  ASSERT_THROW(tokenizer->EncodeBatch(bad_strings, 1), std::runtime_error);
 #endif
 }
 
