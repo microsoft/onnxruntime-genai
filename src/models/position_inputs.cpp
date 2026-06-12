@@ -1,7 +1,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "position_inputs.h"
-#include "model_type.h"
 #include <vector>
 #include <numeric>
 #include <cmath>  // For std::round
@@ -960,8 +959,11 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
 }
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
-  // Check for Qwen-VL family models which require 3D mRoPE position IDs
-  if (ModelType::IsQwenVLFamily(state.model_.config_->model.type)) {
+  // Pipeline-as-Config (issue #2114, PR5/CP3): the 3D mRoPE position strategy is selected by config,
+  // not by model.type. TranslateV1ToPipeline() sets state.position_ids.strategy == "mrope_3d" for the
+  // Qwen-VL family (and v2 configs set it explicitly), which is equivalent to the former
+  // ModelType::IsQwenVLFamily() check.
+  if (state.model_.config_->pipeline.state.position_ids.strategy == "mrope_3d") {
     return std::make_unique<Qwen2VLPositionInputs>(state.model_, state, sequence_lengths);
   }
   if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {

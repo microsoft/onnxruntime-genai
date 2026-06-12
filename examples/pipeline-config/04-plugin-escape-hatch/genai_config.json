@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "pipeline": {
+    "plugin": {
+      "library": "libmy_custom_pipeline.so",
+      "entry_point": "OgaCreateMyPipeline"
+    },
+    "sessions": {
+      "decoder": {"file": "model.onnx"}
+    }
+  },
+  "tokens": {"eos": [2], "pad": 0},
+  "generation": {"max_length": 4096},
+  "metadata": {"model_type": "my-custom-arch"}
+}

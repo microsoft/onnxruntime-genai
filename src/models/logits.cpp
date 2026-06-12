@@ -44,7 +44,7 @@ DeviceSpan<float> Logits::Get() {
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_last, type_);
 
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>)
       logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
 
     logits_of_last_token = output_last_tokens_.get();
@@ -69,8 +69,8 @@ DeviceSpan<float> Logits::Get() {
     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
   }
 
-  // Convert from float16 to float32 if necessary
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
+  // Convert from float16/bfloat16 to float32 if necessary
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
     Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_of_last_token = logits_of_last_token_fp32_.get();
   }
@@ -79,6 +79,22 @@ DeviceSpan<float> Logits::Get() {
     logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
 
   return logits_;
+}
+
+DeviceSpan<float> Logits::GetAll(std::array<int64_t, 3>& out_shape) {
+  out_shape = shape_;
+
+  OrtValue* raw = output_raw_->GetOrtTensor();
+
+  // Convert fp16/bfloat16 -> fp32 if necessary so callers always get float logits.
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    all_logits_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
+    Cast(*raw, all_logits_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
+    raw = all_logits_fp32_.get();
+  }
+
+  all_logits_ = WrapTensor<float>(*model_.p_device_inputs_, *raw);
+  return all_logits_;
 }
 
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {

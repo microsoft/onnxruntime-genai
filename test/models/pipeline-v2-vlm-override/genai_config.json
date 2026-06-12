@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "pipeline": {
+    "extends": "vision-language",
+    "sessions": {
+      "vision": {"file": "vision.onnx"},
+      "embedding": {"file": "embedding.onnx"},
+      "decoder": {"file": "decoder.onnx"}
+    },
+    "flow": [
+      {"run": "vision", "when": "init", "loop": "per_image"},
+      {"run": "embedding", "when": "init"},
+      {"run": "decoder", "when": "step"}
+    ],
+    "state": {
+      "position_ids": {"strategy": "mrope_3d", "grid_source": "vision.image_grid_thw"}
+    }
+  },
+  "tokens": {"eos": [151645], "pad": 0, "image_token": 151655},
+  "generation": {"max_length": 4096, "sampling": {"temperature": 0.7}},
+  "metadata": {"model_type": "qwen2_5_vl", "source": "mobius"}
+}

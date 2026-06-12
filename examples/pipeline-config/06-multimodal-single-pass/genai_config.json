@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "pipeline": {
+    "extends": "vision-language",
+    "sessions": {
+      "vision": {"file": "vision.onnx"},
+      "speech": {"file": "speech.onnx"},
+      "embedding": {"file": "embedding.onnx"},
+      "decoder": {"file": "decoder.onnx"}
+    },
+    "flow": [
+      {"run": "vision", "when": "init", "loop": "batched"},
+      {"run": "speech", "when": "init", "loop": "batched"},
+      {"run": "embedding", "when": "init"},
+      {"run": "decoder", "when": "step"}
+    ],
+    "dataflow": [
+      {"from": "vision.image_features", "to": "embedding.image_features"},
+      {"from": "speech.audio_features", "to": "embedding.audio_features"},
+      {"from": "embedding.inputs_embeds", "to": "decoder.inputs_embeds"}
+    ]
+  },
+  "tokens": {"bos": 2, "eos": [1, 106], "pad": 0, "image_token": 262144},
+  "generation": {"max_length": 32768, "sampling": {"temperature": 1.0, "top_k": 1}},
+  "metadata": {"model_type": "gemma4"}
+}

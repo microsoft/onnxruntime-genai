@@ -31,6 +31,7 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
+#include "logits_processor_chain.h"
 #include "logging.h"
 #include "runtime_settings.h"
 #include "tensor.h"
@@ -44,6 +45,7 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+class ControllerHook;
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -99,14 +101,31 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();  // Defined out-of-line in generators.cpp so unique_ptr members may be forward-declared.
 
   bool IsDone();
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+
+  // Commit caller-chosen `tokens` as the accepted next tokens WITHOUT forcing a new forward pass
+  // (the next ComputeLogits re-evaluates against the extended sequence). Mirrors Search::SelectTop's
+  // append step but with externally-chosen tokens; used by the controller-plugin loop hook
+  // (issue #2114 §8, PR-E). Leaves computed_logits_ = false so IsDone()/the next step re-evaluate.
+  void AppendAcceptedTokens(cpu_span<const int32_t> tokens);
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
+
+  // Returns the full per-position logits from the most recent model run as fp32, shape
+  // [batch*beams, seq, vocab] (written to out_shape), or empty when the underlying state does
+  // not expose them. Used by the speculative-decoding verify pass (issue #2114 v2.1).
+  DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape);
+
+  // Returns the intermediate hidden-state activation from the most recent model run as fp32, shape
+  // [batch*beams, seq, hidden] (written to out_shape), or empty when the underlying state does not
+  // expose one. Used by hidden-state-coupled (EAGLE/MTP) drafts (issue #2114 v2.1, PR-C).
+  DeviceSpan<float> GetHiddenStates(std::array<int64_t, 3>& out_shape);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
 
@@ -120,6 +139,12 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
+  std::unique_ptr<LogitsProcessorChain> logits_chain_;  // v2.1 §6: non-null only when config declares a chain.
+
+  // v2.1 §8 (issue #2114, PR-E): the controller-plugin escape hatch. Non-null only when the config
+  // declares a `pipeline.controller`; when set, the controller OWNS the per-step decode loop and
+  // GenerateNextToken delegates to it. Default (no controller) builds leave this null and unchanged.
+  std::unique_ptr<ControllerHook> controller_;
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
@@ -175,6 +200,33 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+// Pipeline-as-Config (issue #2114): structural dispatch entry point. Delegated to by CreateModel
+// whenever config.pipeline.present is true.
+std::shared_ptr<Model> CreatePipeline(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Pipeline-as-Config (issue #2114, PR5): the concrete Model subclass a config dispatches to. Exposed
+// so the dispatch decision can be tested in isolation (no ONNX load) and so the structural router and
+// the legacy model.type router can be proven equivalent for every fixture (the zero-regression gate).
+enum class ModelRoute {
+  Unsupported,
+  DecoderOnly,          // DecoderOnly_Model
+  Gpt,                  // Gpt_Model (combined KV)
+  LFM2,                 // LFM2_Model (hybrid conv-state cache)
+  DecoderOnlyPipeline,  // DecoderOnlyPipelineModel (multi-stage decoder)
+  Qwen2_5_VL_Pipeline,  // Qwen2_5_VL_PipelineModel (vision + decoder.pipeline)
+  MultiModal,           // MultiModalLanguageModel (VLM / MMM)
+  Whisper,              // WhisperModel (encoder-decoder)
+  Marian,               // MarianModel (encoder-decoder)
+  NemotronSpeech,       // NemotronSpeechModel (RNNT transducer)
+  ParakeetTdt,          // ParakeetTdtModel (TDT transducer)
+};
+// Legacy pre-#2114 model.type dispatch decision. Kept as the ground-truth oracle for the PR5
+// equivalence test; CreateModelFromType() constructs from it.
+ModelRoute ClassifyLegacyRoute(const Config& config);
+// Structural/config dispatch decision used by CreatePipeline(): routes by which ONNX sessions exist,
+// cross-attention, combined-KV and multi-stage structure, with only the transducer/lfm2 residual
+// predicates and a couple of raw-type tie-breakers that have no structural signal.
+ModelRoute ClassifyStructuralRoute(const Config& config);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

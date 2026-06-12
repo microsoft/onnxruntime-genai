@@ -32,6 +32,28 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+
+  // Returns the full per-position logits of the most recent Run as fp32, shape
+  // [batch*beams, seq, vocab] (written to out_shape), or an empty span when the concrete state
+  // does not expose them. Used by the speculative-decoding verify pass (issue #2114 v2.1) to
+  // score all K draft candidates from a single forward pass; ordinary decoding uses the sliced
+  // last-token logits returned by Run().
+  virtual DeviceSpan<float> GetRawLogits(std::array<int64_t, 3>& out_shape) {
+    out_shape = {0, 0, 0};
+    return {};
+  }
+
+  // Returns the intermediate hidden-state activation of the most recent Run as fp32, shape
+  // [batch*beams, seq, hidden] (written to out_shape), or an empty span when the concrete state
+  // does not expose one. This is the dataflow-edge that EAGLE/EAGLE-3/MTP draft modules consume
+  // (design §5/§4e, issue #2114 v2.1): unlike logits/KV, the draft is coupled to the target's last
+  // hidden state, so the executor must be able to read it out of an intermediate pipeline stage.
+  // Additive: ordinary decoding never calls this and is unperturbed.
+  virtual DeviceSpan<float> GetHiddenStates(std::array<int64_t, 3>& out_shape) {
+    out_shape = {0, 0, 0};
+    return {};
+  }
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 

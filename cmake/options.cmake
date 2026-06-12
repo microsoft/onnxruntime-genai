@@ -7,6 +7,10 @@ option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
 
+# Dynamic pipeline plugin loading (issue #2114 §4.5). OFF by default: when off the plugin loader is
+# still compiled but throws "plugin support is not enabled", so the build stays green with no new deps.
+option(USE_GENAI_PLUGINS "Enable dynamic pipeline plugin loading" OFF)
+
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
 cmake_dependent_option(PUBLISH_JAVA_MAVEN_LOCAL "Publish Java artifacts to local Maven repo" OFF "ENABLE_JAVA" ON)

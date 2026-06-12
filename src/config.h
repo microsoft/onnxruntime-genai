@@ -99,6 +99,49 @@ struct Config {
     std::optional<DeviceFilteringOptions> device_filtering_options;
   };
 
+  // v2.1 (issue #2114, PR-F, design §7): the runtime-vs-build-time feature namespace.
+  // RUNTIME features are schedulable at load/session time and imply NO change to the exported ONNX
+  // graph (KV-cache dtype/quant, PagedAttention, prefix cache, sliding window, chunked prefill,
+  // compute precision). They are parsed and validated here; per the design's "KV-quant/paging numeric
+  // parity is out of PR-F scope" note, their numeric session-time effects are DEFERRED (declared, the
+  // plumbing point exists in Model::CreateSessionOptionsFromConfig, but no knob is flipped yet).
+  struct RuntimeFeatures {
+    struct KvCache {
+      std::optional<std::string> dtype;  // KV element type, e.g. "fp16" | "fp8" | "int8" (runtime).
+      std::optional<std::string> quant;  // KV quant scheme, e.g. "per_token" | "per_channel" (runtime).
+    };
+    struct Paging {
+      bool enabled{false};
+      std::optional<int> block_size;
+    };
+    struct PrefixCache {
+      bool enabled{false};
+    };
+    struct SlidingWindow {
+      std::optional<int> size;
+      std::optional<int> sink_tokens;
+    };
+    struct ChunkedPrefill {
+      std::optional<int> max_batched_tokens;
+    };
+    std::optional<KvCache> kv_cache;
+    std::optional<Paging> paging;
+    std::optional<PrefixCache> prefix_cache;
+    std::optional<SlidingWindow> sliding_window;
+    std::optional<ChunkedPrefill> chunked_prefill;
+    std::optional<std::string> precision;  // Compute precision, e.g. "fp16" | "bf16" (runtime).
+  };
+
+  // v2.1 (issue #2114, PR-F, design §7): BUILD-TIME requirements are properties baked into the exported
+  // ONNX graph/weights (attention shape, weight quantization, extra speculative heads). They are
+  // "declared, never synthesized": parsed and validated at load time so a mismatch fails fast with a
+  // clear message, but the runtime NEVER builds them.
+  struct BuildRequires {
+    std::optional<std::string> attention;     // "mha" | "mqa" | "gqa" (in weights/graph).
+    std::optional<std::string> quantization;  // "awq" | "gptq" | "int8" | ... (in weights).
+    std::optional<std::string> extra_heads;   // "medusa" | "mtp" | "eagle" | ... (in graph).
+  };
+
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
     std::optional<int> inter_op_num_threads;
@@ -117,6 +160,12 @@ struct Config {
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
     std::vector<ProviderOptions> provider_options;
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
+
+    // v2.1 (issue #2114, PR-F, design §7): runtime-vs-build-time feature namespace. Block-presence
+    // gated and additive -- both are absent unless the config declares a "runtime" / "build_requires"
+    // object under session_options, in which case behavior is byte-for-byte unchanged.
+    std::optional<RuntimeFeatures> runtime;
+    std::optional<BuildRequires> build_requires;
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
@@ -379,6 +428,13 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
 
+        // v2.1 (issue #2114, PR-C): name of the intermediate hidden-state activation a pipeline
+        // stage exposes (e.g. the transformer's "hidden_states" output that feeds the lm_head).
+        // Empty when the graph does not expose one. When set, DecoderOnlyPipelineState forwards this
+        // tensor out of its ortvalue_store_ via GetHiddenStates() so hidden-state-coupled drafts
+        // (EAGLE/EAGLE-3/MTP, design §5/§4e) can consume it as a dataflow edge.
+        std::string hidden_states;
+
         // Parakeet TDT decoder (prediction network) extra outputs
         std::string outputs_length;
       } outputs;
@@ -407,6 +463,132 @@ struct Config {
 
   } model;
 
+  int version{1};  // Config schema version. v1 (default) is the legacy `model.*` layout; v2 adds the `pipeline` section.
+
+  // Pipeline-as-Config (issue #2114) schema v2 surface.
+  // This is a normalized, introspectable description of the model's execution pipeline.
+  // It is populated for BOTH v1 (via TranslateV1ToPipeline) and v2 (via direct parsing + preset
+  // resolution) inputs. In PR1 it does not change any runtime behavior; default consumers continue
+  // to read `config.model.*`.
+  struct Pipeline {
+    struct Session {
+      std::string name;  // Logical session name (the JSON key under "sessions"), e.g. "decoder".
+      std::string file;  // ONNX model file for this session.
+      std::optional<SessionOptions> session_options;
+    };
+
+    struct FlowStep {
+      std::string run;            // Session name to run.
+      std::string when{"step"};   // Lifecycle phase: "init" | "step" | "final".
+      std::string loop{"batched"};  // Loop mode: "batched" | "per_image".
+      bool variable_resolution{false};  // Per-image vision slicing with variable resolution (Pixtral family).
+      std::optional<std::string> cross_attention_from;  // Session providing cross-attention KV (encoder-decoder).
+    };
+
+    struct Wire {
+      std::string from;  // "session.tensor" producing the value.
+      std::string to;    // "session.tensor" consuming the value.
+    };
+
+    struct State {
+      struct KvCache {
+        std::string format{"auto"};  // "auto" | "separate" | "combined".
+        std::string past_key_pattern, present_key_pattern,
+            past_value_pattern, present_value_pattern;
+      };
+      struct CrossCache {
+        std::optional<std::string> source;  // Session that produces the (frozen) cross-attention cache.
+        bool frozen{true};
+      };
+      struct PositionIds {
+        std::string strategy{"auto"};  // "auto" | "default" | "mrope_3d" | "windowed".
+        std::string input_name{"position_ids"};
+        std::optional<std::string> grid_source;
+      };
+      KvCache kv_cache;
+      std::optional<CrossCache> cross_cache;
+      PositionIds position_ids;
+    };
+
+    struct Plugin {
+      std::string library;
+      std::string entry_point;
+    };
+
+    // v2.1 (issue #2114 §8): the controller-plugin escape hatch (bucket C). When present, a custom
+    // plugin OWNS the per-step decode loop -- it is handed the runtime's step primitives (get/append
+    // tokens, run a forward step, read logits + hidden states, rewind/rollback, query EOS/length) via
+    // a stable C ABI (see src/models/plugin_api.h) and decides the control flow itself. This is the
+    // home for irregular, stateful controllers that cannot be expressed as a static DAG or the
+    // parameterized `speculative` strategy (e.g. Lookahead's Jacobi n-gram pool, nested cascades).
+    //
+    // Block-presence gated and additive: an absent `controller` block leaves every existing path
+    // byte-for-byte unchanged. Loading the controller requires USE_GENAI_PLUGINS (a real external
+    // .so); a default (plugins-OFF) build throws a clear "not enabled" error when one is declared.
+    struct Controller {
+      std::string library;      // Path to the controller plugin shared library (.so/.dll).
+      std::string entry_point;  // Exported symbol of the OgaCreateDecodeControllerFn entry point.
+      std::string config;       // Opaque controller-defined config (passed through verbatim as a C string).
+    };
+
+    std::optional<std::string> extends;  // Built-in preset name to inherit from.
+    std::vector<Session> sessions;
+    std::vector<FlowStep> flow;
+    std::vector<Wire> dataflow;
+    State state;
+    std::optional<Plugin> plugin;
+    std::optional<Controller> controller;  // v2.1 §8: custom decode-loop controller plugin (bucket C).
+
+    // v2.1 (issue #2114): logical role -> session name. Lets >=2 sessions be referenced by a
+    // stable role (target/draft/...) independent of their `sessions[]` key. Speculative decoding
+    // and contrastive/CFG decoding resolve their sessions through these roles.
+    struct Roles {
+      std::optional<std::string> target;
+      std::optional<std::string> draft;
+      std::optional<std::string> amateur;
+      std::optional<std::string> expert;
+      std::optional<std::string> unconditional;
+    };
+    std::optional<Roles> roles;
+
+    // v2.1 (issue #2114): the `speculative` flow strategy. When present, the executor runs a
+    // parameterized draft -> verify -> accept/reject loop instead of the single per-token DAG.
+    // Only the linear-K vanilla draft-target shape is honored today (PR-B); `tree` topology and
+    // hidden-state-coupled drafts (EAGLE/Medusa) are parsed-but-deferred (PR-C).
+    struct Speculative {
+      std::string kind{"speculative"};
+      struct Draft {
+        std::string producer{"draft_model"};  // draft_model | self_speculative | ngram | extra_heads
+        std::optional<std::string> session;    // role/session name producing the draft tokens
+        std::optional<int> depth;              // self_speculative early-exit depth (build property)
+        std::optional<std::string> heads;      // extra_heads/medusa/mtp head group (build property)
+        struct Ngram {
+          int min_match{2};
+          int max_draft{8};
+          int window{256};
+        };
+        std::optional<Ngram> ngram;
+      } draft;
+      struct Verify {
+        std::string session;  // role/session name whose single forward pass verifies the K candidates
+      } verify;
+      int num_speculative_tokens{5};      // K: draft length per outer step
+      std::string acceptance{"greedy"};   // greedy | rejection_sampling | typical
+      std::optional<float> typical_threshold;
+      struct Tree {
+        std::string topology;  // medusa_choices | dynamic (PR-C)
+        int max_nodes{0};
+        int max_depth{0};
+        std::vector<std::vector<int>> medusa_choices;
+      };
+      std::optional<Tree> tree;
+    };
+    std::optional<Speculative> strategy;
+
+    bool present{false};  // True only when the pipeline was explicitly parsed (v2) or translated (v1).
+  };
+  Pipeline pipeline;
+
   struct Search {
     bool do_sample{};                  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};                  // Minimum length for final sequence length
@@ -426,6 +608,27 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+
+    // v2.1 (issue #2114 §6): an ordered, declarative logit-processor / sampler chain. Each entry is a
+    // typed `op` applied to the logits in declared order before the terminal `sample` op. This
+    // generalizes the single fixed guidance->penalty->sampling sequence in GenerateNextToken into a
+    // data-driven pipeline. Parsed from `generation.logits` (v2). BACKWARD-COMPATIBLE: when this
+    // vector is empty (no `logits` block), GenerateNextToken runs the legacy fixed order byte-for-byte
+    // unchanged. The chain is opt-in and additive; version stays 2 (block-presence is the discriminator).
+    struct LogitsProcessor {
+      std::string op;                              // repetition_penalty | min_length | logit_bias | grammar | temperature | top_k | top_p | combine | sample
+      std::optional<float> value;                  // scalar param (repetition_penalty, temperature, top_p)
+      std::optional<int> int_value;                // integer param (top_k, min_length)
+      std::vector<std::pair<int32_t, float>> bias; // logit_bias: token_id -> additive delta, applied in declared order
+      std::optional<std::string> backend;          // grammar backend, e.g. "llguidance"
+      // combine (contrastive / CFG, §5/§6) is parsed for forward-compat but DEFERRED: it requires
+      // multi-session role logits which are not wired into the non-speculative GenerateNextToken path.
+      std::optional<std::string> mode;             // combine mode: "contrastive" | "cfg"
+      std::optional<float> alpha;                  // combine weight
+      std::optional<std::string> expert;           // combine: positive/expert role
+      std::optional<std::string> amateur;          // combine: negative/amateur role
+    };
+    std::vector<LogitsProcessor> logits_processors;  // Empty => legacy fixed order (no behavior change).
   } search;
 
   struct Engine {
@@ -459,6 +662,21 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
+
+// v2.1 (issue #2114, PR-F, design §7): validate the runtime-vs-build-time feature namespace of a
+// session_options block. Throws a clear std::runtime_error when a feature value is unknown or when a
+// build-time-only feature is declared in the runtime namespace (or vice versa). No-op when neither
+// the "runtime" nor the "build_requires" block is present, guaranteeing back-compat. `context` is a
+// human-readable label for the owning session (e.g. "decoder", "pipeline session 'draft'").
+void ValidateSessionOptionsFeatures(const Config::SessionOptions& session_options, std::string_view context);
+
+// Pipeline-as-Config (issue #2114) helpers.
+// Derives an introspective Config::Pipeline from a legacy (v1) config without altering config.model.*.
+void TranslateV1ToPipeline(Config& config);
+// Resolves config.pipeline.extends against the built-in presets, lowering preset defaults into any
+// fields the parsed config left empty. Explicit top-level arrays in the config replace preset arrays
+// wholesale (see pipeline_presets.h for the override semantics).
+void ResolvePipelineExtends(Config::Pipeline& pipeline);
 
 void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type);
 void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id);
