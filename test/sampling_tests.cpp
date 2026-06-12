@@ -493,6 +493,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 1);
   params->SetSearchOption("top_p", 0.25f);
   params->SetSearchOption("batch_size", batch_size);
 
