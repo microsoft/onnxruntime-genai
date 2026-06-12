@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "model.h"
+#include "validate_config_path.h"
 
 #include <regex>
 

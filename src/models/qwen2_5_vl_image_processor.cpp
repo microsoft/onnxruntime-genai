@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "qwen2_5_vl_image_processor.h"
 #include <limits>
 #include <numeric>

@@ -8,6 +8,7 @@
 
 #include "../generators.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "videochat_flash_processor.h"
 #include <regex>
 

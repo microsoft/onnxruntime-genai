@@ -14,6 +14,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"

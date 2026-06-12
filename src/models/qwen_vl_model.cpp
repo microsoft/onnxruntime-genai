@@ -1,5 +1,6 @@
 #include "qwen_vl_model.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "onnxruntime_api.h"
 #include "../logging.h"
 #include <iostream>

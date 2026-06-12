@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include "validate_config_path.h"
 #include <cstring>
 #include <numeric>
 
