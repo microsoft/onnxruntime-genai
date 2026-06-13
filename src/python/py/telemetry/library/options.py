@@ -30,7 +30,10 @@ class OneCollectorTransportOptions:
     max_payload_size_bytes: int = DEFAULT_MAX_PAYLOAD_SIZE_BYTES
     max_items_per_payload: int = DEFAULT_MAX_ITEMS_PER_PAYLOAD
     compression: CompressionType = CompressionType.DEFLATE
-    timeout_seconds: float = 10.0
+    # Fire-and-forget telemetry: bound the worst-case flush (incl. the atexit
+    # flush, which ModelBuilder/benchmarks rely on) so an unreachable collector
+    # cannot hang process exit for the full default budget.
+    timeout_seconds: float = 3.0
     http_client_factory: Optional[Callable[[], requests.Session]] = None
 
     def validate(self) -> None:

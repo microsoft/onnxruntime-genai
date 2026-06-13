@@ -82,7 +82,7 @@ class OneCollectorLogExporter(LogRecordExporter):
                 max_size_bytes=transport_opts.max_payload_size_bytes, max_items=transport_opts.max_items_per_payload
             )
 
-            self._retry_handler = RetryHandler(max_retries=6)
+            self._retry_handler = RetryHandler(max_retries=3)
 
             self._metadata: dict[str, Any] = {}
             self._resource: Optional[Resource] = None
