@@ -16,6 +16,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -281,7 +282,11 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
+  // The tokenizer assets live in the directory referenced by model.tokenizer_dir when set
+  // (allowing tokenizers to be shared across package variants) and otherwise alongside
+  // genai_config.json. Resolution handles relative, absolute, and scheme-prefixed values.
+  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -810,8 +815,38 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = CreateConfig(ort_env, config_path, /*ep=*/nullptr, config_overlay);
   return CreateModel(ort_env, std::move(config));
+}
+
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, const char* ep,
+                                     std::string_view json_overlay) {
+  const std::string ep_str = (ep != nullptr) ? std::string{ep} : std::string{};
+  const fs::path path{config_path};
+
+  if (IsModelPackage(path)) {
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+    if (!json_overlay.empty()) {
+      throw std::runtime_error(
+          "Loading a model package with runtime settings is not supported.");
+    }
+    auto load = OpenAndSelectVariant(ort_env, path, ep_str);
+    auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
+    config->package_root = load.package_root;
+    return config;
+#else
+    throw std::runtime_error(
+        "Model package support requires building onnxruntime-genai against "
+        "ONNX Runtime with the OrtModelPackageApi experimental functions.");
+#endif
+  }
+
+  if (!ep_str.empty()) {
+    throw std::runtime_error(
+        "An execution provider was specified, but \"" + path.string() +
+        "\" is not a model package. Drop the ep argument to load a flat directory.");
+  }
+  return std::make_unique<Config>(path, json_overlay);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
