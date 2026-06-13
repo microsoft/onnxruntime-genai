@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "model.h"
+#include "validate_config_path.h"
 
 namespace Generators {
 
@@ -171,6 +172,7 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
     pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
   }
+  ValidateConfigPath(config.model.vision.config_filename);
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
@@ -180,6 +182,7 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
 
   // Initialize speech/audio processor if config is present
   if (!config.model.speech.config_filename.empty()) {
+    ValidateConfigPath(config.model.speech.config_filename);
     auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
     if (fs::exists(speech_config_path)) {
       has_speech_ = true;

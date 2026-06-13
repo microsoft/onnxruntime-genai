@@ -1,5 +1,6 @@
 #include "qwen_vl_model.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "onnxruntime_api.h"
 #include "../logging.h"
 #include <iostream>
@@ -15,7 +16,10 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   // Find vision pipeline stage paths
   auto find_stage = [&](const std::string& id) -> std::string {
     for (const auto& stage : config_->model.vision.pipeline) {
-      if (stage.model_id == id) return (config_->config_path / fs::path(stage.filename)).string();
+      if (stage.model_id == id) {
+        ValidateConfigPath(stage.filename, "vision pipeline filename");
+        return (config_->config_path / fs::path(stage.filename)).string();
+      }
     }
     return "";
   };

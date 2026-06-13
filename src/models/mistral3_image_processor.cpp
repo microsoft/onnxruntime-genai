@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "model.h"
+#include "validate_config_path.h"
 #include "mistral3_image_processor.h"
 
 namespace Generators {
@@ -211,6 +212,7 @@ Mistral3ImageProcessor::Mistral3ImageProcessor(Config& config, const SessionInfo
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       patch_size_{config.model.vision.patch_size},
       spatial_merge_size_{config.model.vision.spatial_merge_size} {
+  ValidateConfigPath(config.model.vision.config_filename, "vision config_filename");
   const auto processor_config =
       (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
