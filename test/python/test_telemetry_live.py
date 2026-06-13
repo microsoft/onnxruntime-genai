@@ -22,29 +22,8 @@ import sys
 import threading
 import time
 
-# Ensure console output works on non-UTF-8 terminals (e.g. Windows cp1252).
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
-
 # Add the telemetry source to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
-
-# Ensure telemetry is NOT disabled for this test
-os.environ.pop("ORTGENAI_DISABLE_TELEMETRY", None)
-os.environ.pop("CI", None)
-os.environ.pop("GITHUB_ACTIONS", None)
-os.environ.pop("TF_BUILD", None)
-
-# Reset singletons so we get a fresh initialization
-from telemetry.library.telemetry_logger import TelemetryLogger
-TelemetryLogger._instance = None
-TelemetryLogger._default_logger = None
-
-from telemetry.telemetry import GenAITelemetry
-GenAITelemetry._instance = None
 
 
 # ─── Transmission tracking ───────────────────────────────────────────────────
@@ -73,6 +52,27 @@ def on_payload_transmitted(args):
 
 def main():
     global expected_count
+
+    # Ensure console output works on non-UTF-8 terminals (e.g. Windows cp1252).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    # Ensure telemetry is NOT disabled for this test
+    os.environ.pop("ORTGENAI_DISABLE_TELEMETRY", None)
+    os.environ.pop("CI", None)
+    os.environ.pop("GITHUB_ACTIONS", None)
+    os.environ.pop("TF_BUILD", None)
+
+    # Reset singletons so we get a fresh initialization
+    from telemetry.library.telemetry_logger import TelemetryLogger
+    TelemetryLogger._instance = None
+    TelemetryLogger._default_logger = None
+
+    from telemetry.telemetry import GenAITelemetry
+    GenAITelemetry._instance = None
 
     print("=" * 60)
     print("GenAI Telemetry — Live Integration Test")
