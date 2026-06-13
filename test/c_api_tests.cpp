@@ -133,6 +133,21 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, EncodeBatchEmptyInputThrows) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  // EncodeBatch with zero strings should throw, not crash with SIGFPE
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 0), std::runtime_error);
+
+  // Invalid pointers with count > 0 should also be rejected deterministically.
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 1), std::runtime_error);
+  const char* bad_strings[] = {nullptr};
+  ASSERT_THROW(tokenizer->EncodeBatch(bad_strings, 1), std::runtime_error);
+#endif
+}
+
 TEST(CAPITests, TokenizerUpdateOptions) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
