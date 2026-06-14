@@ -3282,11 +3282,11 @@ class Model:
         if self.ep == "cuda" and weights_prepacked in (None, 1) and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
             # The CUDA QMoE fpA_intB mixed-GEMM kernel only supports block sizes
-            # of 64 or 128. Use an explicit check (not assert, which python -O
+            # of 32, 64 or 128. Use an explicit check (not assert, which python -O
             # strips) so an unsupported value fails loudly instead of producing an
             # invalid export.
-            if block_size not in (64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 64 or 128, got {block_size}.")
+            if block_size not in (32, 64, 128):
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64 or 128, got {block_size}.")
             try:
                 qweight, scales = self._cutlass_prepacked_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3301,8 +3301,8 @@ class Model:
         # load time. Only valid on the CUDA EP.
         if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
-            if block_size not in (64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 64 or 128, got {block_size}.")
+            if block_size not in (32, 64, 128):
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64 or 128, got {block_size}.")
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
