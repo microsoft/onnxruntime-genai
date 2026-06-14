@@ -25,10 +25,27 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
+  // model's last hidden state. Only created when the config declares the input.
+  if (!model_.config_->model.decoder.inputs.hidden_states.empty()) {
+    hidden_states_ = std::make_unique<HiddenStatesInputs>(*this);
+    hidden_states_->Add();
+  }
+  // Models that emit a hidden_states output (exported with include_hidden_states, e.g. to feed
+  // the MTP head) register it as a managed output so it survives CUDA-graph capture.
+  if (!model_.config_->model.decoder.outputs.hidden_states.empty()) {
+    hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
+    hidden_states_output_->Add();
+  }
 }
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
+}
+
+void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
+  if (hidden_states_)
+    hidden_states_->SetValue(hidden_states);
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -44,8 +61,11 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     }
 
     // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
-    bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
-    State::Run(*model_.session_decoder_, graph_capture_this_run);
+    // MTP speculative decoding also captures the 2-token verify shape (max_graph_capture_length == 2),
+    // each captured length getting its own annotation id / static buffers.
+    int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
+    bool graph_capture_this_run = params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
+    State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len);
 
     return logits_.Get();
   }
@@ -90,6 +110,11 @@ void DecoderOnly_State::RewindTo(size_t index) {
     recurrent_state_->RewindTo(index);
 }
 
+void DecoderOnly_State::SnapshotState() {
+  if (recurrent_state_)
+    recurrent_state_->Snapshot();
+}
+
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
@@ -118,6 +143,10 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (hidden_states_)
+    hidden_states_->Update(static_cast<int>(new_length));
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
 }
 

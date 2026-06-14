@@ -58,13 +58,24 @@ State::State(const GeneratorParams& params, const Model& model)
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture
+  // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_ = std::to_string(dis(gen));
+    graph_ids_[1] = GraphIdForLength(1);
   }
+}
+
+std::string State::GraphIdForLength(int graph_capture_length) {
+  auto it = graph_ids_.find(graph_capture_length);
+  if (it != graph_ids_.end()) {
+    return it->second;
+  }
+  // Distinct random annotation id per captured length (ORT captures one graph per id).
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, INT_MAX);
+  std::string id = std::to_string(dis(gen));
+  graph_ids_[graph_capture_length] = id;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -89,12 +100,12 @@ void State::DumpOutputs() {
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run) {
+void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }

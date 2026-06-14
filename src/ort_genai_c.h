@@ -473,6 +473,41 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 
+/* Multi-Token-Prediction (MTP) self-speculative decoding (e.g. Qwen3.6). The MtpGenerator
+ * composes a main decoder and an MTP draft head and runs the draft/verify loop in-engine,
+ * keeping the hidden-state handoff on-device. Greedy, batch size 1; the output is identical to
+ * plain greedy decoding (lossless). */
+typedef struct OgaMtpGenerator OgaMtpGenerator;
+
+/**
+ * \brief Creates an MTP self-speculative generator from a main model and an MTP-head model.
+ * \param[in] main_model The main decoder (exported with include_hidden_states).
+ * \param[in] mtp_model The MTP head (mtp.onnx, with a hidden_states input).
+ * \param[in] params The generation parameters (greedy, batch size 1).
+ * \param[out] out The created MTP generator.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_model, const OgaModel* mtp_model, const OgaGeneratorParams* params, OgaMtpGenerator** out);
+
+/** \brief Seed the prompt (runs the main model's prefill). */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
+/** \brief Produce the next token via the draft/verify loop. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator);
+/** \brief Whether generation has reached EOS or max length. */
+OGA_EXPORT bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator);
+/** \brief Number of committed tokens (prompt + generated). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetSequenceCount(const OgaMtpGenerator* generator);
+/** \brief Pointer to the committed token data (valid until the next call). */
+OGA_EXPORT const int32_t* OGA_API_CALL OgaMtpGenerator_GetSequenceData(const OgaMtpGenerator* generator);
+/** \brief Number of main-model forward passes run (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGenerator* generator);
+/** \brief Number of accepted drafts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator);
+/** \brief Number of draft attempts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator);
+/** \brief Destroys the given MTP generator. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* generator);
+
 /**
  * \brief Returns true if the generator has finished generating all the sequences.
  * \param[in] generator The generator to check if it is done with generating all sequences.
@@ -560,6 +595,28 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
  * \return OgaResult containing the error message if the rewinding failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
+
+/**
+ * \brief Snapshots the generator's recurrent state (conv/linear-attention state) so a later
+ *        OgaGenerator_RewindTo can roll it back. Used for speculative decoding (e.g. MTP) on
+ *        hybrid models, whose recurrent state cannot be partially cropped like the KV cache.
+ *        Take the snapshot at the length you might roll back to, then RewindTo that length to
+ *        restore it. A no-op for models without recurrent state.
+ * \param[in] generator The generator whose recurrent state is snapshotted.
+ * \return OgaResult containing the error message if the snapshot failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator);
+
+/**
+ * \brief Stages a hidden_states tensor as the model's hidden_states input for the next step.
+ *        Used by the MTP self-speculative head, which consumes the main model's last hidden
+ *        state. A no-op for models without a hidden_states input. The tensor is [batch,
+ *        sequence_length, hidden_size] of the model's io dtype.
+ * \param[in] generator The generator to set the hidden_states input on.
+ * \param[in] hidden_states The hidden state values to feed on the next step.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetHiddenStates(OgaGenerator* generator, OgaTensor* hidden_states);
 
 /**
  * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

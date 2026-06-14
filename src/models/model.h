@@ -32,6 +32,18 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+
+  // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
+  // for models without recurrent state. SnapshotState() captures the conv/linear-attention
+  // state at the current length; a later RewindTo(length) restores it (the attention KV
+  // cache is rolled back the usual way). Used by MTP self-speculative decoding to undo a
+  // rejected draft, since recurrent state cannot be partially cropped like KV cache.
+  virtual void SnapshotState() {}
+
+  // Stage a hidden_states input value for the next Run (models with a hidden_states input,
+  // e.g. the MTP self-speculative head). Default no-op.
+  virtual void SetHiddenStates(OrtValue* hidden_states) { (void)hidden_states; }
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
@@ -56,13 +68,18 @@ struct State {
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);
+  void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
-  std::string graph_id_{};
+  // CUDA graph annotation id per captured input length. The decode path captures
+  // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
+  // Each distinct length gets its own annotation id so ORT captures/replays an independent graph
+  // bound to that shape's (static) buffers.
+  std::string GraphIdForLength(int graph_capture_length);
+  std::unordered_map<int, std::string> graph_ids_{};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };

@@ -508,6 +508,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
+  void SnapshotState() {
+    OgaCheckResult(OgaGenerator_SnapshotState(this));
+  }
+
+  void SetHiddenStates(OgaTensor& hidden_states) {
+    OgaCheckResult(OgaGenerator_SetHiddenStates(this, &hidden_states));
+  }
+
   void SetRuntimeOption(const char* key, const char* value) {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
@@ -554,6 +562,41 @@ struct OgaGenerator : OgaAbstract {
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
+
+struct OgaMtpGenerator : OgaAbstract {
+  static std::unique_ptr<OgaMtpGenerator> Create(const OgaModel& main_model, const OgaModel& mtp_model, OgaGeneratorParams& params) {
+    OgaMtpGenerator* p;
+    OgaCheckResult(OgaCreateMtpGenerator(&main_model, &mtp_model, &params, &p));
+    return std::unique_ptr<OgaMtpGenerator>(p);
+  }
+
+  void AppendTokens(const int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaMtpGenerator_AppendTokens(this, input_ids, input_ids_count));
+  }
+
+  void GenerateNextToken() {
+    OgaCheckResult(OgaMtpGenerator_GenerateNextToken(this));
+  }
+
+  bool IsDone() const {
+    return OgaMtpGenerator_IsDone(this);
+  }
+
+  size_t GetSequenceCount() const {
+    return OgaMtpGenerator_GetSequenceCount(this);
+  }
+
+  const int32_t* GetSequenceData() const {
+    return OgaMtpGenerator_GetSequenceData(this);
+  }
+
+  size_t GetForwardCount() const { return OgaMtpGenerator_GetForwardCount(this); }
+  size_t GetAcceptCount() const { return OgaMtpGenerator_GetAcceptCount(this); }
+  size_t GetTrialCount() const { return OgaMtpGenerator_GetTrialCount(this); }
+
+  static void operator delete(void* p) { OgaDestroyMtpGenerator(reinterpret_cast<OgaMtpGenerator*>(p)); }
+};
+
 
 struct OgaTensor : OgaAbstract {
 #if OGA_USE_SPAN

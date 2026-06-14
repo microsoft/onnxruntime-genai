@@ -156,10 +156,22 @@ void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
+    // The recurrent (conv + linear-attention) state cannot be cropped like the
+    // attention KV cache. A partial rewind is only possible by restoring a
+    // snapshot captured at the target length (used by speculative decoding to
+    // roll back a rejected draft). The caller (e.g. the MTP orchestrator)
+    // guarantees the snapshot was taken at exactly `index`.
+    if (snapshot_valid_) {
+      RestoreSnapshot();
+      return;
+    }
     throw std::runtime_error(
         "RecurrentState::RewindTo(" + std::to_string(index) +
-        ") is not supported. Recurrent states cannot be partially rewound.");
+        ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
+        "call Snapshot() at the target length first (e.g. for speculative decoding).");
   }
+  // Full reset to length 0.
+  snapshot_valid_ = false;
   if (share_buffers_) {
     // Shared buffers: zero in place, addresses stay stable.
     ZeroStates(presents_);
@@ -180,6 +192,42 @@ void RecurrentState::ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states) 
   for (auto& val : states) {
     ByteWrapTensor(device, *val).Zero();
   }
+}
+
+void RecurrentState::CopyStates(const std::vector<std::unique_ptr<OrtValue>>& src,
+                                std::vector<std::unique_ptr<OrtValue>>& dst) {
+  auto& device = *model_.p_device_kvcache_;
+  for (size_t i = 0; i < src.size(); ++i) {
+    ByteWrapTensor(device, *dst[i]).CopyFrom(ByteWrapTensor(device, *src[i]));
+  }
+}
+
+void RecurrentState::Snapshot() {
+  if (layer_indices_.empty()) return;
+
+  // The live state is in presents_ (shared-buffer EPs alias input==output to it;
+  // non-shared EPs keep the latest in presents_ after Update()'s swap).
+  if (snapshot_.empty()) {
+    auto& allocator = model_.p_device_kvcache_->GetAllocator();
+    const int num_layers = static_cast<int>(layer_indices_.size());
+    snapshot_.reserve(num_layers * 2);
+    for (int i = 0; i < num_layers; ++i) {
+      snapshot_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
+      snapshot_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
+    }
+  }
+  CopyStates(presents_, snapshot_);
+  snapshot_valid_ = true;
+}
+
+void RecurrentState::RestoreSnapshot() {
+  if (layer_indices_.empty()) return;
+  if (!snapshot_valid_) {
+    throw std::runtime_error("RecurrentState::RestoreSnapshot called before Snapshot");
+  }
+  // Copy back into the live buffers in place so their addresses stay stable
+  // (required by CUDA-graph replay, which captures fixed buffer pointers).
+  CopyStates(snapshot_, presents_);
 }
 
 std::unique_ptr<RecurrentState> CreateRecurrentState(State& state) {
