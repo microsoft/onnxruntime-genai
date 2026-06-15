@@ -112,6 +112,95 @@ gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
 
 
+def _load_builder_cli_module(monkeypatch):
+    builders_module = types.ModuleType("builders")
+    for class_name in (
+        "ChatGLMModel",
+        "ErnieModel",
+        "Gemma2Model",
+        "Gemma3Model",
+        "GemmaModel",
+        "GPTOSSModel",
+        "GraniteModel",
+        "HunyuanDenseV1Model",
+        "InternLM2Model",
+        "LFM2Model",
+        "LlamaModel",
+        "Mistral3TextModel",
+        "MistralModel",
+        "Model",
+        "NemotronModel",
+        "OLMoModel",
+        "Phi3MiniLongRoPEModel",
+        "Phi3MiniModel",
+        "Phi3MoELongRoPEModel",
+        "Phi3SmallLongRoPEModel",
+        "Phi3SmallModel",
+        "Phi3VModel",
+        "Phi4MMModel",
+        "PhiModel",
+        "Qwen25VLTextModel",
+        "Qwen35MoeTextModel",
+        "Qwen35TextModel",
+        "Qwen3Model",
+        "Qwen3VLTextModel",
+        "QwenModel",
+        "SmolLM3Model",
+        "VideoChatFlashQwenModel",
+        "WhisperModel",
+    ):
+        setattr(builders_module, class_name, type(class_name, (), {}))
+    monkeypatch.setitem(sys.modules, "builders", builders_module)
+
+    module_name = "builder_cli_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, BUILDERS_DIR.parent / "builder.py")
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [("true", True), ("True", True), ("1", True), ("false", False), ("False", False), ("0", False)],
+)
+def test_use_fp4_moe_extra_option_is_boolean(monkeypatch, raw_value, expected):
+    builder = _load_builder_cli_module(monkeypatch)
+    options = builder.parse_extra_options([f"use_fp4_moe={raw_value}"], "cuda")
+    assert options["use_fp4_moe"] is expected
+
+
+def test_use_fp4_moe_requires_qmoe_precision():
+    if not hasattr(base_module.ir, "Graph"):
+        pytest.skip("onnx_ir graph API is not available")
+
+    config = types.SimpleNamespace(
+        max_position_embeddings=16,
+        intermediate_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_hidden_layers=1,
+        vocab_size=100,
+        hidden_act="silu",
+        _name_or_path="test",
+        architectures=["TestForCausalLM"],
+    )
+
+    with pytest.raises(ValueError, match="use_fp4_moe requires precision=int4"):
+        Model(config, base_module.ir.DataType.FLOAT16, base_module.ir.DataType.FLOAT16, "cuda", ".", {"use_fp4_moe": True})
+
+
+def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
+    model = types.SimpleNamespace(
+        moe_attrs={"op_type": "QMoE", "quant_type": "fp4"},
+        has_quark_experts=lambda experts: True,
+    )
+    mlp = types.SimpleNamespace(experts=types.SimpleNamespace(fc1_weights=torch.empty(0), fc2_weights=torch.empty(0)))
+
+    with pytest.raises(ValueError, match="pre-quantized Quark GPT-OSS experts"):
+        GPTOSSModel.make_moe_fused(model, 0, mlp, "root")
+
+
 class _FakeMoEModel:
     """Minimal stand-in exposing ``make_qmoe_weights`` and recording which
     quantization path it dispatched to."""

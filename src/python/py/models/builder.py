@@ -69,6 +69,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "enable_cuda_graph",
         "enable_webgpu_graph",
         "use_8bits_moe",
+        "use_fp4_moe",
         "use_qdq",
         "use_webgpu_fp32",
         "use_cuda_bf16",
@@ -492,6 +493,11 @@ def get_args():
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                use_fp4_moe = Use FP4 (MXFP4) quantization for MoE layers on the CUDA EP. Default is false.
+                    If true, the QMoE op uses MXFP4 weights (quant_type="fp4", expert_weight_bits=4, block_size=32):
+                    4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
+                    Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON.
+                    Mutually exclusive with use_8bits_moe. Only supported on the CUDA EP.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

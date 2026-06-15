@@ -555,6 +555,9 @@ class GPTOSSModel(Model):
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
 
         has_quark_experts = self.has_quark_experts(mlp.experts)
+        is_fp4_moe = self.moe_attrs.get("quant_type") == "fp4"
+        if is_fp4_moe and has_quark_experts:
+            raise ValueError("use_fp4_moe is not supported with pre-quantized Quark GPT-OSS experts.")
 
         # Make router nodes
         router_basename = f"{basename}/router/MatMul"
@@ -582,6 +585,10 @@ class GPTOSSModel(Model):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
         down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
+        # FP4 (MXFP4) per-expert float32 global scales (empty for the integer QMoE path).
+        gate_up_proj_global_scales = ""
+        down_proj_global_scales = ""
+
         # HF GptOssExperts stores the expert weights input-major:
         #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
         # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
@@ -607,59 +614,100 @@ class GPTOSSModel(Model):
                 to=self.io_dtype,
             )
         else:
-            if has_quark_experts:
-                # Use pre-quantized Quark experts
-                gate_up_proj_qweight_tensor, gate_up_proj_scales_tensor, gate_up_proj_zero_points_tensor = (
-                    mlp.experts.fc1_weights,
-                    mlp.experts.fc1_scales,
-                    mlp.experts.fc1_zero_points,
-                )
-                down_proj_qweight_tensor, down_proj_scales_tensor, down_proj_zero_points_tensor = (
-                    mlp.experts.fc2_weights,
-                    mlp.experts.fc2_scales,
-                    mlp.experts.fc2_zero_points,
-                )
-
-                # Save zero point as initializers
-                self.make_initializer(gate_up_proj_zero_points_tensor, gate_up_proj_zero_points)
-                self.make_initializer(down_proj_zero_points_tensor, down_proj_zero_points)
-            else:
-                # Create and save quantized MoE weights as initializers
-                gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
-                down_proj_qweight_list, down_proj_scales_list = [], []
+            if is_fp4_moe and not has_quark_experts:
+                # MXFP4 path: quantize each expert to FP4 e2m1 weights with ue8m0 block
+                # scales. The CUDA QMoE FP4 op consumes column-major packed weights
+                # [E, K, N/2] uint8, FLOAT8E8M0 block scales [E, N, K//32], and per-expert
+                # float32 global scales [E] (fed at QMoE inputs 15/16).
+                gate_up_packed_list, gate_up_block_scales_list, gate_up_global_list = [], [], []
+                down_packed_list, down_block_scales_list, down_global_list = [], [], []
 
                 for i in range(self.moe_attrs["num_experts"]):
-                    qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
-                    gate_up_proj_qweight_list.append(qweight1)
-                    gate_up_proj_scales_list.append(scales1)
-                    qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
-                    down_proj_qweight_list.append(qweight2)
-                    down_proj_scales_list.append(scales2)
+                    p1, bs1, g1 = self.make_mxfp4_weights(gate_up_proj_layout[i], 32)
+                    gate_up_packed_list.append(p1)
+                    gate_up_block_scales_list.append(bs1)
+                    gate_up_global_list.append(g1)
+                    p2, bs2, g2 = self.make_mxfp4_weights(down_proj_layout[i], 32)
+                    down_packed_list.append(p2)
+                    down_block_scales_list.append(bs2)
+                    down_global_list.append(g2)
 
-                gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
-                gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
-                down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
-                down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
+                self.moe_attrs["block_size"] = 32
 
-            gate_up_proj_qweight_shape, down_proj_qweight_shape = self.make_qmoe_weight_initializer_shapes(
-                gate_up_proj_qweight_list if not has_quark_experts else None,
-                down_proj_qweight_list if not has_quark_experts else None,
-                has_quark_experts,
-            )
+                gate_up_packed_tensor = torch.stack(gate_up_packed_list, dim=0).to(torch.uint8)
+                gate_up_block_scales_tensor = torch.stack(gate_up_block_scales_list, dim=0).to(torch.uint8)
+                down_packed_tensor = torch.stack(down_packed_list, dim=0).to(torch.uint8)
+                down_block_scales_tensor = torch.stack(down_block_scales_list, dim=0).to(torch.uint8)
+                gate_up_global_tensor = torch.tensor(gate_up_global_list, dtype=torch.float32)
+                down_global_tensor = torch.tensor(down_global_list, dtype=torch.float32)
 
-            # Save qweight tensors
-            self.make_initializer(
-                gate_up_proj_qweight_tensor.view(gate_up_proj_qweight_shape),
-                gate_up_proj_weight,
-            )
-            self.make_initializer(
-                down_proj_qweight_tensor.view(down_proj_qweight_shape),
-                down_proj_weight,
-            )
+                # Packed FP4 weights [E, K, N/2] uint8
+                self.make_initializer(gate_up_packed_tensor, gate_up_proj_weight)
+                self.make_initializer(down_packed_tensor, down_proj_weight)
 
-            # Save scales tensors
-            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-            self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+                # Block scales as FLOAT8E8M0 [E, N, K//32]
+                self.make_fp8e8m0_initializer(gate_up_block_scales_tensor, gate_up_proj_scales)
+                self.make_fp8e8m0_initializer(down_block_scales_tensor, down_proj_scales)
+
+                # Per-expert float32 global scales [E]
+                gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
+                down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+                self.make_initializer(gate_up_global_tensor, gate_up_proj_global_scales)
+                self.make_initializer(down_global_tensor, down_proj_global_scales)
+            else:
+                if has_quark_experts:
+                    # Use pre-quantized Quark experts
+                    gate_up_proj_qweight_tensor, gate_up_proj_scales_tensor, gate_up_proj_zero_points_tensor = (
+                        mlp.experts.fc1_weights,
+                        mlp.experts.fc1_scales,
+                        mlp.experts.fc1_zero_points,
+                    )
+                    down_proj_qweight_tensor, down_proj_scales_tensor, down_proj_zero_points_tensor = (
+                        mlp.experts.fc2_weights,
+                        mlp.experts.fc2_scales,
+                        mlp.experts.fc2_zero_points,
+                    )
+
+                    # Save zero point as initializers
+                    self.make_initializer(gate_up_proj_zero_points_tensor, gate_up_proj_zero_points)
+                    self.make_initializer(down_proj_zero_points_tensor, down_proj_zero_points)
+                else:
+                    # Create and save quantized MoE weights as initializers
+                    gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
+                    down_proj_qweight_list, down_proj_scales_list = [], []
+
+                    for i in range(self.moe_attrs["num_experts"]):
+                        qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
+                        gate_up_proj_qweight_list.append(qweight1)
+                        gate_up_proj_scales_list.append(scales1)
+                        qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
+                        down_proj_qweight_list.append(qweight2)
+                        down_proj_scales_list.append(scales2)
+
+                    gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
+                    gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
+                    down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
+                    down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
+
+                gate_up_proj_qweight_shape, down_proj_qweight_shape = self.make_qmoe_weight_initializer_shapes(
+                    gate_up_proj_qweight_list if not has_quark_experts else None,
+                    down_proj_qweight_list if not has_quark_experts else None,
+                    has_quark_experts,
+                )
+
+                # Save qweight tensors
+                self.make_initializer(
+                    gate_up_proj_qweight_tensor.view(gate_up_proj_qweight_shape),
+                    gate_up_proj_weight,
+                )
+                self.make_initializer(
+                    down_proj_qweight_tensor.view(down_proj_qweight_shape),
+                    down_proj_weight,
+                )
+
+                # Save scales tensors
+                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
         # Save biases (shared for all paths)
         if has_quark_experts:
@@ -689,6 +737,8 @@ class GPTOSSModel(Model):
             bias2=down_proj_bias,
             zero_points1=gate_up_proj_zero_points if use_zero_points else "",
             zero_points2=down_proj_zero_points if use_zero_points else "",
+            global_scales1=gate_up_proj_global_scales,
+            global_scales2=down_proj_global_scales,
         )
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
