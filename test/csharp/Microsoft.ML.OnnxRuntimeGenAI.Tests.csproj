@@ -12,11 +12,11 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configurations>Debug;RelWithDebInfo;Release</Configurations>
-    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
+    <RestoreAdditionalProjectSources>https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json</RestoreAdditionalProjectSources>
     <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
-    <OrtPackageVersion>1.26.0</OrtPackageVersion>
+    <OrtPackageVersion>1.28.0-dev-20260610-0510-50c9510000</OrtPackageVersion>
     <!-- EP-plugin pipelines (e.g. WebGPU) pass /p:EPDir=<dir> pointing at the directory of EP plugin
          libraries the pipeline downloaded. At runtime the tests enumerate that directory and register
          each plugin; when EPDir is not set, registration is a no-op. -->
