@@ -3298,7 +3298,7 @@ class Model:
         if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
             if block_size not in (32, 64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64 or 128, got {block_size}.")
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3323,6 +3323,94 @@ class Model:
         raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)})"
          " and set qmoe_block_size > 0 for block-wise quantization of QMoE expert weights. "
          f"Got qmoe_block_size={self.qmoe_block_size} and ep={self.ep}.")
+
+    def _cutlass_prepacked_blockwise_quantize(self, weights, block_size):
+        """Quantize a single expert's weights and CUTLASS-prepack them for the
+        CUDA QMoE fpA_intB mixed-GEMM kernel.
+
+        ``weights`` has logical shape ``[N, K]`` (quantized along ``K``). Returns
+        ``(qweight, scales)`` where ``qweight`` is the prepacked uint8 tensor of
+        shape ``[K, N/pack]`` (``pack`` = 2 for INT4, 1 for INT8) and ``scales``
+        is ``[N, K/block_size]`` SIGNED float scales. The sign is required: the
+        CUDA kernel dequantizes as ``(q - 2^(bits-1)) * scale``, so abs() would
+        corrupt every block whose max-magnitude element is negative. Stacking the
+        per-expert results yields ``fc_weights`` ``[E, K, N/pack]`` and ``scales``
+        ``[E, N, K/block_size]`` — the layout the QMoE op reads when
+        ``weights_prepacked`` is left at its prepacked default.
+        """
+        import numpy as np
+        from onnxruntime.capi import _pybind_state as _ortpyb
+
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
+        n, k = w.shape
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
+        num_blocks = k // block_size
+        pack = 8 // bits
+
+        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
+        # (column = output channel), quantizing each column along K.
+        w_t = np.ascontiguousarray(w.T)  # [K, N]
+        qweight = np.zeros((n, num_blocks, block_size // pack), dtype=np.uint8)
+        scales = np.zeros((n, num_blocks), dtype=np.float32)
+        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+
+        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
+        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
+        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
+
+        # quantize_matmul_{4,8}bits returns SIGNED blockwise scales (the scale
+        # carries the sign of the block's max-magnitude element). The CUDA QMoE
+        # kernel dequantizes as (q - 2^(bits-1)) * scale, so the sign MUST be
+        # preserved — taking abs() here corrupts every block whose anchor element
+        # is negative and yields garbage weights.
+
+        # CUTLASS-prepack with force_arch=80: the fpA_intB kernel always expects
+        # the SM80-style interleaved layout for SM >= 80 (validated on SM89/SM90),
+        # so 80 is the correct universal choice regardless of build/runtime GPU.
+        q_reshaped = qweight.reshape(n, -1)  # [N, K/pack]
+        packed = _ortpyb.pack_weights_for_cuda_mixed_gemm(q_reshaped, n, k, bits, 80)
+        out_cols = n // pack
+        packed = np.asarray(packed).view(np.uint8).reshape(k, out_cols)  # [K, N/pack]
+
+        return torch.from_numpy(np.ascontiguousarray(packed)), torch.from_numpy(scales)
+
+    def _matmulnbits_blockwise_quantize(self, weights, block_size):
+        """Quantize per-expert weights with ONNX Runtime's MatMulNBits blockwise
+        quantizer, matching the encoding the QMoE PrePack hook expects.
+
+        ``weights`` is a single expert's weight of logical shape ``[N, K]``
+        (quantized along the last/``K`` axis). Returns ``(qweight, scales)`` where
+        ``qweight`` is ``[N, K/pack]`` uint8 (2 INT4 elements per byte; INT8 is
+        one element per byte) and ``scales`` is ``[N, K/block_size]`` positive
+        float scales — the same layout produced by ``quantize_matmul_{4,8}bits``.
+        """
+        import numpy as np
+        from onnxruntime.capi import _pybind_state as _ortpyb
+
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
+        n, k = w.shape
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
+        num_blocks = k // block_size
+        pack = 8 // bits
+
+        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
+        # (column = output channel), quantizing each column along K.
+        w_t = np.ascontiguousarray(w.T)  # [K, N]
+        qweight = np.zeros((n, k // pack), dtype=np.uint8)
+        scales = np.zeros((n, num_blocks), dtype=np.float32)
+        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+
+        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
+        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
+        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
+
+        # The kernel applies (q - 2^(bits-1)) * scale, so scales must be positive.
+        scales = np.abs(scales)
+        return torch.from_numpy(qweight), torch.from_numpy(scales)
 
     def _cutlass_prepacked_blockwise_quantize(self, weights, block_size):
         """Quantize a single expert's weights and CUTLASS-prepack them for the

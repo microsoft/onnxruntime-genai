@@ -582,17 +582,17 @@ class GPTOSSModel(Model):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
         down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
-        # Apply transpose depending on EP/op requirements and Quark expert presence
-        # For quantized QMoE on CUDA, kernels expect scales along the hidden_size axis,
-        # so we keep original orientation (last axis = hidden_size) when quantizing.
-        # For non-quantized MoE or non-CUDA EPs, transpose to align MatMul layout.
+        # HF GptOssExperts stores the expert weights input-major:
+        #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
+        # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
+        # make_qmoe_weights) expects output-major [E, N, K] with the contraction
+        # axis (K) last: gate_up = [E, 2*inter, hidden], down = [E, hidden, inter].
+        # Transpose for all EPs/ops; the CUDA QMoE path is no exception (keeping
+        # the original orientation swaps N and K, which silently corrupts the
+        # quantized weights/scales and yields garbage output).
         if not has_quark_experts:
-            if op_type == "QMoE" and self.ep == "cuda":
-                gate_up_proj_layout = mlp.experts.gate_up_proj
-                down_proj_layout = mlp.experts.down_proj
-            else:
-                gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
-                down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
+            gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
+            down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
         if op_type == "MoE" and not has_quark_experts:
             # Save non-quantized MoE weights as initializers
