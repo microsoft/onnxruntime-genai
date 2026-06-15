@@ -51,7 +51,7 @@ class _FakeMoEModel:
 _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
 
 
-@pytest.mark.parametrize("weights_prepacked", [None, 1])
+@pytest.mark.parametrize("weights_prepacked", [-1, 1])
 def test_cuda_prepacked_path_for_none_and_one(weights_prepacked):
     """None (auto=prepacked) and 1 (explicitly prepacked) both produce
     CUTLASS-prepacked weights so the emitted layout matches the op attribute."""
@@ -77,7 +77,7 @@ def test_non_cuda_does_not_use_cuda_only_paths():
     assert model.calls == [("symmetric", 128)]
 
 
-@pytest.mark.parametrize("weights_prepacked", [None, 0, 1])
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
 @pytest.mark.parametrize("bad_block", [16, 32, 256])
 def test_cuda_rejects_unsupported_block_size(weights_prepacked, bad_block):
     """Unsupported block sizes must raise a real exception (not an assert that
@@ -105,7 +105,7 @@ def _ort_cuda_available():
 def test_cutlass_prepacked_scales_are_signed():
     """Regression guard for the abs(scales) bug: blockwise scales must keep their
     sign, and the encoded shapes must match the QMoE op's prepacked layout."""
-    model = _FakeMoEModel("cuda", 128, None)
+    model = _FakeMoEModel("cuda", 128, -1)
     torch.manual_seed(0)
     weights = torch.randn(256, 256) * 0.05  # [N, K]
     qweight, scales = Model._cutlass_prepacked_blockwise_quantize(model, weights, 128)

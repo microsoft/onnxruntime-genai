@@ -304,13 +304,10 @@ class Model:
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
-        # For CUDA QMoE the builder ships expert weights already CUTLASS-prepacked
-        # (offline via pack_weights_for_cuda_mixed_gemm, see make_qmoe_weights), so
-        # the QMoE op's default interpretation (weights_prepacked=-1/auto =
-        # prepacked) is exactly what we want and the attribute is omitted (None).
-        # Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship raw
-        # [E, N, K/pack] weights and let the runtime PrePack hook transform them).
-        weights_prepacked = int(extra_options["qmoe_weights_prepacked"]) if "qmoe_weights_prepacked" in extra_options else None
+        # For CUDA QMoE the builder ships expert weights already CUTLASS-prepacked (offline via pack_weights_for_cuda_mixed_gemm, see make_qmoe_weights),
+        # so the QMoE op's default interpretation (weights_prepacked=-1/auto = prepacked) is exactly what we want and the attribute is omitted.
+        # Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship raw [E, N, K/pack] weights and let the runtime PrePack hook transform them).
+        weights_prepacked = int(extra_options["qmoe_weights_prepacked"]) if "qmoe_weights_prepacked" in extra_options else -1
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -323,7 +320,7 @@ class Model:
             "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
-            "weights_prepacked": weights_prepacked,          # QMoE int weight layout: 0=raw [E,N,K/pack], 1=CUTLASS-prepacked, -1/None=auto (omit attr)
+            "weights_prepacked": weights_prepacked,          # QMoE int weight layout: 0=raw [E,N,K/pack], 1=CUTLASS-prepacked, -1=auto (omit attr)
         }
 
         # LM head-specific variables
@@ -3229,19 +3226,16 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
-        # weights_prepacked is a tri-state CUDA QMoE attribute describing the
-        # expert-weight layout (see make_qmoe_weights, which produces the matching
-        # bytes):
-        #   None/auto -> omit the attribute; the op treats weights as already
-        #                CUTLASS-prepacked, which is what the builder ships for CUDA.
-        #   1         -> weights are CUTLASS-prepacked (explicit form of the above).
-        #   0         -> weights are raw [E, N, K/pack]; the runtime PrePack hook
-        #                transforms them at load time.
-        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an
-        # ONNX Runtime build with the com.microsoft QMoE PrePack hook, so only
+        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout (see make_qmoe_weights, which produces the matching bytes):
+        #   -1       -> omit the attribute; the op treats weights as already
+        #               CUTLASS-prepacked, which is what the builder ships for CUDA.
+        #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
+        #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
+        #               transforms them at load time.
+        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with the com.microsoft QMoE PrePack hook, so only
         # emit it on the CUDA EP.
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
-        if weights_prepacked is not None and self.ep == "cuda":
+        if weights_prepacked != -1 and self.ep == "cuda":
             extra_kwargs["weights_prepacked"] = weights_prepacked
 
         self.make_node(
@@ -3274,10 +3268,10 @@ class Model:
         # builder's own _symmetric_blockwise_quantize uses a different
         # scale/packing convention the kernel cannot consume.
         #
-        # Both weights_prepacked=None (auto, the op's prepacked default) and
+        # Both weights_prepacked=-1 (auto, the op's prepacked default) and
         # weights_prepacked=1 (explicitly prepacked) mean the op reads prepacked
         # weights, so the builder must produce prepacked weights for both.
-        if self.ep == "cuda" and weights_prepacked in (None, 1) and self.qmoe_block_size > 0:
+        if self.ep == "cuda" and weights_prepacked in (-1, 1) and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
             if block_size not in (32, 64, 128):
                 raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
