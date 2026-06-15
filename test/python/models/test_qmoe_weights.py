@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from onnxruntime_genai.models.builders.base import Model
 
 
@@ -90,8 +89,8 @@ def test_cuda_rejects_unsupported_block_size(weights_prepacked, bad_block):
 
 def _ort_cuda_available():
     try:
-        import onnxruntime as ort
-        from onnxruntime.capi import _pybind_state as _pyb
+        import onnxruntime as ort  # noqa: PLC0415
+        from onnxruntime.capi import _pybind_state as _pyb  # noqa: PLC0415
 
         return (
             hasattr(_pyb, "quantize_matmul_4bits")

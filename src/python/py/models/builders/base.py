@@ -338,7 +338,7 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         algo_config = self.make_algo_config(extra_options.get("int4_algo_config", "default"))
         self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
-        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32))
+        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
         self.quant_attrs = {
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
@@ -3281,12 +3281,8 @@ class Model:
         # weights, so the builder must produce prepacked weights for both.
         if self.ep == "cuda" and weights_prepacked in (None, 1) and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
-            # The CUDA QMoE fpA_intB mixed-GEMM kernel only supports block sizes
-            # of 64 or 128. Use an explicit check (not assert, which python -O
-            # strips) so an unsupported value fails loudly instead of producing an
-            # invalid export.
-            if block_size not in (64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 64 or 128, got {block_size}.")
+            if block_size not in (32, 64, 128):
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
                 qweight, scales = self._cutlass_prepacked_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3301,8 +3297,8 @@ class Model:
         # load time. Only valid on the CUDA EP.
         if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
-            if block_size not in (64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 64 or 128, got {block_size}.")
+            if block_size not in (32, 64, 128):
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3311,7 +3307,6 @@ class Model:
                 raise RuntimeError(f"MatMulNBits-compatible QMoE quantization failed with block_size={block_size}: {e}")
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
-        # CUDA and TRT-RTX default to 128; others default to 32.
         supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
@@ -3324,35 +3319,10 @@ class Model:
             except Exception as e:
                 raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
 
-        # Use tensor-level quantization (default for QMoE on CPU/WebGPU when not explicitly requested)
-        self.moe_attrs["block_size"] = 0
-
-        # Existing tensor-level quantization implementation (fallback)
-        unsuccessful = True
-        try:
-            import tensorrt_llm
-
-            _, qweight, scales = torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(
-                weights.detach().cpu().contiguous(), dtype
-            )
-            unsuccessful = False
-        except ImportError:
-            print(
-                "WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()."
-            )
-        except RuntimeError as r:
-            print(
-                "WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully."
-            )
-            err = str(r)
-            print(err[: err.find("\n1")])  # omit internal traceback inside TensorRT-LLM
-        finally:
-            if unsuccessful:
-                raise RuntimeError(
-                    "Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment."
-                )
-
-        return qweight, scales.to(torch.float16)
+        # Column-wise quantization (block_size=0) is deprecated in favor of block-wise quantization to be consistent among EPs.
+        raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)})"
+         " and set qmoe_block_size > 0 for block-wise quantization of QMoE expert weights. "
+         f"Got qmoe_block_size={self.qmoe_block_size} and ep={self.ep}.")
 
     def _cutlass_prepacked_blockwise_quantize(self, weights, block_size):
         """Quantize a single expert's weights and CUTLASS-prepack them for the
