@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 
 namespace Generators {
@@ -40,6 +41,7 @@ struct Config {
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view PixelPositionIdsName = "pixel_position_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
 
@@ -66,6 +68,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view LangIdName = "lang_id";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -127,8 +130,10 @@ struct Config {
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
 
-    // Qwen2.5-VL specific token IDs
+    // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
     int image_token_id{};
+    int audio_token_id{};
+    int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
 
@@ -142,6 +147,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -150,6 +156,11 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Parakeet TDT (Token-and-Duration Transducer) parameters
+    int left_context_samples{};
+    int right_context_samples{};
+    std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
     struct Encoder {
       std::string filename;
@@ -173,6 +184,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string lang_id{Defaults::LangIdName};
       } inputs;
 
       struct Outputs {
@@ -200,6 +212,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
 
@@ -215,10 +228,11 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
-                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
+                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -237,6 +251,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
@@ -302,6 +317,10 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
+      // Hybrid SSM+Attention (LFM2) parameters
+      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
         int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
@@ -332,11 +351,18 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
         // RNNT decoder inputs
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Gemma4 per-layer inputs (e.g. per-layer embeddings from embedding model)
+        std::string per_layer_inputs;
+
+        // Parakeet TDT decoder (prediction network) extra inputs
+        std::string targets_length;
       } inputs;
 
       struct Outputs {
@@ -346,11 +372,15 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
+        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
 
         // RNNT decoder outputs
         std::string outputs;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Parakeet TDT decoder (prediction network) extra outputs
+        std::string outputs_length;
       } outputs;
 
       struct PipelineModel {
@@ -395,6 +425,7 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
+    float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
   } search;
 
   struct Engine {

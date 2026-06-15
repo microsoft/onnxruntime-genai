@@ -13,7 +13,7 @@ struct Embeddings {
     Output
   };
 
-  Embeddings(State& state, Embeddings::Mode mode, const std::string& name);
+  Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size = 0);
   Embeddings(const Embeddings&) = delete;
   Embeddings& operator=(const Embeddings&) = delete;
 

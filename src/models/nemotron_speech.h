@@ -6,10 +6,11 @@
 
 #include "model.h"
 #include "audio_features.h"
+#include "transducer_state.h"
 
 namespace Generators {
 
-struct NemotronCacheConfig {
+struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
   int num_encoder_layers{};
   int hidden_dim{};
@@ -23,6 +24,7 @@ struct NemotronCacheConfig {
   // Vocabulary
   int vocab_size{};
   int blank_id{};
+  float blank_penalty{};
 
   // Streaming chunk config
   int chunk_frames{};
@@ -48,6 +50,7 @@ struct NemotronCacheConfig {
   std::string enc_in_cache_channel;
   std::string enc_in_cache_time;
   std::string enc_in_cache_channel_len;
+  std::string enc_in_lang_id;
   std::string enc_out_encoded;
   std::string enc_out_length;
   std::string enc_out_cache_channel;
@@ -76,8 +79,8 @@ struct NemotronEncoderCache {
   std::unique_ptr<OrtValue> cache_last_time;
   std::unique_ptr<OrtValue> cache_last_channel_len;
 
-  void Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
-  void Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 /// Holds the RNNT decoder LSTM hidden states between decoding steps.
@@ -86,8 +89,8 @@ struct NemotronDecoderState {
   std::unique_ptr<OrtValue> lstm_cell_state;
   int last_token{0};  // Last emitted non-blank token (for autoregressive feedback)
 
-  void Initialize(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
-  void Reset(const NemotronCacheConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Initialize(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
+  void Reset(const NemotronConfig& cfg, const SessionInfo& session_info, OrtAllocator& allocator, DeviceInterface& device);
 };
 
 struct NemotronSpeechModel : Model {
@@ -105,7 +108,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
   std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
-  NemotronCacheConfig cache_config_;
+  NemotronConfig nemotron_config_;
 };
 
 /// Sub-state for the streaming encoder.
@@ -121,15 +124,22 @@ struct NemotronEncoderSubState : State {
   /// Update registered input pointers after cache is modified.
   void UpdateCacheInputs();
 
+  void SetLangId(int lang_id);
+
+  bool HasLangIdInput() const { return has_lang_id_input_; }
+
  private:
   friend struct NemotronSpeechState;
 
   const NemotronSpeechModel& model_;
   NemotronEncoderCache cache_;
   std::unique_ptr<OrtValue> signal_length_;
+  std::unique_ptr<OrtValue> lang_id_tensor_;
 
   // Whether the encoder model has a "length" input
   bool has_length_input_{};
+  // Whether the encoder model has a "lang_id" input (prompt-conditioned multilingual model)
+  bool has_lang_id_input_{};
 
   // Indices into inputs_/outputs_ vectors
   size_t mel_input_idx_{};
@@ -137,6 +147,7 @@ struct NemotronEncoderSubState : State {
   size_t cache_channel_input_idx_{};
   size_t cache_time_input_idx_{};
   size_t cache_channel_len_input_idx_{};
+  size_t lang_id_input_idx_{};
 };
 
 /// Sub-state for the RNNT prediction network (decoder LSTM).
@@ -181,7 +192,7 @@ struct NemotronJoinerSubState : State {
 };
 
 /// Orchestrator state for the full RNNT pipeline.
-struct NemotronSpeechState : State {
+struct NemotronSpeechState : TransducerState {
   NemotronSpeechState(const NemotronSpeechModel& model, const GeneratorParams& params);
   ~NemotronSpeechState() override;
 
@@ -190,18 +201,17 @@ struct NemotronSpeechState : State {
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
-  std::span<const int32_t> StepToken();
-  bool IsChunkDone() const { return chunk_done_; }
-  std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
-  size_t TokenCount() const { return token_count_; }
+  void StepToken() override;
   void ResetStreamingState();
+
+  void SetLangId(int lang_id);
 
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
  private:
   const NemotronSpeechModel& nemotron_model_;
-  NemotronCacheConfig cache_config_;
+  NemotronConfig nemotron_config_;
 
   std::unique_ptr<NemotronEncoderSubState> encoder_state_;
   std::unique_ptr<NemotronPredictionSubState> prediction_state_;
@@ -221,9 +231,6 @@ struct NemotronSpeechState : State {
   int64_t time_step_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
-  bool chunk_done_{true};
-  std::vector<int32_t> last_tokens_;
-  size_t token_count_{};  // Total tokens emitted across all chunks
 
   void RunEncoder();
 };

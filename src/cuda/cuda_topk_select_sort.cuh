@@ -79,8 +79,10 @@ __global__ void GetTop1Kernel(const float* scores_in, float* scores_out, int* in
 
   // Thread 0 writes the final result. No fence or write-back to scores_in is needed.
   if (tid == 0) {
+    // Guard against NaN inputs: clamp invalid index to 0
+    int safe_p = top_k_sequence.p < vocab_size ? top_k_sequence.p : 0;
     scores_out[batch] = top_k_sequence.u;
-    indices_out[batch] = top_k_sequence.p;
+    indices_out[batch] = safe_p;
   }
 }
 
@@ -104,9 +106,14 @@ __global__ void GetTopKKernel(volatile float* scores_in, float* scores_out, int*
     TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op);
 
     if (tid == 0) {
+      // Guard against NaN inputs: if all scores are NaN, no valid index is found
+      // and p remains INT_MAX (its init value). Clamp to index 0 to avoid OOB.
+      int safe_p = top_k_sequence.p < vocab_size ? top_k_sequence.p : 0;
       scores_out[ite + batch * k] = top_k_sequence.u;
-      indices_out[ite + batch * k] = top_k_sequence.p;
-      scores_in[batch * vocab_size + top_k_sequence.p] = -FLT_MAX;
+      indices_out[ite + batch * k] = safe_p;
+      if (top_k_sequence.p < vocab_size) {
+        scores_in[batch * vocab_size + top_k_sequence.p] = -FLT_MAX;
+      }
 
       __threadfence_block();
     }

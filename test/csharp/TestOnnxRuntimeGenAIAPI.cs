@@ -46,9 +46,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static Lazy<string> _lazyPhi2Path = new Lazy<string>(() =>
         {
             string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                               "test_models", "phi-2", "int4", "cpu");
+                                               "models", "phi-2", "int4", "cpu");
             string cudaModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                               "test_models", "phi-2", "int4", "cuda");
+                                               "models", "phi-2", "int4", "cuda");
             // Prefer CUDA model if available.
             if (System.IO.Directory.Exists(cudaModelPath))
             {
@@ -65,7 +65,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static Lazy<string> _lazyTinyRandomGpt2ModelPath = new Lazy<string>(() =>
         {
             string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                            "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+                                            "models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             if (System.IO.Directory.Exists(modelPath))
             {
                 return modelPath;
@@ -79,7 +79,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static Lazy<string> _lazyAdaptersPath = new Lazy<string>(() =>
         {
             string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                            "test_models", "adapters");
+                                            "models", "adapters");
             if (System.IO.Directory.Exists(modelPath))
             {
                 return modelPath;
@@ -238,7 +238,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestAudioOpenBytes()
         {
             byte[] audioBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                                            "test_models", "audios", "1272-141231-0002.mp3"));
+                                                            "audios", "1272-141231-0002.mp3"));
             var audios = Audios.Load(audioBytes);
             Assert.NotNull(audios);
         }
@@ -247,7 +247,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestImageOpenBytes()
         {
             byte[] imageBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                                            "test_models", "images", "10809054.jpg"));
+                                                            "images", "10809054.jpg"));
             var images = Images.Load(imageBytes);
             Assert.NotNull(images);
         }

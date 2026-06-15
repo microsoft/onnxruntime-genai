@@ -7,10 +7,10 @@
 
 namespace Generators {
 
-Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name)
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
-             0, model_.config_->model.decoder.hidden_size},
+             0, hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_.GetInputDataType(name)
                 : model_.session_info_.GetOutputDataType(name)},
@@ -21,7 +21,7 @@ Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& n
   // So only create the transient input and reuse that ortvalue for previous
   // steps in the pipeline.
   if (mode == Embeddings::Mode::Input) {
-    embeddings_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+    embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
   }
 }
 
@@ -49,7 +49,7 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
-      embeddings_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+      embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
       state_.inputs_[index_] = embeddings_.get();
     }
   }

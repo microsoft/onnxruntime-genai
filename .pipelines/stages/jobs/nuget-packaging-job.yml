@@ -2,8 +2,8 @@ parameters:
 - name: ep
   type: string
 
-- name: enable_win_cpu
-  displayName: 'Whether Windows CPU package is built.'
+- name: enable_win_x64_cpu
+  displayName: 'Whether Windows x64 CPU package is built.'
   type: boolean
   default: false
 
@@ -12,8 +12,13 @@ parameters:
   type: boolean
   default: false
 
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
+- name: enable_linux_x64_cpu
+  displayName: 'Whether Linux x64 CPU package is built.'
+  type: boolean
+  default: false
+
+- name: enable_linux_arm64_cpu
+  displayName: 'Whether Linux ARM64 CPU package is built.'
   type: boolean
   default: false
 
@@ -47,11 +52,6 @@ parameters:
   type: boolean
   default: false
 
-- name: enable_win_qnn
-  displayName: 'Whether QNN nuget package should be built.'
-  type: boolean
-  default: false
-
 - name: enable_winml
   displayName: 'Whether WinML nuget package should be built.'
   type: boolean
@@ -69,7 +69,7 @@ parameters:
   default: 'stable'
 
 jobs:
-- job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
+- job: nuget_${{ parameters.ep }}_packaging
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
@@ -95,29 +95,25 @@ jobs:
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'onnxruntime-genai-winml'
     ${{ else }}:
-      value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}-nuget'
+      value: 'onnxruntime-genai-${{ parameters.ep }}-nuget'
 
   - name: genai_nuget_package_name
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
+    ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
-      value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
 
   - name: ort_nuget_package_name
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
+    ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
-      value: 'Microsoft.ML.OnnxRuntime.QNN'
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
       value: 'Microsoft.WindowsAppSDK.ML'
 
@@ -134,7 +130,7 @@ jobs:
         ArtifactName: onnxruntime-genai-win-winml-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
+  - ${{ if and(eq(parameters.enable_win_x64_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-cpu-x64 capi Artifacts'
@@ -169,11 +165,18 @@ jobs:
         ArtifactName: onnxruntime-genai-win-directml-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_linux_cpu, true), eq(parameters.ep, 'cpu')) }}:
+  - ${{ if and(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download linux-cpu-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cpu-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if and(eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.ep, 'cpu')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download linux-cpu-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-linux-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - ${{ if and(eq(parameters.enable_linux_cuda, true), eq(parameters.ep, 'cuda')) }}:
@@ -262,6 +265,8 @@ jobs:
           $rid = "win-arm64"
         } elseif ($a -like "*linux-x64*") {
           $rid = "linux-x64"
+        } elseif ($a -like "*linux-arm64*") {
+          $rid = "linux-arm64"
         } elseif ($a -like "*osx-arm64*") {
           $rid = "osx-arm64"
         } elseif ($a -like "*android*") {
@@ -269,8 +274,7 @@ jobs:
         } elseif ($a -like "*ios*") {
           $rid = "ios"
         } else {
-          Write-Host "Unknown artifact name" $a
-          return
+          throw "Unknown artifact name $a"
         }
 
         mkdir -Force $outputDir/$rid
@@ -297,6 +301,20 @@ jobs:
           Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
         }
         Get-ChildItem -Path $outputDir/$rid -Recurse
+      }
+
+      # Verify all enabled RIDs produced the expected native library.
+      $expected = @{}
+      if ('${{ parameters.enable_win_x64_cpu }}' -eq 'True')        { $expected['win-x64']    = 'onnxruntime-genai.dll' }
+      if ('${{ parameters.enable_win_arm64 }}' -eq 'True')      { $expected['win-arm64']  = 'onnxruntime-genai.dll' }
+      if ('${{ parameters.enable_linux_x64_cpu }}' -eq 'True')      { $expected['linux-x64']  = 'libonnxruntime-genai.so' }
+      if ('${{ parameters.enable_linux_arm64_cpu }}' -eq 'True'){ $expected['linux-arm64']= 'libonnxruntime-genai.so' }
+      if ('${{ parameters.enable_macos_cpu }}' -eq 'True')      { $expected['osx-arm64']  = 'libonnxruntime-genai.dylib' }
+      foreach ($rid in $expected.Keys) {
+        $lib = "$outputDir/$rid/$(buildConfig)/$($expected[$rid])"
+        if (-not (Test-Path $lib)) {
+          throw "Expected native library missing for enabled RID '$rid': $lib"
+        }
       }
 
     displayName: 'Extract Artifacts & Prepare Native Libraries'

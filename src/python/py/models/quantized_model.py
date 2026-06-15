@@ -3,7 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+# Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI generated content.
 """
 A set of Python classes to unpack the quantized weights and repack them in ONNX Runtime's
 standard format.
@@ -18,6 +19,24 @@ import re
 
 import torch
 from safetensors.torch import load_file
+
+
+def normalize_vlm_weight_name(name):
+    """Normalize a checkpoint tensor key for VLM/Quark conventions.
+
+    Returns None if the tensor should be skipped (vision-tower weights), or
+    the normalized key string otherwise.
+    """
+    # Skip vision tower weights in VLM checkpoints
+    if name.startswith(("model.visual.", "model.vision.", "visual.")):
+        return None
+    # Normalize common VLM prefix so existing LLM regex + parsing keeps working
+    if name.startswith("model.language_model."):
+        name = "model." + name[len("model.language_model."):]
+    # Normalize Quark weight_quantizer.* naming to flat weight_* naming
+    name = name.replace(".weight_quantizer.scale", ".weight_scale")
+    name = name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
+    return name
 
 
 class QuantizedTensorModule:
@@ -209,7 +228,7 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
         self._quant_attrs = quant_attrs
-        self._load_quant_config(quant_attrs)  # codeql[py/init-calls-subclass]
+        self._load_quant_config(quant_attrs)
 
         lm_head_tensors = {}
         for weight_file in os.listdir(input_path):
@@ -217,10 +236,14 @@ class QuantizedModel:
                 weights = load_file(os.path.join(input_path, weight_file))
 
                 # Map weights to modules
-                for name, tensor in weights.items():
+                for raw_name, tensor in weights.items():
+                    name = normalize_vlm_weight_name(raw_name)
+                    if name is None:
+                        continue
+
                     # Per-layer quantization support
-                    local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
-                    local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
+                    local_bits = self.get_layer_bits(name)
+                    local_group_size = self.get_layer_group_size(name)
 
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
@@ -290,11 +313,9 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.q_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.q_proj.bias
                             tensor_map["self_attn.q_proj.bias"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.weight$", name)):
-                            # model.layers.layer_id.self_attn.q_norm.weight
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(q_norm|query_layernorm)\.weight$", name)):
                             tensor_map["self_attn.q_norm.weight"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.bias$", name)):
-                            # model.layers.layer_id.self_attn.q_norm.bias
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(q_norm|query_layernorm)\.bias$", name)):
                             tensor_map["self_attn.q_norm.bias"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.k_proj.qweight
@@ -314,11 +335,9 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.k_proj.bias
                             tensor_map["self_attn.k_proj.bias"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.weight$", name)):
-                            # model.layers.layer_id.self_attn.k_norm.weight
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(k_norm|key_layernorm)\.weight$", name)):
                             tensor_map["self_attn.k_norm.weight"] = tensor
-                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.bias$", name)):
-                            # model.layers.layer_id.self_attn.k_norm.bias
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.(k_norm|key_layernorm)\.bias$", name)):
                             tensor_map["self_attn.k_norm.bias"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.v_proj.qweight
@@ -679,7 +698,7 @@ class QuantizedModel:
         self.set_properties()
 
     # Canonical name mapping for lm_head tensors (transformer.output_layer.* -> lm_head.*)
-    _LM_HEAD_NAME_MAP = {  # noqa: RUF012
+    _LM_HEAD_NAME_MAP = {
         "transformer.output_layer.weight": "lm_head.weight",
         "transformer.output_layer.bias": "lm_head.bias",
         "transformer.output_layer.qweight": "lm_head.qweight",

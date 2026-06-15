@@ -40,6 +40,7 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 namespace Generators {
 struct Model;
 struct State;
+struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
@@ -130,6 +131,18 @@ struct Generator : LeakChecked<Generator> {
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength
   Action last_action_{standard};
+
+  // Pre-computed per-token decisions: avoid repeated checks each token
+  // Non-null when the model is a transducer (RNNT, TDT); points into state_.
+  TransducerState* transducer_state_{nullptr};
+  int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
+  enum class SamplingMethod { kGreedy,
+                              kTopK,
+                              kTopP,
+                              kTopKTopP };
+  SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  void InitializeSamplingMethod(const GeneratorParams& params);
+  void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
 struct OrtGlobals {

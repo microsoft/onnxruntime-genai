@@ -16,24 +16,24 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
     throw std::runtime_error("NemotronStreamingProcessor requires a nemotron_speech model type. Got: " + model.config_->model.type);
   }
 
-  cache_config_ = nemotron_model->cache_config_;
+  nemotron_config_ = nemotron_model->nemotron_config_;
 
-  if (cache_config_.pre_encode_cache_size <= 0) {
+  if (nemotron_config_.pre_encode_cache_size <= 0) {
     throw std::runtime_error("NemotronStreamingProcessor requires pre_encode_cache_size > 0. Got: " +
-                             std::to_string(cache_config_.pre_encode_cache_size));
+                             std::to_string(nemotron_config_.pre_encode_cache_size));
   }
 
   // Initialize mel extractor from config
   nemo_mel::NemoMelConfig mel_cfg{
-      cache_config_.num_mels, cache_config_.fft_size,
-      cache_config_.hop_length, cache_config_.win_length,
-      cache_config_.sample_rate,
-      cache_config_.preemph, cache_config_.log_eps};
+      nemotron_config_.num_mels, nemotron_config_.fft_size,
+      nemotron_config_.hop_length, nemotron_config_.win_length,
+      nemotron_config_.sample_rate,
+      nemotron_config_.preemph, nemotron_config_.log_eps};
   mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
 
   // Initialize mel pre-encode cache (time-major ring buffer, zeros for first chunk)
   mel_pre_encode_cache_.assign(
-      static_cast<size_t>(cache_config_.pre_encode_cache_size) * cache_config_.num_mels, 0.0f);
+      static_cast<size_t>(nemotron_config_.pre_encode_cache_size) * nemotron_config_.num_mels, 0.0f);
   cache_pos_ = 0;
 
   // Initialize VAD from config
@@ -46,7 +46,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
-  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
+  const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
 
   // Process the first complete chunk available
   if (audio_buffer_.size() >= chunk_size) {
@@ -75,7 +75,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
     return nullptr;
   }
 
-  const size_t chunk_size = static_cast<size_t>(cache_config_.chunk_samples);
+  const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
   audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
 
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
@@ -91,12 +91,12 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   // Compute mel spectrogram for this chunk: returns [num_mels, num_frames] (frequency-major)
   auto [mel_data, num_frames] = mel_extractor_.Process(audio_chunk, chunk_samples);
 
-  const int cache_size = cache_config_.pre_encode_cache_size;
-  const int num_mels = cache_config_.num_mels;
+  const int cache_size = nemotron_config_.pre_encode_cache_size;
+  const int num_mels = nemotron_config_.num_mels;
   const int total_mel_frames = cache_size + num_frames;
 
   // Create output tensor: [1, total_mel_frames, num_mels] (time-major)
-  auto signal_type = model_.session_info_.GetInputDataType(cache_config_.enc_in_audio);
+  auto signal_type = model_.session_info_.GetInputDataType(nemotron_config_.enc_in_audio);
 
   // TODO: Optimize for GPU/CUDA later, CPU always expects float32.
   if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {

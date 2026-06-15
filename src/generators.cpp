@@ -4,8 +4,11 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include <cstring>
+#include <cstdlib>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/parakeet.h"
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
@@ -87,11 +90,28 @@ GetOrtGlobals() {
   return globals;
 }
 
-// Used by Shutdown() to display the counts and types of any leaked objects
+// Used by Shutdown() to display the counts and types of any leaked objects.
+// Leak reporting is gated to debug builds or when logging is enabled, since
+// consuming applications often cannot guarantee model teardown before process
+// exit, and there is little they can do in response at that point.
+static bool ShouldReportLeaks() {
+#if !defined(NDEBUG)
+  return true;
+#else
+  return g_log.enabled;
+#endif
+}
+
 template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
-  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
-  return ((LeakChecked<Types>::Count() != 0) || ...);
+  const bool report = ShouldReportLeaks();
+  bool any_leaked = false;
+  ((LeakChecked<Types>::Count() != 0
+        ? (any_leaked = true,
+           report ? (std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl, 0) : 0)
+        : 0),
+   ...);
+  return any_leaked && report;
 }
 
 void Shutdown() {
@@ -348,10 +368,11 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
-  // RNNT models don't use the traditional search/logits pipeline,
+  // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
-  if (ModelType::IsRNNT(model.config_->model.type)) {
+  if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
+    transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
     return;
   }
 
@@ -367,6 +388,46 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
+
+  InitializePhi3RopeThreshold(params);
+  InitializeSamplingMethod(params);
+}
+
+void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
+  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
+  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+                                          model_->p_device_->GetType() == DeviceType::DML;
+
+  // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
+  // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
+  const auto& model_type = model_->config_->model.type;
+  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
+    if (model_type == "phi3" || model_type == "phimoe")
+      phi3_rope_threshold_ = 4097;
+    else if (model_type == "phi3small")
+      phi3_rope_threshold_ = 8193;
+  }
+}
+
+void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
+  const auto& search = params.search;
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
+    sampling_method_ = SamplingMethod::kGreedy;
+  } else {
+    if (search.num_beams != 1)
+      throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+    if (search.top_p < 0.0f || search.top_p > 1.0f)
+      throw std::runtime_error("top_p must be between 0.0 and 1.0");
+    if (search.top_k < 0)
+      throw std::runtime_error("top_k must be 0 or greater");
+    if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopKTopP;
+    } else if (search.top_k > 1) {
+      sampling_method_ = SamplingMethod::kTopK;
+    } else {
+      sampling_method_ = SamplingMethod::kTopP;
+    }
+  }
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
@@ -507,22 +568,36 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
+  // Nemotron speech models support per-generator "lang_id" override so that
+  // a single loaded model can serve generators in different languages.
+  if (ModelType::IsRNNT(model_->config_->model.type) && key != nullptr && std::strcmp(key, "lang_id") == 0) {
+    if (value == nullptr) {
+      throw std::runtime_error("SetRuntimeOption(\"lang_id\"): value must not be null.");
+    }
+    size_t pos = 0;
+    int lang_id = std::stoi(value, &pos);
+    if (pos != std::strlen(value)) {
+      throw std::runtime_error(std::string("SetRuntimeOption(\"lang_id\"): invalid integer value \"") + value + "\".");
+    }
+    static_cast<NemotronSpeechState*>(state_.get())->SetLangId(lang_id);
+    return;
+  }
   state_->SetRunOption(key, value);
 }
 
 size_t Generator::TokenCount() const {
-  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get()))
-    return speech_state->TokenCount();
+  if (transducer_state_)
+    return transducer_state_->TokenCount();
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
+  if (transducer_state_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    return speech_state->IsChunkDone();
+    return transducer_state_->IsChunkDone();
   }
 
   if (computed_logits_) {
@@ -555,32 +630,24 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
-  // RNNT models: yield one token per call from the decoder state machine
-  if (auto* speech_state = dynamic_cast<NemotronSpeechState*>(state_.get())) {
+  // Transducer models (RNNT, TDT): yield one token per call by stepping
+  // the encoder/decoder/joiner loop directly.
+  if (transducer_state_) {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
-    speech_state->StepToken();
+    transducer_state_->StepToken();
     return;
   }
 
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
-  // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
-  // TODO: change this when these EPs support multi rope factors
-  const bool epUsesSingleRopeFactor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx || model_->p_device_->GetType() == DeviceType::DML;
-
-  // TODO: Extend the solution to make it work for batch size > 1, num beams > 1, multimodal and DML
-  // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
-  // at this stage which is achieved by rewinding to zero and appending the current sequence
-  // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
-  // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
-  if (search_->params_->BatchBeamSize() == 1 && !epUsesSingleRopeFactor) {
-    if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8193) && (model_->config_->model.type == "phi3small"))) {
-      auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
-      RewindToLength(0);
-      AppendTokens(current_seq);
-    }
+  // Phi3 model switches from short factor to long factor at the ROPE threshold token,
+  // needs recomputation of Position IDs and KV Cache via rewind + re-append.
+  if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
+    auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
+    RewindToLength(0);
+    AppendTokens(current_seq);
   }
 
   if (!computed_logits_) {
@@ -609,33 +676,26 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
-    search_->SelectTop();
-    return;
-  }
-
-  // The user explicitly called TopK_TopP on a beam search
-  if (search.num_beams != 1)
-    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
-
-  // Sanity checks
-  if (search.top_p < 0.0f || search.top_p > 1.0f)
-    throw std::runtime_error("top_p must be between 0.0 and 1.0");
-  if (search.top_k < 0)
-    throw std::runtime_error("top_k must be 0 or greater");
-
-  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
-    search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
-  } else if (search.top_k > 1) {
-    search_->SampleTopK(search.top_k, search.temperature);
-  } else {
-    assert(search.top_k == 0);
-    search_->SampleTopP(search.top_p, search.temperature);
+  switch (sampling_method_) {
+    case SamplingMethod::kGreedy:
+      search_->SelectTop();
+      return;
+    case SamplingMethod::kTopKTopP:
+      search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+      return;
+    case SamplingMethod::kTopK:
+      search_->SampleTopK(search.top_k, search.temperature);
+      return;
+    case SamplingMethod::kTopP:
+      search_->SampleTopP(search.top_p, search.temperature);
+      return;
+    default:
+      throw std::runtime_error("Unknown sampling method");
   }
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline")
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

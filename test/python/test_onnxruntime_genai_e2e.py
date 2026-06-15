@@ -47,14 +47,15 @@ def run_whisper():
 
     num_beams = 5
     (audio_path, expected_transcription) = (
-        os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3"),
+        os.path.join(cwd, "..", "audios", "1272-141231-0002.mp3"),
         "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
     )
 
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
-        built_model = os.path.join(cwd, "..", "test_models", f"whisper-tiny-{precision}-{execution_provider}")
-        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision, device=execution_provider, one_layer=False)
+        built_model = os.path.join(cwd, "..", "models", f"whisper-tiny-{precision}-{execution_provider}")
+        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision,
+                       device=execution_provider, one_layer=False, enable_graph_capture=False)
 
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
@@ -96,7 +97,7 @@ def run_tool_calling():
 
     for (model_name, tool_call_start, tool_call_end) in tool_call_models:
         for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
-            model_path = os.path.join(cwd, "..", "test_models", model_name, precision, execution_provider)
+            model_path = os.path.join(cwd, "..", "models", model_name, precision, execution_provider)
             if not os.path.exists(model_path): continue
 
             # Run special_tokens.py to mark tool call token ids as special
@@ -125,7 +126,7 @@ def run_tool_calling():
                 "--response_format",
                 response_format,
                 "--tools_file",
-                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                os.path.join(cwd, "..", "tool-definitions", "weather.json"),
                 "--tool_call_start",
                 tool_call_start,
                 "--tool_call_end",
@@ -150,7 +151,7 @@ def run_tool_calling():
                 "--response_format",
                 response_format,
                 "--tools_file",
-                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                os.path.join(cwd, "..", "tool-definitions", "weather.json"),
                 "--tool_call_start",
                 tool_call_start,
                 "--tool_call_end",
@@ -168,15 +169,15 @@ def run_nemotron_speech():
     """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_speech.py example."""
     log.debug("Running Nemotron Speech Python E2E Test")
 
-    # Look for nemotron speech model in test_models directory
+    # Look for nemotron speech model in "models" directory
     cwd = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    model_path = os.path.join(cwd, "..", "models", "nemotron-speech-streaming")
     if not os.path.exists(model_path):
         log.info(f"Nemotron speech model not found at {model_path}, skipping E2E test.")
         return
 
     # Look for a test audio file
-    audio_path = os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3")
+    audio_path = os.path.join(cwd, "..", "audios", "1272-141231-0002.mp3")
     if not os.path.exists(audio_path):
         log.info(f"Test audio file not found at {audio_path}, skipping E2E test.")
         return
@@ -190,6 +191,33 @@ def run_nemotron_speech():
         audio_path,
     ]
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
+def run_parakeet_tdt():
+    """Run Parakeet TDT E2E test by invoking the parakeet.py example."""
+    log.debug("Running Parakeet TDT Python E2E Test")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(cwd, "..", "models", "parakeet-tdt")
+    if not os.path.exists(model_path):
+        log.info(f"Parakeet TDT model not found at {model_path}, skipping E2E test.")
+        return
+
+    for audio_filename in ("jfk.flac", "tedlium_long_120s.flac"):
+        audio_path = os.path.join(cwd, "..", "audios", audio_filename)
+        if not os.path.exists(audio_path):
+            log.info(f"Test audio file not found at {audio_path}, skipping.")
+            continue
+
+        command = [
+            sys.executable,
+            os.path.join(cwd, "..", "..", "examples", "python", "parakeet.py"),
+            "--model_path",
+            model_path,
+            "--audio_file",
+            audio_path,
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def get_args():
@@ -223,6 +251,9 @@ if __name__ == "__main__":
 
     # Run Nemotron Speech E2E tests
     run_nemotron_speech()
+
+    # Run Parakeet TDT E2E tests
+    run_parakeet_tdt()
 
     # Run tool calling E2E tests
     run_tool_calling()
