@@ -15,9 +15,13 @@ struct Allocator;
 }
 
 namespace Generators {
+struct GeneratorParams;
+struct GlobalAllocatorSession;
+struct OrtGlobals;
 struct Search;
 struct Sequences;
-struct GeneratorParams;
+
+std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -101,28 +105,15 @@ enum struct DeviceType {
 };
 
 struct DeviceInterface {
-  virtual ~DeviceInterface() {}
+  virtual ~DeviceInterface();
 
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
-  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const {
-    // Names for the device memory types used by 'OrtMemoryInfo::Create'
-    static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
-    static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
-    // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
-    auto name = device_memory_type_names[static_cast<int>(GetType())];
-    return OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  }
-
-  virtual Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& /* config */) const {
-    // Names for the device types used by 'SetProviderSessionOptions'
-    static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
-    static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-    return Config::ProviderOptions{device_type_names[static_cast<int>(GetType())], {}};
-  }
+  virtual GlobalAllocatorSession& GetGlobalAllocatorSession(const Config& /* config */) const;
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const;
+  virtual Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& /* config */) const;
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
@@ -152,10 +143,7 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
 
-  virtual void* GetCudaStream() {
-    assert(false);
-    return nullptr;
-  }  // Temporary until we fully factor out providers
+  virtual void* GetCudaStream();
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

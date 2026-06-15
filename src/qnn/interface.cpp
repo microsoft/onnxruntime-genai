@@ -12,6 +12,9 @@ namespace QNN {
 static Ort::Allocator* ort_allocator_{};
 const char* device_label = "qnn";
 
+GlobalAllocatorSession g_htp_allocator;
+GlobalAllocatorSession g_dx12_allocator;
+
 struct QnnMemory final : DeviceBuffer {
   QnnMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
@@ -48,6 +51,29 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::QNN; }
+
+  GlobalAllocatorSession& GetGlobalAllocatorSession(const Config& config) const override {
+    auto* allocator = &g_htp_allocator;
+
+    const auto& config_providers = config.model.decoder.session_options.providers;
+    const auto& config_provider_options = config.model.decoder.session_options.provider_options;
+
+    auto it = std::find_if(config_providers.begin(), config_providers.end(), [](const std::string& p) { return p == "QNN"; });
+    if (it != config_providers.end()) {
+      const auto i = std::distance(config_providers.begin(), it);
+      if (config_provider_options.size() > static_cast<size_t>(i)) {
+        for (const auto& pair : config_provider_options[i].options) {
+          if (pair.first == "enable_htp_shared_memory_allocator" && pair.second == "1") {
+            allocator = &g_htp_allocator;
+          } else if (pair.first == "enable_dx12_shared_memory_allocator" && pair.second == "1") {
+            allocator = &g_dx12_allocator;
+          }
+        }
+      }
+    }
+
+    return *allocator;
+  }
 
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     // Note: "QnnHtpShared" allocator is the correct name even when using the GPU backend. Eventually, the plan is to

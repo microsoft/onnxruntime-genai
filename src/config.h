@@ -4,6 +4,16 @@
 // Portions of this file consist of AI generated content.
 #pragma once
 
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include "filesystem.h"
+#include "onnxruntime_c_api.h"  // for OrtHardwareDeviceType and GraphOptimizationLevel
+#include "span.h"
+
 namespace Generators {
 
 struct RuntimeSettings;
