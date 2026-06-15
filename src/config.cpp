@@ -15,6 +15,12 @@
 
 namespace Generators {
 
+namespace {
+constexpr std::string_view kTurboQuantDisabled = "0";
+constexpr std::string_view kTurboQuantInt4 = "4";
+constexpr std::string_view kTurboQuantOptionName = "turboQuant";
+}  // namespace
+
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
@@ -1485,6 +1491,39 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 
   ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
   JSON::Parse(element, json.str());
+}
+
+int GetTurboQuantBitWidth(const Config::SessionOptions& session_options,
+                          std::string_view provider_name) {
+  const auto normalized_provider = NormalizeProviderName(provider_name);
+  const auto provider_options_it = std::find_if(session_options.provider_options.begin(),
+                                                session_options.provider_options.end(),
+                                                [&normalized_provider](const Config::ProviderOptions& po) {
+                                                  return po.name == normalized_provider;
+                                                });
+  if (provider_options_it == session_options.provider_options.end()) {
+    return 0;
+  }
+
+  const auto option_it = std::find_if(provider_options_it->options.begin(),
+                                      provider_options_it->options.end(),
+                                      [](const Config::NamedString& option) {
+                                        return option.first == kTurboQuantOptionName;
+                                      });
+  if (option_it == provider_options_it->options.end() || option_it->second == kTurboQuantDisabled) {
+    return 0;
+  }
+
+  const auto& turbo_quant = option_it->second;
+
+  if (turbo_quant == kTurboQuantInt4) {
+    return 4;
+  }
+
+  throw std::runtime_error("Unsupported turboQuant value: " + turbo_quant +
+                           ". Only " + std::string(kTurboQuantDisabled) +
+                           " (disabled) and " + std::string(kTurboQuantInt4) +
+                           " are supported.");
 }
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {

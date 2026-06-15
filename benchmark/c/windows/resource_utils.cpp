@@ -28,7 +28,7 @@ GpuMemoryInfo GetGpuMemoryUsage() {
     return result;
   }
 
-  for (UINT i = 0; ; ++i) {
+  for (UINT i = 0;; ++i) {
     IDXGIAdapter1* adapter1 = nullptr;
     if (factory->EnumAdapters1(i, &adapter1) == DXGI_ERROR_NOT_FOUND) break;
 

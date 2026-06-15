@@ -467,6 +467,8 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 
+int GetTurboQuantBitWidth(const Config::SessionOptions& session_options,
+                          std::string_view provider_name = "WebGPU");
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
