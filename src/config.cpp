@@ -1433,34 +1433,35 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 int GetTurboQuantBitWidth(const Config::SessionOptions& session_options,
                           std::string_view provider_name) {
   const auto normalized_provider = NormalizeProviderName(provider_name);
-  const auto provider_options_it = std::find_if(session_options.provider_options.begin(),
-                                                session_options.provider_options.end(),
-                                                [&normalized_provider](const Config::ProviderOptions& po) {
-                                                  return po.name == normalized_provider;
-                                                });
-  if (provider_options_it == session_options.provider_options.end()) {
-    return 0;
+  for (auto provider_options_it = session_options.provider_options.rbegin();
+       provider_options_it != session_options.provider_options.rend();
+       ++provider_options_it) {
+    if (NormalizeProviderName(provider_options_it->name) != normalized_provider) {
+      continue;
+    }
+
+    const auto option_it = std::find_if(provider_options_it->options.begin(),
+                                        provider_options_it->options.end(),
+                                        [](const Config::NamedString& option) {
+                                          return option.first == kTurboQuantOptionName;
+                                        });
+    if (option_it == provider_options_it->options.end() || option_it->second == kTurboQuantDisabled) {
+      return 0;
+    }
+
+    const auto& turbo_quant = option_it->second;
+
+    if (turbo_quant == kTurboQuantInt4) {
+      return 4;
+    }
+
+    throw std::runtime_error("Unsupported turboQuant value: " + turbo_quant +
+                             ". Only " + std::string(kTurboQuantDisabled) +
+                             " (disabled) and " + std::string(kTurboQuantInt4) +
+                             " are supported.");
   }
 
-  const auto option_it = std::find_if(provider_options_it->options.begin(),
-                                      provider_options_it->options.end(),
-                                      [](const Config::NamedString& option) {
-                                        return option.first == kTurboQuantOptionName;
-                                      });
-  if (option_it == provider_options_it->options.end() || option_it->second == kTurboQuantDisabled) {
-    return 0;
-  }
-
-  const auto& turbo_quant = option_it->second;
-
-  if (turbo_quant == kTurboQuantInt4) {
-    return 4;
-  }
-
-  throw std::runtime_error("Unsupported turboQuant value: " + turbo_quant +
-                           ". Only " + std::string(kTurboQuantDisabled) +
-                           " (disabled) and " + std::string(kTurboQuantInt4) +
-                           " are supported.");
+  return 0;
 }
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {

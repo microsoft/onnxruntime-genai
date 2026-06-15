@@ -30,10 +30,17 @@ GpuMemoryInfo GetGpuMemoryUsage() {
 
   for (UINT i = 0;; ++i) {
     IDXGIAdapter1* adapter1 = nullptr;
-    if (factory->EnumAdapters1(i, &adapter1) == DXGI_ERROR_NOT_FOUND) break;
+    const HRESULT enum_hr = factory->EnumAdapters1(i, &adapter1);
+    if (enum_hr == DXGI_ERROR_NOT_FOUND) break;
+    if (FAILED(enum_hr) || adapter1 == nullptr) {
+      continue;
+    }
 
     DXGI_ADAPTER_DESC1 desc;
-    adapter1->GetDesc1(&desc);
+    if (FAILED(adapter1->GetDesc1(&desc))) {
+      adapter1->Release();
+      continue;
+    }
     // Skip software/remote adapters
     if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
       adapter1->Release();

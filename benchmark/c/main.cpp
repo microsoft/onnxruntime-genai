@@ -47,6 +47,35 @@ class Timing {
   const Clock::time_point start_;
 };
 
+class ScopedProfilingRuntimeOption {
+ public:
+  ScopedProfilingRuntimeOption(OgaGenerator* generator, bool enabled, const char* value)
+      : generator_{generator}, enabled_{enabled} {
+    if (enabled_) {
+      generator_->SetRuntimeOption("enable_profiling", value);
+    }
+  }
+
+  ScopedProfilingRuntimeOption(const ScopedProfilingRuntimeOption&) = delete;
+  ScopedProfilingRuntimeOption& operator=(const ScopedProfilingRuntimeOption&) = delete;
+
+  ~ScopedProfilingRuntimeOption() {
+    if (!enabled_) {
+      return;
+    }
+
+    // Best effort reset to avoid leaving profiling enabled after an exception.
+    try {
+      generator_->SetRuntimeOption("enable_profiling", "0");
+    } catch (...) {
+    }
+  }
+
+ private:
+  OgaGenerator* generator_;
+  bool enabled_;
+};
+
 struct Statistics {
   DurationFp average{};
   DurationFp stddev{};
@@ -303,21 +332,14 @@ void RunBenchmark(const benchmark::Options& opts) {
 
       {
         Timing prompt_processing_timing{prompt_processing_times};
-        if (profile_prefill_now) {
-          gen->SetRuntimeOption("enable_profiling", prefill_profile_prefix);
-        }
+        ScopedProfilingRuntimeOption prefill_profile_guard{gen, profile_prefill_now, prefill_profile_prefix};
         gen->AppendTokenSequences(*prompt_sequences);
-        if (profile_prefill_now) {
-          gen->SetRuntimeOption("enable_profiling", "0");
-        }
       }
 
       const size_t target_token_count = gen->TokenCount() + opts.num_tokens_to_generate;
       bool generator_done = false;
 
-      if (profile_generation_now) {
-        gen->SetRuntimeOption("enable_profiling", generation_profile_prefix);
-      }
+      ScopedProfilingRuntimeOption generation_profile_guard{gen, profile_generation_now, generation_profile_prefix};
 
       {
         Timing sampling_timing{sampling_times};
@@ -334,9 +356,6 @@ void RunBenchmark(const benchmark::Options& opts) {
         }
       }
 
-      if (profile_generation_now) {
-        gen->SetRuntimeOption("enable_profiling", "0");
-      }
     }
   }
 
