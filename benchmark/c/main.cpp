@@ -368,9 +368,12 @@ void RunBenchmark(const benchmark::Options& opts) {
     auto human_bytes = [](size_t bytes) -> std::string {
       std::ostringstream oss;
       oss << std::fixed << std::setprecision(2);
-      if (bytes >= (1ULL << 40)) oss << (double)bytes / (1ULL << 40) << " TB";
-      else if (bytes >= (1ULL << 30)) oss << (double)bytes / (1ULL << 30) << " GB";
-      else oss << (double)bytes / (1ULL << 20) << " MB";
+      if (bytes >= (1ULL << 40))
+        oss << (double)bytes / (1ULL << 40) << " TB";
+      else if (bytes >= (1ULL << 30))
+        oss << (double)bytes / (1ULL << 30) << " GB";
+      else
+        oss << (double)bytes / (1ULL << 20) << " MB";
       return oss.str();
     };
 

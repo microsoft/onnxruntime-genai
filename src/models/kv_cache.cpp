@@ -154,14 +154,15 @@ namespace {
 // TurboQuant packs each head into (1 + head_size/8) u32 words: one fp32 scale followed by
 // head_size values quantized to 4 bits. The tensor dimension depends on the element type.
 // TurboQuant requires head_size >= 8 and a power of 2 (Hadamard transform needs power-of-2,
-// and packing 8 indices per u32 needs head_size >= 8). Silently falls back to regular
-// head_size if those conditions are not met or turbo_quant_bits is 0 (disabled).
+// and packing 8 indices per u32 needs head_size >= 8). If turbo_quant_bits is enabled with
+// an invalid head_size, this throws instead of silently falling back.
 int64_t ComputeTurboQuantHeadSize(int head_size, int turbo_quant_bits, ONNXTensorElementDataType type) {
   if (turbo_quant_bits == 4) {
-    // Silently disable if head_size doesn't meet TurboQuant requirements.
     const bool is_power_of_two = head_size > 0 && (head_size & (head_size - 1)) == 0;
     if (head_size < 8 || !is_power_of_two) {
-      return head_size;
+      throw std::runtime_error(
+          "TurboQuant requires head_size to be a power of 2 and >= 8, but got head_size=" +
+          std::to_string(head_size) + ".");
     }
     const int compressed_u32_words = head_size / 8 + 1;
     const int bytes_per_element = static_cast<int>(Ort::SizeOf(type));
@@ -302,31 +303,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
 
   // Detect TurboQuant configuration from provider options.
-  int turbo_quant_bits = 0;
-  for (const auto& provider : model_.config_->model.decoder.session_options.provider_options) {
-    if (provider.name == "WebGPU") {
-      for (const auto& opt : provider.options) {
-        if (opt.first == "turboQuant") {
-          std::size_t pos = 0;
-          int parsed_val = 0;
-          try {
-            parsed_val = std::stoi(opt.second, &pos);
-          } catch (const std::exception& e) {
-            throw std::runtime_error("Invalid turboQuant value '" + opt.second + "': " + e.what());
-          }
-          if (pos != opt.second.size()) {
-            throw std::runtime_error("Invalid turboQuant value '" + opt.second + "': must be an integer.");
-          }
-          turbo_quant_bits = parsed_val;
-          if (turbo_quant_bits != 0 && turbo_quant_bits != 4) {
-            throw std::runtime_error("Unsupported turboQuant value: " + opt.second + ". Only 0 (disabled) and 4 are supported.");
-          }
-          break;
-        }
-      }
-      break;
-    }
-  }
+  const int turbo_quant_bits = GetTurboQuantBitWidth(model_.config_->model.decoder.session_options);
 
   // When TurboQuant is enabled, compute the compressed KV cache head dimension.
   if (turbo_quant_bits == 4) {
