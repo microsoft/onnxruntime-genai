@@ -468,6 +468,11 @@ def get_args():
                     This affects attention mask reformatting and position IDs handling.
                 use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                use_fp4_moe = Use FP4 (MXFP4) quantization for MoE layers on the CUDA EP. Default is false.
+                    If true, the QMoE op uses MXFP4 weights (quant_type="fp4", expert_weight_bits=4, block_size=32):
+                    4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
+                    Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON (CUDA Toolkit 12.8+).
+                    Mutually exclusive with use_8bits_moe. Only supported on the CUDA EP.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
