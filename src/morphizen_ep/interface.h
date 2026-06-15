@@ -4,6 +4,12 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "../smartptrs.h"  // DeviceInterface
+
 namespace Generators {
 
 // Memory allocated through the MorphiZen EP interface is treated as both

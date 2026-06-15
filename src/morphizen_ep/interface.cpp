@@ -81,8 +81,10 @@ struct Interface : MorphiZenEPInterface {
     if (GetModuleHandleA(ep_filename_))
       return;
 #else
-    if (dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW))
+    if (void* handle = dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW)) {
+      dlclose(handle);
       return;
+    }
 #endif
 
     std::error_code ec;
