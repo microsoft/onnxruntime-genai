@@ -414,6 +414,20 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGeneratorParams* params, const char* name, double value) {
+  OGA_TRY
+  params->SetSpeculativeNumber(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value) {
+  OGA_TRY
+  *value = params->GetSpeculativeNumber(name);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
   *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
@@ -603,6 +617,22 @@ const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* gen
     return transducer->GetAllTokens().data();
   }
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats) {
+  OGA_TRY
+  auto stats = generator->GetSpeculativeStats();
+  out_stats->rounds = stats.rounds;
+  out_stats->draft_tokens_proposed = stats.draft_tokens_proposed;
+  out_stats->draft_tokens_accepted = stats.draft_tokens_accepted;
+  out_stats->correction_tokens = stats.correction_tokens;
+  out_stats->bonus_tokens = stats.bonus_tokens;
+  out_stats->avg_draft_ms_per_token = stats.avg_draft_ms_per_token;
+  out_stats->avg_target_ms_per_token = stats.avg_target_ms_per_token;
+  out_stats->acceptance_rate = stats.acceptance_rate;
+  out_stats->effective_speedup = stats.effective_speedup;
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {

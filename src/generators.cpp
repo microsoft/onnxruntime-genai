@@ -357,6 +357,16 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
   }
 }
 
+void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) {
+  Generators::SetSpeculativeNumber(speculative, name, value);
+}
+
+double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
+  if (name == "max_draft_tokens")
+    return static_cast<double>(speculative.max_draft_tokens);
+  throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }

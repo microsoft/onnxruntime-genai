@@ -192,6 +192,24 @@ struct PyGeneratorParams {
     }
   }
 
+  void SetSpeculativeOptions(const pybind11::kwargs& dict) {
+    for (auto& entry : dict) {
+      auto name = entry.first.cast<std::string>();
+      if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+        params_->SetSpeculativeOption(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+        params_->SetSpeculativeOption(name.c_str(), entry.second.cast<int>());
+      } else
+        throw std::runtime_error("Unknown speculative option type, must be int or float: " + name);
+    }
+  }
+
+  pybind11::dict GetSpeculativeOptions() {
+    pybind11::dict d;
+    d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
+    return d;
+  }
+
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
@@ -290,6 +308,21 @@ struct PyGenerator {
     generator_->SetRuntimeOption(key.c_str(), value.c_str());
   }
 
+  pybind11::dict GetSpeculativeStats() {
+    auto stats = generator_->GetSpeculativeStats();
+    pybind11::dict d;
+    d["rounds"] = stats.rounds;
+    d["draft_tokens_proposed"] = stats.draft_tokens_proposed;
+    d["draft_tokens_accepted"] = stats.draft_tokens_accepted;
+    d["correction_tokens"] = stats.correction_tokens;
+    d["bonus_tokens"] = stats.bonus_tokens;
+    d["avg_draft_ms_per_token"] = stats.avg_draft_ms_per_token;
+    d["avg_target_ms_per_token"] = stats.avg_target_ms_per_token;
+    d["acceptance_rate"] = stats.acceptance_rate;
+    d["effective_speedup"] = stats.effective_speedup;
+    return d;
+  }
+
  private:
   std::unique_ptr<OgaGenerator> generator_;
 };
@@ -343,6 +376,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("set_speculative_options", &PyGeneratorParams::SetSpeculativeOptions)
+      .def("get_speculative_options", &PyGeneratorParams::GetSpeculativeOptions)
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
            pybind11::arg("enable_ff_tokens") = false)
@@ -496,7 +531,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
-      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption)
+      .def("get_speculative_stats", &PyGenerator::GetSpeculativeStats);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
