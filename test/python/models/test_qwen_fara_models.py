@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
-from _test_utils import run_subprocess
+from _test_utils import register_webgpu_plugin, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("qwen-fara-vision-tests")
@@ -729,16 +729,11 @@ def test_qwen3_5_hybrid_text_generation_cuda(test_data_path):
 # ---------------------------------------------------------------------------
 
 
-def _is_webgpu_test_enabled():
-    """WebGPU tests require both runtime support and explicit opt-in via TEST_WEBGPU env var."""
-    return (
-        hasattr(og, "is_webgpu_available")
-        and og.is_webgpu_available()
-        and os.environ.get("TEST_WEBGPU", "").lower() in ("true", "1", "yes")
-    )
+# Register the WebGPU EP plugin once at import time so the gating check below and the tests can use it.
+_webgpu_plugin_registered = register_webgpu_plugin(log)
 
 
-@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+@pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
 def test_qwen3_5_hybrid_generator_creates_webgpu(test_data_path):
     """Test that a Generator can be created for the hybrid model on WebGPU.
     Validates RecurrentState separate-buffer path (WebGPU cannot alias
@@ -757,7 +752,7 @@ def test_qwen3_5_hybrid_generator_creates_webgpu(test_data_path):
     assert generator is not None
 
 
-@pytest.mark.skipif(not _is_webgpu_test_enabled(), reason="WebGPU EP not available or TEST_WEBGPU not set")
+@pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
 def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
     """Test that the hybrid model generator constructs and prefill executes on WebGPU.
     RecurrentState uses separate past/present buffers to avoid the WebGPU
