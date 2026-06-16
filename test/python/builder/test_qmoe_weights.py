@@ -17,9 +17,32 @@ must:
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
 import pytest
 import torch
-from onnxruntime_genai.models.builders.base import Model
+
+BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
+sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+
+
+def _load_builder_module(module_name):
+    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"models.builders.{module_name}"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+sys.modules.setdefault("models", types.ModuleType("models"))
+builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
+builders_package.__path__ = [str(BUILDERS_DIR)]
+
+base_module = _load_builder_module("base")
+Model = base_module.Model
 
 
 class _FakeMoEModel:
@@ -78,12 +101,12 @@ def test_non_cuda_does_not_use_cuda_only_paths():
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
-@pytest.mark.parametrize("bad_block", [16, 32, 256])
+@pytest.mark.parametrize("bad_block", [16, 48, 256])
 def test_cuda_rejects_unsupported_block_size(weights_prepacked, bad_block):
     """Unsupported block sizes must raise a real exception (not an assert that
     ``python -O`` would strip)."""
     model = _FakeMoEModel("cuda", bad_block, weights_prepacked)
-    with pytest.raises(ValueError, match="block_size 64 or 128"):
+    with pytest.raises(ValueError, match=r"block_size 32, 64, or 128"):
         model.make_qmoe_weights(_W)
 
 

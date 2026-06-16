@@ -307,7 +307,7 @@ class Model:
         # For CUDA QMoE the builder ships expert weights already CUTLASS-prepacked (offline via pack_weights_for_cuda_mixed_gemm, see make_qmoe_weights),
         # so the QMoE op's default interpretation (weights_prepacked=-1/auto = prepacked) is exactly what we want and the attribute is omitted.
         # Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship raw [E, N, K/pack] weights and let the runtime PrePack hook transform them).
-        weights_prepacked = int(extra_options["qmoe_weights_prepacked"]) if "qmoe_weights_prepacked" in extra_options else -1
+        weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -338,7 +338,7 @@ class Model:
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
         self.quant_attrs = {
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
-            "qmoe_block_size": int(self.qmoe_block_size),
+            "qmoe_block_size": self.qmoe_block_size,
             "qdq_block_size": int(self.matmul_block_size),
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
@@ -3272,7 +3272,7 @@ class Model:
         # weights_prepacked=1 (explicitly prepacked) mean the op reads prepacked
         # weights, so the builder must produce prepacked weights for both.
         if self.ep == "cuda" and weights_prepacked in (-1, 1) and self.qmoe_block_size > 0:
-            block_size = int(self.qmoe_block_size)
+            block_size = self.qmoe_block_size
             if block_size not in (32, 64, 128):
                 raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
@@ -3288,9 +3288,9 @@ class Model:
         # blockwise scales, which it lays out into the CUTLASS fpA_intB format at
         # load time. Only valid on the CUDA EP.
         if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
-            block_size = int(self.qmoe_block_size)
+            block_size = self.qmoe_block_size
             if block_size not in (32, 64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 32, 64 or 128, got {block_size}.")
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
