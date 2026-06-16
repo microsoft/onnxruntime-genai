@@ -44,6 +44,26 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+
+}  // namespace Generators
+
+#include "decoding_strategy.h"
+
+namespace Generators {
+
+// Instrumentation snapshot returned by Generator::GetSpeculativeStats().
+// All fields are zero for non-speculative models.
+struct SpeculativeStats {
+  size_t rounds{};
+  size_t draft_tokens_proposed{};
+  size_t draft_tokens_accepted{};
+  size_t correction_tokens{};
+  size_t bonus_tokens{};
+  float avg_draft_ms_per_token{};
+  float avg_target_ms_per_token{};
+  float acceptance_rate{};
+  float effective_speedup{};
+};
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -127,6 +147,9 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+  // Returns zero-filled stats when the model is not speculative.
+  SpeculativeStats GetSpeculativeStats() const;
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
@@ -146,6 +169,11 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+
+  std::unique_ptr<DecodingStrategy> strategy_;
+  friend struct StandardDecodingStrategy;
+  friend struct TransducerDecodingStrategy;
+  friend struct SpeculativeDecodingStrategy;
 };
 
 struct OrtGlobals {
