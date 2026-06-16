@@ -935,9 +935,11 @@ inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char*
   Ort::ThrowOnError(Ort::api->SetEpDynamicOptions(this, keys, values, kv_len));
 }
 
+#if ORT_API_VERSION >= 27
 inline void OrtSession::ReleaseCapturedGraph(int graph_annotation_id) {
   Ort::ThrowOnError(Ort::api->SessionReleaseCapturedGraph(this, graph_annotation_id));
 }
+#endif
 
 inline std::string OrtModelMetadata::GetProducerName() const {
   Ort::StringAllocator string_allocator;

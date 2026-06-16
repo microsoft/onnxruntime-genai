@@ -786,7 +786,9 @@ struct OrtSession {
 
   void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
 
-  void ReleaseCapturedGraph(int graph_annotation_id);
+#if ORT_API_VERSION >= 27
+  void ReleaseCapturedGraph(int graph_annotation_id);  ///< Wraps OrtApi::SessionReleaseCapturedGraph (ORT 1.27+)
+#endif
 
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;

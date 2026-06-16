@@ -1,1 +1,1 @@
-onnxruntime-gpu==1.26.0
+onnxruntime-gpu==1.27.0
