@@ -115,7 +115,7 @@ jobs:
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
     ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
-      value: 'Microsoft.WindowsAppSDK.ML'
+      value: 'Microsoft.Windows.AI.MachineLearning'
 
   steps:
   - ${{ if eq(parameters.enable_winml, true) }}:

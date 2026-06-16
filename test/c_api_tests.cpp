@@ -1491,7 +1491,7 @@ TEST(CAPITests, RewindQwen25CAPI) {
   // Save first-run output
   auto seq_len = generator->GetSequenceCount(0);
   std::vector<int32_t> first_output(seq_len);
-  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+  std::copy(generator->GetSequenceData(0), generator->GetSequenceData(0) + seq_len, first_output.begin());
 
   // RewindTo(0) - full rewind
   generator->RewindTo(0);
