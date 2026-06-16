@@ -22,17 +22,9 @@
 #endif
 
 // Internal C++ helpers are not part of the genai DLL's public C API exports on Windows.
-// BUILDING_ORT_GENAI_DLL is set privately on the onnxruntime-genai target so consumers
-// (e.g. unit_tests) see dllimport for these symbols.
-#if defined(_WIN32)
-#ifdef BUILDING_ORT_GENAI_DLL
-#define MODEL_PACKAGE_API __declspec(dllexport)
-#else
-#define MODEL_PACKAGE_API __declspec(dllimport)
-#endif
-#else
-#define MODEL_PACKAGE_API
-#endif
+// ORT_GENAI_INTERNAL_API (defined in filesystem.h) resolves to dllexport for the genai
+// build and dllimport for consumers (e.g. unit_tests).
+#define MODEL_PACKAGE_API ORT_GENAI_INTERNAL_API
 
 struct OrtEnv;
 

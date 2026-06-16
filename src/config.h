@@ -90,7 +90,7 @@ struct Config {
   // Resolves a path-like string from genai_config.json. Empty -> config_path.
   // "package:<rel>" -> package_root/<rel> (errors when package_root is empty). Anything
   // else is joined with config_path.
-  fs::path ResolvePath(std::string_view value) const;
+  ORT_GENAI_INTERNAL_API fs::path ResolvePath(std::string_view value) const;
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
