@@ -29,9 +29,10 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test\python\requirements.txt
       python -m pip install pytest
+      python -m pip install onnxruntime-gpu==1.26.0
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
-        python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime-ep-webgpu==0.2.0.dev20260611
+        python -m pip install onnxruntime-ep-webgpu==0.1.0
       }
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -74,6 +75,7 @@ steps:
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
           \$PYTHON_EXE -m pip install -r test/python/requirements.txt
           \$PYTHON_EXE -m pip install pytest
+          \$PYTHON_EXE -m pip install onnxruntime-gpu==1.26.0
           \$PYTHON_EXE -m pip install /wheel/*.whl
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
           \$PYTHON_EXE -m pytest test/python/integration -sv \
@@ -111,9 +113,10 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
+      python -m pip install onnxruntime==1.26.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
-        python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime-ep-webgpu==0.2.0.dev20260611
+        python -m pip install onnxruntime-ep-webgpu==0.1.0
       fi
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
