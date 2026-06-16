@@ -355,7 +355,6 @@ void RunBenchmark(const benchmark::Options& opts) {
           generator_done = gen->IsDone();
         }
       }
-
     }
   }
 
