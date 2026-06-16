@@ -1,0 +1,66 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+#pragma once
+#include <vector>
+#include "model.h"
+#include "decoder_only.h"
+
+namespace Generators {
+
+struct Generator;
+
+// Composes two DecoderOnly_Model instances each with its own cloned Config
+// reused verbatim for session loading, KV cache, and logits I/O.
+struct SpeculativeDecodingModel : Model {
+  SpeculativeDecodingModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
+                                     const GeneratorParams& params) const override;
+
+  const DecoderOnly_Model& target_model() const { return *target_model_; }
+  const DecoderOnly_Model& draft_model() const { return *draft_model_; }
+
+ private:
+  std::shared_ptr<DecoderOnly_Model> target_model_;
+  std::shared_ptr<DecoderOnly_Model> draft_model_;
+};
+
+// 2 inner States + the cross-round "pending draft probs"
+// carry-over. The per-round propose -> verify -> accept loop lives in
+// SpeculativeDecodingStrategy; Run() here only handles prefill.
+struct SpeculativeDecodingState : State {
+  SpeculativeDecodingState(const SpeculativeDecodingModel& model,
+                           DeviceSpan<int32_t> sequence_lengths,
+                           const GeneratorParams& params);
+
+  // Prefill path: runs both inner states, saves draft pending probs, returns target logits.
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
+  void RewindTo(size_t index) override;
+
+  // Accessors for the strategy layer.
+  const SpeculativeDecodingModel& spec_model() const { return model_; }
+  State& target_state() { return *target_state_; }
+  State& draft_state() { return *draft_state_; }
+
+  const std::vector<float>& draft_pending_probs() const { return draft_pending_probs_; }
+  void set_draft_pending_probs(std::vector<float> probs) {
+    draft_pending_probs_ = std::move(probs);
+    draft_pending_valid_ = true;
+  }
+  bool draft_pending_valid() const { return draft_pending_valid_; }
+
+ private:
+  const SpeculativeDecodingModel& model_;
+  std::unique_ptr<State> target_state_;
+  std::unique_ptr<State> draft_state_;
+
+  // Draft's softmax distribution for the next token position.
+  // Set by Run() and refreshed at the end of each strategy round.
+  std::vector<float> draft_pending_probs_;
+  bool draft_pending_valid_{false};
+};
+
+}  // namespace Generators
+

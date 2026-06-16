@@ -16,6 +16,7 @@
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
 #include "parakeet_processor.h"
@@ -783,6 +784,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  // Speculative decoding wraps two decoder-only models (target + draft) under single model.
+  if (config->model.type == "speculative")
+    return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
