@@ -113,7 +113,7 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime==1.27.0
+      python -m pip install onnxruntime==1.26.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
         python -m pip install onnxruntime-ep-webgpu==0.1.0
