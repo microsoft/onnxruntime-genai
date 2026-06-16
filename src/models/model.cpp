@@ -382,7 +382,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
-  auto& allocator = device.GetGlobalAllocatorSession(config);
+  auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(type)];
   if (allocator.allocator_)
     return;
 

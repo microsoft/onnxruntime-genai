@@ -145,17 +145,16 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
-struct GlobalAllocatorSession {
-  std::unique_ptr<Ort::Allocator> allocator_;
-  std::unique_ptr<OrtSession> session_;
-};
-
 struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
 
-  GlobalAllocatorSession device_allocators_[static_cast<int>(DeviceType::MAX)];
+  struct Allocator {
+    std::unique_ptr<Ort::Allocator> allocator_;
+    std::unique_ptr<OrtSession> session_;
+  };
+  Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
   // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
   // Destroyed before env_ to ensure proper cleanup order
