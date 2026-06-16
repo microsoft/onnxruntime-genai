@@ -93,7 +93,8 @@ enum struct DeviceType {
   CUDA,
   DML,
   WEBGPU,
-  QNN,
+  QnnHtp,
+  QnnGpu,
   OpenVINO,
   NvTensorRtRtx,
   RyzenAI,
@@ -108,7 +109,7 @@ struct DeviceInterface {
   virtual Ort::Allocator& GetAllocator() = 0;
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const {
     // Names for the device memory types used by 'OrtMemoryInfo::Create'
-    static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+    static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
     static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
     // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -118,7 +119,7 @@ struct DeviceInterface {
 
   virtual Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& /* config */) const {
     // Names for the device types used by 'SetProviderSessionOptions'
-    static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+    static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
     static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
     return Config::ProviderOptions{device_type_names[static_cast<int>(GetType())], {}};

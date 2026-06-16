@@ -5,9 +5,10 @@ namespace Generators {
 
 struct Config;
 struct DeviceInterface;
+enum struct DeviceType;
 struct Model;
 
-DeviceInterface* GetQNNInterface();
+DeviceInterface* GetQNNInterface(DeviceType device_type);
 
 bool IsQNNGPUBackend(const Config& config);
 bool IsQNNStatefulModel(const Model& model);

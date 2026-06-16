@@ -43,14 +43,9 @@ struct QnnMemory final : DeviceBuffer {
   bool owned_;
 };
 
-struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl() {
-  }
-
-  DeviceType GetType() const override { return DeviceType::QNN; }
-
+struct QnnInterfaceBase : DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    // Note: "QnnHtpShared" allocator is the correct name even when using the GPU backend. Eventually, the plan is to
+    // Note: "QnnHtpShared" allocator is the correct name for both HTP and GPU backends. Eventually, the plan is to
     // migrate to "QnnShared".
     return OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
   }
@@ -99,11 +94,31 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do
 };
 
+struct HtpInterfaceImpl : QnnInterfaceBase {
+  HtpInterfaceImpl() {}
+  DeviceType GetType() const override { return DeviceType::QnnHtp; }
+};
+
+struct GpuInterfaceImpl : QnnInterfaceBase {
+  GpuInterfaceImpl() {}
+  DeviceType GetType() const override { return DeviceType::QnnGpu; }
+};
+
 }  // namespace QNN
 
-DeviceInterface* GetQNNInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<QNN::InterfaceImpl>();
-  return g_device.get();
+DeviceInterface* GetQNNInterface(DeviceType device_type) {
+  assert(type == DeviceType::QnnHtp || type == DeviceType::QnnGpu);
+
+  static std::unique_ptr<DeviceInterface> g_htp_device = std::make_unique<QNN::HtpInterfaceImpl>();
+  static std::unique_ptr<DeviceInterface> g_gpu_device = std::make_unique<QNN::GpuInterfaceImpl>();
+  switch (device_type) {
+    case DeviceType::QnnHtp:
+      return g_htp_device.get();
+    case DeviceType::QnnGpu:
+      return g_gpu_device.get();
+    default:
+      return nullptr;
+  }
 }
 
 bool IsQNNGPUBackend(const Config& config) {
