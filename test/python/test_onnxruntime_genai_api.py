@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sysconfig
@@ -14,9 +15,15 @@ import onnx
 import onnxruntime
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
+
+logger = logging.getLogger(__name__)
 
 
 devices = ["cpu"]
+
+# Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
+register_plugin_providers(logger)
 
 if og.is_cuda_available():
     devices.append("cuda")

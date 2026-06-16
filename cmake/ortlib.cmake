@@ -5,15 +5,18 @@ if(USE_WINML)
   message(STATUS "----- Building with WinML support ----- ")
 
   if(NOT DEFINED WINML_SDK_VERSION OR WINML_SDK_VERSION STREQUAL "")
-    #set(WINML_SDK_VERSION "1.8.1065-experimental")
+    #set(WINML_SDK_VERSION "2.1.1")
     # message(STATUS "WINML_SDK_VERSION not set, defaulting to ${WINML_SDK_VERSION}")
     message(FATAL_ERROR "WINML_SDK_VERSION must be set when USE_WINML=ON. Configure CMake with -DWINML_SDK_VERSION=<version>.")
   endif()
 
-  if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
-      set(ORT_PLATFORM "win-x64")
-  elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64X" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64EC")
-      set(ORT_PLATFORM "win-arm64")
+  string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" _winml_generator_platform)
+  if(_winml_generator_platform STREQUAL "x64")
+      set(ORT_PLATFORM "x64")
+  elseif(_winml_generator_platform STREQUAL "arm64" OR _winml_generator_platform STREQUAL "arm64x")
+      set(ORT_PLATFORM "arm64")
+  elseif(_winml_generator_platform STREQUAL "arm64ec")
+      set(ORT_PLATFORM "arm64ec")
   else()
       message(FATAL_ERROR "Unsupported platform for GenAI: ${CMAKE_GENERATOR_PLATFORM}")
       return()
@@ -23,7 +26,7 @@ if(USE_WINML)
 
   # We could have this as a variable in the build pipeline...
   install_nuget_package(
-    Microsoft.WindowsAppSDK.ML
+    Microsoft.Windows.AI.MachineLearning
     ${WINML_SDK_VERSION}
     WINML_ROOT)
 
@@ -47,7 +50,7 @@ if(USE_WINML)
   file(COPY ${ORT_HEADERS_1} DESTINATION "${ORT_HOME}/include")
   file(COPY ${ORT_HEADERS_2} DESTINATION "${ORT_HOME}/include")
 
-  file (GLOB ORT_LIBS_1 CONFIGURE_DEPENDS "${WINML_ROOT}/runtimes/${ORT_PLATFORM}/native/onnxruntime.lib")
+  file(GLOB ORT_LIBS_1 CONFIGURE_DEPENDS "${WINML_ROOT}/lib/native/${ORT_PLATFORM}/onnxruntime.lib")
   file(COPY ${ORT_LIBS_1} DESTINATION "${ORT_HOME}/lib")
 
   message(STATUS "USE_WINML: ORT_HOME set to: ${ORT_HOME}")
@@ -77,16 +80,15 @@ if(ORT_HOME)
   endif()
 else()
   # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
-  set(ORT_VERSION "1.25.0-dev-20260125-1205-727db0d3dc")
+  set(ORT_VERSION "1.26.0")
   set(ORT_FEED_ORG_NAME "aiinfra")
   set(ORT_FEED_PROJECT "2692857e-05ef-43b4-ba9c-ccf1c22c437c")
   set(ORT_NIGHTLY_FEED_ID "7982ae20-ed19-4a35-a362-a96ac99897b7")
 
   if (USE_DML)
-    set(ORT_VERSION "1.25.0-dev-20260125-0556-727db0d3dc")
+    set(ORT_VERSION "1.24.4")
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.DirectML")
   elseif(USE_CUDA)
-    set(ORT_VERSION "1.25.0-dev-20260125-0617-727db0d3dc")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Gpu.Linux")
     elseif(WIN32)

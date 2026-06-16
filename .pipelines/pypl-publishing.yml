@@ -50,9 +50,9 @@ parameters:
     default: true
 
   - name: ort_winml_version
-    displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
+    displayName: 'Microsoft.Windows.AI.MachineLearning Version (should match CMakeList.txt)'
     type: string
-    default: '1.8.2091'
+    default: '2.1.1'
 
   - name: ort_cuda_version
     displayName: 'OnnxRuntime GPU version'
