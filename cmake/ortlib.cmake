@@ -80,7 +80,7 @@ if(ORT_HOME)
   endif()
 else()
   # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
-  set(ORT_VERSION "1.26.0")
+  set(ORT_VERSION "1.27.0")
   set(ORT_FEED_ORG_NAME "aiinfra")
   set(ORT_FEED_PROJECT "2692857e-05ef-43b4-ba9c-ccf1c22c437c")
   set(ORT_NIGHTLY_FEED_ID "7982ae20-ed19-4a35-a362-a96ac99897b7")
