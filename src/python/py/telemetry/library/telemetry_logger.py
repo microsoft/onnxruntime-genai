@@ -52,6 +52,7 @@ class TelemetryLogger:
             self._logger_exporter = OneCollectorLogExporter(options=options)
 
             self._logger_provider = LoggerProvider(
+                shutdown_on_exit=False,
                 resource=Resource.create(
                     {
                         "service.name": "onnxruntime-genai",

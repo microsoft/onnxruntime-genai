@@ -30,10 +30,11 @@ class OneCollectorTransportOptions:
     max_payload_size_bytes: int = DEFAULT_MAX_PAYLOAD_SIZE_BYTES
     max_items_per_payload: int = DEFAULT_MAX_ITEMS_PER_PAYLOAD
     compression: CompressionType = CompressionType.DEFLATE
-    # Fire-and-forget telemetry: bound the worst-case flush (incl. the atexit
-    # flush, which ModelBuilder/benchmarks rely on) so an unreachable collector
-    # cannot hang process exit for the full default budget.
-    timeout_seconds: float = 3.0
+    # Bounds a single HTTP send so an unreachable collector can't block the
+    # background export thread forever (requests has no default timeout).
+    # This governs delivery quality, not process-exit latency: exit is bounded
+    # separately by GenAITelemetry's atexit flush budget.
+    timeout_seconds: float = 10.0
     http_client_factory: Optional[Callable[[], requests.Session]] = None
 
     def validate(self) -> None:
