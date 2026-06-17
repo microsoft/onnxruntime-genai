@@ -235,6 +235,10 @@ State::~State() {
       graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
     } catch (...) {
       // Best-effort cleanup; swallow to keep the destructor non-throwing.
+      if (g_log.enabled && g_log.ort_lib) {
+        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
+                       << ") failed: unknown exception" << std::endl;
+      }
     }
   }
 #endif
