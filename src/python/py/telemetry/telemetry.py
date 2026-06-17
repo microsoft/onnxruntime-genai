@@ -13,6 +13,7 @@ Provides high-level telemetry for:
 - Error/crash reporting
 """
 
+import atexit
 import base64
 import os
 import platform
@@ -145,6 +146,11 @@ class GenAITelemetry:
                 self._logger = get_telemetry_logger(connection_string)
                 event_source.disable()
                 self._log_heartbeat()
+                # The LoggerProvider is created with shutdown_on_exit=False, so OTel
+                # does not register its own (unbounded, blocking) flush at exit. We
+                # register a bounded best-effort flush instead so a slow/unreachable
+                # collector cannot delay process exit beyond the budget below.
+                atexit.register(self._atexit_flush)
             except Exception:
                 self._logger = None
                 self._enabled = False
@@ -396,9 +402,37 @@ class GenAITelemetry:
             self._logger.enable_telemetry()
 
     def shutdown(self) -> None:
-        """Shutdown the telemetry system and flush pending events."""
+        """Shutdown the telemetry system and flush pending events.
+
+        This performs a blocking flush bounded only by the transport timeout.
+        Prefer this when you can afford to wait for delivery (e.g. tests). For
+        process exit, the registered atexit handler uses a bounded flush.
+        """
         if self._logger:
             self._logger.shutdown()
+
+    # Maximum time the atexit flush may delay process exit. The flush runs on a
+    # daemon thread; if it exceeds this budget the thread is abandoned (and
+    # killed at interpreter exit) so an unreachable collector never hangs exit.
+    _EXIT_FLUSH_BUDGET_SECONDS = 2.0
+
+    def _safe_shutdown(self) -> None:
+        try:
+            if self._logger:
+                self._logger.shutdown()
+        except Exception:
+            pass
+
+    def _atexit_flush(self) -> None:
+        """Best-effort delivery of any buffered events without hanging exit."""
+        if not self._logger:
+            return
+        try:
+            flush_thread = threading.Thread(target=self._safe_shutdown, daemon=True)
+            flush_thread.start()
+            flush_thread.join(self._EXIT_FLUSH_BUDGET_SECONDS)
+        except Exception:
+            pass
 
 
 # Module-level convenience functions
