@@ -11,10 +11,6 @@
 #include <string>
 #include <system_error>
 
-#if ORT_GENAI_HAS_MODEL_PACKAGE
-#include "onnxruntime_api.h"
-#endif
-
 namespace Generators {
 
 namespace {

@@ -5,16 +5,16 @@
 #include <string>
 
 #include "../filesystem.h"
-#include "onnxruntime_c_api.h"
+#include "onnxruntime_api.h"
 
-// ORT_GENAI_HAS_MODEL_PACKAGE is set when the ORT C API version exposes the
+// ORT_GENAI_HAS_MODEL_PACKAGE is set when the loaded ONNX Runtime exposes the
 // OrtModelPackageApi experimental functions (introduced in API version 28) and the
-// experimental header is available on the build's include path. Some Apple/iOS
+// experimental header is available on the build's include path. This mirrors the gate
+// guarding the OrtModelPackage* RAII wrappers in onnxruntime_api.h. Some Apple/iOS
 // toolchains ship the core C API but no experimental header; those builds compile with
 // model-package support disabled.
 #if !defined(ORT_GENAI_HAS_MODEL_PACKAGE)
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && \
-    (!defined(__has_include) || __has_include("onnxruntime_experimental_c_api.h"))
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
@@ -25,8 +25,6 @@
 // ORT_GENAI_INTERNAL_API (defined in filesystem.h) resolves to dllexport for the genai
 // build and dllimport for consumers (e.g. unit_tests).
 #define MODEL_PACKAGE_API ORT_GENAI_INTERNAL_API
-
-struct OrtEnv;
 
 namespace Generators {
 
