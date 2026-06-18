@@ -8,7 +8,7 @@
 #include <memory>
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
-#include "config.h"                  // for Config::ProviderOptions
+#include "provider_options.h"        // for ProviderOptions
 namespace Ort {
 struct Allocator;
 }
@@ -139,8 +139,8 @@ struct DeviceInterface {
   // allocator gating options (e.g. QNN) override this. `user_options` is the user-supplied entry
   // for this provider from config.model.decoder.session_options.provider_options, or nullptr if
   // the user did not provide one.
-  virtual void ShapeInitSessionProviderOptions(Config::ProviderOptions& /*init_options*/,
-                                               const Config::ProviderOptions* /*user_options*/) const {}
+  virtual void ShapeInitSessionProviderOptions(ProviderOptions& /*init_options*/,
+                                               const ProviderOptions* /*user_options*/) const {}
 
   virtual void* GetCudaStream() {
     assert(false);

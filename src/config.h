@@ -3,20 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
-
-// Do not include "smartptrs.h" or "generators.h" from this header: smartptrs.h
-// includes this file, so the reverse direction would form a cycle.
-#include <cstddef>
-#include <cstdint>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <utility>
-#include <vector>
-#include "filesystem.h"
-#include "models/onnxruntime_api.h"
-#include "span.h"
+#include "provider_options.h"
 
 namespace Generators {
 
@@ -100,18 +87,9 @@ struct Config {
 
   fs::path config_path;  // Path of the config directory
 
-  using NamedString = std::pair<std::string, std::string>;
-  struct DeviceFilteringOptions {
-    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
-  };
-
-  struct ProviderOptions {
-    std::string name;
-    std::vector<NamedString> options;
-    std::optional<DeviceFilteringOptions> device_filtering_options;
-  };
+  using NamedString = Generators::NamedString;
+  using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
+  using ProviderOptions = Generators::ProviderOptions;
 
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
