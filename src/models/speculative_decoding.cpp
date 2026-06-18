@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "../speculative_sampling.h"
 #include "speculative_decoding.h"
+#include "model_type.h"
 
 namespace Generators {
 
@@ -78,6 +79,17 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
     throw std::runtime_error(
         "Speculative decoding does not support multimodal (vision/audio) models in this release; "
         "target and draft must be plain decoder-only LLMs.");
+
+  // The inner states are constructed directly as DecoderOnly_Model, which requires the modern
+  // separate key/value KV-cache format (past_key_names/past_value_names). 
+  auto uses_combined_kv = [](const Config::Model::Decoder& d) {
+    return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
+  };
+  if (uses_combined_kv(config_->model.decoder) || uses_combined_kv(config_->model.draft))
+    throw std::runtime_error(
+        "Speculative decoding requires decoder-only target and draft models that use the separate "
+        "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
+        "such as the original gpt2 graph (past_%d/present_%d) are not supported in this release.");
 
   // Sliding-window and LFM2 caches discard old K/V by design, so RewindTo throws.
   // Speculative decoding rewinds on every rejection, so reject these up front (checked on both target and draft).

@@ -663,6 +663,7 @@ void Generator::RewindToLength(size_t new_length) {
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
   }
+  strategy_->Reset();
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }
