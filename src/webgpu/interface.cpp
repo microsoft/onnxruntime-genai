@@ -161,51 +161,6 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::WEBGPU; }
 
-  Config::ProviderOptions GetProviderOptionsForAllocatorSession(const Config& config) const override {
-    auto provider_options = Config::ProviderOptions{"WebGPU", {}};
-
-    constexpr std::array<std::string_view, 7> kWebGpuGlobalOptions = {
-        "deviceId",
-        "webgpuInstance",
-        "webgpuDevice",
-        "dawnBackendType",
-        "powerPreference",
-        "validationMode",
-        "dawnProcTable",
-    };
-    for (const auto& user_po : config.model.decoder.session_options.provider_options) {
-      if (user_po.name == "WebGPU") {
-        for (const auto& opt : user_po.options) {
-          if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
-            provider_options.options.emplace_back(opt);
-          }
-        }
-        provider_options.device_filtering_options = user_po.device_filtering_options;
-        break;
-      }
-    }
-
-    return provider_options;
-  }
-
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    try {
-      return OrtMemoryInfo::Create("WebGPU_Buf", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    } catch (const Ort::Exception& e) {
-      // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
-      // Try the old name before giving up.
-      try {
-        return OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      } catch (const Ort::Exception& fallback_e) {
-        throw std::runtime_error(
-            "Failed to create memory info for WebGPU. "
-            "Primary name 'WebGPU_Buf' error: " +
-            std::string(e.what()) +
-            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
-      }
-    }
-  }
-
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;

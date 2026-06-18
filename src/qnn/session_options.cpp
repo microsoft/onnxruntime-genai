@@ -17,7 +17,20 @@ static bool IsAllocatorAvailable(const Config& config, DeviceType device_type) {
   //   b. The QNN EP package loaded by onnxruntime-genai
   // If either dependency is out-of-date, the allocator will not be available.
   auto session_options = OrtSessionOptions::Create();
-  Config::ProviderOptions provider_options = GetQNNInterface(device_type)->GetProviderOptionsForAllocatorSession(config);
+
+  auto provider_options = Config::ProviderOptions{"QNN", {}};
+  const auto& config_providers = config.model.decoder.session_options.providers;
+  const auto& config_provider_options = config.model.decoder.session_options.provider_options;
+
+  auto it = std::find_if(config_providers.begin(), config_providers.end(), [](const std::string& p) { return p == "QNN"; });
+  if (it != config_providers.end()) {
+    const auto i = std::distance(config_providers.begin(), it);
+    if (config_provider_options.size() > static_cast<size_t>(i)) {
+      for (const auto& pair : config_provider_options[i].options) {
+        provider_options.options.emplace_back(pair);
+      }
+    }
+  }
 
   if (!AppendExecutionProviderV2(*session_options, provider_options,
                                  device_type, "QNNExecutionProvider")) {
@@ -26,13 +39,15 @@ static bool IsAllocatorAvailable(const Config& config, DeviceType device_type) {
 
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
 
+  const auto trivial_model = Generators::GetTrivialModel();
   const auto session = OrtSession::Create(GetOrtEnv(),
-                                          Generators::GetTrivialModel().data(),
-                                          Generators::GetTrivialModel().size(),
+                                          trivial_model.data(),
+                                          trivial_model.size(),
                                           session_options.get());
 
   try {
-    const auto memory_info = GetQNNInterface(device_type)->GetMemoryInfo();
+    const auto memory_info = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator,
+                                                   0, OrtMemType::OrtMemTypeDefault);
     const auto allocator = Ort::Allocator::Create(*session, *memory_info);
     return allocator != nullptr;
   } catch (const Ort::Exception&) {

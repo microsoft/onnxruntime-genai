@@ -391,30 +391,99 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // re-use it for all models.
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
+  // Names for the device types used by 'SetProviderSessionOptions'
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
+
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
-  std::vector<Config::ProviderOptions> provider_options_list = {device.GetProviderOptionsForAllocatorSession(config)};
-  const std::vector<std::string> providers{provider_options_list.back().name};
+  std::vector<Config::ProviderOptions> provider_options_list;
+  const char* provider_name = device_type_names[static_cast<int>(type)];
+  Config::ProviderOptions init_session_provider_options{provider_name, {}};
+
+  // Forward only global/singleton WebGPU options to the init session so that the
+  // process-wide WebGpuContext singleton is initialized with the correct settings.
+  // Per-session options (enableGraphCapture, enableInt64, etc.) are excluded
+  // because they are meaningless for the trivial initialization model.
+  if (type == DeviceType::WEBGPU) {
+    constexpr std::array<std::string_view, 7> kWebGpuGlobalOptions = {
+        "deviceId",
+        "webgpuInstance",
+        "webgpuDevice",
+        "dawnBackendType",
+        "powerPreference",
+        "validationMode",
+        "dawnProcTable",
+    };
+    for (const auto& user_po : config.model.decoder.session_options.provider_options) {
+      if (user_po.name == provider_name) {
+        for (const auto& opt : user_po.options) {
+          if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
+            init_session_provider_options.options.emplace_back(opt);
+          }
+        }
+        init_session_provider_options.device_filtering_options = user_po.device_filtering_options;
+        break;
+      }
+    }
+  }
+
+  provider_options_list.emplace_back(std::move(init_session_provider_options));
+
+  if (type == DeviceType::QnnHtp || type == DeviceType::QnnGpu) {
+    const auto& config_providers = config.model.decoder.session_options.providers;
+    const auto& config_provider_options = config.model.decoder.session_options.provider_options;
+
+    // Copy the config QNN provider options to the allocator session.
+    // Certain options (e.g. "enable_htp_shared_memory_allocator") are required for QNN EP to expose an allocator.
+    auto it = std::find_if(config_providers.begin(), config_providers.end(), [](const std::string& p) { return p == "QNN"; });
+    if (it != config_providers.end()) {
+      const auto i = std::distance(config_providers.begin(), it);
+      if (config_provider_options.size() > static_cast<size_t>(i)) {
+        for (const auto& pair : config_provider_options[i].options) {
+          provider_options_list.back().options.emplace_back(pair);
+        }
+      }
+    }
+  }
+  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
-  // Use the trivial model to create an OrtSession that lets us get a device Ort::Allocator for each device type.
-  // This is necessary because the Ort::Allocator needs to persist and is valid for the lifetime of this OrtSession.
   const auto trivial_model = GetTrivialModel();
-  allocator.session_ = OrtSession::Create(GetOrtEnv(),
-                                          trivial_model.data(),
-                                          trivial_model.size(),
-                                          session_options.get());
+  allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
+
+  // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
+  auto name = device_memory_type_names[static_cast<int>(type)];
   try {
-    auto memory_info = device.GetMemoryInfo();
+    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
+                                             0, OrtMemType::OrtMemTypeDefault);
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
-    throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
+    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
+    // Try the old name before giving up.
+    if (type == DeviceType::WEBGPU) {
+      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      try {
+        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
+      } catch (const Ort::Exception& fallback_e) {
+        throw std::runtime_error(
+            "Failed to create allocator for WebGPU. "
+            "Primary name '" +
+            std::string(name) + "' error: " + std::string(e.what()) +
+            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
+      }
+    } else {
+      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
+    }
   }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
 }
