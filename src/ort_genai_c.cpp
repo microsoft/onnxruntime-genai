@@ -662,6 +662,8 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
 
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
+  if (count > 0 && strings == nullptr)
+    throw std::runtime_error("EncodeBatch: strings pointer must not be null when count > 0");
   auto tensor = tokenizer->EncodeBatch(std::span<const char*>(strings, count));
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;
