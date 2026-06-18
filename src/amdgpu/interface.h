@@ -8,16 +8,16 @@
 #include <utility>
 #include <vector>
 
-#include "../smartptrs.h"  // DeviceInterface
+#include "../smartptrs.h"
 
 namespace Generators {
 
-// Memory allocated through the MorphiZen EP interface is treated as both
+// Memory allocated through the AMDGPU EP interface is treated as both
 // host- and device-accessible because the underlying AMD APU iGPU shares
 // physical memory with the host. Mirrors the RyzenAIInterface pattern; the
 // difference is that this provider targets OrtHardwareDeviceType_GPU + AMD
 // GPU vendor id (0x1002) instead of the NPU.
-struct MorphiZenEPInterface : DeviceInterface {
+struct AMDGPUInterface : DeviceInterface {
   using ProviderOptions = std::vector<std::pair<std::string, std::string>>;
 
   virtual void SetupProvider(OrtSessionOptions&, const ProviderOptions&) = 0;
@@ -25,6 +25,6 @@ struct MorphiZenEPInterface : DeviceInterface {
   static void Shutdown();
 };
 
-MorphiZenEPInterface* GetMorphiZenEPInterface();
+AMDGPUInterface* GetAMDGPUInterface();
 
 }  // namespace Generators

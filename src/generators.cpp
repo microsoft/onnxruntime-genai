@@ -23,7 +23,7 @@
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
-#include "morphizen_ep/interface.h"
+#include "amdgpu/interface.h"
 #include "ryzenai/interface.h"
 #include "engine/engine.h"
 
@@ -123,7 +123,7 @@ void Shutdown() {
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
 
   RyzenAIInterface::Shutdown();
-  MorphiZenEPInterface::Shutdown();
+  AMDGPUInterface::Shutdown();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -256,8 +256,8 @@ std::string to_string(DeviceType device_type) {
       return "NvTensorRtRtx";
     case DeviceType::RyzenAI:
       return "RyzenAI";
-    case DeviceType::MorphiZenEP:
-      return "MorphiZenEP";
+    case DeviceType::AMDGPU:
+      return "AMDGPU";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -283,8 +283,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetOpenVINOInterface();
     case DeviceType::RyzenAI:
       return GetRyzenAIInterface();
-    case DeviceType::MorphiZenEP:
-      return GetMorphiZenEPInterface();
+    case DeviceType::AMDGPU:
+      return GetAMDGPUInterface();
   }
 }
 
@@ -482,7 +482,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       DeviceType::OpenVINO,
       DeviceType::NvTensorRtRtx,
       DeviceType::RyzenAI,
-      DeviceType::MorphiZenEP};
+      DeviceType::AMDGPU};
 
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),

@@ -16,26 +16,25 @@
 #endif
 
 namespace Generators {
-namespace MorphiZenEP {
+namespace AMDGPU {
 
 // Mirrors ryzenai/interface.cpp. The behavioural differences are:
-//   - ep_name_ matches the registration_name passed to morphizen's
-//     CreateEpFactories (== "MorphiZenEP" -- what callers like
-//     model_benchmark use with --ep_library, what genai_config.json uses
-//     as a provider name, and what session_options.cpp's dispatch table
-//     keys on).
+//   - ep_name_ matches the registration_name passed to amdgpu-ep's
+//     CreateEpFactories (== "amdgpu" -- what callers like model_benchmark
+//     use with --ep_library, what genai_config.json uses as a provider
+//     name, and what session_options.cpp's dispatch table keys on).
 //   - SetupProvider filters OrtHardwareDeviceType_GPU; vendor id matching
 //     is delegated to the EP factory's GetSupportedDevicesImpl, which
 //     already restricts itself to AMD GPU vendor id 0x1002.
-//   - DeviceType::MorphiZenEP is returned from GetType().
+//   - DeviceType::AMDGPU is returned from GetType().
 //   - Allocator-backed memory is treated as both host- and device-
 //     accessible (true on AMD APU iGPU; same simplification RyzenAI uses).
-static constexpr auto ep_path_env_key_ = "MORPHIZEN_EP_PATH";
-static constexpr auto ep_name_ = "MorphiZenEP";
+static constexpr auto ep_path_env_key_ = "AMDGPU_EP_PATH";
+static constexpr auto ep_name_ = "amdgpu";
 #if defined(_WIN32)
-static constexpr auto ep_filename_ = "onnxruntime_morphizen_ep.dll";
+static constexpr auto ep_filename_ = "amdgpu-ep.dll";
 #else
-static constexpr auto ep_filename_ = "libonnxruntime_morphizen_ep.so";
+static constexpr auto ep_filename_ = "libamdgpu-ep.so";
 #endif
 
 static Ort::Allocator* ort_allocator_{};
@@ -56,7 +55,7 @@ struct Memory : DeviceBuffer {
       ort_allocator_->Free(p_device_);
   }
 
-  const char* GetType() const override { return "MorphiZenEP"; }
+  const char* GetType() const override { return "AMDGPU"; }
 
   void AllocateCpu() override {}
   void CopyDeviceToCpu() override {}
@@ -73,7 +72,7 @@ struct Memory : DeviceBuffer {
   bool owned_;
 };
 
-struct Interface : MorphiZenEPInterface {
+struct Interface : AMDGPUInterface {
   Interface() {
     ep_path_ = ep_filename_;
     // If the EP DLL is already loaded by the host, there is nothing to do.
@@ -81,7 +80,7 @@ struct Interface : MorphiZenEPInterface {
     if (GetModuleHandleA(ep_filename_))
       return;
 #else
-    if (void* handle = dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW)) {
+    if (auto handle = dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW)) {
       dlclose(handle);
       return;
     }
@@ -115,7 +114,7 @@ struct Interface : MorphiZenEPInterface {
 
     if (ep_path_.empty())
       // Check next to onnxruntime-genai.dll.
-      if (const auto hmod = get_hmod_for_method(GetMorphiZenEPInterface))
+      if (const auto hmod = get_hmod_for_method(GetAMDGPUInterface))
         ep_path_ = find_next_to_module(hmod);
 
     if (ep_path_.empty())
@@ -137,8 +136,6 @@ struct Interface : MorphiZenEPInterface {
   }
 
   ~Interface() {
-    // The EP DLL releases its singletons in DllMain on unload; there is no
-    // equivalent of RyzenAI_Shutdown to call here.
   }
 
   void SetupProvider(OrtSessionOptions& session_options, const ProviderOptions& provider_options) override {
@@ -156,33 +153,36 @@ struct Interface : MorphiZenEPInterface {
         const auto* hw = Ort::api->EpDevice_Device(device);
         if (Ort::api->HardwareDevice_Type(hw) != OrtHardwareDeviceType_GPU)
           continue;
-        // The morphizen factory's GetSupportedDevicesImpl already restricts
-        // itself to AMD GPU vendor id 0x1002, so any OrtEpDevice carrying
-        // our ep_name is by construction an AMD GPU. We deliberately do
-        // not re-check the vendor id here so the factory can broaden its
-        // device list in future without us having to update this filter
-        // in lockstep.
         supported_devices.push_back(device);
       }
     }
 
     if (supported_devices.empty())
-      throw std::runtime_error{"No MorphiZenEP-supported AMD GPU devices detected"};
+      throw std::runtime_error{"No AMDGPU-supported AMD GPU devices detected"};
 
     std::vector<const char*> ep_keys, ep_values;
+    std::vector<std::string> config_keys;
 
+    // The umbrella EP reads provider options from session config entries prefixed
+    // with "ep.<name>.", so mirror them there in addition to passing them through
+    // the plugin EP V2 metadata below.
     for (auto& option : provider_options) {
       ep_keys.emplace_back(option.first.c_str());
       ep_values.emplace_back(option.second.c_str());
+      config_keys.emplace_back(std::string{"ep."} + ep_name_ + "." + option.first);
     }
 
-    // Merges provider_options into session_options.
+    for (size_t i = 0; i < config_keys.size(); ++i) {
+      Ort::ThrowOnError(Ort::api->AddSessionConfigEntry(
+          &session_options, config_keys[i].c_str(), ep_values[i]));
+    }
+
     Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(
         &session_options, &GetOrtEnv(), supported_devices.data(), supported_devices.size(),
         ep_keys.data(), ep_values.data(), ep_keys.size()));
   }
 
-  DeviceType GetType() const override { return DeviceType::MorphiZenEP; }
+  DeviceType GetType() const override { return DeviceType::AMDGPU; }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
@@ -212,20 +212,20 @@ struct Interface : MorphiZenEPInterface {
 
 static std::unique_ptr<Interface> interface_;
 
-}  // namespace MorphiZenEP
+}  // namespace AMDGPU
 
-void MorphiZenEPInterface::Shutdown() {
-  MorphiZenEP::interface_.reset();
+void AMDGPUInterface::Shutdown() {
+  AMDGPU::interface_.reset();
 }
 
-MorphiZenEPInterface* GetMorphiZenEPInterface() {
+AMDGPUInterface* GetAMDGPUInterface() {
   static std::once_flag once;
 
   std::call_once(once, []() {
-    MorphiZenEP::interface_ = std::make_unique<MorphiZenEP::Interface>();
+    AMDGPU::interface_ = std::make_unique<AMDGPU::Interface>();
   });
 
-  return MorphiZenEP::interface_.get();
+  return AMDGPU::interface_.get();
 }
 
 }  // namespace Generators
