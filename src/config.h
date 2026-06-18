@@ -6,9 +6,13 @@
 
 // Do not include "smartptrs.h" or "generators.h" from this header: smartptrs.h
 // includes this file, so the reverse direction would form a cycle.
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "filesystem.h"
