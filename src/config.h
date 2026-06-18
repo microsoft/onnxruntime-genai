@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,6 +16,7 @@
 #include <vector>
 #include "filesystem.h"
 #include "models/onnxruntime_api.h"
+#include "span.h"
 
 namespace Generators {
 

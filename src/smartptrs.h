@@ -8,7 +8,7 @@
 #include <memory>
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
-#include "config.h"  // for Config::ProviderOptions
+#include "config.h"                  // for Config::ProviderOptions
 namespace Ort {
 struct Allocator;
 }
