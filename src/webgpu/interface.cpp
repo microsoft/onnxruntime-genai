@@ -295,7 +295,6 @@ struct InterfaceImpl : DeviceInterface {
         init_options.options.emplace_back(opt);
       }
     }
-    init_options.device_filtering_options = user_options->device_filtering_options;
   }
 };
 

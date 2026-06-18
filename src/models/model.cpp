@@ -421,6 +421,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
       [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
   const Config::ProviderOptions* user_provider_options =
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
+  if (user_provider_options)
+    init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));

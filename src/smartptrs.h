@@ -3,9 +3,11 @@
 //
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
+#include <algorithm>
 #include <assert.h>
 #include <atomic>
 #include <memory>
+#include <type_traits>
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
