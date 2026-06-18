@@ -4,6 +4,16 @@
 // Portions of this file consist of AI generated content.
 #pragma once
 
+// Do not include "smartptrs.h" or "generators.h" from this header: smartptrs.h
+// includes this file, so the reverse direction would form a cycle.
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "filesystem.h"
+#include "models/onnxruntime_api.h"
+
 namespace Generators {
 
 struct RuntimeSettings;
