@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "pipeline": {
+    "extends": "autoregressive-decoder",
+    "sessions": {
+      "decoder": {"file": "model.onnx"}
+    }
+  },
+  "tokens": {"eos": [151645], "pad": 0},
+  "generation": {"max_length": 4096, "sampling": {"temperature": 0.7}},
+  "metadata": {"model_type": "qwen2"}
+}

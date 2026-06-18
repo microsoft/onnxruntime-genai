@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "pipeline": {
+    "sessions": {
+      "encoder": {"file": "encoder.onnx"},
+      "decoder": {"file": "decoder.onnx"}
+    },
+    "flow": [
+      {"run": "encoder", "when": "init"},
+      {"run": "decoder", "when": "step", "cross_attention_from": "encoder"}
+    ],
+    "dataflow": [
+      {"from": "encoder.encoder_hidden_states", "to": "decoder.encoder_hidden_states"}
+    ],
+    "state": {
+      "kv_cache": {"format": "separate"},
+      "cross_cache": {"source": "encoder", "frozen": true},
+      "position_ids": {"strategy": "default"}
+    }
+  },
+  "tokens": {"eos": [2], "pad": 1, "bos": 0, "decoder_start": 2},
+  "generation": {"max_length": 448, "num_beams": 1},
+  "metadata": {"model_type": "whisper"}
+}

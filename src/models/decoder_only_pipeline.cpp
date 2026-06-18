@@ -7,10 +7,134 @@
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
 
+#include <functional>
+#include <unordered_set>
+
 namespace Generators {
+
+namespace {
+
+// Splits a "session.tensor" dataflow endpoint into {session, tensor}. If no '.' is present the whole
+// string is treated as the session and the tensor is empty.
+std::pair<std::string, std::string> SplitEndpoint(const std::string& endpoint) {
+  const auto dot = endpoint.find('.');
+  if (dot == std::string::npos) {
+    return {endpoint, std::string{}};
+  }
+  return {endpoint.substr(0, dot), endpoint.substr(dot + 1)};
+}
+
+// DFS-based cycle detection over the dataflow session graph (issue #2114 §3.2 guardrail).
+void ThrowIfDataflowHasCycle(const std::unordered_map<std::string, std::vector<std::string>>& adjacency) {
+  enum class Color { White, Gray, Black };
+  std::unordered_map<std::string, Color> color;
+
+  std::function<void(const std::string&)> visit = [&](const std::string& node) {
+    color[node] = Color::Gray;
+    if (auto it = adjacency.find(node); it != adjacency.end()) {
+      for (const auto& next : it->second) {
+        const Color next_color = color.count(next) ? color[next] : Color::White;
+        if (next_color == Color::Gray) {
+          throw std::runtime_error(
+              MakeString("Pipeline dataflow contains a cycle involving session '", next,
+                         "'. Dataflow wiring must be acyclic."));
+        }
+        if (next_color == Color::White) {
+          visit(next);
+        }
+      }
+    }
+    color[node] = Color::Black;
+  };
+
+  for (const auto& [node, _] : adjacency) {
+    if (!color.count(node) || color[node] == Color::White) {
+      visit(node);
+    }
+  }
+}
+
+}  // namespace
+
+std::string PipelineFlow::WireKey(std::string_view session, std::string_view input) {
+  std::string key;
+  key.reserve(session.size() + input.size() + 1);
+  key.append(session);
+  key.push_back('\n');  // '\n' cannot appear in a tensor/session name, so it is a safe separator.
+  key.append(input);
+  return key;
+}
+
+std::pair<std::string, std::string> PipelineFlow::SplitWire(const std::string& endpoint) {
+  return SplitEndpoint(endpoint);
+}
+
+PipelineFlow::PipelineFlow(const Config& config) {
+  const auto& decoder_pipeline = config.model.decoder.pipeline;
+  const auto& pipeline = config.pipeline;
+
+  // Max-10-stage guardrail (issue #2114 §3.2).
+  const size_t stage_count = std::max(decoder_pipeline.size(), pipeline.flow.size());
+  if (stage_count > 10) {
+    throw std::runtime_error(
+        MakeString("Pipeline exceeds the maximum of 10 stages (got ", stage_count, ")."));
+  }
+
+  // Map session name -> decoder.pipeline[] index. The session name is the stage model_id when set,
+  // otherwise its filename (mirrors how TranslateV1ToPipeline names passthrough sessions).
+  std::unordered_map<std::string, size_t> name_to_stage;
+  for (size_t i = 0; i < decoder_pipeline.size(); ++i) {
+    const auto& stage = decoder_pipeline[i];
+    const std::string& name = !stage.model_id.empty() ? stage.model_id : stage.filename;
+    name_to_stage.emplace(name, i);
+  }
+
+  // Default every stage to Step; flow steps refine init/final.
+  stage_phase_.assign(decoder_pipeline.size(), Phase::Step);
+  for (const auto& step : pipeline.flow) {
+    Phase phase = Phase::Step;
+    if (step.when == "init") {
+      phase = Phase::Init;
+    } else if (step.when == "final") {
+      phase = Phase::Final;
+    }
+    if (auto it = name_to_stage.find(step.run); it != name_to_stage.end()) {
+      stage_phase_[it->second] = phase;
+      if (phase == Phase::Final) {
+        has_final_ = true;
+      }
+    }
+  }
+
+  // Explicit dataflow wiring (overrides auto-match) + cycle detection.
+  std::unordered_map<std::string, std::vector<std::string>> adjacency;
+  for (const auto& wire : pipeline.dataflow) {
+    const auto [from_session, from_tensor] = SplitWire(wire.from);
+    const auto [to_session, to_tensor] = SplitWire(wire.to);
+    explicit_wires_[WireKey(to_session, to_tensor)] = from_tensor;
+    adjacency[from_session].push_back(to_session);
+  }
+  ThrowIfDataflowHasCycle(adjacency);
+}
+
+PipelineFlow::Phase PipelineFlow::PhaseForStage(size_t stage_id) const {
+  return stage_id < stage_phase_.size() ? stage_phase_[stage_id] : Phase::Step;
+}
+
+bool PipelineFlow::IsFinal(size_t stage_id) const {
+  return stage_id < stage_phase_.size() && stage_phase_[stage_id] == Phase::Final;
+}
+
+const std::string* PipelineFlow::ExplicitSource(const std::string& session, const std::string& input) const {
+  auto it = explicit_wires_.find(WireKey(session, input));
+  return it == explicit_wires_.end() ? nullptr : &it->second;
+}
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
+  // Validate flow/dataflow guardrails (cycle, max-10-stage) at load time.
+  PipelineFlow{*config_};
+
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
   }
@@ -121,6 +245,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();
+
+  flow_ = PipelineFlow{*model_.config_};
   if (key_value_cache_) {
     key_value_cache_->Add();
   }
@@ -202,153 +328,184 @@ void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices, bool is_last_chunk) {
   for (auto& pipeline_state : pipeline_states_) {
-    if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
+    const size_t id = pipeline_state->id_;
+
+    // Final-phase stages run once after the generation loop (see Finalize), never in the per-token loop.
+    if (flow_.IsFinal(id)) {
       continue;
-    } else if (first_run_ && model_.config_->model.decoder.pipeline[pipeline_state->id_].is_lm_head && !is_last_chunk) {
+    }
+
+    // Init-vs-step gating is preserved exactly via the run_on_prompt/run_on_token_gen fields that PR1
+    // lowering populates (kept consistent with the resolved flow), so v1 behavior is unchanged.
+    if (first_run_ && !model_.config_->model.decoder.pipeline[id].run_on_prompt) {
       continue;
-    } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
+    } else if (first_run_ && model_.config_->model.decoder.pipeline[id].is_lm_head && !is_last_chunk) {
+      continue;
+    } else if (!first_run_ && !model_.config_->model.decoder.pipeline[id].run_on_token_gen) {
       continue;
     }
 
-    DurationTrace trace{MakeString("DecoderOnlyPipelineState::RunPipeline[", pipeline_state->id_, "]")};
-
-    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
-      if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx >=
-          static_cast<int>(model_.sessions_.size())) {
-        throw std::runtime_error(
-            MakeString("Invalid reset_session_idx ", model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx,
-                       " for pipeline model ", model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id));
-      }
-      (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
-    }
-
-    auto* const partial_kv_cache_update_record = [&]() -> PartialKeyValueCacheUpdateRecord* {
-      auto it = pipeline_state_id_to_partial_kv_cache_update_record_idx_.find(pipeline_state->id_);
-      if (it != pipeline_state_id_to_partial_kv_cache_update_record_idx_.end()) {
-        return &partial_kv_cache_update_records_[it->second];
-      }
-      return nullptr;
-    }();
-
-    // If there is any outstanding partial KV cache update, wait for it to finish.
-    // It is important to synchronize at this point, before setting input/output tensors for this pipeline state run,
-    // because a KV cache update may replace the KV cache input/output tensors.
-    if (partial_kv_cache_update_record) {
-      if (partial_kv_cache_update_record->outstanding_update.valid()) {
-        partial_kv_cache_update_record->outstanding_update.get();
-      }
-    }
-
-    // Clear the intermediate pipeline state outputs from the previous runs.
-    // These outputs will be replaced by the outputs from the current run.
-    for (const auto& output_name : pipeline_state->output_names_) {
-      if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
-        ortvalue_store_.erase(iter);
-      }
-    }
-    pipeline_state->ClearIO();
-
-    // Managed inputs and outputs are those inputs and outputs that the
-    // Model knows how to create and update from one run to the next.
-
-    // Add all the managed inputs to the intermediate pipeline state
-    for (const auto& input_name : input_names_) {
-      if (pipeline_state->HasInput(input_name)) {
-        if (!pipeline_state->SupportsPrimaryDevice()) {
-          throw std::runtime_error(
-              MakeString("Managed input ", input_name, " resides on the primary device type (",
-                         static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
-                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
-                         " is expecting it to reside elsewhere."));
-        }
-        pipeline_state->input_names_.push_back(input_name);
-        pipeline_state->inputs_.push_back(State::GetInput(input_name));
-      }
-    }
-
-    // Add outputs from the previous pipeline states to the current pipeline state
-    for (auto& [name, ortvalue] : ortvalue_store_) {
-      if (pipeline_state->HasInput(name)) {
-        pipeline_state->input_names_.push_back(name.c_str());
-        pipeline_state->inputs_.push_back(ortvalue.get());
-      }
-    }
-
-    // Add all the managed outputs to the intermediate pipeline state
-    for (const auto& output_name : output_names_) {
-      if (pipeline_state->HasOutput(output_name)) {
-        if (!pipeline_state->SupportsPrimaryDevice()) {
-          throw std::runtime_error(
-              MakeString("Managed output ", output_name, " resides on the primary device type (",
-                         static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
-                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
-                         " is expecting it to reside elsewhere."));
-        }
-        pipeline_state->output_names_.push_back(output_name);
-        pipeline_state->outputs_.push_back(State::GetOutput(output_name));
-      }
-    }
-
-    // Output of pipeline models could also be managed inputs.
-    // For example, the output of a pipeline model could be the key-value cache.
-    // In such cases, use the managed output buffers and register them with the pipeline model as outputs.
-    for (const auto& input_name : input_names_) {
-      if (pipeline_state->HasOutput(input_name)) {
-        if (!pipeline_state->SupportsPrimaryDevice()) {
-          throw std::runtime_error(
-              MakeString("Managed input ", input_name, " resides on the primary device type (",
-                         static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
-                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
-                         " is expecting it to reside elsewhere."));
-        }
-        pipeline_state->output_names_.push_back(input_name);
-        pipeline_state->outputs_.push_back(State::GetInput(input_name));
-      }
-    }
-
-    // Add all the remaining outputs for the intermediate pipeline state
-    for (const auto& output_name : model_.config_->model.decoder.pipeline[pipeline_state->id_].outputs) {
-      if (std::none_of(pipeline_state->output_names_.begin(), pipeline_state->output_names_.end(),
-                       [&](const std::string& elem) { return elem == output_name; })) {
-        pipeline_state->output_names_.push_back(output_name.c_str());
-        pipeline_state->outputs_.push_back(nullptr);
-      }
-    }
-
-    // Run the intermediate pipeline state
-    pipeline_state->Run(total_length, next_tokens, next_indices);
-
-    // If there is any partial KV cache update to start, enqueue it.
-    if (partial_kv_cache_update_record) {
-      assert(key_value_cache_update_worker_thread_.has_value());
-      auto update_fn = [&key_value_cache = *key_value_cache_.get(),
-                        layer_indices = partial_kv_cache_update_record->layer_indices,
-                        next_indices, total_length]() {
-        key_value_cache.PartialUpdate(next_indices, total_length, layer_indices);
-      };
-      partial_kv_cache_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
-    }
-
-    // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
-    // All non managed outputs are assumed to be on CPU
-    for (size_t i = 0; i < pipeline_state->output_names_.size(); ++i) {
-      if (std::none_of(output_names_.begin(), output_names_.end(),
-                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; }) &&
-          std::none_of(input_names_.begin(), input_names_.end(),
-                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; })) {
-        auto forwarded_output = model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.find(pipeline_state->output_names_[i]);
-        if (forwarded_output != model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.end()) {
-          ortvalue_store_[forwarded_output->second] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
-        } else {
-          ortvalue_store_[pipeline_state->output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
-        }
-      }
-    }
-
-    // Notify derived classes that this pipeline stage has completed.
-    // This allows e.g. Qwen VL to inject vision embeddings after the embeddings stage.
-    OnStageComplete(pipeline_state->id_);
+    RunStage(*pipeline_state, total_length, next_tokens, next_indices);
   }
+}
+
+void DecoderOnlyPipelineState::RunStage(IntermediatePipelineState& pipeline_state, int total_length,
+                                        DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  DurationTrace trace{MakeString("DecoderOnlyPipelineState::RunPipeline[", pipeline_state.id_, "]")};
+
+  const auto& stage_config = model_.config_->model.decoder.pipeline[pipeline_state.id_];
+  const std::string& stage_session = !stage_config.model_id.empty() ? stage_config.model_id : stage_config.filename;
+
+  if (stage_config.reset_session_idx > -1) {
+    if (stage_config.reset_session_idx >= static_cast<int>(model_.sessions_.size())) {
+      throw std::runtime_error(
+          MakeString("Invalid reset_session_idx ", stage_config.reset_session_idx,
+                     " for pipeline model ", stage_config.model_id));
+    }
+    (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[stage_config.reset_session_idx].reset();
+  }
+
+  auto* const partial_kv_cache_update_record = [&]() -> PartialKeyValueCacheUpdateRecord* {
+    auto it = pipeline_state_id_to_partial_kv_cache_update_record_idx_.find(pipeline_state.id_);
+    if (it != pipeline_state_id_to_partial_kv_cache_update_record_idx_.end()) {
+      return &partial_kv_cache_update_records_[it->second];
+    }
+    return nullptr;
+  }();
+
+  // If there is any outstanding partial KV cache update, wait for it to finish.
+  // It is important to synchronize at this point, before setting input/output tensors for this pipeline state run,
+  // because a KV cache update may replace the KV cache input/output tensors.
+  if (partial_kv_cache_update_record) {
+    if (partial_kv_cache_update_record->outstanding_update.valid()) {
+      partial_kv_cache_update_record->outstanding_update.get();
+    }
+  }
+
+  // Clear the intermediate pipeline state outputs from the previous runs.
+  // These outputs will be replaced by the outputs from the current run.
+  for (const auto& output_name : pipeline_state.output_names_) {
+    if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+      ortvalue_store_.erase(iter);
+    }
+  }
+  pipeline_state.ClearIO();
+
+  // Managed inputs and outputs are those inputs and outputs that the
+  // Model knows how to create and update from one run to the next.
+
+  // Add all the managed inputs to the intermediate pipeline state
+  for (const auto& input_name : input_names_) {
+    if (pipeline_state.HasInput(input_name)) {
+      if (!pipeline_state.SupportsPrimaryDevice()) {
+        throw std::runtime_error(
+            MakeString("Managed input ", input_name, " resides on the primary device type (",
+                       static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
+                       stage_config.model_id,
+                       " is expecting it to reside elsewhere."));
+      }
+      pipeline_state.input_names_.push_back(input_name);
+      pipeline_state.inputs_.push_back(State::GetInput(input_name));
+    }
+  }
+
+  // Explicit dataflow wiring (issue #2114 §3.3) overrides the name-based auto-match below. For each
+  // declared input of this stage that an explicit `dataflow[]` wire targets, bind it from the wired
+  // producer's stored output tensor (which may have a different name than the input).
+  std::unordered_set<std::string> explicitly_bound_inputs;
+  for (const auto& input_name : stage_config.inputs) {
+    if (const std::string* from_tensor = flow_.ExplicitSource(stage_session, input_name)) {
+      if (auto iter = ortvalue_store_.find(*from_tensor); iter != ortvalue_store_.end()) {
+        pipeline_state.input_names_.push_back(input_name.c_str());
+        pipeline_state.inputs_.push_back(iter->second.get());
+        explicitly_bound_inputs.insert(input_name);
+      }
+    }
+  }
+
+  // Add outputs from the previous pipeline states to the current pipeline state (auto-match by name).
+  // Skip inputs already satisfied by an explicit dataflow wire (explicit wires win).
+  for (auto& [name, ortvalue] : ortvalue_store_) {
+    if (pipeline_state.HasInput(name) && explicitly_bound_inputs.find(name) == explicitly_bound_inputs.end()) {
+      pipeline_state.input_names_.push_back(name.c_str());
+      pipeline_state.inputs_.push_back(ortvalue.get());
+    }
+  }
+
+  // Add all the managed outputs to the intermediate pipeline state
+  for (const auto& output_name : output_names_) {
+    if (pipeline_state.HasOutput(output_name)) {
+      if (!pipeline_state.SupportsPrimaryDevice()) {
+        throw std::runtime_error(
+            MakeString("Managed output ", output_name, " resides on the primary device type (",
+                       static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
+                       stage_config.model_id,
+                       " is expecting it to reside elsewhere."));
+      }
+      pipeline_state.output_names_.push_back(output_name);
+      pipeline_state.outputs_.push_back(State::GetOutput(output_name));
+    }
+  }
+
+  // Output of pipeline models could also be managed inputs.
+  // For example, the output of a pipeline model could be the key-value cache.
+  // In such cases, use the managed output buffers and register them with the pipeline model as outputs.
+  for (const auto& input_name : input_names_) {
+    if (pipeline_state.HasOutput(input_name)) {
+      if (!pipeline_state.SupportsPrimaryDevice()) {
+        throw std::runtime_error(
+            MakeString("Managed input ", input_name, " resides on the primary device type (",
+                       static_cast<int>(model_.p_device_->GetType()), "). But the pipeline model ",
+                       stage_config.model_id,
+                       " is expecting it to reside elsewhere."));
+      }
+      pipeline_state.output_names_.push_back(input_name);
+      pipeline_state.outputs_.push_back(State::GetInput(input_name));
+    }
+  }
+
+  // Add all the remaining outputs for the intermediate pipeline state
+  for (const auto& output_name : stage_config.outputs) {
+    if (std::none_of(pipeline_state.output_names_.begin(), pipeline_state.output_names_.end(),
+                     [&](const std::string& elem) { return elem == output_name; })) {
+      pipeline_state.output_names_.push_back(output_name.c_str());
+      pipeline_state.outputs_.push_back(nullptr);
+    }
+  }
+
+  // Run the intermediate pipeline state
+  pipeline_state.Run(total_length, next_tokens, next_indices);
+
+  // If there is any partial KV cache update to start, enqueue it.
+  if (partial_kv_cache_update_record) {
+    assert(key_value_cache_update_worker_thread_.has_value());
+    auto update_fn = [&key_value_cache = *key_value_cache_.get(),
+                      layer_indices = partial_kv_cache_update_record->layer_indices,
+                      next_indices, total_length]() {
+      key_value_cache.PartialUpdate(next_indices, total_length, layer_indices);
+    };
+    partial_kv_cache_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
+  }
+
+  // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
+  // All non managed outputs are assumed to be on CPU
+  for (size_t i = 0; i < pipeline_state.output_names_.size(); ++i) {
+    if (std::none_of(output_names_.begin(), output_names_.end(),
+                     [&](const std::string& elem) { return elem == pipeline_state.output_names_[i]; }) &&
+        std::none_of(input_names_.begin(), input_names_.end(),
+                     [&](const std::string& elem) { return elem == pipeline_state.output_names_[i]; })) {
+      auto forwarded_output = stage_config.output_names_forwarder.find(pipeline_state.output_names_[i]);
+      if (forwarded_output != stage_config.output_names_forwarder.end()) {
+        ortvalue_store_[forwarded_output->second] = std::unique_ptr<OrtValue>(pipeline_state.outputs_[i]);
+      } else {
+        ortvalue_store_[pipeline_state.output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state.outputs_[i]);
+      }
+    }
+  }
+
+  // Notify derived classes that this pipeline stage has completed.
+  // This allows e.g. Qwen VL to inject vision embeddings after the embeddings stage.
+  OnStageComplete(pipeline_state.id_);
 }
 
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -394,7 +551,105 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
 
   first_run_ = false;
 
+  // Remember the managed indices/length so a post-loop Finalize() can replay them into final stages.
+  last_next_indices_ = next_indices;
+  last_total_length_ = total_length;
+
   return logits_.Get();
+}
+
+void DecoderOnlyPipelineState::Finalize(int current_length) {
+  // Execute flow stages whose `when=="final"` exactly once after the generation loop completes.
+  // No in-tree model declares final stages today, so this is a no-op for all current models.
+  if (!flow_.HasFinalStages()) {
+    return;
+  }
+
+  DurationTrace trace{"DecoderOnlyPipelineState::Finalize"};
+
+  const int total_length = last_total_length_ != 0 ? last_total_length_ : current_length;
+  DeviceSpan<int32_t> next_tokens{};
+  for (auto& pipeline_state : pipeline_states_) {
+    if (flow_.IsFinal(pipeline_state->id_)) {
+      RunStage(*pipeline_state, total_length, next_tokens, last_next_indices_);
+    }
+  }
+}
+
+void DecoderOnlyPipelineState::RewindTo(size_t index) {
+  // Before mutating cache state, drain any outstanding asynchronous partial KV cache updates.
+  // A partial update worker may otherwise write into KV cache tensors after we rewind them,
+  // racing with and corrupting the rolled-back state.
+  for (auto& record : partial_kv_cache_update_records_) {
+    if (record.outstanding_update.valid()) {
+      record.outstanding_update.get();
+    }
+  }
+
+  // Mirror DecoderOnly_State::RewindTo: roll back the position inputs and, when present, the
+  // KV cache and recurrent state. If an owned cache cannot be rewound (e.g. LFM2Cache), its
+  // RewindTo throws a clear error rather than leaving the pipeline in a corrupt state.
+  position_inputs_->RewindTo(index);
+  if (key_value_cache_)
+    key_value_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
+DeviceSpan<float> DecoderOnlyPipelineState::GetRawLogits(std::array<int64_t, 3>& out_shape) {
+  return logits_.GetAll(out_shape);
+}
+
+DeviceSpan<float> DecoderOnlyPipelineState::GetHiddenStates(std::array<int64_t, 3>& out_shape) {
+  out_shape = {0, 0, 0};
+  hidden_states_ = {};
+  hidden_states_fp32_.reset();
+
+  // The configured name of the intermediate hidden-state activation a pipeline stage exposes
+  // (e.g. the transformer's "hidden_states" output that feeds the lm_head). When unset, no
+  // hidden-state dataflow edge is declared and there is nothing to expose.
+  const std::string& name = model_.config_->model.decoder.outputs.hidden_states;
+  if (name.empty()) {
+    return {};
+  }
+
+  // The producing stage left the tensor in the ortvalue_store_ (it is a non-managed inter-stage
+  // output). Unlike logits/KV, hidden states may be large and device-resident; we read them in
+  // place (relaxing the historical CPU-only forwarded-output assumption, design §11.4) and convert
+  // to fp32 for the caller. GetOutput() also covers managed outputs for completeness.
+  OrtValue* raw = GetOutput(name.c_str());
+  if (!raw) {
+    return {};
+  }
+
+  auto type_info = raw->GetTensorTypeAndShapeInfo();
+  const ONNXTensorElementDataType type = type_info->GetElementType();
+  const std::vector<int64_t> shape = type_info->GetShape();
+
+  // Convert fp16/bfloat16 -> fp32 so callers always get float hidden states.
+  if (type == Ort::TypeToTensorType<Ort::Float16_t> || type == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    hidden_states_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape);
+    Cast(*raw, hidden_states_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
+    raw = hidden_states_fp32_.get();
+  } else if (type != Ort::TypeToTensorType<float>) {
+    return {};  // Unsupported element type for a hidden-state edge.
+  }
+
+  // Normalize the reported shape to [batch*beams, seq, hidden]; collapse any leading dims into batch.
+  std::array<int64_t, 3> normalized{1, 1, 1};
+  if (shape.size() >= 3) {
+    int64_t lead = 1;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) lead *= shape[i];
+    normalized = {lead, shape[shape.size() - 2], shape[shape.size() - 1]};
+  } else if (shape.size() == 2) {
+    normalized = {shape[0], 1, shape[1]};
+  } else if (shape.size() == 1) {
+    normalized = {1, 1, shape[0]};
+  }
+  out_shape = normalized;
+
+  hidden_states_ = WrapTensor<float>(*model_.p_device_inputs_, *raw);
+  return hidden_states_;
 }
 
 void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length) {

@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "pipeline": {
+    "extends": "autoregressive-decoder",
+    "sessions": {
+      "decoder": {"file": "model.onnx"}
+    },
+    "state": {
+      "kv_cache": {
+        "format": "combined",
+        "past_key_pattern": "past_%d",
+        "present_key_pattern": "present_%d"
+      },
+      "position_ids": {"strategy": "default"}
+    }
+  },
+  "tokens": {"eos": [98], "pad": 98, "bos": 98},
+  "generation": {"max_length": 512},
+  "metadata": {"model_type": "gpt2"}
+}

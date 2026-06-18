@@ -562,12 +562,38 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
 // Factory
 // ---------------------------------------------------------------------------
 
-std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
-  if (ModelType::IsQwenVLFamily(model.config_->model.type)) {
-    return std::make_unique<QwenVisionState>(model, params);
+namespace {
+
+// Returns the resolved vision flow step's slicing policy (issue #2114, PR5/CP4). per_image is true
+// when flow.loop == "per_image"; variable_resolution distinguishes the Pixtral per-image loop (which
+// resizes each image independently) from the Qwen-VL one. TranslateV1ToPipeline() sets both purely
+// from config, so CreateVisionState() no longer consults model.type.
+struct VisionLoopPolicy {
+  bool per_image{false};
+  bool variable_resolution{false};
+};
+
+VisionLoopPolicy ResolveVisionLoopPolicy(const Config& config) {
+  for (const auto& step : config.pipeline.flow) {
+    if (step.run == "vision") {
+      return {step.loop == "per_image", step.variable_resolution};
+    }
   }
-  if (ModelType::IsPixtralFamily(model.config_->model.type)) {
+  return {};
+}
+
+}  // namespace
+
+std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
+  // Config-driven per-image selection (issue #2114, PR5/CP4). flow.loop == "per_image" gates per-image
+  // slicing; the variable_resolution flag selects the Pixtral algorithm vs the Qwen-VL one. No
+  // model.type fallback remains -- routing is purely structural/config.
+  const VisionLoopPolicy policy = ResolveVisionLoopPolicy(*model.config_);
+  if (policy.per_image && policy.variable_resolution) {
     return std::make_unique<PixtralVisionState>(model, params);
+  }
+  if (policy.per_image) {
+    return std::make_unique<QwenVisionState>(model, params);
   }
   return std::make_unique<VisionState>(model, params);
 }
