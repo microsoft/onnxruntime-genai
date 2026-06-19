@@ -22,16 +22,25 @@ std::unique_ptr<Config> CloneConfigForTarget(const Config& source) {
 
 bool ProviderConfigurationMatches(const Config::SessionOptions& a,
                                   const Config::SessionOptions& b) {
-  if (a.providers.size() != b.providers.size())
-    return false;
-  for (size_t i = 0; i < a.providers.size(); ++i)
-    if (a.providers[i] != b.providers[i])
-      return false;
-  if (a.provider_options.size() != b.provider_options.size())
-    return false;
-  for (size_t i = 0; i < a.provider_options.size(); ++i)
-    if (a.provider_options[i].name != b.provider_options[i].name)
-      return false;
+  if (a.providers != b.providers) return false;
+
+  if (a.provider_options.size() != b.provider_options.size()) return false;
+  for (size_t i = 0; i < a.provider_options.size(); ++i) {
+    const auto& pa = a.provider_options[i];
+    const auto& pb = b.provider_options[i];
+    if (pa.name != pb.name) return false;
+    if (pa.options != pb.options) return false;
+    if (pa.device_filtering_options.has_value() != pb.device_filtering_options.has_value()) return false;
+    if (pa.device_filtering_options) {
+      const auto& da = *pa.device_filtering_options;
+      const auto& db = *pb.device_filtering_options;
+      if (da.hardware_device_type != db.hardware_device_type ||
+          da.hardware_device_id != db.hardware_device_id ||
+          da.hardware_vendor_id != db.hardware_vendor_id)
+        return false;
+    }
+  }
+
   return true;
 }
 
