@@ -62,9 +62,16 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     throw std::runtime_error(
         "Speculative decoding: max_draft_tokens (K) must be in [1, 16]. Got K=" +
         std::to_string(K) + ".");
-  // Don't look further ahead than max_length.
-  K = std::min(K, max_length - seed_length);
 
+  const int remaining = max_length - seed_length;
+  if (remaining <= 0)
+    throw std::runtime_error(
+        "Speculative decoding: cannot generate because sequence_length (" +
+        std::to_string(seed_length) + ") has reached max_length (" +
+        std::to_string(max_length) + ").");
+
+  // Don't look further ahead than max_length.
+  K = std::min(K, remaining);
   // Seed the shared RNG.
   if (!rng_seeded_) {
     const uint32_t seed = (params.search.random_seed < 0)
