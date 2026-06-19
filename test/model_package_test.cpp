@@ -46,18 +46,16 @@ std::string ReadFile(const fs_std::path& path) {
   return ss.str();
 }
 
-// A variant of the package's single "model" component. When `valid_config` is true the
-// variant gets a minimal but loadable genai_config.json, so selecting it produces a usable
-// OgaConfig; otherwise the variant is left without a config so selecting it fails.
+// A variant of the package's single "model" component. With `valid_config` the variant gets
+// a loadable genai_config.json so selecting it succeeds; without one, selecting it fails.
 struct VariantSpec {
   std::string name;
   std::string ep;
   bool valid_config = true;
 };
 
-// Builds a minimal model package the ORT runtime model_package API can open. The package
-// has a single component named "model"; each VariantSpec becomes a directory under
-// models/model/ with a placeholder model.onnx and, optionally, a minimal genai_config.json.
+// Builds a minimal model package the ORT model_package API can open: a single "model"
+// component whose variants each get a placeholder model.onnx and, optionally, a config.
 fs_std::path WritePackage(const std::string& suffix, const std::vector<VariantSpec>& variants) {
   const auto root = MakeTempDir(suffix);
 
@@ -136,10 +134,8 @@ TEST(ModelPackage, AmbiguousEpsWithoutEpThrow) {
 }
 
 TEST(ModelPackage, ExplicitEpSelectsNamedVariant) {
-  // Selecting "cpu" routes to the cpu variant, which carries a config, so a usable OgaConfig
-  // is produced - proving the named variant is what gets selected and loaded. Selecting
-  // "cuda" must not silently succeed: it fails either because the cuda variant has no config
-  // or because the CUDA provider is unavailable in this build.
+  // Selecting "cpu" routes to the cpu variant (which has a config) and succeeds. Selecting
+  // "cuda" must not silently succeed: the cuda variant has no config (and CUDA may be absent).
   const auto root = WritePackage(
       "explicit",
       {{"cpu", "CPUExecutionProvider", true}, {"cuda", "CUDAExecutionProvider", false}});

@@ -18,10 +18,8 @@ struct PackageLoadResult {
   fs::path variant_dir;
 };
 
-// Opens a model package, resolves an EP, and selects the variant for the package's single
-// component. When `explicit_ep` is empty, the EP is auto-detected: the call succeeds when
-// the component's variants declare exactly one EP and fails otherwise. The package must
-// declare exactly one component.
+// Opens a package and selects the variant for its single component. When `explicit_ep` is
+// empty the EP is auto-detected, which requires the variants to declare exactly one EP.
 PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
                                        const fs::path& package_root,
                                        const std::string& explicit_ep);

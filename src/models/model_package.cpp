@@ -36,15 +36,13 @@ std::set<std::string> CollectVariantEps(const OrtModelPackageContext& pkg_ctx,
   return result;
 }
 
-// Builds an OrtSessionOptions with `ep` registered, used only so ORT can score and pick a
-// variant. A throwaway Config carries the EP through the model's standard provider-append
-// path (SetProviderSessionOptions), so plugin EPs and providers with bespoke handling
-// (CUDA, DML, ...) are registered exactly as they would be for a real session. SetProviderOption
-// normalizes the EP name (full ORT name or short alias) to the canonical dispatch name.
+// Builds OrtSessionOptions with `ep` registered so ORT can score and select a variant.
+// Reuses SetProviderSessionOptions (via a throwaway Config) so plugin EPs and providers
+// with bespoke append handling are registered just as they are for a real session.
 std::unique_ptr<OrtSessionOptions> BuildSelectionSessionOptions(const std::string& ep) {
   auto session_options = OrtSessionOptions::Create();
   if (ep.empty()) {
-    return session_options;  // No EP: ORT defaults to CPU for variant selection.
+    return session_options;  // No EP: ORT defaults to CPU.
   }
   Config config;
   SetProviderOption(config, ep, /*option_name=*/{}, /*option_value=*/{});
@@ -53,13 +51,6 @@ std::unique_ptr<OrtSessionOptions> BuildSelectionSessionOptions(const std::strin
                             config.model.decoder.session_options.provider_options,
                             /*is_primary_session_options=*/true, config);
   return session_options;
-}
-
-std::string OrtPathToUtf8(const std::basic_string<ORTCHAR_T>& s) {
-  if (s.empty()) return {};
-  std::filesystem::path p(s);
-  const auto u8 = p.u8string();
-  return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
 #endif  // ORT_GENAI_HAS_MODEL_PACKAGE
@@ -83,9 +74,8 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
                                        const std::string& explicit_ep) {
   auto pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
 
-  // Single-component restriction. The package author selects "the" genai component by being
-  // the only component in the package. A future change can replace this with an explicit
-  // lookup once ORT exposes per-manifest additional_metadata to consumers.
+  // Single-component restriction: the package author designates "the" genai component by
+  // making it the only one.
   const auto components = pkg_ctx->GetComponentNames();
   if (components.size() != 1) {
     std::ostringstream oss;
@@ -132,7 +122,7 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
 
   PackageLoadResult result;
   result.package_root = package_root;
-  result.variant_dir = fs::path{OrtPathToUtf8(component_ctx->GetSelectedVariantFolderPath())};
+  result.variant_dir = fs::path{component_ctx->GetSelectedVariantFolderPath()};
   return result;
 }
 

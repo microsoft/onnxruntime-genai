@@ -88,10 +88,8 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
 
-// ORT_GENAI_HAS_MODEL_PACKAGE is the single gate for the OrtModelPackageApi support: the
-// loaded ONNX Runtime must be new enough to declare the experimental functions (API
-// version 28) and the experimental header must be available on the include path. The
-// OrtModelPackage* RAII wrappers below and all of model_package.{h,cpp} key off this.
+// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
+// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
 #if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
@@ -1488,9 +1486,8 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
-/// Typed function-pointer cache for the OrtModelPackageApi experimental entries that
-/// onnxruntime-genai consumes. Each pointer is resolved once via the name-based experimental
-/// lookup; a null pointer means the loaded ONNX Runtime build does not export that entry.
+/// Typed function-pointer cache for the OrtModelPackageApi experimental entries genai uses.
+/// Each pointer is resolved once by name; null means the loaded ORT build lacks that entry.
 struct ModelPackageApi {
   OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn
       CreateModelPackageOptionsFromSessionOptions{nullptr};
@@ -1519,8 +1516,7 @@ struct ModelPackageApi {
 };
 
 /// Returns the lazily-resolved model package API function pointers. Throws if the loaded
-/// ONNX Runtime build does not expose the experimental functions onnxruntime-genai requires
-/// (typically because the runtime predates the model package feature).
+/// ONNX Runtime build does not expose the experimental functions genai requires.
 const ModelPackageApi& GetModelPackageApi();
 
 }  // namespace Ort

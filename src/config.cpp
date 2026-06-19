@@ -15,10 +15,8 @@
 
 namespace Generators {
 
-// Fix casing of certain historical names to match current Onnxruntime names, and accept
-// the full ONNX Runtime execution provider names (e.g. "CUDAExecutionProvider") in addition
-// to the short aliases. Returns the canonical name used by the provider dispatch table;
-// unknown names (e.g. plugin EPs) are returned unchanged.
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });

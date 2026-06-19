@@ -176,10 +176,8 @@ OrtEnv& GetOrtEnv();
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
 
-// Construct a Config from `config_path`. When `config_path` is a model package the
-// package is opened and a variant is selected (auto-detected when `ep` is null or empty,
-// or chosen by the supplied `ep`). When `config_path` is a flat directory the existing
-// path-based Config constructor is used; `ep` must be null/empty in that case.
+// Constructs a Config from `config_path`. For a model package, a variant is selected
+// (auto-detected when `ep` is null/empty). For a flat directory `ep` must be null/empty.
 std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
                                      const char* ep = nullptr,
                                      std::string_view json_overlay = {});

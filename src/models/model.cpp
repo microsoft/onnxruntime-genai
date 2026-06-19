@@ -282,9 +282,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // The tokenizer assets live in the directory referenced by model.tokenizer_dir when set
-  // (allowing tokenizers to be shared across package variants) and otherwise alongside
-  // genai_config.json. Resolution handles relative, absolute, and scheme-prefixed values.
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
