@@ -123,7 +123,7 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
-                "enable_skip_layer_norm_strict_mode": "1",
+                "enable_skip_layer_norm_strict_mode": "0",
             },
             "dml": {},
             "webgpu": {
@@ -333,7 +333,14 @@ class Model:
         self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
-        algo_config = self.make_algo_config(extra_options.get("int4_algo_config", "default"))
+        # Decouple the int4 quantization *method* (how weights are rounded) from the
+        # int8 bit *placement* (which MatMuls are upgraded to 8 bits). The base method
+        # is one of {"default", "rtn", "k_quant"}; bit placement is controlled by the
+        # orthogonal flags resolved in `resolve_int4_quant_config`. Legacy compound
+        # names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
+        self.int4_base_method, self.int4_bit_placement = self.resolve_int4_quant_config(extra_options)
+        self.int4_customized_weight_config = self.make_bit_placement_config(self.int4_bit_placement)
+        algo_config = self.make_algo_config(self.int4_base_method, self.int4_customized_weight_config)
         self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
         self.quant_attrs = {
@@ -527,14 +534,14 @@ class Model:
         # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
         self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
         self.shared_embeddings = self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
-        self.int8_lm_head = self.extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"}
+        self.int8_lm_head = bool(self.int4_bit_placement.get("last_matmul_weight_int8", False))
 
         # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
         if self.exclude_embeds or self.exclude_lm_head:
             self.shared_embeddings = False
         elif self.shared_embeddings and not self.unquantized_lm_head:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            self.shared_embeddings = self.int8_lm_head or self.extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
+            self.shared_embeddings = self.int8_lm_head or self.int4_base_method in {"rtn", "k_quant"}
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
@@ -695,59 +702,153 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def make_algo_config(self, quant_method: str):
+    # Legacy compound `int4_algo_config` names map to a base method plus a set of
+    # int8 bit-placement flags so existing recipes keep producing identical models.
+    LEGACY_INT4_ALGO_ALIASES = {
+        "rtn_last": ("rtn", {"last_matmul_weight_int8": True}),
+        "k_quant_last": ("k_quant", {"last_matmul_weight_int8": True}),
+        "k_quant_mixed": ("k_quant", {"last_matmul_weight_int8": True, "int8_mixed_layers": True}),
+        "k_quant_linear": ("k_quant", {"last_matmul_weight_int8": True, "int8_linear_attn": True}),
+    }
+
+    # Orthogonal int8 bit-placement flags (each can be combined with any base method).
+    INT8_PLACEMENT_FLAGS = ("last_matmul_weight_int8", "int8_mixed_layers", "int8_linear_attn")
+
+    def resolve_int4_quant_config(self, extra_options):
+        """Split `int4_algo_config` into a base method and int8 bit-placement flags.
+
+        Returns ``(base_method, placement)`` where ``base_method`` is one of
+        ``{"default", "rtn", "k_quant"}`` and ``placement`` is a dict of the
+        ``INT8_PLACEMENT_FLAGS`` booleans. Explicit flags in ``extra_options`` take
+        precedence over the defaults implied by a legacy compound name.
+        """
+        algo = extra_options.get("int4_algo_config", "default")
+
+        implied = {}
+        base_method = algo
+        if algo in self.LEGACY_INT4_ALGO_ALIASES:
+            base_method, implied = self.LEGACY_INT4_ALGO_ALIASES[algo]
+        elif algo == "k_quant":
+            # Historically `k_quant` always upgraded the LM head to int8.
+            implied = {"last_matmul_weight_int8": True}
+
+        placement = {}
+        for flag in self.INT8_PLACEMENT_FLAGS:
+            placement[flag] = bool(extra_options.get(flag, implied.get(flag, False)))
+        return base_method, placement
+
+    def make_bit_placement_config(self, placement):
+        """Build the per-node `customized_weight_config` (int8 upgrades) from bit-placement flags."""
         customized_weight_config = {}
-        algo_config = None
 
-        if quant_method in {"rtn", "rtn_last"}:
-            if quant_method == "rtn_last":
-                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-            algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
-
-        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
-            if quant_method != "k_quant":
-                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-
-            if quant_method == "k_quant_mixed":
-                # k_quant_mixed is from llama.cpp.
-                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
-                layers_to_exclude = [
-                    i
-                    for i in range(self.num_layers)
-                    if i < self.num_layers / 8
-                    or i >= 7 * self.num_layers / 8
-                    or (i - (round)(self.num_layers / 8)) % 3 == 2
-                ]
-                for i in layers_to_exclude:
-                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
-
-            if quant_method == "k_quant_linear" and hasattr(self, "layer_types"):
-                # Promote linear attention projections and their MLPs to INT8.
-                # Linear attention recurrence accumulates quantization errors across
-                # the full sequence (no softmax normalization).
-                for i, lt in enumerate(self.layer_types):
-                    if lt == "linear_attention":
-                        for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                            customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                        for proj in ("gate_proj", "up_proj", "down_proj"):
-                            customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
-
+        if placement.get("last_matmul_weight_int8"):
             customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-            algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        return algo_config
+        if placement.get("int8_mixed_layers"):
+            # Mixed precision from llama.cpp: promote the most quantization-sensitive MatMuls to int8.
+            # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+            layers_to_upgrade = [
+                i
+                for i in range(self.num_layers)
+                if i < self.num_layers / 8
+                or i >= 7 * self.num_layers / 8
+                or (i - (round)(self.num_layers / 8)) % 3 == 2
+            ]
+            for i in layers_to_upgrade:
+                customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+
+        if placement.get("int8_linear_attn") and hasattr(self, "layer_types"):
+            # Promote linear attention projections and their MLPs to INT8.
+            # Linear attention recurrence accumulates quantization errors across
+            # the full sequence (no softmax normalization).
+            for i, lt in enumerate(self.layer_types):
+                if lt == "linear_attention":
+                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                        customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                        customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
+
+        return customized_weight_config
+
+    def make_algo_config(self, quant_method: str, customized_weight_config=None):
+        """Create the MatMulNBitsQuantizer algo config for a *base* method.
+
+        `quant_method` is one of {"default", "rtn", "k_quant"}. Per-node int8 bit
+        placement is supplied via `customized_weight_config`. The "default" method
+        returns ``None`` (MatMulNBitsQuantizer's built-in DEFAULT quantizer), which
+        cannot apply per-node bits in a single pass; `to_int4` performs a second
+        DEFAULT pass to honor any int8 placement for that method.
+        """
+        customized_weight_config = customized_weight_config or {}
+
+        if quant_method == "default":
+            return None
+        if quant_method == "rtn":
+            return RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        if quant_method == "k_quant":
+            return KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+
+        raise ValueError(
+            f"Unsupported int4_algo_config base method '{quant_method}'. "
+            "Expected one of 'default', 'rtn', 'k_quant' (optionally with int8 placement flags), "
+            "or a legacy alias ('rtn_last', 'k_quant_last', 'k_quant_mixed', 'k_quant_linear')."
+        )
 
     def to_int4(self) -> ir.Model:
+        quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
+        nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
+        customized_weight_config = getattr(self, "int4_customized_weight_config", {}) or {}
+        base_method = getattr(self, "int4_base_method", "default")
+
+        # The DEFAULT quantizer applies a single global bit-width per pass and ignores
+        # `customized_weight_config`. To support int8 bit placement (e.g. the int8 last
+        # MatMul) on top of the DEFAULT method, quantize the int4 body first (excluding
+        # the int8-designated nodes), keeping the int4 body byte-identical to a plain
+        # DEFAULT model. Then upgrade just the designated nodes to int8 with a second
+        # pass. NOTE: the DEFAULT (MLAS) symmetric 8-bit format emits signed int8 with
+        # negative scales, which the MatMulNBits runtime kernel does NOT consume
+        # correctly (it expects unsigned uint8 offset-by-128 with positive scales).
+        # The RTN quantizer produces the kernel-compatible int8 format, so the int8
+        # pass uses RTN even when the body method is DEFAULT.
+        if base_method == "default" and customized_weight_config:
+            int8_nodes = list(customized_weight_config.keys())
+
+            quant_int4 = MatMulNBitsQuantizer(
+                model=ir.to_proto(self.model),
+                block_size=self.quant_attrs["qdq_block_size"],
+                is_symmetric=self.quant_attrs["is_symmetric"],
+                accuracy_level=self.quant_attrs["accuracy_level"],
+                nodes_to_exclude=nodes_to_exclude + int8_nodes,
+                quant_format=quant_format,
+                op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
+                algo_config=None,
+            )
+            quant_int4.process()
+
+            int8_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+            quant_int8 = MatMulNBitsQuantizer(
+                model=quant_int4.model.model,
+                block_size=self.quant_attrs["qdq_block_size"],
+                is_symmetric=self.quant_attrs["is_symmetric"],
+                accuracy_level=self.quant_attrs["accuracy_level"],
+                nodes_to_exclude=nodes_to_exclude,
+                nodes_to_include=int8_nodes,
+                quant_format=quant_format,
+                op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
+                algo_config=int8_algo_config,
+            )
+            quant_int8.process()
+            return ir.from_proto(quant_int8.model.model)
+
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
             block_size=self.quant_attrs["qdq_block_size"],
             is_symmetric=self.quant_attrs["is_symmetric"],
             accuracy_level=self.quant_attrs["accuracy_level"],
-            nodes_to_exclude=self.quant_attrs["nodes_to_exclude"],
-            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
+            nodes_to_exclude=nodes_to_exclude,
+            quant_format=quant_format,
             op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
             algo_config=self.quant_attrs["algo_config"],
         )
