@@ -15,12 +15,23 @@
 
 namespace Generators {
 
-// Fix casing of certain historical names to match current Onnxruntime names
+// Fix casing of certain historical names to match current Onnxruntime names, and accept
+// the full ONNX Runtime execution provider names (e.g. "CUDAExecutionProvider") in addition
+// to the short aliases. Returns the canonical name used by the provider dispatch table;
+// unknown names (e.g. plugin EPs) are returned unchanged.
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "cpu" || lower_name == "cpuexecutionprovider") {
+  // Strip the shared "ExecutionProvider" suffix so full ORT names normalize like the aliases.
+  constexpr std::string_view kEpSuffix = "executionprovider";
+  if (lower_name.size() > kEpSuffix.size() &&
+      lower_name.compare(lower_name.size() - kEpSuffix.size(), kEpSuffix.size(), kEpSuffix) == 0) {
+    lower_name.resize(lower_name.size() - kEpSuffix.size());
+  }
+  if (lower_name == "cpu") {
     return "CPU";
+  } else if (lower_name == "cuda") {
+    return "cuda";
   } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
@@ -31,7 +42,9 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "OpenVINO";
   } else if (lower_name == "vitisai") {
     return "VitisAI";
-  } else if (lower_name == "nvtensorrtrtx" || lower_name == "nvtensorrtrtxexecutionprovider") {
+  } else if (lower_name == "ryzenai") {
+    return "RyzenAI";
+  } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
   }
   return name;  // Return name unchanged

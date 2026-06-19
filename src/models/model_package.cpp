@@ -2,14 +2,15 @@
 // Licensed under the MIT License.
 #include "model_package.h"
 
-#include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+
+#include "../generators.h"
+#include "session_options.h"
 
 namespace Generators {
 
@@ -23,39 +24,6 @@ std::filesystem::path AsStdPath(const fs::path& p) {
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
 
-std::string ToLower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
-}
-
-// Maps a user-supplied EP name to its canonical ORT form for matching against the EP
-// names ORT returns from GetVariantEpName. Accepts short aliases used in genai_config.json
-// (e.g. "cuda") and the full ORT names. Unknown names pass through unchanged.
-std::string NormalizeEpName(const std::string& ep_name) {
-  static const std::pair<const char*, const char*> kAliases[] = {
-      {"cpu", "CPUExecutionProvider"},
-      {"cuda", "CUDAExecutionProvider"},
-      {"dml", "DmlExecutionProvider"},
-      {"directml", "DmlExecutionProvider"},
-      {"openvino", "OpenVINOExecutionProvider"},
-      {"qnn", "QNNExecutionProvider"},
-      {"nvtensorrtrtx", "NvTensorRtRtxExecutionProvider"},
-      {"tensorrt", "TensorrtExecutionProvider"},
-      {"webgpu", "WebGpuExecutionProvider"},
-      {"vitisai", "VitisAIExecutionProvider"},
-      {"ryzenai", "RyzenAIExecutionProvider"},
-      {"rocm", "ROCMExecutionProvider"},
-  };
-  const std::string lower = ToLower(ep_name);
-  for (const auto& [alias, full] : kAliases) {
-    if (lower == alias || lower == ToLower(full)) {
-      return full;
-    }
-  }
-  return ep_name;
-}
-
 std::set<std::string> CollectVariantEps(const OrtModelPackageContext& pkg_ctx,
                                         const std::string& component_name) {
   std::set<std::string> result;
@@ -68,19 +36,22 @@ std::set<std::string> CollectVariantEps(const OrtModelPackageContext& pkg_ctx,
   return result;
 }
 
-// Builds a fresh OrtSessionOptions with `ep` appended, used only by ORT to pick a variant.
-// CUDA needs the dedicated V2 entry point; every other EP goes through the generic API.
+// Builds an OrtSessionOptions with `ep` registered, used only so ORT can score and pick a
+// variant. A throwaway Config carries the EP through the model's standard provider-append
+// path (SetProviderSessionOptions), so plugin EPs and providers with bespoke handling
+// (CUDA, DML, ...) are registered exactly as they would be for a real session. SetProviderOption
+// normalizes the EP name (full ORT name or short alias) to the canonical dispatch name.
 std::unique_ptr<OrtSessionOptions> BuildSelectionSessionOptions(const std::string& ep) {
   auto session_options = OrtSessionOptions::Create();
-  if (ep.empty() || ep == "CPUExecutionProvider") {
-    return session_options;
+  if (ep.empty()) {
+    return session_options;  // No EP: ORT defaults to CPU for variant selection.
   }
-  if (ep == "CUDAExecutionProvider") {
-    auto cuda_opts = OrtCUDAProviderOptionsV2::Create();
-    session_options->AppendExecutionProvider_CUDA_V2(*cuda_opts);
-  } else {
-    session_options->AppendExecutionProvider(ep.c_str(), nullptr, nullptr, 0);
-  }
+  Config config;
+  SetProviderOption(config, ep, /*option_name=*/{}, /*option_value=*/{});
+  SetProviderSessionOptions(*session_options,
+                            config.model.decoder.session_options.providers,
+                            config.model.decoder.session_options.provider_options,
+                            /*is_primary_session_options=*/true, config);
   return session_options;
 }
 
@@ -130,7 +101,7 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
 
   std::string ep;
   if (!explicit_ep.empty()) {
-    ep = NormalizeEpName(explicit_ep);
+    ep = explicit_ep;  // Normalized downstream by SetProviderOption.
   } else {
     auto variant_eps = CollectVariantEps(*pkg_ctx, component_name);
     constexpr const char* kEpHint =

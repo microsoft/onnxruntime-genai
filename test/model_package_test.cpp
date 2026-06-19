@@ -136,9 +136,10 @@ TEST(ModelPackage, AmbiguousEpsWithoutEpThrow) {
 }
 
 TEST(ModelPackage, ExplicitEpSelectsNamedVariant) {
-  // Only the cpu variant carries a config, so selecting "cpu" yields a usable OgaConfig
-  // while selecting "cuda" fails to find one - proving the named variant is what gets
-  // selected and loaded.
+  // Selecting "cpu" routes to the cpu variant, which carries a config, so a usable OgaConfig
+  // is produced - proving the named variant is what gets selected and loaded. Selecting
+  // "cuda" must not silently succeed: it fails either because the cuda variant has no config
+  // or because the CUDA provider is unavailable in this build.
   const auto root = WritePackage(
       "explicit",
       {{"cpu", "CPUExecutionProvider", true}, {"cuda", "CUDAExecutionProvider", false}});
