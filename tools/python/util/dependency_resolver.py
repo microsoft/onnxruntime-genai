@@ -39,7 +39,10 @@ def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
         if is_linux():
             package_name = "Microsoft.ML.OnnxRuntime.Gpu.Linux"
         elif is_windows():
-            package_name = "Microsoft.ML.OnnxRuntime.Gpu.Windows"
+            if is_windows_arm():
+                package_name = "Microsoft.ML.OnnxRuntime"
+            else:
+                package_name = "Microsoft.ML.OnnxRuntime.Gpu.Windows"
         else:
             raise NotImplementedError("ORT with CUDA is not supported on this platform")
     elif use_dml:
