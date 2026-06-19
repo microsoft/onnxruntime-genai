@@ -87,12 +87,15 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   cfg.top_p = params.search.top_p;
   cfg.temperature = params.search.temperature;
 
-  // Turn a row of logits into the probability distribution the accept step compares against:
-  // a plain softmax for greedy (top choice is unaffected by truncation), else the top-k / top-p
-  // distribution.
-  SampledCategorical sampled;
   auto to_dist = [&cfg, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
-    if (cfg.greedy) return Softmax(logits);
+    if (cfg.greedy) {
+      // Greedy accept/correct/bonus only needs argmax, so avoid exp() over the full vocab.
+      std::vector<float> onehot(static_cast<size_t>(vocab_size), 0.0f);
+      const int32_t idx = static_cast<int32_t>(
+          std::max_element(logits.begin(), logits.end()) - logits.begin());
+      onehot[static_cast<size_t>(idx)] = 1.0f;
+      return onehot;
+    }
     ComputeSampledCategorical(logits, cfg.top_k, cfg.top_p, cfg.temperature, sampled);
     return ScatterToFullVocab(sampled, vocab_size);
   };
