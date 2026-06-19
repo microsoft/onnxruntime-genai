@@ -87,6 +87,17 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "onnxruntime_experimental_c_api.h"
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
+
+// ORT_GENAI_HAS_MODEL_PACKAGE is the single gate for the OrtModelPackageApi support: the
+// loaded ONNX Runtime must be new enough to declare the experimental functions (API
+// version 28) and the experimental header must be available on the include path. The
+// OrtModelPackage* RAII wrappers below and all of model_package.{h,cpp} key off this.
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#define ORT_GENAI_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_GENAI_HAS_MODEL_PACKAGE 0
+#endif
+
 #include "../span.h"
 #include "../logging.h"
 #include "env_utils.h"
@@ -1471,7 +1482,7 @@ struct OrtLoraAdapter {
   Ort::Abstract make_abstract;
 };
 
-#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#if ORT_GENAI_HAS_MODEL_PACKAGE
 
 struct OrtModelPackageComponentContext;
 
@@ -1566,6 +1577,6 @@ struct OrtModelPackageComponentContext {
   Ort::Abstract make_abstract;
 };
 
-#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE
 
 #include "onnxruntime_inline.h"

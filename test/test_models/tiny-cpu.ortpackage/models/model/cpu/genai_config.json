@@ -1,9 +1,0 @@
-{
-  "model": {
-    "type": "tiny-test-model",
-    "tokenizer_dir": "package:shared",
-    "vocab_size": 16,
-    "context_length": 32
-  },
-  "search": {}
-}

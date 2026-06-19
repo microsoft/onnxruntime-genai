@@ -15,8 +15,6 @@ namespace Generators {
 
 namespace {
 
-constexpr const char* kManifestFilename = "manifest.json";
-
 // fs::path -> std::filesystem::path. The wrapper's c_str() returns the platform-correct
 // UTF-16/UTF-8 form.
 std::filesystem::path AsStdPath(const fs::path& p) {
@@ -98,6 +96,7 @@ std::string OrtPathToUtf8(const std::basic_string<ORTCHAR_T>& s) {
 }  // namespace
 
 bool IsModelPackage(const fs::path& path) {
+  constexpr const char* kManifestFilename = "manifest.json";
   std::error_code ec;
   const std::filesystem::path root = AsStdPath(path);
   if (!std::filesystem::is_directory(root, ec) || ec) {

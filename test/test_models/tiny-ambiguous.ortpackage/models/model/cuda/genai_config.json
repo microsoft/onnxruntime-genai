@@ -1,8 +1,0 @@
-{
-  "model": {
-    "type": "tiny-test-model",
-    "vocab_size": 16,
-    "context_length": 64
-  },
-  "search": {}
-}

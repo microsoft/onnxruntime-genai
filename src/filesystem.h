@@ -29,19 +29,6 @@
 #include <unistd.h>
 #endif
 
-// Internal C++ helpers are not part of the genai DLL's public C API exports on Windows.
-// BUILDING_ORT_GENAI_DLL is set privately on the onnxruntime-genai target so the genai
-// build exports these symbols while consumers (e.g. unit_tests) see dllimport.
-#if defined(_WIN32)
-#ifdef BUILDING_ORT_GENAI_DLL
-#define ORT_GENAI_INTERNAL_API __declspec(dllexport)
-#else
-#define ORT_GENAI_INTERNAL_API __declspec(dllimport)
-#endif
-#else
-#define ORT_GENAI_INTERNAL_API
-#endif
-
 namespace fs {
 
 class path {

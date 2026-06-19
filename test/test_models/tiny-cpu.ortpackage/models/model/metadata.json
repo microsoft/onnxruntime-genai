@@ -1,6 +1,0 @@
-{
-  "component_name": "model",
-  "variants": {
-    "cpu": { "ep": "CPUExecutionProvider" }
-  }
-}
