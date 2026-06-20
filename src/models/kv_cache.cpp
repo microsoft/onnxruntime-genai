@@ -708,6 +708,109 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
   state_.ep_dynamic_options_next_run_.push_back({"kvcache_rewind", std::to_string(index)});
 }
 
+bool StaticScatterKeyValueCache::IsStaticScatterCache(const Model& model) {
+  return model.session_info_.HasInput(model.config_->model.decoder.inputs.write_indices);
+}
+
+StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
+    : state_{state},
+      layer_count_{model_.config_->model.decoder.num_hidden_layers} {
+  if (state_.params_->search.num_beams != 1) {
+    throw std::runtime_error("Beam search (num_beams > 1) is not supported by the static-scatter KV cache.");
+  }
+
+  // Auto-discover which layer indices have KV cache inputs (mirrors
+  // DefaultKeyValueCache so sparse/hybrid layouts work the same way).
+  {
+    const auto& key_template = model_.config_->model.decoder.inputs.past_key_names;
+    auto prefix = key_template.substr(0, key_template.find('%'));
+    auto suffix = key_template.substr(key_template.find('%') + 2);
+    for (const auto& name : model_.session_info_.GetInputNames()) {
+      if (name.size() > prefix.size() + suffix.size() &&
+          name.compare(0, prefix.size(), prefix) == 0 &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+        kv_layer_indices_.push_back(std::stoi(idx_str));
+      }
+    }
+    std::sort(kv_layer_indices_.begin(), kv_layer_indices_.end());
+  }
+
+  if (!kv_layer_indices_.empty()) {
+    layer_count_ = static_cast<int>(kv_layer_indices_.size());
+  }
+
+  for (int i = 0; i < layer_count_; ++i) {
+    int layer_idx = kv_layer_indices_.empty() ? i : kv_layer_indices_[i];
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, layer_idx));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, layer_idx));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_key_names, layer_idx));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, layer_idx));
+  }
+
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+
+  // Each KV input declares shape [batch, max_seq_len, kv_hidden]. The batch dim
+  // is a runtime property (symbolic in the graph), so take it from the params
+  // like DefaultKeyValueCache; only max_seq_len and kv_hidden must be static.
+  // kv_hidden = num_kv_heads * head_dim and may vary per layer, so read each
+  // layer's own declared shape rather than assuming a uniform value.
+  const int64_t batch_size = state_.params_->BatchBeamSize();
+  layer_shapes_.resize(layer_count_ * 2);
+  caches_.reserve(layer_count_ * 2);
+  for (int i = 0; i < layer_count_ * 2; ++i) {
+    const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i]);
+    if (input_shape.size() != 3) {
+      throw std::runtime_error(
+          "StaticScatterKeyValueCache expects 3D [batch, max_seq_len, kv_hidden] KV inputs, but '" +
+          input_name_strings_[i] + "' has rank " + std::to_string(input_shape.size()) + ".");
+    }
+    // max_seq_len (axis 1) and kv_hidden (axis 2) size the fixed buffer and must
+    // be concrete; the batch dim (axis 0) is allowed to be symbolic.
+    for (size_t axis = 1; axis < 3; ++axis) {
+      if (input_shape[axis] <= 0) {
+        throw std::runtime_error(
+            "StaticScatterKeyValueCache requires a static max_seq_len and kv_hidden, but '" +
+            input_name_strings_[i] + "' has a non-concrete dim at axis " + std::to_string(axis) + ".");
+      }
+    }
+    std::array<int64_t, 3> tensor_shape{batch_size, input_shape[1], input_shape[2]};
+    layer_shapes_[i] = tensor_shape;
+
+    caches_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
+    if (Device().GetType() != DeviceType::WEBGPU) {
+      ByteWrapTensor(Device(), *caches_.back()).Zero();
+    }
+  }
+}
+
+void StaticScatterKeyValueCache::Add() {
+  input_index_ = state_.inputs_.size();
+  output_index_ = state_.outputs_.size();
+
+  // Past and present share one buffer: TensorScatter writes new rows in place,
+  // so key_cache.{i} (input) and updated_key_cache.{i} (output) point at the
+  // same OrtValue and never need rebinding between steps.
+  for (int i = 0; i < layer_count_ * 2; ++i) {
+    state_.inputs_.push_back(caches_[i].get());
+    state_.input_names_.push_back(input_name_strings_[i].c_str());
+    state_.outputs_.push_back(caches_[i].get());
+    state_.output_names_.push_back(output_name_strings_[i].c_str());
+  }
+}
+
+void StaticScatterKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int /*total_length*/) {
+  // No-op: the shared buffer is updated in place by the graph's TensorScatter,
+  // and the write offset / valid length are carried by the write_indices /
+  // nonpad_kv_seqlen inputs (see input_ids.cpp), not by rebinding tensors here.
+}
+
+void StaticScatterKeyValueCache::RewindTo(size_t /*index*/) {
+  // No-op for the shared in-place buffer, matching DefaultKeyValueCache's
+  // past_present_share_buffer path. Rewind is driven by resetting the
+  // write_indices/nonpad_kv_seqlen stream, not by trimming this buffer.
+}
+
 LFM2Cache::LFM2Cache(State& state)
     : state_{state},
       layer_types_{model_.config_->model.decoder.layer_types},
@@ -945,6 +1048,15 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
 
   if (!IsCacheNeeded(state.model_)) {
     return nullptr;
+  }
+
+  // mobius static-cache decoders drive an in-place TensorScatter KV buffer via
+  // the write_indices input; auto-detect that (no user-visible search flag,
+  // mirroring DetectAndConfigureFixedKvShape) before the default fallback.
+  if (StaticScatterKeyValueCache::IsStaticScatterCache(state.model_)) {
+    if (g_log.enabled)
+      Log("info", "CreateKeyValueCache: Creating StaticScatterKeyValueCache");
+    return std::make_unique<StaticScatterKeyValueCache>(state);
   }
 
   if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&

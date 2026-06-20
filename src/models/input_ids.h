@@ -1,5 +1,7 @@
 #pragma once
 
+#include "static_scatter_indices.h"
+
 namespace Generators {
 
 struct InputIDs {
@@ -41,6 +43,13 @@ struct DefaultInputIDs : InputIDs {
 
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
+
+  // Static-scatter (TensorScatter) KV cache driver inputs, created only when the
+  // model declares write_indices + nonpad_kv_seqlen. Both are [batch] int64 CPU
+  // tensors; their per-step values come from static_scatter_indices_.
+  std::unique_ptr<OrtValue> write_indices_;
+  std::unique_ptr<OrtValue> nonpad_kv_seqlen_;
+  StaticScatterIndexTracker static_scatter_indices_;
 };
 
 // Certain models can only process a fixed number of tokens at a time.

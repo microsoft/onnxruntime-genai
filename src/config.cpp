@@ -321,6 +321,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "total_sequence_length") {
       v_.total_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "write_indices") {
+      v_.write_indices = JSON::Get<std::string_view>(value);
+    } else if (name == "nonpad_kv_seqlen") {
+      v_.nonpad_kv_seqlen = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_hidden_states") {
       v_.encoder_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_attention_mask") {

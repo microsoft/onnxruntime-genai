@@ -54,6 +54,8 @@ struct Config {
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
+    static constexpr std::string_view WriteIndicesName = "write_indices";
+    static constexpr std::string_view NonpadKvSeqlenName = "nonpad_kv_seqlen";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
@@ -344,6 +346,10 @@ struct Config {
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
+        // Static-scatter (TensorScatter) KV cache driver inputs ([batch] int64).
+        // Presence of write_indices selects StaticScatterKeyValueCache.
+        std::string write_indices{Defaults::WriteIndicesName};
+        std::string nonpad_kv_seqlen{Defaults::NonpadKvSeqlenName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
