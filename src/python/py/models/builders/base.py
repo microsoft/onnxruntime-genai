@@ -281,6 +281,8 @@ class Model:
             "rope": True,                                    # Use rotary embeddings in attention subgraph
             "q_norm": False,                                 # LayerNorm after MatMul in Q path
             "k_norm": False,                                 # LayerNorm after MatMul in K path
+            "q_norm_weight": "",                             # Q norm weight input to GroupQueryAttention
+            "k_norm_weight": "",                             # K norm weight input to GroupQueryAttention
             "sinks": False,                                  # Sink values for softmax in attention
             # Attributes for packed Attention op:
             "root_input": "",                                # Root input to attention
@@ -361,7 +363,7 @@ class Model:
     def make_ep_expansions_init(self):
         """
         Replace the current class's methods with the appropriate expansion class's methods.
-        
+
         For an EP with specific subgraph requirements, this can be used to extend the current class
         with additional functionality provided by the expansion class.
         """
@@ -486,6 +488,14 @@ class Model:
     def is_fused_rope_supported(self):
         return self.ep not in ["dml"]
 
+    def is_fused_qk_norm_gqa_supported(self):
+        return (
+            self.attention_attrs["op_type"] == "GroupQueryAttention"
+            and self.ep in {"cuda", "webgpu"}
+            and not self.extra_options.get("disable_qk_norm_fusion", False)
+            and (not self.attention_attrs["rope"] or self.attention_attrs["use_rope_in_attn"])
+        )
+
     def make_attention_init(self, config):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
@@ -585,7 +595,7 @@ class Model:
             inputs["past_value_names"] = "past_key_values.%d.value"
 
         # Create outputs dict
-        outputs = {} 
+        outputs = {}
         if "logits" in self.output_names:
             outputs["logits"] = self.output_names["logits"]
         if "present.key" in self.output_names:
@@ -1001,7 +1011,7 @@ class Model:
                     outputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
             else:
                 outputs.append(self.make_value(name, dtype=dtype, shape=shape))
-    
+
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{num}"
@@ -1450,7 +1460,7 @@ class Model:
 
         matmul = PackedMatMul()
         return matmul
-    
+
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
         if not hasattr(q_matmul, "qweight"):
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
@@ -1512,7 +1522,7 @@ class Model:
         return add
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        add = self.make_packed_add_tensor(q_add, k_add, v_add)        
+        add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -2552,22 +2562,42 @@ class Model:
             "",  # attention_bias
             kwargs.get("sinks", ""),
         ]
+        q_norm_weight = kwargs.get("q_norm_weight", "")
+        k_norm_weight = kwargs.get("k_norm_weight", "")
+        if bool(q_norm_weight) != bool(k_norm_weight):
+            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
+        if q_norm_weight:
+            inputs.extend(
+                [
+                    "",  # k_scale
+                    "",  # v_scale
+                    q_norm_weight,
+                    k_norm_weight,
+                ]
+            )
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        attributes = {
+            "num_heads": self.num_attn_heads,
+            "kv_num_heads": self.num_kv_heads,
+            "scale": self.attention_attrs["scale"],
+            "local_window_size": self.window_size,
+            "softcap": self.attention_attrs["softcap"],
+            "do_rotary": self.attention_attrs["use_rope_in_attn"],
+            "rotary_interleaved": self.rope_attrs["interleaved"],
+        }
+        if q_norm_weight and k_norm_weight:
+            attributes["qk_norm_epsilon"] = kwargs.get(
+                "qk_norm_epsilon", self.layernorm_attrs["epsilon"]
+            )
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            local_window_size=self.window_size,
-            softcap=self.attention_attrs["softcap"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rope_attrs["interleaved"],
+            **attributes,
         )
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
@@ -2721,6 +2751,9 @@ class Model:
         #                   O_MatMul
         #                       |
         #                     O_Add
+        self.attention_attrs["q_norm_weight"] = ""
+        self.attention_attrs["k_norm_weight"] = ""
+
         self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
         self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -2842,7 +2875,22 @@ class Model:
     def make_attention_qk_norm(self, layer_id, attention):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
-            self.make_qk_norm(layer_id, attention)
+            if self.is_fused_qk_norm_gqa_supported():
+                self.make_fused_gqa_qk_norm_inputs(layer_id, attention)
+            else:
+                self.make_qk_norm(layer_id, attention)
+
+    def make_fused_gqa_qk_norm_inputs(self, layer_id, attention):
+        q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
+        k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
+        self.make_initializer(
+            attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
+        )
+        self.make_initializer(
+            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
+        )
+        self.attention_attrs["q_norm_weight"] = q_weight_name
+        self.attention_attrs["k_norm_weight"] = k_weight_name
 
     def make_attention_qk_rope(self, layer_id, **kwargs):
         # Make RotaryEmbedding nodes; returns (cos_cache_name, sin_cache_name)
@@ -2909,6 +2957,9 @@ class Model:
             cos_cache=cos_cache_name,
             sin_cache=sin_cache_name,
             sinks=sinks_name,
+            q_norm_weight=self.attention_attrs["q_norm_weight"],
+            k_norm_weight=self.attention_attrs["k_norm_weight"],
+            qk_norm_epsilon=self.layernorm_attrs["epsilon"],
             **kwargs,
         )
 

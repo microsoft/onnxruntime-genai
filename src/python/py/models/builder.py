@@ -75,6 +75,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "shared_embeddings",
         "hf_remote",
         "disable_qkv_fusion",
+        "disable_qk_norm_fusion",
         "prune_lm_head",
         "last_matmul_weight_int8",
         "int8_mixed_layers",
