@@ -3,6 +3,14 @@
 
 #include "models/static_scatter_indices.h"
 
+#include <cmath>
+#include <cstdint>
+#include <numeric>
+#include <vector>
+
+#include "span.h"
+#define OGA_USE_SPAN 1
+#include <ort_genai.h>
 #include <gtest/gtest.h>
 
 namespace Generators::test {
@@ -78,26 +86,80 @@ TEST(StaticScatterIndexTracker, MatchesSliceAFixtureGolden) {
   EXPECT_EQ(decode.nonpad_seqlen, 5);
 }
 
-// Scaffolding for the end-to-end cache test owned by the build-test-genai (qa)
-// task. It drives the mobius slice-A fixture (#366, bias-aware external-KV
-// static-cache decoder: static_cache_bias_decoder.onnx + golden_io.npz, 2
-// layers, key_cache.{i}/value_cache.{i} [batch,16,32], write_indices/
-// nonpad_kv_seqlen [batch] int64) through CreateKeyValueCache and asserts:
-//   * StaticScatterKeyValueCache::IsStaticScatterCache(model) selects this
-//     variant (and does NOT fire for a non-scatter model).
-//   * Per-layer 3D buffers [batch, max_seq_len, kv_hidden] are allocated at the
-//     declared max_seq_len/kv_hidden (batch from BatchBeamSize, symbolic in the
-//     graph), incl. per-layer kv_hidden variation (Gemma-4 Phase 2).
-//   * Add() binds key_cache.{i} and updated_key_cache.{i} to the SAME OrtValue
-//     (in-place share-buffer aliasing) and Update()/RewindTo() leave it intact.
-//   * Prefill (seq=4) then a decode step (write@4, nonpad=5) match the golden
-//     logits/updated caches (parity).
-// Needs a GPU/CPU build with opset-24 TensorScatter/Attention kernels, so it
-// cannot run here yet.
-TEST(StaticScatterKeyValueCache, DISABLED_EndToEndFixtureParity) {
-  GTEST_SKIP() << "Requires the #366 slice-A fixture wired into a genai_config.json "
-                  "and a build with opset-24 TensorScatter/Attention kernels "
-                  "(build-test-genai task).";
+// End-to-end parity test for the mobius slice-A fixture (#366, bias-aware
+// external-KV static-cache decoder). It drives the real
+// StaticScatterKeyValueCache C++ path through the public Oga generator API:
+// AppendTokens runs the model, DefaultInputIDs feeds write_indices /
+// nonpad_kv_seqlen via StaticScatterIndexTracker, and StaticScatterKeyValueCache
+// binds the 3D in-place share-buffer KV cache. We force the exact prompt + decode
+// token from golden_io.npz and compare the produced logits / updated caches to
+// the frozen golden (ORT CPU MEA reference, opset 24).
+//
+// Fixture geometry: mistral backbone, 2 layers, key_cache.{i}/value_cache.{i}
+// [batch,16,32] FLOAT, write_indices/nonpad_kv_seqlen [batch] int64. The model
+// runs on the CPU EP (empty provider_options) so it matches the CPU golden.
+namespace {
+
+// Last-token logits summary from golden_io.npz (CPU MEA, opset 24).
+// prefill: input_ids [1,2,3,4] @ write_index 0, nonpad 4 -> argmax(last)=11.
+// decode:  input_ids [5]       @ write_index 4, nonpad 5 -> argmax=36.
+constexpr int kPrefillArgmax = 11;
+constexpr float kPrefillLastTokLogitsSum = -9.80959f;
+constexpr int kDecodeArgmax = 36;
+constexpr float kDecodeLogitsSum = 78.96353f;  // matches manifest logits_sum.
+
+// updated_key_cache.0 element-sums from golden (proves the in-place scatter
+// actually wrote the cache, not just that logits are right).
+constexpr float kPrefillUpdatedKeyCache0Sum = 4.31156f;
+constexpr float kDecodeUpdatedKeyCache0Sum = -37.31835f;
+
+std::vector<float> ToFloatVector(OgaTensor& tensor) {
+  auto shape = tensor.Shape();
+  int64_t count = std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+  const float* data = static_cast<const float*>(tensor.Data());
+  return std::vector<float>(data, data + count);
+}
+
+int ArgMax(const std::vector<float>& values) {
+  return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
+}
+
+float Sum(const std::vector<float>& values) {
+  return std::accumulate(values.begin(), values.end(), 0.0f);
+}
+
+}  // namespace
+
+TEST(StaticScatterKeyValueCache, EndToEndFixtureParity) {
+  auto model = OgaModel::Create(MODEL_PATH "static-scatter-bias-decoder");
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // --- Prefill: force the 4-token golden prompt. StaticScatterIndexTracker
+  // must bind write_index=0, nonpad=4; TensorScatter writes rows 0..3. ---
+  const std::vector<int32_t> prompt{1, 2, 3, 4};
+  generator->AppendTokens(prompt);
+
+  auto prefill_logits = generator->GetLogits();
+  auto prefill_logits_vec = ToFloatVector(*prefill_logits);  // last token only: [1,1,256]
+  EXPECT_EQ(ArgMax(prefill_logits_vec), kPrefillArgmax);
+  EXPECT_NEAR(Sum(prefill_logits_vec), kPrefillLastTokLogitsSum, 1e-2f);
+
+  auto prefill_cache = generator->GetOutput("updated_key_cache.0");
+  EXPECT_NEAR(Sum(ToFloatVector(*prefill_cache)), kPrefillUpdatedKeyCache0Sum, 1e-2f);
+
+  // --- Decode: force golden token 5. The tracker advances to write_index=4,
+  // nonpad=5; the decode step must read the slot prefill just wrote. ---
+  const std::vector<int32_t> decode_token{5};
+  generator->AppendTokens(decode_token);
+
+  auto decode_logits = generator->GetLogits();
+  auto decode_logits_vec = ToFloatVector(*decode_logits);  // [1,1,256]
+  EXPECT_EQ(ArgMax(decode_logits_vec), kDecodeArgmax);
+  EXPECT_NEAR(Sum(decode_logits_vec), kDecodeLogitsSum, 1e-2f);
+
+  auto decode_cache = generator->GetOutput("updated_key_cache.0");
+  EXPECT_NEAR(Sum(ToFloatVector(*decode_cache)), kDecodeUpdatedKeyCache0Sum, 1e-2f);
 }
 
 }  // namespace Generators::test
