@@ -19,8 +19,8 @@ namespace Generators {
 //   * nonpad_kv_seqlen - the number of valid cached tokens AFTER this step,
 //                        which Attention reads as the per-batch seqlens_k.
 struct StaticScatterIndices {
-  int64_t write_index;     // valid cache tokens before this step (scatter offset)
-  int64_t nonpad_seqlen;   // valid cache tokens after this step (Attention seqlens_k)
+  int64_t write_index;       // valid cache tokens before this step (scatter offset)
+  int64_t nonpad_kv_seqlen;  // valid cache tokens after this step (Attention seqlens_k)
 };
 
 // Tracks the running static-scatter cache indices for a single (batch==1)
@@ -30,7 +30,7 @@ struct StaticScatterIndices {
 // Sequencing contract (the crux mobius and genai must agree on):
 //   * The very first step (prefill) writes at row 0 and reports nonpad equal to
 //     the number of prefill tokens.
-//   * Each subsequent step's write_index is the PREVIOUS step's nonpad_seqlen,
+//   * Each subsequent step's write_index is the PREVIOUS step's nonpad_kv_seqlen,
 //     so rows are appended contiguously with no gap or overlap.
 // This deliberately does NOT reuse genai's existing past_sequence_length scalar
 // (which inits to -1 and is consumed differently); mixing the two would yield
@@ -49,9 +49,6 @@ class StaticScatterIndexTracker {
 
   // Valid cached tokens before the next step. Zero before any Advance().
   int64_t valid_tokens() const { return valid_tokens_; }
-
-  // Reset the stream back to an empty cache (e.g. on RewindTo(0)).
-  void Reset() { valid_tokens_ = 0; }
 
  private:
   int64_t valid_tokens_{0};

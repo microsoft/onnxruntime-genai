@@ -709,7 +709,13 @@ void ModelManagedKeyValueCache::RewindTo(size_t index) {
 }
 
 bool StaticScatterKeyValueCache::IsStaticScatterCache(const Model& model) {
-  return model.session_info_.HasInput(model.config_->model.decoder.inputs.write_indices);
+  // Both driver inputs must be present. input_ids.cpp only produces the indices
+  // when it sees write_indices AND nonpad_kv_seqlen, so requiring just one here
+  // would create the cache for a model whose indices never get bound, surfacing
+  // as an obscure unbound-input error at Run. Keep this predicate in lockstep
+  // with the producer gate in input_ids.cpp.
+  return model.session_info_.HasInput(model.config_->model.decoder.inputs.write_indices) &&
+         model.session_info_.HasInput(model.config_->model.decoder.inputs.nonpad_kv_seqlen);
 }
 
 StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
@@ -806,9 +812,13 @@ void StaticScatterKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, in
 }
 
 void StaticScatterKeyValueCache::RewindTo(size_t /*index*/) {
-  // No-op for the shared in-place buffer, matching DefaultKeyValueCache's
-  // past_present_share_buffer path. Rewind is driven by resetting the
-  // write_indices/nonpad_kv_seqlen stream, not by trimming this buffer.
+  // Fail loud: rewind is NOT wired for the static-scatter cache. The
+  // write_indices/nonpad_kv_seqlen stream lives in InputIDs and has no RewindTo
+  // hook, so a silent no-op here would leave the index tracker stale -> wrong
+  // scatter slots and an over-reported nonpad => silently wrong logits with no
+  // error. Throw until rewind is properly wired, matching the LFM2Cache and
+  // WindowedKeyValueCache siblings.
+  throw std::runtime_error("StaticScatterKeyValueCache does not support RewindTo.");
 }
 
 LFM2Cache::LFM2Cache(State& state)

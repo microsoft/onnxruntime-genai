@@ -97,7 +97,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
     const StaticScatterIndices indices = static_scatter_indices_.Advance(new_sequence_length);
     *write_indices_->GetTensorMutableData<int64_t>() = indices.write_index;
-    *nonpad_kv_seqlen_->GetTensorMutableData<int64_t>() = indices.nonpad_seqlen;
+    *nonpad_kv_seqlen_->GetTensorMutableData<int64_t>() = indices.nonpad_kv_seqlen;
   }
 
   // For beam search, resize input_ids shape based on new_tokens

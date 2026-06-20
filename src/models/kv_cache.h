@@ -201,8 +201,10 @@ std::string ComposeKeyValueName(const std::string& template_string, int index);
 // TensorScatter (driven by the write_indices / nonpad_kv_seqlen inputs produced
 // in input_ids.cpp), reading them back through Attention. Because the scatter is
 // in place, past and present share one buffer: Add() binds key_cache.{i} and
-// updated_key_cache.{i} to the same OrtValue, and Update()/RewindTo() are no-ops
-// (mirroring DefaultKeyValueCache's past_present_share_buffer path).
+// updated_key_cache.{i} to the same OrtValue, and Update() is a no-op (mirroring
+// DefaultKeyValueCache's past_present_share_buffer path). RewindTo() is NOT
+// supported and throws: the write_indices/nonpad_kv_seqlen index stream lives in
+// InputIDs with no rewind hook, so rewinding would silently desynchronize it.
 //
 // Differs from DefaultKeyValueCache only in the allocator: it consumes mobius's
 // 3D emission directly (vs the 4D [batch, num_kv_heads, seq, head_dim] layout),
@@ -211,7 +213,8 @@ std::string ComposeKeyValueName(const std::string& template_string, int index);
 struct StaticScatterKeyValueCache : KeyValueCache {
   StaticScatterKeyValueCache(State& state);
 
-  // True if the model declares the static-scatter driver input (write_indices).
+  // True if the model declares BOTH static-scatter driver inputs (write_indices
+  // and nonpad_kv_seqlen); kept in lockstep with the producer gate in input_ids.
   static bool IsStaticScatterCache(const Model& model);
 
   void Add() override;
@@ -225,6 +228,8 @@ struct StaticScatterKeyValueCache : KeyValueCache {
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
+  // Bind offsets recorded by Add() for parity with the other KV caches; unused
+  // here because the shared buffer never needs rebinding between steps.
   size_t input_index_{~0U}, output_index_{~0U};
 
   // Auto-discovered KV layer indices (sparse for hybrid models).
