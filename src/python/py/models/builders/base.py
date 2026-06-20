@@ -123,6 +123,7 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
+                # Since ORT 1.27.0, we use FP32 accumulation so no need to use the strict mode workaround anymore.
                 "enable_skip_layer_norm_strict_mode": "0",
             },
             "dml": {},
@@ -309,7 +310,7 @@ class Model:
         # For CUDA QMoE the builder ships expert weights already CUTLASS-prepacked (offline via pack_weights_for_cuda_mixed_gemm, see make_qmoe_weights),
         # so the QMoE op's default interpretation (weights_prepacked=-1/auto = prepacked) is exactly what we want and the attribute is omitted.
         # Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship raw [E, N, K/pack] weights and let the runtime PrePack hook transform them).
-        weights_prepacked = int(extra_options["qmoe_weights_prepacked"]) if "qmoe_weights_prepacked" in extra_options else -1
+        weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -347,7 +348,7 @@ class Model:
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
         self.quant_attrs = {
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
-            "qmoe_block_size": int(self.qmoe_block_size),
+            "qmoe_block_size": self.qmoe_block_size,
             "qdq_block_size": int(self.matmul_block_size),
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
@@ -789,7 +790,7 @@ class Model:
         placement is supplied via `customized_weight_config`. The "default" method
         returns ``None`` (MatMulNBitsQuantizer's built-in DEFAULT quantizer), which
         cannot apply per-node bits in a single pass; `to_int4` performs a second
-        DEFAULT pass to honor any int8 placement for that method.
+        RTN pass to honor any int8 placement for that method.
         """
         customized_weight_config = customized_weight_config or {}
 
@@ -3432,7 +3433,7 @@ class Model:
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                raise RuntimeError(f"CUTLASS-prepacked QMoE quantization failed with block_size={block_size}: {e}")
+                raise RuntimeError(f"CUTLASS-prepacked QMoE quantization failed with block_size={block_size}: {e}") from e
 
         # weights_prepacked == 0: ship raw [N, K/pack] weights with ONNX Runtime's
         # MatMulNBits-compatible blockwise quantizer. This is the exact encoding
@@ -3442,13 +3443,13 @@ class Model:
         if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
             block_size = int(self.qmoe_block_size)
             if block_size not in (32, 64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 32, 64 or 128, got {block_size}.")
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                raise RuntimeError(f"MatMulNBits-compatible QMoE quantization failed with block_size={block_size}: {e}")
+                raise RuntimeError(f"MatMulNBits-compatible QMoE quantization failed with block_size={block_size}: {e}") from e
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
         supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
@@ -3461,7 +3462,7 @@ class Model:
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
+                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}") from e
 
         # Column-wise quantization (block_size=0) is deprecated in favor of block-wise quantization to be consistent among EPs.
         raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)})"

@@ -78,12 +78,12 @@ def test_non_cuda_does_not_use_cuda_only_paths():
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
-@pytest.mark.parametrize("bad_block", [16, 32, 256])
+@pytest.mark.parametrize("bad_block", [16, 256])
 def test_cuda_rejects_unsupported_block_size(weights_prepacked, bad_block):
     """Unsupported block sizes must raise a real exception (not an assert that
     ``python -O`` would strip)."""
     model = _FakeMoEModel("cuda", bad_block, weights_prepacked)
-    with pytest.raises(ValueError, match="block_size 64 or 128"):
+    with pytest.raises(ValueError, match="block_size 32, 64, or 128"):
         model.make_qmoe_weights(_W)
 
 
