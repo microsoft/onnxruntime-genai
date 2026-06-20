@@ -307,10 +307,13 @@ class Model:
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
-        # For CUDA QMoE the builder ships expert weights already CUTLASS-prepacked (offline via pack_weights_for_cuda_mixed_gemm, see make_qmoe_weights),
-        # so the QMoE op's default interpretation (weights_prepacked=-1/auto = prepacked) is exactly what we want and the attribute is omitted.
-        # Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship raw [E, N, K/pack] weights and let the runtime PrePack hook transform them).
+        # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
+        # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
+        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
+        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
         weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
+        if weights_prepacked not in (-1, 0, 1):
+            raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {weights_prepacked}.")
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -323,7 +326,7 @@ class Model:
             "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
-            "weights_prepacked": weights_prepacked,          # QMoE int weight layout: 0=raw [E,N,K/pack], 1=CUTLASS-prepacked, -1=auto (omit attr)
+            "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
         }
 
         # LM head-specific variables
@@ -3379,14 +3382,16 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
-        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout (see make_qmoe_weights, which produces the matching bytes):
+        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
+        # (see make_qmoe_weights, which produces the matching bytes):
         #   -1       -> omit the attribute; the op treats weights as already
         #               CUTLASS-prepacked, which is what the builder ships for CUDA.
         #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
         #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
         #               transforms them at load time.
-        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with the com.microsoft QMoE PrePack hook, so only
-        # emit it on the CUDA EP.
+        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with
+        # the com.microsoft QMoE PrePack hook, so non-CUDA exports omit it and keep their own blockwise
+        # QMoE layout. Build separate ONNX files when CPU/WebGPU/TRT-RTX and CUDA QMoE exports are needed.
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
         if weights_prepacked != -1 and self.ep == "cuda":
             extra_kwargs["weights_prepacked"] = weights_prepacked
@@ -3410,53 +3415,42 @@ class Model:
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
     def make_qmoe_weights(self, weights):
-        dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
 
-        # CUDA QMoE consumes CUTLASS-prepacked expert weights (the kernel's
-        # fpA_intB mixed GEMM layout). Produce them offline so the QMoE op reads
-        # them directly: quantize with ONNX Runtime's blockwise quantizer, keep
-        # the signed scales, then run pack_weights_for_cuda_mixed_gemm. This is
-        # the encoding validated by the com.microsoft QMoE CUDA parity tests. The
-        # builder's own _symmetric_blockwise_quantize uses a different
-        # scale/packing convention the kernel cannot consume.
-        #
-        # Both weights_prepacked=-1 (auto, the op's prepacked default) and
-        # weights_prepacked=1 (explicitly prepacked) mean the op reads prepacked
-        # weights, so the builder must produce prepacked weights for both.
-        if self.ep == "cuda" and weights_prepacked in (-1, 1) and self.qmoe_block_size > 0:
-            block_size = int(self.qmoe_block_size)
-            if block_size not in (32, 64, 128):
-                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
-            try:
-                qweight, scales = self._cutlass_prepacked_blockwise_quantize(weights, block_size)
-                self.moe_attrs["block_size"] = block_size
-                return qweight, scales.to(torch.float16)
-            except Exception as e:
-                raise RuntimeError(f"CUTLASS-prepacked QMoE quantization failed with block_size={block_size}: {e}") from e
+        if self.ep == "cuda" and self.qmoe_block_size > 0:
+            # CUDA QMoE consumes CUTLASS-prepacked expert weights (the kernel's fpA_intB mixed GEMM
+            # layout). For weights_prepacked=-1 (auto) or 1, produce them offline so the QMoE op reads
+            # them directly: quantize with ONNX Runtime's blockwise quantizer, keep the signed scales,
+            # then run pack_weights_for_cuda_mixed_gemm. This is the encoding validated by the
+            # com.microsoft QMoE CUDA parity tests. The builder's own _symmetric_blockwise_quantize uses
+            # a different scale/packing convention the kernel cannot consume.
+            #
+            # weights_prepacked=0 ships raw [N, K/pack] weights with ONNX Runtime's MatMulNBits-compatible
+            # blockwise quantizer. This is the exact encoding the CUDA QMoE PrePack hook expects: raw
+            # bytes + blockwise scales, which it lays out into the CUTLASS fpA_intB format at load time.
+            block_size = self.qmoe_block_size
+            quantize_method = (
+                self._matmulnbits_blockwise_quantize
+                if weights_prepacked == 0
+                else self._cutlass_prepacked_blockwise_quantize
+            )
+            descriptor = "MatMulNBits-compatible" if weights_prepacked == 0 else "CUTLASS-prepacked"
 
-        # weights_prepacked == 0: ship raw [N, K/pack] weights with ONNX Runtime's
-        # MatMulNBits-compatible blockwise quantizer. This is the exact encoding
-        # the CUDA QMoE PrePack hook (com.microsoft QMoE) expects: raw bytes +
-        # blockwise scales, which it lays out into the CUTLASS fpA_intB format at
-        # load time. Only valid on the CUDA EP.
-        if self.ep == "cuda" and weights_prepacked == 0 and self.qmoe_block_size > 0:
-            block_size = int(self.qmoe_block_size)
             if block_size not in (32, 64, 128):
                 raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
             try:
-                qweight, scales = self._matmulnbits_blockwise_quantize(weights, block_size)
+                qweight, scales = quantize_method(weights)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                raise RuntimeError(f"MatMulNBits-compatible QMoE quantization failed with block_size={block_size}: {e}") from e
+                raise RuntimeError(f"{descriptor} QMoE quantization failed with block_size={block_size}: {e}") from e
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
         supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:
-            block_size = self.quant_attrs["qmoe_block_size"]
+            block_size = self.qmoe_block_size
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -3469,7 +3463,7 @@ class Model:
          " and set qmoe_block_size > 0 for block-wise quantization of QMoE expert weights. "
          f"Got qmoe_block_size={self.qmoe_block_size} and ep={self.ep}.")
 
-    def _cutlass_prepacked_blockwise_quantize(self, weights, block_size):
+    def _cutlass_prepacked_blockwise_quantize(self, weights):
         """Quantize a single expert's weights and CUTLASS-prepack them for the
         CUDA QMoE fpA_intB mixed-GEMM kernel.
 
@@ -3487,6 +3481,7 @@ class Model:
         from onnxruntime.capi import _pybind_state as _ortpyb
 
         bits = int(self.moe_attrs["expert_weight_bits"])
+        block_size = self.qmoe_block_size
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
         n, k = w.shape
         if k % block_size != 0:
@@ -3521,7 +3516,7 @@ class Model:
 
         return torch.from_numpy(np.ascontiguousarray(packed)), torch.from_numpy(scales)
 
-    def _matmulnbits_blockwise_quantize(self, weights, block_size):
+    def _matmulnbits_blockwise_quantize(self, weights):
         """Quantize per-expert weights with ONNX Runtime's MatMulNBits blockwise
         quantizer, matching the encoding the QMoE PrePack hook expects.
 
@@ -3535,6 +3530,7 @@ class Model:
         from onnxruntime.capi import _pybind_state as _ortpyb
 
         bits = int(self.moe_attrs["expert_weight_bits"])
+        block_size = self.qmoe_block_size
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
         n, k = w.shape
         if k % block_size != 0:
