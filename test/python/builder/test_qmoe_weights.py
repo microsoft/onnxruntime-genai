@@ -11,7 +11,8 @@ must:
   2. only do so on the CUDA EP,
   3. reject unsupported block sizes with a real exception (not a ``python -O``
      strippable ``assert``), and
-  4. keep the SIGNED blockwise scales (taking ``abs()`` reintroduces the
+  4. restore per-channel quantization when ``qmoe_block_size <= 0``, and
+  5. keep the SIGNED blockwise scales (taking ``abs()`` reintroduces the
      garbage-output bug).
 """
 
@@ -124,6 +125,26 @@ class _FakeMoEModel:
         self.calls.append(("symmetric", block_size))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
 
+    def _cuda_per_channel_quantize(self, weights, prepack):
+        self.calls.append(("cuda_per_channel", prepack))
+        return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
+
+    def _symmetric_per_channel_quantize(self, weights):
+        self.calls.append(("per_channel",))
+        return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
+
+
+class _RealMoEModel:
+    make_qmoe_weights = Model.make_qmoe_weights
+    _symmetric_per_channel_quantize = Model._symmetric_per_channel_quantize
+    _cuda_per_channel_quantize = Model._cuda_per_channel_quantize
+
+    def __init__(self, ep, block_size, weights_prepacked, bits=4):
+        self.ep = ep
+        self.qmoe_block_size = block_size
+        self.moe_attrs = {"expert_weight_bits": bits, "weights_prepacked": weights_prepacked}
+        self.quant_attrs = {"qmoe_block_size": block_size}
+
 
 _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
 
@@ -154,6 +175,29 @@ def test_non_cuda_does_not_use_cuda_only_paths():
     assert model.calls == [("symmetric", 128)]
 
 
+@pytest.mark.parametrize(
+    "weights_prepacked,expected_prepack",
+    [(-1, True), (0, False), (1, True)],
+)
+@pytest.mark.parametrize("block_size", [-1, 0])
+def test_cuda_per_channel_path_for_non_positive_block_size(block_size, weights_prepacked, expected_prepack):
+    """qmoe_block_size <= 0 means per-channel QMoE scales and must not emit a
+    block_size attribute."""
+    model = _FakeMoEModel("cuda", block_size, weights_prepacked)
+    model.moe_attrs["block_size"] = 128
+    model.make_qmoe_weights(_W)
+    assert model.calls == [("cuda_per_channel", expected_prepack)]
+    assert "block_size" not in model.moe_attrs
+
+
+def test_non_cuda_per_channel_path_for_non_positive_block_size():
+    model = _FakeMoEModel("cpu", 0, -1)
+    model.moe_attrs["block_size"] = 128
+    model.make_qmoe_weights(_W)
+    assert model.calls == [("per_channel",)]
+    assert "block_size" not in model.moe_attrs
+
+
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
 @pytest.mark.parametrize("bad_block", [16, 256])
 def test_cuda_rejects_unsupported_block_size(weights_prepacked, bad_block):
@@ -176,6 +220,44 @@ def _ort_cuda_available():
         )
     except Exception:
         return False
+
+
+def _ort_qmoe_pack_available():
+    try:
+        from onnxruntime.capi import _pybind_state as _pyb  # noqa: PLC0415
+
+        return hasattr(_pyb, "pack_weights_for_cuda_mixed_gemm")
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(
+    not _ort_qmoe_pack_available(),
+    reason="onnxruntime QMoE pack pybind not available",
+)
+@pytest.mark.parametrize(
+    "bits,raw_shape,packed_shape",
+    [(4, (64, 64), (128, 32)), (8, (64, 128), (128, 64))],
+)
+def test_cuda_per_channel_quantization_shapes(bits, raw_shape, packed_shape):
+    torch.manual_seed(0)
+    weights = torch.randn(64, 128) * 0.05
+
+    raw_model = _RealMoEModel("cuda", 0, 0, bits=bits)
+    raw_qweight, raw_scales = raw_model.make_qmoe_weights(weights)
+    assert raw_qweight.dtype == torch.uint8
+    assert tuple(raw_qweight.shape) == raw_shape
+    assert tuple(raw_scales.shape) == (64,)
+    assert (raw_scales > 0).all()
+    assert "block_size" not in raw_model.moe_attrs
+
+    prepacked_model = _RealMoEModel("cuda", 0, -1, bits=bits)
+    prepacked_qweight, prepacked_scales = prepacked_model.make_qmoe_weights(weights)
+    assert prepacked_qweight.dtype == torch.uint8
+    assert tuple(prepacked_qweight.shape) == packed_shape
+    assert tuple(prepacked_scales.shape) == (64,)
+    assert (prepacked_scales > 0).all()
+    assert "block_size" not in prepacked_model.moe_attrs
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")
