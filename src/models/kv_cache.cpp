@@ -505,7 +505,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;
-  } else if (shape_[2] <= static_cast<int>(index)) {
+  } else if (index > 0 && shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
 
