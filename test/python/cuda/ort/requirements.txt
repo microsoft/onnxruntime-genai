@@ -1,1 +1,4 @@
-onnxruntime-gpu==1.27.0
+# onnxruntime-gpu 1.27.0 links libcudart.so.13 (CUDA 13). CI runners
+# currently ship CUDA 12.x, so the wheel fails to import. Hold the python
+# pin at 1.26.0 until the CI image migrates to CUDA 13.
+onnxruntime-gpu==1.26.0

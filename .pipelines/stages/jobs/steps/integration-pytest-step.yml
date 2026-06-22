@@ -29,7 +29,16 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test\python\requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime-gpu==1.27.0
+      # WebGPU: plugin EP onnxruntime-ep-webgpu has not published 0.2.0 yet,
+      # and ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
+      # only exists in plugin EP 0.2.0+. Hold WebGPU on 1.26.0 + plugin 0.1.0.
+      # CUDA: onnxruntime-gpu 1.27.0 links libcudart.so.13 (CUDA 13); CI runners
+      # ship CUDA 12.x. Hold CUDA on 1.26.0 until the CI image migrates.
+      if ("${{ parameters.ep }}" -eq "cpu") {
+        python -m pip install onnxruntime-gpu==1.27.0
+      } else {
+        python -m pip install onnxruntime-gpu==1.26.0
+      }
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
         python -m pip install onnxruntime-ep-webgpu==0.1.0
@@ -75,7 +84,10 @@ steps:
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
           \$PYTHON_EXE -m pip install -r test/python/requirements.txt
           \$PYTHON_EXE -m pip install pytest
-          \$PYTHON_EXE -m pip install onnxruntime-gpu==1.27.0
+          # onnxruntime-gpu 1.27.0 links libcudart.so.13 (CUDA 13). This CUDA
+          # container image ships CUDA 12.x, so the wheel fails to import.
+          # Hold at 1.26.0 until the image migrates to CUDA 13.
+          \$PYTHON_EXE -m pip install onnxruntime-gpu==1.26.0
           \$PYTHON_EXE -m pip install /wheel/*.whl
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
           \$PYTHON_EXE -m pytest test/python/integration -sv \
@@ -113,7 +125,14 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime==1.27.0
+      # WebGPU: plugin EP onnxruntime-ep-webgpu has not published 0.2.0 yet,
+      # and ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
+      # only exists in plugin EP 0.2.0+. Hold WebGPU on 1.26.0 + plugin 0.1.0.
+      if [ "${{ parameters.ep }}" = "webgpu" ]; then
+        python -m pip install onnxruntime==1.26.0
+      else
+        python -m pip install onnxruntime==1.27.0
+      fi
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
         python -m pip install onnxruntime-ep-webgpu==0.1.0
