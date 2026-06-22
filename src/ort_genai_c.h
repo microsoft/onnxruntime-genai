@@ -650,6 +650,7 @@ typedef struct OgaSpeculativeStats {
   float avg_draft_ms_per_token;
   float avg_target_ms_per_token;
   float acceptance_rate;
+  float mean_accepted_tokens;
   float effective_speedup;
 } OgaSpeculativeStats;
 

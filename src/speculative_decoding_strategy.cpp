@@ -307,7 +307,11 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   auto t_target_start = clock::now();
   auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
   auto t_target_end = clock::now();
-  total_target_ms_ += ms_f(t_target_end - t_target_start).count();
+  // This is a SINGLE-token target decode, so it measures T_target (the baseline
+  // per-token cost). Keep it separate from the K-token verify pass (total_target_ms_)
+  // so GetStats can form the speedup formula's denominator terms.
+  total_reanchor_ms_ += ms_f(t_target_end - t_target_start).count();
+  reanchor_runs_++;
   g.SetLogits(target_lgt); 
 
   // Update draft model (KV cache + probs); count it as propose time.
@@ -346,10 +350,19 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
     s.acceptance_rate =
         static_cast<float>(draft_accepted_) / static_cast<float>(draft_proposed_);
   }
+  const std::size_t committed = draft_accepted_ + corrections_ + bonuses_;
   if (rounds_ > 0) {
-    s.effective_speedup =
-        static_cast<float>(draft_accepted_ + corrections_ + bonuses_) /
-        static_cast<float>(rounds_);
+    s.mean_accepted_tokens =
+        static_cast<float>(committed) / static_cast<float>(rounds_);
+  }
+  if (reanchor_runs_ > 0 && committed > 0) {
+    // Speedup = E[tok/round] / (1 + k*(T_draft/T_target) + x), mapped to measured
+    // per-round times: reanchor=1*T_target, verify=x*T_target, propose=k*T_draft.
+    const float t_target = total_reanchor_ms_ / static_cast<float>(reanchor_runs_);
+    const float t_spec_total = total_propose_ms_ + total_target_ms_ + total_reanchor_ms_;
+    if (t_spec_total > 0.0f)
+      s.effective_speedup =
+          static_cast<float>(committed) * t_target / t_spec_total;
   }
   return s;
 }

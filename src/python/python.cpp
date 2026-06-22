@@ -319,6 +319,7 @@ struct PyGenerator {
     d["avg_draft_ms_per_token"] = stats.avg_draft_ms_per_token;
     d["avg_target_ms_per_token"] = stats.avg_target_ms_per_token;
     d["acceptance_rate"] = stats.acceptance_rate;
+    d["mean_accepted_tokens"] = stats.mean_accepted_tokens;
     d["effective_speedup"] = stats.effective_speedup;
     return d;
   }

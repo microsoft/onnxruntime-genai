@@ -630,6 +630,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* gen
   out_stats->avg_draft_ms_per_token = stats.avg_draft_ms_per_token;
   out_stats->avg_target_ms_per_token = stats.avg_target_ms_per_token;
   out_stats->acceptance_rate = stats.acceptance_rate;
+  out_stats->mean_accepted_tokens = stats.mean_accepted_tokens;
   out_stats->effective_speedup = stats.effective_speedup;
   return nullptr;
   OGA_CATCH

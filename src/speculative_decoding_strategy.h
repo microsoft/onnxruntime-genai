@@ -63,6 +63,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   std::size_t bonuses_{};
   float total_propose_ms_{};
   float total_target_ms_{};
+  float total_reanchor_ms_{};
+  std::size_t reanchor_runs_{};
 
   // Runtime vocab-size sanity check.
   bool vocab_check_done_{false};
