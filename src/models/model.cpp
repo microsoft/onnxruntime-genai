@@ -358,6 +358,15 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
 }
 
 std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  if (strings.empty()) {
+    throw std::runtime_error("EncodeBatch: input strings must not be empty");
+  }
+  for (size_t i = 0; i < strings.size(); i++) {
+    if (strings[i] == nullptr) {
+      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
+    }
+  }
+
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
