@@ -29,19 +29,22 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test\python\requirements.txt
       python -m pip install pytest
-      # WebGPU: plugin EP onnxruntime-ep-webgpu has not published 0.2.0 yet,
-      # and ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
-      # only exists in plugin EP 0.2.0+. Hold WebGPU on 1.26.0 + plugin 0.1.0.
       # CUDA: onnxruntime-gpu 1.27.0 links libcudart.so.13 (CUDA 13); CI runners
       # ship CUDA 12.x. Hold CUDA on 1.26.0 until the CI image migrates.
+      # WebGPU: ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
+      # only exists in plugin EP 0.2.0+. Pair ORT 1.27 with the 0.2.0.dev wheel
+      # from the ORT-Nightly Azure feed (not published to PyPI).
       if ("${{ parameters.ep }}" -eq "cpu") {
         python -m pip install onnxruntime-gpu==1.27.0
-      } else {
+      } elseif ("${{ parameters.ep }}" -eq "cuda") {
         python -m pip install onnxruntime-gpu==1.26.0
+      } else {
+        python -m pip install onnxruntime==1.27.0
       }
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.0.dev20260611 `
+          --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
       }
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -125,17 +128,14 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
-      # WebGPU: plugin EP onnxruntime-ep-webgpu has not published 0.2.0 yet,
-      # and ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
-      # only exists in plugin EP 0.2.0+. Hold WebGPU on 1.26.0 + plugin 0.1.0.
-      if [ "${{ parameters.ep }}" = "webgpu" ]; then
-        python -m pip install onnxruntime==1.26.0
-      else
-        python -m pip install onnxruntime==1.27.0
-      fi
+      # WebGPU: ORT 1.27 ships a MatMulNBitsMlpFusion transformer whose kernel
+      # only exists in plugin EP 0.2.0+. Pair ORT 1.27 with the 0.2.0.dev wheel
+      # from the ORT-Nightly Azure feed (not published to PyPI).
+      python -m pip install onnxruntime==1.27.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.0.dev20260611 \
+          --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
       fi
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
