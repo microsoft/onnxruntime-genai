@@ -19,8 +19,8 @@ parameters:
     type: boolean
     default: true
 
-  - name: enable_win_arm64_cpu
-    displayName: 'Whether Windows ARM64 CPU package is built.'
+  - name: enable_win_arm64
+    displayName: 'Whether Windows ARM64 package is built.'
     type: boolean
     default: true
 
@@ -53,6 +53,11 @@ parameters:
     displayName: 'Microsoft.Windows.AI.MachineLearning Version (should match CMakeList.txt)'
     type: string
     default: '2.1.1'
+
+  - name: ort_cuda_version
+    displayName: 'OnnxRuntime GPU version'
+    type: string
+    default: '1.23.0'
 
   - name: cuda_versions
     displayName: 'CUDA versions'
@@ -115,11 +120,12 @@ extends:
           enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
-          enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+          enable_win_arm64: ${{ parameters.enable_win_arm64 }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
           cuda_versions: ${{ parameters.cuda_versions }}
           build_config: ${{ parameters.build_config }}
           enable_winml: ${{ parameters.enable_winml }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
           ${{ if eq(parameters.enable_winml, true) }}:
             ort_version: ${{ parameters.ort_winml_version }}
           ${{ else }}:
@@ -136,7 +142,7 @@ extends:
               enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
               enable_win_cuda: ${{ parameters.enable_win_cuda }}
               enable_win_dml: ${{ parameters.enable_win_dml }}
-              enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+              enable_win_arm64: ${{ parameters.enable_win_arm64 }}
               enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
               cuda_versions: ${{ parameters.cuda_versions }}
               SpecificArtifact: false

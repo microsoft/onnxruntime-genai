@@ -83,7 +83,7 @@ parameters:
     type: string
     values:
       - '12.8'
-      - '13.0'
+      - '13.1'
     default: '12.8'
 
   - name: build_config
