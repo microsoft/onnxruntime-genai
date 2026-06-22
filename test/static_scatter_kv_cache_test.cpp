@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numeric>
@@ -40,7 +41,7 @@ TEST(StaticScatterIndexTracker, DecodeStepsAppendContiguously) {
   tracker.Advance(5);  // prefill
 
   const StaticScatterIndices decode1 = tracker.Advance(1);
-  EXPECT_EQ(decode1.write_index, 5);     // this step's offset == previous nonpad
+  EXPECT_EQ(decode1.write_index, 5);  // this step's offset == previous nonpad
   EXPECT_EQ(decode1.nonpad_kv_seqlen, 6);
 
   const StaticScatterIndices decode2 = tracker.Advance(1);
