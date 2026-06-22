@@ -724,6 +724,12 @@ StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
   if (state_.params_->search.num_beams != 1) {
     throw std::runtime_error("Beam search (num_beams > 1) is not supported by the static-scatter KV cache.");
   }
+  // The index tracker advances a single slot per step and cannot be forked
+  // across batch or beam dimensions; keep this aligned with the DefaultInputIDs
+  // producer gate, which also requires BatchBeamSize()==1.
+  if (state_.params_->BatchBeamSize() != 1) {
+    throw std::runtime_error("The static-scatter KV cache requires batch beam size (batch_size * num_beams) == 1.");
+  }
 
   // Auto-discover which layer indices have KV cache inputs (mirrors
   // DefaultKeyValueCache so sparse/hybrid layouts work the same way).

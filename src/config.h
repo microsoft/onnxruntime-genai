@@ -347,7 +347,9 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         // Static-scatter (TensorScatter) KV cache driver inputs ([batch] int64).
-        // Presence of write_indices selects StaticScatterKeyValueCache.
+        // Both write_indices AND nonpad_kv_seqlen must be present to select
+        // StaticScatterKeyValueCache: IsStaticScatterCache() (the factory
+        // predicate) and the DefaultInputIDs producer both require both inputs.
         std::string write_indices{Defaults::WriteIndicesName};
         std::string nonpad_kv_seqlen{Defaults::NonpadKvSeqlenName};
         std::string cache_indirection{Defaults::CacheIndirectionName};

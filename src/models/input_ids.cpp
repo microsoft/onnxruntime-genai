@@ -32,7 +32,7 @@ DefaultInputIDs::DefaultInputIDs(State& state)
   if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.write_indices) &&
       model_.session_info_.HasInput(model_.config_->model.decoder.inputs.nonpad_kv_seqlen)) {
     if (state_.params_->BatchBeamSize() != 1) {
-      throw std::runtime_error("Batch size must be 1 for write_indices and nonpad_kv_seqlen inputs");
+      throw std::runtime_error("Batch beam size (batch_size * num_beams) must be 1 for write_indices and nonpad_kv_seqlen inputs");
     }
     if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.write_indices) != Ort::TypeToTensorType<int64_t> ||
         model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.nonpad_kv_seqlen) != Ort::TypeToTensorType<int64_t>)
@@ -92,7 +92,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
   if (write_indices_ && nonpad_kv_seqlen_) {
     if (state_.params_->BatchBeamSize() != 1) {
-      throw std::runtime_error("Batch size must be 1 for write_indices and nonpad_kv_seqlen inputs");
+      throw std::runtime_error("Batch beam size (batch_size * num_beams) must be 1 for write_indices and nonpad_kv_seqlen inputs");
     }
     auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
     const StaticScatterIndices indices = static_scatter_indices_.Advance(new_sequence_length);
