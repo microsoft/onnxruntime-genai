@@ -62,9 +62,16 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     throw std::runtime_error(
         "Speculative decoding: max_draft_tokens (K) must be in [1, 16]. Got K=" +
         std::to_string(K) + ".");
-  // Don't look further ahead than max_length.
-  K = std::min(K, max_length - seed_length);
 
+  const int remaining = max_length - seed_length;
+  if (remaining <= 0)
+    throw std::runtime_error(
+        "Speculative decoding: cannot generate because sequence_length (" +
+        std::to_string(seed_length) + ") has reached max_length (" +
+        std::to_string(max_length) + ").");
+
+  // Don't look further ahead than max_length.
+  K = std::min(K, remaining);
   // Seed the shared RNG.
   if (!rng_seeded_) {
     const uint32_t seed = (params.search.random_seed < 0)
@@ -80,12 +87,15 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   cfg.top_p = params.search.top_p;
   cfg.temperature = params.search.temperature;
 
-  // Turn a row of logits into the probability distribution the accept step compares against:
-  // a plain softmax for greedy (top choice is unaffected by truncation), else the top-k / top-p
-  // distribution.
-  SampledCategorical sampled;
   auto to_dist = [&cfg, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
-    if (cfg.greedy) return Softmax(logits);
+    if (cfg.greedy) {
+      // Greedy accept/correct/bonus only needs argmax, so avoid exp() over the full vocab.
+      std::vector<float> onehot(static_cast<size_t>(vocab_size), 0.0f);
+      const int32_t idx = static_cast<int32_t>(
+          std::max_element(logits.begin(), logits.end()) - logits.begin());
+      onehot[static_cast<size_t>(idx)] = 1.0f;
+      return onehot;
+    }
     ComputeSampledCategorical(logits, cfg.top_k, cfg.top_p, cfg.temperature, sampled);
     return ScatterToFullVocab(sampled, vocab_size);
   };
