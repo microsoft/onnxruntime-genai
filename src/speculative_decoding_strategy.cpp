@@ -17,7 +17,9 @@ namespace Generators {
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
   if (pending_.empty()) {
-    if (!g.computed_logits_)
+    // A new round needs a starting point: either fresh logits or a token left over from the 
+    // fold to feed into this round's verify.
+    if (!g.computed_logits_ && !pending_anchor_token_.has_value())
       throw std::runtime_error(
           "Speculative decoding: GenerateNextToken called without fresh logits. Call AppendTokens "
           "before GenerateNextToken, and again after any RewindToLength. Continuous decoding via "
@@ -30,6 +32,7 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
 void SpeculativeDecodingStrategy::Reset() {
   pending_.clear();
   reanchor_pending_ = false;
+  pending_anchor_token_.reset();
 }
 
 // Runs one speculative round:
@@ -87,6 +90,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   cfg.top_p = params.search.top_p;
   cfg.temperature = params.search.temperature;
 
+  SampledCategorical sampled;
   auto to_dist = [&cfg, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
     if (cfg.greedy) {
       // Greedy accept/correct/bonus only needs argmax, so avoid exp() over the full vocab.
@@ -115,17 +119,34 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         "Speculative draft returned " + std::to_string(proposal.probs.size()) +
         " prob rows, expected K=" + std::to_string(K) + " (or 0 for greedy-match).");
 
-  // Grab the target's distribution for the first token. We need this before the verify Run overwrites the logits buffer. 
-  // The target's accept/reject decision for the first token is based on this distribution, not the one from the verify Run.
-  auto pending_cpu_pos0 = g.search_->GetLogits().CopyDeviceToCpu();
-  std::vector<float> target_probs_pos0 =
-      to_dist({pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)});
+  // If a token is waiting from the fold, it goes at the front of this verify batch (so the
+  // batch is K+1 wide instead of K). It also fills the gap left in the target's cache.
+  const bool use_anchor = pending_anchor_token_.has_value();
+  int verify_width = K;
+  int32_t anchor_token = 0;
+  if (use_anchor) {
+    verify_width = K + 1;
+    anchor_token = *pending_anchor_token_;
+  }
+  pending_anchor_token_.reset();  // taken; FinalizeRound may set a new one for next round.
 
-  // Verify: run the target over all K proposed tokens at once (its KV cache grows to seed_length + K).
-  auto target_input = params.p_device->Allocate<int32_t>(K);
+  // We need the target's prediction for proposal token 0 ("pos0"). Without an anchor we already
+  // have it from the previous step's logits. With an anchor it comes out of the verify below
+  // (it's the row produced right after the anchor token) so -> fill it in there.
+  std::vector<float> target_probs_pos0;
+  if (!use_anchor) {
+    auto pending_cpu_pos0 = g.search_->GetLogits().CopyDeviceToCpu();
+    target_probs_pos0 =
+        to_dist({pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)});
+  }
+
+  // Verify: score the anchor (when present) plus the K proposed tokens in one target pass.
+  auto target_input = params.p_device->Allocate<int32_t>(verify_width);
   {
     auto sp = target_input.CpuSpan();
-    for (int i = 0; i < K; i++) sp[i] = proposal.tokens[i];
+    int w = 0;
+    if (use_anchor) sp[w++] = anchor_token;
+    for (int i = 0; i < K; i++) sp[w++] = proposal.tokens[i];
   }
   target_input.CopyCpuToDevice();
 
@@ -143,7 +164,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 
   auto raw_shape = raw_ort->GetTensorTypeAndShapeInfo()->GetShape();
   const bool is_multi =
-      (raw_shape.size() >= 2 && raw_shape[1] == static_cast<int64_t>(K));
+      (raw_shape.size() >= 2 && raw_shape[1] == static_cast<int64_t>(verify_width));
+  is_multi_ = is_multi;
 
   // Runtime vocab-size safety net (once per generator lifetime).
   if (!vocab_check_done_) {
@@ -167,11 +189,26 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       throw std::runtime_error(
           "Speculative decoding: unsupported logits element type (expected fp32).");
     const float* data = raw_ort->GetTensorData<float>();
+    auto row = [&](int r) {
+      return std::span<const float>{data + static_cast<ptrdiff_t>(r) * vocab_size,
+                                    static_cast<size_t>(vocab_size)};
+    };
+    // The anchor (when present) takes row 0, so the proposal rows start at 1; otherwise they
+    // start at 0 and pos0 came from earlier. target_dists[i] ends up as "the
+    // target's prediction after proposal token i", so the accept loop below is unchanged.
+    int prop_row0 = 0;
+    if (use_anchor) {
+      prop_row0 = 1;
+      target_probs_pos0 = to_dist(row(0));
+    }
     for (int i = 0; i < K; i++)
-      target_dists[i] = to_dist(
-          {data + static_cast<ptrdiff_t>(i) * vocab_size, static_cast<size_t>(vocab_size)});
+      target_dists[i] = to_dist(row(prop_row0 + i));
   } else {
-    // Pruned model - K separate single-token target passes.
+    // Pruned model - one target pass per token. Guard against out of sync cache.
+    if (use_anchor)
+      throw std::runtime_error(
+          "Speculative decoding: internal error - re-anchor fold reached the non-multi target "
+          "path. The fold must only engage for targets that return one logits row per token.");
     spec_state->target_state().RewindTo(seed_length);
     auto single_buf = params.p_device->Allocate<int32_t>(1);
     for (int i = 0; i < K; i++) {
@@ -282,12 +319,14 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
     FinalizeRound(g);
 }
 
-// Re-anchor the target = line its KV cache back up with the tokens we actually kept, then get it
-// ready for the next round. Verify left the cache holding all K tokens, but only n_direct were
-// accepted, so:
-//   1. rewind the cache to seed_length + n_direct, dropping the rejected tokens.
-//   2. run final_token so GetLogits() holds the prediction that follows the committed tokens.
-// Then let the subclass Advance its draft model. Deferred until the round is fully drained.
+// Tidy up after a round and get ready for the next one. Verify ran all the proposed tokens, but
+// we only kept n_direct of them, so first drop the rejected ones from the target's cache. Then
+// handle the one committed token (final_token) in one of two ways:
+//   * fold path (is_multi && K>=2): leave it for the next round's verify batch (see RunRound).
+//     This skips a whole extra target run each round.
+//   * legacy path (K==1 / pruned target): run it through the target now. This keeps K==1
+//     byte-for-byte identical to plain greedy decoding.
+// Either way we then advance the draft model. Runs once the round's tokens have all been emitted.
 void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
@@ -309,22 +348,30 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   if (rewind_to < target_kv_len)
     spec_state->target_state().RewindTo(rewind_to);
 
-  auto single_buf = params.p_device->Allocate<int32_t>(1);
-  single_buf.CpuSpan()[0] = saved_final_token_;
-  single_buf.CopyCpuToDevice();
+  const bool fold = is_multi_ && saved_K_ >= 2;
+  if (fold) {
+    // Hand the committed token to the next round instead of running it now. Its verify pass
+    // will both place it in the cache and give us its prediction - saving a full target run.
+    pending_anchor_token_ = saved_final_token_;
+  } else {
+    auto single_buf = params.p_device->Allocate<int32_t>(1);
+    single_buf.CpuSpan()[0] = saved_final_token_;
+    single_buf.CopyCpuToDevice();
 
-  const int next_len = saved_seed_length_ + saved_n_direct_ + 1;
-  auto t_target_start = clock::now();
-  auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
-  auto t_target_end = clock::now();
-  // This is a SINGLE-token target decode, so it measures T_target (the baseline
-  // per-token cost). Keep it separate from the K-token verify pass (total_target_ms_)
-  // so GetStats can form the speedup formula's denominator terms.
-  total_reanchor_ms_ += ms_f(t_target_end - t_target_start).count();
-  reanchor_runs_++;
-  g.SetLogits(target_lgt); 
+    const int next_len = saved_seed_length_ + saved_n_direct_ + 1;
+    auto t_target_start = clock::now();
+    auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
+    auto t_target_end = clock::now();
+    // One single-token target run, which is exactly the baseline cost per token (T_target).
+    // We track it separately from the K-token verify for the speedup formula in GetStats.
+    // (The fold path has no such run, so it leaves this at 0.)
+    total_reanchor_ms_ += ms_f(t_target_end - t_target_start).count();
+    reanchor_runs_++;
+    g.SetLogits(target_lgt);
+  }
 
-  // Update draft model (KV cache + probs); count it as propose time.
+  // Update draft model (KV cache + probs); count it as propose time. Unchanged by the fold - the
+  // draft always advances on final_token to seed the next round's first proposal.
   auto t_advance_start = clock::now();
   Advance(g, saved_proposal_, saved_n_direct_, saved_final_token_, saved_seed_length_);
   auto t_advance_end = clock::now();
@@ -368,6 +415,8 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
   if (reanchor_runs_ > 0 && committed > 0) {
     // Speedup = E[tok/round] / (1 + k*(T_draft/T_target) + x), mapped to measured
     // per-round times: reanchor=1*T_target, verify=x*T_target, propose=k*T_draft.
+    // Only the non-fold path runs a single-token target forward, so it is the only
+    // path that measures T_target; under the re-anchor fold this stays 0
     const float t_target = total_reanchor_ms_ / static_cast<float>(reanchor_runs_);
     const float t_spec_total = total_propose_ms_ + total_target_ms_ + total_reanchor_ms_;
     if (t_spec_total > 0.0f)

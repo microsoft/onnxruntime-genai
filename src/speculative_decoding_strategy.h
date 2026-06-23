@@ -3,6 +3,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <random>
 #include <vector>
 #include "decoding_strategy.h"
@@ -92,6 +93,14 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   int saved_seed_length_{};
   int saved_K_{};
   bool reanchor_pending_{false};
+
+  // Re-anchor fold: instead of giving the round's committed token its own target forward, 
+  // we tack it onto the front of the next round's verify batch. Saves
+  // one full target run per round.
+  // pending_anchor_token_ = the token waiting to ride the next verify (empty = none waiting).
+  // is_multi_ = true if the target returns one logits row per token (required for the fold).
+  bool is_multi_{false};
+  std::optional<int32_t> pending_anchor_token_{};
 
   // Reusable one-hot logit row used to commit a single token.
   DeviceSpan<float> onehot_buf_;
