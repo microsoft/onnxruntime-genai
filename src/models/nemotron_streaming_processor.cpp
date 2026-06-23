@@ -145,7 +145,7 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
 }
 
 std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
-  if (model.config_->model.type == "moonshine_streaming") {
+  if (ModelType::IsStreamingEncDecASR(model.config_->model.type)) {
     return std::make_unique<MoonshineStreamingProcessor>(model);
   }
   return std::make_unique<NemotronStreamingProcessor>(model);

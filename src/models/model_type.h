@@ -45,8 +45,8 @@ struct ModelType {
   }
 
   inline static bool IsRNNT(const std::string& model_type) {
-    // RNNT and streaming ASR models bypass the search/logits pipeline entirely.
-    static constexpr std::array<std::string_view, 2> rnnt_types = {"nemotron_speech", "moonshine_streaming"};
+    // RNN-Transducer encoder/decoder/joiner models.
+    static constexpr std::array<std::string_view, 1> rnnt_types = {"nemotron_speech"};
     return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
   }
 
@@ -59,6 +59,16 @@ struct ModelType {
   // and drive a custom encoder/decoder/joiner loop via TransducerState.
   inline static bool IsTransducer(const std::string& model_type) {
     return IsRNNT(model_type) || IsTDT(model_type);
+  }
+
+  // Streaming encoder-decoder ASR models (e.g. Moonshine). Architecturally
+  // distinct from transducers (audio encoder + auto-regressive transformer
+  // decoder with self+cross KV cache) but share the same runtime contract:
+  // bypass the search/logits pipeline and drive token emission via
+  // TransducerState::StepToken().
+  inline static bool IsStreamingEncDecASR(const std::string& model_type) {
+    static constexpr std::array<std::string_view, 1> streaming_enc_dec = {"streaming_enc_dec_asr"};
+    return std::find(streaming_enc_dec.begin(), streaming_enc_dec.end(), model_type) != streaming_enc_dec.end();
   }
 
   inline static bool IsMMM(const std::string& model_type) {

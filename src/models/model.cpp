@@ -867,9 +867,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (config->model.type == "nemotron_speech")
+  if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
-  if (config->model.type == "moonshine_streaming")
+  if (ModelType::IsStreamingEncDecASR(config->model.type))
     return std::make_shared<MoonshineStreamingModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);

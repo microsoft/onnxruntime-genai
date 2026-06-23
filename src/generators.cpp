@@ -368,9 +368,11 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
-  // RNNT and TDT models don't use the traditional search/logits pipeline,
-  // so skip the standard validations and just create the state.
-  if (ModelType::IsTransducer(model.config_->model.type)) {
+  // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
+  // search/logits pipeline; skip the standard validations and create the
+  // TransducerState-derived state directly.
+  const auto& model_type = model.config_->model.type;
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
     return;

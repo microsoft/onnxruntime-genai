@@ -15,7 +15,7 @@ MoonshineStreamingProcessor::MoonshineStreamingProcessor(Model& model)
     : model_{model} {
   auto* moonshine_model = dynamic_cast<MoonshineStreamingModel*>(&model);
   if (!moonshine_model) {
-    throw std::runtime_error("MoonshineStreamingProcessor requires a moonshine_streaming model type. Got: " +
+    throw std::runtime_error("MoonshineStreamingProcessor requires a streaming_enc_dec_asr model type. Got: " +
                              model.config_->model.type);
   }
   config_ = moonshine_model->moonshine_config_;
