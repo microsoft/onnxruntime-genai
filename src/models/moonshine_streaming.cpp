@@ -18,6 +18,7 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
 
   sample_rate = config.model.sample_rate;
   chunk_samples = config.model.chunk_samples;
+  if (config.model.overlap_samples > 0) overlap_samples = config.model.overlap_samples;
 
   bos_token_id = config.model.bos_token_id;
   eos_token_id = config.model.eos_token_id.empty() ? 2 : config.model.eos_token_id[0];
@@ -116,7 +117,6 @@ void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extr
       decode_mode_ = true;
       chunk_done_ = false;
       first_decode_ = true;
-      last_token_ = config_.bos_token_id;
 
       // Reset KV caches and last-step buffer for the new chunk.
       self_kv_cache_.clear();
@@ -159,19 +159,19 @@ void MoonshineStreamingState::StepToken() {
     }
   }
 
-  last_token_ = max_idx;
+  const int last_token = max_idx;
 
-  if (last_token_ == config_.eos_token_id) {
+  if (last_token == config_.eos_token_id) {
     chunk_done_ = true;
     decode_mode_ = false;
     return;
   }
 
-  last_tokens_.push_back(static_cast<int32_t>(last_token_));
-  all_tokens_.push_back(static_cast<int32_t>(last_token_));
+  last_tokens_.push_back(static_cast<int32_t>(last_token));
+  all_tokens_.push_back(static_cast<int32_t>(last_token));
 
   // Feed the emitted token into the next decoder step.
-  *decoder_input_ids_->GetTensorMutableData<int64_t>() = last_token_;
+  *decoder_input_ids_->GetTensorMutableData<int64_t>() = last_token;
 }
 
 void MoonshineStreamingState::RunInitialDecoder() {

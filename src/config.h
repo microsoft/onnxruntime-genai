@@ -162,6 +162,7 @@ struct Config {
     int pre_encode_cache_size{};
     int sample_rate{};
     int chunk_samples{};
+    int overlap_samples{};
     int blank_id{};
     int max_symbols_per_step{};
 

@@ -1171,6 +1171,8 @@ struct Model_Element : JSON::Element {
       v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "chunk_samples") {
       v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "overlap_samples") {
+      v_.overlap_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "blank_id") {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {

@@ -86,7 +86,6 @@ struct MoonshineStreamingState : TransducerState {
   // Decoder state machine
   bool first_decode_{true};
   bool decode_mode_{false};
-  int last_token_{1};  // BOS
 
   // KV caches
   // self_kv[2*i]   = present_self_key_i

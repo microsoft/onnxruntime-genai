@@ -55,9 +55,10 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::EncodeAllAudio() {
   constexpr int FRAME_LEN = 80;
   const size_t audio_len = audio_buffer_.size();
 
-  // Encode in overlapping chunks.
-  std::vector<std::vector<float>> all_enc_data;
-  std::vector<int64_t> all_enc_frames;
+  // Encode in overlapping chunks. Accumulate useful (non-overlap) encoder frames into
+  // a flat float buffer; concatenate into the final OrtValue once the total is known.
+  std::vector<float> enc_buffer;
+  int64_t total_frames = 0;
 
   int pos = 0;
   int chunk_idx = 0;
@@ -118,9 +119,8 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::EncodeAllAudio() {
     int64_t useful_frames = enc_frames - frames_to_skip;
     if (useful_frames > 0) {
       const float* src = enc_data + frames_to_skip * hidden_size;
-      std::vector<float> frame_data(src, src + useful_frames * hidden_size);
-      all_enc_data.push_back(std::move(frame_data));
-      all_enc_frames.push_back(useful_frames);
+      enc_buffer.insert(enc_buffer.end(), src, src + useful_frames * hidden_size);
+      total_frames += useful_frames;
     }
 
     pos += chunk_samples;
@@ -129,24 +129,18 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::EncodeAllAudio() {
 
   audio_buffer_.clear();
 
-  // Concatenate all encoder outputs.
-  int64_t total_frames = 0;
-  for (auto f : all_enc_frames) total_frames += f;
-
   if (total_frames == 0) {
     return nullptr;
   }
 
-  int64_t hidden_size = config_.encoder_hidden_size;
+  // Concatenate accumulated frames into the final encoder_hidden_states tensor.
+  const int64_t hidden_size = config_.encoder_hidden_size;
   auto out_shape = std::array<int64_t, 3>{1, total_frames, hidden_size};
   auto full_enc = OrtValue::CreateTensor(allocator, out_shape,
                                          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  float* out_ptr = full_enc->GetTensorMutableData<float>();
-
-  for (const auto& chunk_data : all_enc_data) {
-    std::memcpy(out_ptr, chunk_data.data(), chunk_data.size() * sizeof(float));
-    out_ptr += chunk_data.size();
-  }
+  std::memcpy(full_enc->GetTensorMutableData<float>(),
+              enc_buffer.data(),
+              enc_buffer.size() * sizeof(float));
 
   auto result = std::make_unique<NamedTensors>();
   result->emplace("encoder_hidden_states",
