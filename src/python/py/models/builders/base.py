@@ -496,7 +496,7 @@ class Model:
         return (
             self.attention_attrs["op_type"] == "GroupQueryAttention"
             and self.ep in {"cuda", "webgpu"}
-            and not self.extra_options.get("disable_qk_norm_fusion", False)
+            and self.extra_options.get("fuse_qk_norm_gqa", False)
             and (not self.attention_attrs["rope"] or self.attention_attrs["use_rope_in_attn"])
         )
 
