@@ -33,6 +33,21 @@ from transformers import (
 )
 
 
+def onnxruntime_version_at_least(major, minor):
+    """Return True if the installed onnxruntime is at least the given major.minor version.
+
+    Robust to pre-release/dev suffixes (e.g. "1.28.0.dev20260612004"). Returns False if
+    the version string cannot be parsed.
+    """
+    import onnxruntime
+
+    try:
+        installed_major, installed_minor = (int(part) for part in onnxruntime.__version__.split(".")[:2])
+    except (AttributeError, ValueError):
+        return False
+    return (installed_major, installed_minor) >= (major, minor)
+
+
 def parse_hf_token(hf_token):
     """
     Returns the authentication token needed for Hugging Face.
@@ -123,8 +138,11 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
-                # Since ORT 1.27.0, we use FP32 accumulation so no need to use the strict mode workaround anymore.
-                "enable_skip_layer_norm_strict_mode": "0",
+                # Since ORT 1.27.0, SkipLayerNorm uses FP32 accumulation by default, so the strict-mode
+                # workaround is unnecessary (and disabling it is faster). For older ORT versions that the
+                # package still supports (onnxruntime-gpu>=1.20.1), keep strict mode enabled to avoid an
+                # accuracy regression.
+                "enable_skip_layer_norm_strict_mode": "0" if onnxruntime_version_at_least(1, 27) else "1",
             },
             "dml": {},
             "webgpu": {
@@ -742,9 +760,6 @@ class Model:
         base_method = algo
         if algo in self.LEGACY_INT4_ALGO_ALIASES:
             base_method, implied = self.LEGACY_INT4_ALGO_ALIASES[algo]
-        elif algo == "k_quant":
-            # Historically `k_quant` always upgraded the LM head to int8.
-            implied = {"last_matmul_weight_int8": True}
 
         placement = {}
         for flag in self.INT8_PLACEMENT_FLAGS:
@@ -3562,6 +3577,8 @@ class Model:
             raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
         num_blocks = k // block_size
         pack = 8 // bits
+        if n % pack != 0:
+            raise ValueError(f"N ({n}) must be divisible by {pack} (2 INT4 elements per byte) for QMoE blockwise quantization.")
 
         # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
         # (column = output channel), quantizing each column along K.

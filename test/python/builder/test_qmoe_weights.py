@@ -45,8 +45,17 @@ def _stub_missing_builder_dependencies():
         sys.modules["onnx_ir.tensor_adapters"] = tensor_adapters
 
     if not _module_available("onnxruntime.quantization.matmul_nbits_quantizer"):
-        onnxruntime = sys.modules.setdefault("onnxruntime", types.ModuleType("onnxruntime"))
-        quantization = types.ModuleType("onnxruntime.quantization")
+        # Prefer the real onnxruntime package when it is installed; only fabricate a
+        # top-level stub when the package truly isn't available. This avoids shadowing a
+        # real onnxruntime wheel (which would break other tests in the session) and only
+        # supplies the specific submodule the builder needs.
+        if _module_available("onnxruntime"):
+            import onnxruntime
+        else:
+            onnxruntime = sys.modules.setdefault("onnxruntime", types.ModuleType("onnxruntime"))
+        quantization = getattr(onnxruntime, "quantization", None)
+        if quantization is None:
+            quantization = types.ModuleType("onnxruntime.quantization")
         matmul_nbits_quantizer = types.ModuleType("onnxruntime.quantization.matmul_nbits_quantizer")
         for class_name in (
             "KQuantWeightOnlyQuantConfig",
