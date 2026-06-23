@@ -519,17 +519,33 @@ class Model:
             )
 
     def make_tied_embeddings_init(self, config):
-        # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
-        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
-        self.shared_embeddings = self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
+        shared_embeddings = self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
+
+        # Determine dtype for quantized lm_head
+        self.int4_lm_head = self.extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
         self.int8_lm_head = self.extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"}
 
-        # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
-        if self.exclude_embeds or self.exclude_lm_head:
-            self.shared_embeddings = False
-        elif self.shared_embeddings and not self.unquantized_lm_head:
-            # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            self.shared_embeddings = self.int8_lm_head or self.extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
+        # Determine if embeddings and lm_head will be quantized or not
+        self.quantized_embeds = (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            and "Gather" in self.quant_attrs["op_types_to_quantize"]
+            and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
+            and not self.exclude_embeds
+        )
+        self.quantized_lm_head = (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
+            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
+            and not self.exclude_lm_head
+            and not self.prune_lm_head
+        )
+
+        if shared_embeddings:
+            self.tied_quantized_embeddings = self.quantized_embeds and self.quantized_lm_head
+            self.tied_unquantized_embeddings = not self.tied_quantized_embeddings
+        else:
+            self.tied_unquantized_embeddings = False
+            self.tied_quantized_embeddings = False
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
@@ -752,9 +768,8 @@ class Model:
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
 
-        already_quantized_in_qdq_format = (
-            self.quant_type is not None and self.quant_attrs["use_qdq"]
-        )  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
         if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
             model = self.to_int4()
         else:
@@ -1413,7 +1428,7 @@ class Model:
         basename = "/model/embed_tokens"
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.shared_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        if self.tied_quantized_embeddings:
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
@@ -1425,6 +1440,7 @@ class Model:
                 f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]",
             ]
             weight_reshape_output = f"{weight_reshape_name}/output_0"
+
             # Quantized weight dtype is uint8. See here for more info:
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
@@ -1445,7 +1461,7 @@ class Model:
             )
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.shared_embeddings and self.unquantized_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
