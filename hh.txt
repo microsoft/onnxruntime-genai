@@ -1,0 +1,973 @@
+    1  import csv, os, sys, json
+    2  sys.path.insert(0, "/home/nebanfic/open_asr_leaderboard")
+    3  from normalizer import BasicMultilingualTextNormalizer
+    4  _norm = BasicMultilingualTextNormalizer()
+    5  def edit_distance(r, h):
+    6      n, m = len(r), len(h)
+    7      dp = [[0]*(m+1) for _ in range(n+1)]
+    8      for i in range(n+1): dp[i][0] = i
+    9      for j in range(m+1): dp[0][j] = j
+   10      for i in range(1, n+1):
+   11          for j in range(1, m+1):
+   12              dp[i][j] = dp[i-1][j-1] if r[i-1]==h[j-1] else 1+min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+   13      return dp[n][m]
+   14  def wer_tsv(p):
+   15      tot_w = tot_e = 0
+   16      with open(p, newline='') as f:
+   17          rd = csv.DictReader(f, delimiter='\t')
+   18          for r in rd:
+   19              ref = _norm(r['ref']).split()
+   20              hyp = _norm(r['hyp']).split()
+   21              tot_e += edit_distance(ref, hyp)
+   22              tot_w += len(ref)
+   23      return 100.0 * tot_e / tot_w if tot_w else float('nan')
+   24  # Hybrid streaming TSVs are at LATENCY=0.56 per eval_pt_hybrid.sh default
+   25  LANGS = ['hr','is','pl','pt']
+   26  SPLICES = ['last','middle','0to12','first']
+   27  print(f"{'lang':<5}{'splice':<10}{'wer_streaming':>15}")
+   28  results = {}
+   29  for lang in LANGS:
+   30      results[lang] = {}
+   31      for sp in SPLICES:
+   32          p = f"{lang}/eval_hybrid/{lang}_100h_hybrid_ml_{sp}_1e4_nopre/{lang}_100h_hybrid_ml_{sp}_1e4_nopre_fleurs_streaming.tsv"
+   33          if not os.path.exists(p):
+   34              print(f"{lang:<5}{sp:<10}{'MISSING':>15}  ({p})")
+   35              continue
+   36          w = wer_tsv(p)
+   37          results[lang][sp] = w
+   38          print(f"{lang:<5}{sp:<10}{w:>15.3f}")
+   39  # Compare to known 160ms hybrid_last (PT = 15.32) to detect if these are 160ms or 560ms
+   40  print()
+   41  print("Reference 160ms hybrid PT_last from wer_results.json: 15.32")
+   42  print(f"Computed PT last from TSV: {results.get('pt',{}).get('last','?')}")
+   43  EOF
+   44  python3 << 'EOF'
+   45  import json
+   46  with open('paper/wer_results.json') as f:
+   47      d = json.load(f)
+   48  # Look at one existing 560ms entry to learn the schema
+   49  print("=== ml 560ms entry structure (PT) ===")
+   50  print(json.dumps(d['pt']['100h']['ml']['560ms'], indent=2)[:600])
+   51  print()
+   52  print("=== existing hybrid 160ms entry structure (PT last) ===")
+   53  print(json.dumps(d['pt']['100h']['hybrid_last']['160ms'], indent=2)[:600])
+   54  EOF
+   55  python3 << 'EOF'
+   56  import csv, json, os, sys
+   57  sys.path.insert(0, "/home/nebanfic/open_asr_leaderboard")
+   58  from normalizer import BasicMultilingualTextNormalizer
+   59  _norm = BasicMultilingualTextNormalizer()
+   60  def edit_distance(r, h):
+   61      n, m = len(r), len(h)
+   62      dp = [[0]*(m+1) for _ in range(n+1)]
+   63      for i in range(n+1): dp[i][0] = i
+   64      for j in range(m+1): dp[0][j] = j
+   65      for i in range(1, n+1):
+   66          for j in range(1, m+1):
+   67              dp[i][j] = dp[i-1][j-1] if r[i-1]==h[j-1] else 1+min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+   68      return dp[n][m]
+   69  def wer_tsv(p):
+   70      tot_w = tot_e = n_utt = 0
+   71      with open(p, newline='') as f:
+   72          rd = csv.DictReader(f, delimiter='\t')
+   73          for r in rd:
+   74              ref = _norm(r['ref']).split()
+   75              hyp = _norm(r['hyp']).split()
+   76              tot_e += edit_distance(ref, hyp)
+   77              tot_w += len(ref)
+   78              n_utt += 1
+   79      return (100.0*tot_e/tot_w if tot_w else float('nan')), tot_w, n_utt
+   80  with open('paper/wer_results.json') as f:
+   81      d = json.load(f)
+   82  LANGS = ['hr','is','pl','pt']
+   83  SPLICES = ['last','middle','0to12','first']
+   84  DATASETS = ['fleurs','cv','mls']
+   85  added = []
+   86  for lang in LANGS:
+   87      for sp in SPLICES:
+   88          key = f'hybrid_{sp}'
+   89          if key not in d[lang]['100h']:
+   90              print(f"WARN: missing key {lang}/100h/{key} — creating")
+   91              d[lang]['100h'][key] = {}
+   92          entry560 = {}
+   93          for ds in DATASETS:
+   94              p = f"{lang}/eval_hybrid/{lang}_100h_hybrid_ml_{sp}_1e4_nopre/{lang}_100h_hybrid_ml_{sp}_1e4_nopre_{ds}_streaming.tsv"
+   95              if not os.path.exists(p):
+   96                  continue
+   97              wer, nw, nu = wer_tsv(p)
+   98              entry560[ds] = {
+   99                  "n_ref_words": nw,
+  100                  "n_utt": nu,
+  101                  "run_dir": f"{lang}/eval_hybrid/{lang}_100h_hybrid_ml_{sp}_1e4_nopre",
+  102                  "seed": 45,
+  103                  "wer": wer,
+  104              }
+  105          d[lang]['100h'][key]['560ms'] = entry560
+  106          added.append(f"{lang}/100h/{key}/560ms ({len(entry560)} datasets, FLEURS WER={entry560.get('fleurs',{}).get('wer','?'):.3f})")
+  107  with open('paper/wer_results.json','w') as f:
+  108      json.dump(d, f, indent=2)
+  109  print("Added:")
+  110  for a in added: print(" ", a)
+  111  EOF
+  112  for lang in de es fr nl; do   found=$(find /datadisks -maxdepth 3 -type d -iname "*${lang}_*hybrid*" 2>/dev/null);   if [ -n "$found" ]; then     echo "--- $lang HAS hybrids ---";     echo "$found";   else     echo "$lang: none";   fi; done
+  113  echo ""
+  114  echo "=== ML-EN gap @ 100h 560ms (seen vs unseen) ==="
+  115  cd /home/nebanfic/ForeignlangNemotronTraining
+  116  python3 << 'EOF'
+  117  import json
+  118  d = json.load(open('paper/wer_results.json'))
+  119  print(f"{'lang':<6}{'ML':>8}{'EN':>8}{'gap':>8}")
+  120  for lang in ['de','es','fr','nl','hr','is','pl','pt']:
+  121      try:
+  122          ml = d[lang]['100h']['ml']['560ms']['fleurs']['wer']
+  123          en = d[lang]['100h']['enc']['560ms']['fleurs']['wer']
+  124          print(f"{lang:<6}{ml:>8.2f}{en:>8.2f}{en-ml:>+8.2f}")
+  125      except KeyError:
+  126          print(f"{lang}: missing")
+  127  EOF
+  128  echo "=== Hybrid TSVs for seen langs ==="
+  129  for lang in de es fr nl; do   for sp in last middle 0to12 first; do     p="${lang}/eval_hybrid/${lang}_100h_hybrid_ml_${sp}_1e4_nopre/${lang}_100h_hybrid_ml_${sp}_1e4_nopre_fleurs_streaming.tsv";     if [ -f "$p" ]; then       echo "OK   $p";     else       echo "MISS $p";     fi;   done; done
+  130  python3 << 'EOF'
+  131  import csv, json, os, sys
+  132  sys.path.insert(0, "/home/nebanfic/open_asr_leaderboard")
+  133  from normalizer import BasicMultilingualTextNormalizer
+  134  _norm = BasicMultilingualTextNormalizer()
+  135  def edit_distance(r, h):
+  136      n, m = len(r), len(h)
+  137      dp = [[0]*(m+1) for _ in range(n+1)]
+  138      for i in range(n+1): dp[i][0] = i
+  139      for j in range(m+1): dp[0][j] = j
+  140      for i in range(1, n+1):
+  141          for j in range(1, m+1):
+  142              dp[i][j] = dp[i-1][j-1] if r[i-1]==h[j-1] else 1+min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+  143      return dp[n][m]
+  144  def wer_tsv(p):
+  145      tot_w = tot_e = n_utt = 0
+  146      with open(p, newline='') as f:
+  147          rd = csv.DictReader(f, delimiter='\t')
+  148          for r in rd:
+  149              ref = _norm(r['ref']).split()
+  150              hyp = _norm(r['hyp']).split()
+  151              tot_e += edit_distance(ref, hyp)
+  152              tot_w += len(ref)
+  153              n_utt += 1
+  154      return (100.0*tot_e/tot_w if tot_w else float('nan')), tot_w, n_utt
+  155  with open('paper/wer_results.json') as f:
+  156      d = json.load(f)
+  157  LANGS_SEEN   = ['de','es','fr','nl']
+  158  LANGS_UNSEEN = ['hr','is','pl','pt']
+  159  LANGS = LANGS_SEEN + LANGS_UNSEEN
+  160  SPLICES = ['last','0to12','middle','first']
+  161  DATASETS = ['fleurs','cv','mls']
+  162  # Compute and persist seen-lang hybrids
+  163  for lang in LANGS_SEEN:
+  164      for sp in SPLICES:
+  165          key = f'hybrid_{sp}'
+  166          if key not in d[lang]['100h']:
+  167              d[lang]['100h'][key] = {}
+  168          entry560 = {}
+  169          for ds in DATASETS:
+  170              p = f"{lang}/eval_hybrid/{lang}_100h_hybrid_ml_{sp}_1e4_nopre/{lang}_100h_hybrid_ml_{sp}_1e4_nopre_{ds}_streaming.tsv"
+  171              if not os.path.exists(p):
+  172                  continue
+  173              wer, nw, nu = wer_tsv(p)
+  174              entry560[ds] = {"n_ref_words": nw, "n_utt": nu,
+  175                              "run_dir": f"{lang}/eval_hybrid/{lang}_100h_hybrid_ml_{sp}_1e4_nopre",
+  176                              "seed": 45, "wer": wer}
+  177          d[lang]['100h'][key]['560ms'] = entry560
+  178  with open('paper/wer_results.json','w') as f:
+  179      json.dump(d, f, indent=2)
+  180  # Print full 8-lang seed-matched 560ms hybrid table
+  181  def fl(lang, init):
+  182      return d[lang]['100h'][init]['560ms']['fleurs']['wer']
+  183  rows = [
+  184      ('ML s45',  'ml_s45'),
+  185      ('0:12 s45','hybrid_0to12'),
+  186      ('last s45','hybrid_last'),
+  187      ('middle s45','hybrid_middle'),
+  188      ('first s45','hybrid_first'),
+  189      ('EN s45',  'enc_s45'),
+  190  ]
+  191  print()
+  192  print(f"=== FLEURS 560ms, 100h, seed-matched (all rows seed 45) ===")
+  193  hdr = f"{'init':<11}" + "".join(f"{l.upper():>7}" for l in LANGS) + f"{'meanA':>8}{'meanS':>8}{'meanU':>8}"
+  194  print(hdr)
+  195  print("-"*len(hdr))
+  196  ml_row = None
+  197  for label, k in rows:
+  198      vals = [fl(l,k) for l in LANGS]
+  199      meanA = sum(vals)/len(vals)
+  200      meanS = sum(vals[:4])/4
+  201      meanU = sum(vals[4:])/4
+  202      line = f"{label:<11}" + "".join(f"{v:>7.2f}" for v in vals) + f"{meanA:>8.2f}{meanS:>8.2f}{meanU:>8.2f}"
+  203      print(line)
+  204      if k == 'ml_s45':
+  205          ml_row = (vals, meanA, meanS, meanU)
+  206  print()
+  207  print("=== Δ vs ML s45 (pp) ===")
+  208  for label, k in rows:
+  209      if k == 'ml_s45': continue
+  210      vals = [fl(l,k) for l in LANGS]
+  211      deltas = [v - m for v,m in zip(vals, ml_row[0])]
+  212      meanA = sum(vals)/len(vals) - ml_row[1]
+  213      meanS = sum(vals[:4])/4 - ml_row[2]
+  214      meanU = sum(vals[4:])/4 - ml_row[3]
+  215      line = f"{label:<11}" + "".join(f"{d:>+7.2f}" for d in deltas) + f"{meanA:>+8.2f}{meanS:>+8.2f}{meanU:>+8.2f}"
+  216      print(line)
+  217  EOF
+  218  # Verify JSON has all 8 langs × 4 splices @ 560ms
+  219  python3 -c "
+  220  import json
+  221  d = json.load(open('paper/wer_results.json'))
+  222  for lang in ['de','es','fr','nl','hr','is','pl','pt']:
+  223      for sp in ['last','middle','0to12','first']:
+  224          e = d[lang]['100h'].get(f'hybrid_{sp}',{}).get('560ms',{}).get('fleurs',{})
+  225          w = e.get('wer','MISS'); s = e.get('seed','?')
+  226          print(f'{lang}_{sp:6s}: WER={w if isinstance(w,str) else f\"{w:.2f}\"} seed={s}')
+  227  "
+  228  python3 << 'EOF'
+  229  import json
+  230  d = json.load(open('paper/wer_results.json'))
+  231  seen_dirs = set()
+  232  for lang in d:
+  233    for h in d[lang]:
+  234      for init in d[lang][h]:
+  235        for tier in d[lang][h][init]:
+  236          for ds, entry in d[lang][h][init][tier].items():
+  237            if isinstance(entry, dict) and 'run_dir' in entry:
+  238              key = (tier, ds, entry['run_dir'].split('/',2)[1] if '/' in entry['run_dir'] else '')
+  239              if key not in seen_dirs:
+  240                seen_dirs.add(key)
+  241                print(f"{tier:8s} {ds:4s} {entry['run_dir']}")
+  242                if len(seen_dirs) > 40: break
+  243          if len(seen_dirs) > 40: break
+  244  EOF
+  245  echo "---"
+  246  grep -rEn "def wer|jiwer|compute_wer|edit_distance" /home/nebanfic/open_asr_leaderboard/*.py 2>/dev/null | head -20
+  247  git status
+  248  git add --all
+  249  git commit -m "More updates"
+  250  git push origin main
+  251  cd ForeignlangNemotronTraining/
+  252  git status
+  253  git diff eval_fleurs_streaming_ids.py
+  254  tmux attach -t train
+  255  head -1 /home/nebanfic/.vscode-server/data/User/workspaceStorage/2d280ee0f9f5397460107df45b4d5271/GitHub.copilot-chat/transcripts/de23a7ff-8427-47e2-9f01-7f44880d1cd1.jsonl | head -c 500
+  256  echo "---"
+  257  ls /datadisks/disk4/nebanfic/multilingual_data/es/*.json 2>/dev/null | head -30
+  258  echo "---"
+  259  head -3 /datadisks/disk2/nebanfic/datasets/manifests/icelandic_train_100h_cut_isnorm.jsonl 2>&1
+  260  wc -l /home/nebanfic/ForeignlangNemotronTraining/paper/slt2026_draft_ieee_small.tex /home/nebanfic/ForeignlangNemotronTraining/paper/slt2026_draft_ieee.tex
+  261  cd ForeignlangNemotronTraining/
+  262  git status
+  263  git add --all
+  264  git commit -m "More stuff"
+  265  git push origin main
+  266  git status
+  267  git add --all
+  268  git commit -m "More stuff + ieee paper"
+  269  git push origin main
+  270  git status
+  271  git add --all
+  272  git commit -m "Polishing"
+  273  git push origin main
+  274  git status
+  275  git add --all
+  276  git commit -m "more stuff 2"
+  277  git push origin main
+  278  git status
+  279  git add --all
+  280  git commit -m "More changes"
+  281  git push origin main
+  282  git status
+  283  git add --all
+  284  git commit -m "more changes 2"
+  285  git push origin main
+  286  git status
+  287  git add --all
+  288  git commit -m "more stuff 3"
+  289  git push origin main
+  290  echo "---"
+  291  find /home/nebanfic -type d -path "*hr*" -name "*onnx*" 2>/dev/null | head -20
+  292  ls -la /home/nebanfic/multilingual_onnx_eval_int4_v3/hr/ 2>/dev/null | head -20
+  293  echo ""
+  294  echo "=== int4_v3/hr/* (cells) ==="
+  295  ls -d /home/nebanfic/multilingual_onnx_eval_int4_v3/hr/*/ 2>/dev/null | head -10
+  296  echo ""
+  297  echo "=== one cell, encoder files ==="
+  298  ls -lh /home/nebanfic/multilingual_onnx_eval_int4_v3/hr/*/encoder* 2>/dev/null | head -20
+  299  echo "---"
+  300  ls -la /home/nebanfic/ForeignlangNemotronTraining/onnx_eval/ 2>/dev/null | head -30
+  301  echo "---"
+  302  echo "=== encoder file sizes for each HR INT4 cell ==="
+  303  for d in /datadisks/disk2/nebanfic/hr_onnx_int4/*/; do   name=$(basename "$d");   enc=$(ls -l "$d"/encoder.onnx 2>/dev/null | awk '{print $5}');   enc_data=$(ls -l "$d"/encoder.onnx.data 2>/dev/null | awk '{print $5}');   total_mb=$(du -sm "$d" 2>/dev/null | awk '{print $1}');   echo "$name  encoder.onnx=$enc  encoder.onnx.data=$enc_data  total=${total_mb}MB"; done
+  304  ls
+  305  echo "=== File sizes ==="
+  306  ls -lh pretrain_combined*.jsonl
+  307  echo
+  308  echo "=== Verify new file: line count, JSON validity, schema ==="
+  309  python3 - <<'PY'
+  310  import json
+  311  fp = '/home/nebanfic/slt2026_manifests_staging/pretrain_combined_new.jsonl'
+  312  ok = bad = 0
+  313  keys = set()
+  314  dur_sum = 0.0
+  315  lang_buckets = {}
+  316  seen_paths = set()
+  317  dups = 0
+  318  with open(fp) as f:
+  319      for line in f:
+  320          try:
+  321              o = json.loads(line)
+  322              ok += 1
+  323              keys.update(o.keys())
+  324              dur_sum += float(o['duration'])
+  325              ap = o['audio_filepath']
+  326              if ap in seen_paths:
+  327                  dups += 1
+  328              seen_paths.add(ap)
+  329              # bucket by lang
+  330              if '/multilingual_data/' in '/' + ap:
+  331                  lang = ap.split('multilingual_data/',1)[1].split('/',1)[0]
+  332              else:
+  333                  lang = '?'
+  334              lang_buckets.setdefault(lang, [0, 0.0])
+  335              lang_buckets[lang][0] += 1
+  336              lang_buckets[lang][1] += float(o['duration'])
+  337          except Exception as e:
+  338              bad += 1
+  339  print(f"  total rows:     {ok:,}")
+  340  print(f"  bad lines:      {bad}")
+  341  print(f"  unique paths:   {len(seen_paths):,}  (dups: {dups})")
+  342  print(f"  total duration: {dur_sum/3600:,.1f} h")
+  343  print(f"  schema keys:    {sorted(keys)}")
+  344  print()
+  345  print(f"  Per-language:")
+  346  for L in sorted(lang_buckets):
+  347      n, s = lang_buckets[L]
+  348      print(f"    {L:5s} : {n:>9,} rows  {s/3600:>8.1f} h")
+  349  PY
+  350  echo
+  351  echo "=== Cross-check vs 4 finetune manifests (should be ZERO overlap) ==="
+  352  python3 - <<'PY'
+  353  import json
+  354  from pathlib import Path
+  355  STAGE = Path('/home/nebanfic/slt2026_manifests_staging')
+  356  forbidden = set()
+  357  for L in ('de','es','fr','nl'):
+  358      with open(STAGE/L/'train_2500h.jsonl') as f:
+  359          for line in f:
+  360              forbidden.add(json.loads(line)['audio_filepath'])
+  361  overlap = 0
+  362  with open(STAGE/'pretrain_combined_new.jsonl') as f:
+  363      for line in f:
+  364          ap = json.loads(line)['audio_filepath']
+  365          if ap in forbidden:
+  366              overlap += 1
+  367  print(f"  overlap with 4x 2500h manifests: {overlap}")
+  368  PY
+  369  echo
+  370  echo "=== Spot-check 6 random lines from new manifest ==="
+  371  shuf -n 6 pretrain_combined_new.jsonl
+  372  echo "=== Swap: pretrain_combined.jsonl -> pretrain_combined_new.jsonl ==="
+  373  mv pretrain_combined.jsonl pretrain_combined_OLD_8704h.jsonl.bak
+  374  mv pretrain_combined_new.jsonl pretrain_combined.jsonl
+  375  ls -lh pretrain_combined*
+  376  echo
+  377  echo "=== Final sanity: head of new pretrain ==="
+  378  head -3 pretrain_combined.jsonl
+  379  echo
+  380  echo "=== Final sanity: tail ==="
+  381  tail -3 pretrain_combined.jsonl
+  382  echo
+  383  echo "=== check no /datadisks or @microsoft or nebanfic leaks ==="
+  384  grep -c -e 'datadisks' -e '@microsoft' -e 'nebanfic' pretrain_combined.jsonl || echo "0 leaks"
+  385  echo "---"
+  386  echo $PATH | tr ':' '\n' | grep -i -e conda -e venv -e huggingface | head -10
+  387  echo "---"
+  388  ls -la ~/.cache/huggingface/token 2>/dev/null && echo "token file present"
+  389  find /home/nebanfic /opt -maxdepth 6 -name 'huggingface-cli' -type f 2>/dev/null | head -5
+  390  find /usr -maxdepth 5 -name 'huggingface-cli' -type f 2>/dev/null | head -5
+  391  echo "--- conda envs ---"
+  392  ls -d /home/nebanfic/miniconda* /home/nebanfic/anaconda* /home/nebanfic/.conda 2>/dev/null | head -5
+  393  ls -d /opt/conda 2>/dev/null
+  394  echo "--- venvs ---"
+  395  find /home/nebanfic -maxdepth 4 -name 'activate' -path '*/bin/activate' 2>/dev/null | head -5
+  396  python3 paper/make_supplements.py
+  397  echo
+  398  echo "=== Compiling supplements.tex ==="
+  399  cd paper
+  400  pdflatex -interaction=nonstopmode supplements.tex 2>&1 | tail -20
+  401  echo
+  402  echo "=== Second pass for refs ==="
+  403  pdflatex -interaction=nonstopmode supplements.tex 2>&1 | tail -10
+  404  echo
+  405  ls -lh supplements.pdf supplements.tex 2>&1 | head -5
+  406  echo
+  407  echo "=== Page count ==="
+  408  pdfinfo supplements.pdf 2>&1 | grep -E 'Pages|File size'
+  409  echo "=== top 30 lines of supplements.tex ==="
+  410  head -30 supplements.tex
+  411  echo
+  412  echo "=== Artifacts section ==="
+  413  sed -n '/\\section{Released artifacts}/,/\\section{Main grid/p' supplements.tex | head -25
+  414  echo
+  415  echo "=== Sanity: no IEEE leftovers ==="
+  416  grep -c -e 'IEEEtran' -e 'IEEEauthorblock' -e 'IEEEoverride' supplements.tex || echo "0 IEEE refs"
+  417  echo
+  418  echo "=== HF URLs present ==="
+  419  grep -c 'anon-asr-artifacts-2026' supplements.tex
+  420  echo
+  421  echo "=== Artifacts section after regen ==="
+  422  sed -n '/\\section{Released artifacts}/,/\\section{Main grid/p' paper/supplements.tex | head -40
+  423  echo
+  424  sed -n '/\\section{Released artifacts}/,/\\section{Main grid/p' paper/supplements.tex | head -35
+  425  echo
+  426  echo "=== which numbered blocks remain in the verbatim ==="
+  427  grep -E '^\[[0-9]+\]' paper/supplements.tex
+  428  echo
+  429  echo "=== intro paragraph ==="
+  430  sed -n '/\\section{Aggregate quantities/,/begin{Verbatim}/p' paper/supplements.tex
+  431  echo "=== sizes of eval Pythons ==="
+  432  wc -l train_single_lang.py eval_model.py eval_fleurs.py eval_parakeet_chunked.py eval_whisper_batch.py onnx_eval/eval_fleurs_onnx.py paper/aggregate.py paper/make_supplements.py 2>&1
+  433  echo
+  434  echo "=== identifying-info scan in candidates ==="
+  435  for f in train_single_lang.py eval_model.py eval_fleurs.py onnx_eval/eval_fleurs_onnx.py onnx_eval/run_fleurs_eval.sh paper/aggregate.py paper/make_supplements.py; do   echo "--- $f ---";   grep -c -E 'nebanfic|@microsoft|/datadisks|/home/[a-z]' "$f" 2>/dev/null || echo "0"; done
+  436  echo "=== onnx_eval/run_fleurs_eval.sh ==="
+  437  cat onnx_eval/run_fleurs_eval.sh
+  438  echo
+  439  echo "=== onnx_eval/run_fleurs_eval_de.sh (compare) ==="
+  440  cat onnx_eval/run_fleurs_eval_de.sh
+  441  echo "=== leaks in eval_model.py ==="
+  442  grep -nE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' eval_model.py
+  443  echo
+  444  echo "=== leaks in eval_fleurs.py ==="
+  445  grep -nE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' eval_fleurs.py
+  446  echo
+  447  echo "=== leaks in onnx_eval/eval_fleurs_onnx.py ==="
+  448  grep -nE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' onnx_eval/eval_fleurs_onnx.py
+  449  echo
+  450  echo "=== leaks in train_single_lang.py ==="
+  451  grep -nE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' train_single_lang.py
+  452  SRC=/home/nebanfic/ForeignlangNemotronTraining
+  453  rm -rf "$STAGE"
+  454  mkdir -p "$STAGE"/{onnx_eval,paper}
+  455  # clean copies (already-clean files just copied verbatim)
+  456  cp "$SRC/eval_fleurs.py"        "$STAGE/eval_fleurs.py"
+  457  cp "$SRC/paper/aggregate.py"    "$STAGE/paper/aggregate.py"
+  458  # files that need sanitization — copy first, then sed in-place
+  459  cp "$SRC/train_single_lang.py"          "$STAGE/train_single_lang.py"
+  460  cp "$SRC/eval_model.py"                 "$STAGE/eval_model.py"
+  461  cp "$SRC/onnx_eval/eval_fleurs_onnx.py" "$STAGE/onnx_eval/eval_fleurs_onnx.py"
+  462  ls -la "$STAGE" "$STAGE/onnx_eval" "$STAGE/paper"
+  463  echo "=== leak scan (staging) ==="
+  464  grep -rnE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' . && echo "FOUND LEAKS" || echo "CLEAN"
+  465  echo
+  466  echo "=== syntax check ==="
+  467  python3 -m py_compile train_multilingual_nemotron.py && echo "OK: train_multilingual_nemotron.py compiles"
+  468  echo
+  469  echo "=== freeze-seed verification (grep the new file) ==="
+  470  grep -nE 'random\.seed|np\.random\.seed|torch\.manual_seed|cudnn\.|PYTHONHASHSEED|worker_init_fn|_seed_everything' train_multilingual_nemotron.py
+  471  echo
+  472  echo "=== file inventory ==="
+  473  find . -type f | sort
+  474  set +e
+  475  echo "=== [1/6] py_compile (syntax) ==="
+  476  for f in train_multilingual_nemotron.py train_single_lang.py eval_model.py eval_fleurs.py onnx_eval/eval_fleurs_onnx.py paper/aggregate.py; do     python3 -m py_compile "$f" && echo "  OK  $f" || echo "  FAIL $f"; done
+  477  echo
+  478  echo "=== [2/6] bash -n (shell parse) ==="
+  479  bash -n onnx_eval/run_fleurs_eval.sh && echo "  OK  onnx_eval/run_fleurs_eval.sh" || echo "  FAIL"
+  480  echo
+  481  echo "=== [3/6] shellcheck (if available) ==="
+  482  command -v shellcheck >/dev/null 2>&1     && shellcheck onnx_eval/run_fleurs_eval.sh || echo "  (shellcheck not installed; skipped)"
+  483  echo
+  484  echo "=== [4/6] which python + nemo presence ==="
+  485  which python3
+  486  python3 -c "import nemo, nemo.collections.asr; print('  nemo:', nemo.__version__)" 2>&1 | head -5
+  487  python3 -c "import onnxruntime_genai as og; print('  onnxruntime_genai:', og.__version__)" 2>&1 | head -3
+  488  python3 -c "import jiwer, soundfile, tqdm; print('  jiwer/soundfile/tqdm: OK')" 2>&1 | head -3
+  489  echo
+  490  echo "=== [5/6] --help (exercises imports + argparse) ==="
+  491  for f in train_multilingual_nemotron.py train_single_lang.py eval_model.py eval_fleurs.py onnx_eval/eval_fleurs_onnx.py; do     echo "--- $f ---";     timeout 90 python3 "$f" --help >/dev/null 2>/tmp/help_err.$$;     rc=$?;     if [ $rc -eq 0 ]; then         echo "  OK";     else         echo "  rc=$rc — first 10 lines of stderr:";         head -10 /tmp/help_err.$$ | sed 's/^/      /';     fi;     rm -f /tmp/help_err.$$; done
+  492  echo
+  493  echo "=== [6/6] final pass: leaks + TODO/FIXME/private comments + JSON validity ==="
+  494  echo "-- broader leak scan (usernames, hosts, IPs, abs paths) --"
+  495  grep -rnE 'nebanfic|@microsoft|/datadisks|/home/[a-z]|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.' .     --include='*.py' --include='*.sh' --include='*.md' --include='*.json'     && echo "  LEAKS FOUND" || echo "  CLEAN"
+  496  echo
+  497  echo "-- TODO / FIXME / HACK / XXX --"
+  498  grep -rnE 'TODO|FIXME|HACK|XXX' . --include='*.py' --include='*.sh' --include='*.md' || echo "  none"
+  499  echo
+  500  echo "-- 'aml://' / 'azureml' / 'mlflow' / co-author / internal --"
+  501  grep -rniE 'aml://|azureml|mlflow|@nvidia\.com|copilot|claude|anthropic|gpt-4|microsoft' .     --include='*.py' --include='*.sh' --include='*.md' || echo "  none"
+  502  echo
+  503  echo "-- final file tree --"
+  504  find . -type f -not -path '*/\.*' -not -path '*__pycache__*' | sort
+  505  echo "=== train_single_lang.py --help (full output) ==="
+  506  python3 train_single_lang.py --help 2>&1 | head -60
+  507  echo "=== exit code: ${PIPESTATUS[0]} ==="
+  508  echo "=== final --help re-check on train_single_lang.py ==="
+  509  python3 train_single_lang.py --help 2>&1 | head -5
+  510  echo
+  511  echo "=== final leak scan ==="
+  512  grep -rnE 'nebanfic|@microsoft|/datadisks|/home/[a-z]' .     --include='*.py' --include='*.sh' --include='*.md' --include='*.json'     && echo "LEAKS FOUND" || echo "CLEAN"
+  513  echo
+  514  echo "=== file inventory + sizes ==="
+  515  find . -type f -not -path '*__pycache__*' -exec ls -la {} \;
+  516  echo
+  517  echo "=== total size ==="
+  518  du -sh .
+  519  $HF whoami 2>&1 | head -5
+  520  echo
+  521  echo "=== creating dataset repo anon-asr-artifacts-2026/slt2026-code ==="
+  522  $HF repo create slt2026-code --type dataset --organization anon-asr-artifacts-2026 -y 2>&1 | tail -10
+  523  echo
+  524  echo "=== uploading staging dir contents ==="
+  525  $HF upload anon-asr-artifacts-2026/slt2026-code     /home/nebanfic/slt2026_code_staging .     --repo-type dataset     --commit-message "Initial release: training (multilingual + per-language) and evaluation (NeMo + ONNX) scripts, plus aggregate.py for paper numbers" 2>&1 | tail -30
+  526  echo "=== all files including hidden ==="
+  527  find . -type f -o -type l 2>/dev/null | sort
+  528  echo
+  529  echo "=== what's on the hub ==="
+  530  HF=/home/nebanfic/miniconda3/bin/huggingface-cli
+  531  $HF download anon-asr-artifacts-2026/slt2026-code --repo-type dataset --quiet --local-dir /tmp/slt2026_code_check 2>&1 | tail -5
+  532  echo
+  533  find /tmp/slt2026_code_check -type f -not -path '*/.cache/*' | sort
+  534  rm -rf /tmp/slt2026_code_check
+  535  echo "=== removing local pycache ==="
+  536  find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
+  537  find . -type f -name '*.pyc' -delete
+  538  find . -type f -o -type l | sort
+  539  echo
+  540  echo "=== deleting pycache from hub ==="
+  541  /home/nebanfic/miniconda3/bin/python3 - <<'PY'
+  542  from huggingface_hub import HfApi
+  543  api = HfApi()
+  544  api.delete_files(
+  545      delete_patterns=["**/__pycache__/**", "**/*.pyc"],
+  546      repo_id="anon-asr-artifacts-2026/slt2026-code",
+  547      repo_type="dataset",
+  548      commit_message="Remove __pycache__ artifacts",
+  549  )
+  550  print("OK: pycache deleted from hub")
+  551  # List final remote tree
+  552  files = api.list_repo_files(
+  553      repo_id="anon-asr-artifacts-2026/slt2026-code",
+  554      repo_type="dataset",
+  555  )
+  556  print()
+  557  print("=== final remote tree ===")
+  558  for f in sorted(files):
+  559      print(f"  {f}")
+  560  PY
+  561  python3 make_supplements.py 2>&1 | tail -10
+  562  echo
+  563  echo "=== verify new section appears ==="
+  564  grep -nE '\\section\{|sec:supp:recipe|Training and decoding|fastemit|warprnnt' supplements.tex | head -20
+  565  echo
+  566  echo "=== line count ==="
+  567  wc -l supplements.tex
+  568  DST=~/slt2026_manifests_staging/pretrain_combined.jsonl
+  569  sed -e 's|/datadisks/disk[0-9]\+/nebanfic/||g' "$SRC" > "$DST"
+  570  echo "=== leak check (should be 0) ==="
+  571  grep -cE "(/datadisks/|nebanfic|@microsoft)" "$DST"
+  572  echo
+  573  echo "=== size / line count ==="
+  574  ls -lh "$DST"
+  575  wc -l "$DST"
+  576  echo
+  577  echo "=== first 2 lines ==="
+  578  head -2 "$DST"
+  579  echo
+  580  echo "=== sample yodas line (to confirm refs preserved) ==="
+  581  grep -m1 yodas_granary "$DST"
+  582  find /datadisks -maxdepth 6 -type d -iname "*yodas*granary*" 2>/dev/null | head -20
+  583  echo
+  584  echo "=== look for any yodas_granary manifest files ==="
+  585  find /datadisks -maxdepth 6 -type f \( -name "*yodas*granary*.json*" -o -name "*granary*yodas*.json*" -o -name "yodas_granary_*.json*" \) 2>/dev/null | head -40
+  586  echo
+  587  echo "=== other yodas-related manifests ==="
+  588  find /datadisks -maxdepth 6 -type f -iname "*yodas*manifest*" 2>/dev/null | head -20
+  589  echo
+  590  echo "=== quick disk-level check ==="
+  591  ls -d /datadisks/disk*/nebanfic/multilingual_data/{de,es,fr,nl}/yodas_granary 2>/dev/null
+  592  ls -d /datadisks/disk*/nebanfic/multilingual_data/{de,es,fr,nl}/yodas* 2>/dev/null | head
+  593  curl -fsSL -o nl_asr.jsonl   "https://huggingface.co/datasets/nvidia/Granary/resolve/main/nl/yodas/nl_asr.jsonl"
+  594  ls -lh nl_asr.jsonl
+  595  echo
+  596  echo "=== first 2 lines ==="
+  597  head -2 nl_asr.jsonl
+  598  echo
+  599  echo "=== line count ==="
+  600  wc -l nl_asr.jsonl
+  601  echo
+  602  echo "=== sample line from a 2500h staged manifest ==="
+  603  for L in de es fr; do   f=$(ls ~/slt2026_manifests_staging/$L/train_2500h.jsonl 2>/dev/null);   if [[ -n "$f" ]]; then     echo "--- $L: $f ---";     head -1 "$f";     echo;   fi; done
+  604  for L in de es fr; do   if [[ ! -f ${L}_asr.jsonl ]]; then     echo "=== Downloading ${L}_asr.jsonl ===";     curl -fL --progress-bar -o ${L}_asr.jsonl       "https://huggingface.co/datasets/nvidia/Granary/resolve/main/${L}/yodas/${L}_asr.jsonl";   else     echo "=== ${L}_asr.jsonl already exists ===";   fi; done
+  605  echo
+  606  ls -lh *.jsonl
+  607  for L in de es fr; do   echo "--- $L/yodas ---";   curl -fsSL "https://huggingface.co/api/datasets/nvidia/Granary/tree/main/${L}/yodas"     | python3 -c "import json,sys; [print(f\"{x['type']:6} {x.get('size','?'):>12}  {x['path']}\") for x in json.load(sys.stdin)]"; done
+  608  echo
+  609  echo "=== top-level Granary tree ==="
+  610  curl -fsSL "https://huggingface.co/api/datasets/nvidia/Granary/tree/main"   | python3 -c "import json,sys; [print(f\"{x['type']:6}  {x['path']}\") for x in json.load(sys.stdin)]"
+  611  curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main" 2>&1   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f\"{x['type']:6} {x.get('size','?'):>15}  {x['path']}\") for x in d]" 2>&1 | head -40
+  612  echo
+  613  echo "=== first 2 lines of de ast-en file (peek format with byte-range) ==="
+  614  curl -fsSL -r 0-4000   "https://huggingface.co/datasets/nvidia/Granary/resolve/main/de/yodas/de_ast-en.jsonl"   | head -2
+  615  curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/data"   | python3 -c "import json,sys; [print(f\"{x['type']:6}  {x['path']}\") for x in json.load(sys.stdin)]" | head -40
+  616  echo
+  617  echo "=== if espnet/yodas-granary has data/de/ ==="
+  618  curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/data/de" 2>&1   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f\"{x['type']:6} {x.get('size','?'):>15}  {x['path']}\") for x in d[:20]]" 2>&1 | head -25
+  619  curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/data/de000"   | python3 -c "import json,sys; [print(f\"{x['type']:6} {x.get('size','?'):>15}  {x['path']}\") for x in json.load(sys.stdin)]" | head -20
+  620  echo
+  621  echo "=== full DE/ES/FR shard list with total size ==="
+  622  for L in de es fr; do   total=0;   count=0;   for SH in 000 100 101 102 103 104 105 106; do     DIR="data/${L}${SH}";     out=$(curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/${DIR}" 2>/dev/null);     if [[ -z "$out" || "$out" == "[]" ]]; then continue; fi;     sz=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(x.get('size',0) for x in d))" 2>/dev/null);     n=$(echo "$out" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null);     echo "  $DIR : $n files, $((sz/1024/1024)) MB";     total=$((total + sz));     count=$((count + n));   done;   echo "  ==> ${L} total: $count files, $((total/1024/1024)) MB";   echo; done
+  623  curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/data/de000/asr_only"   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f\"{x['type']:6} {x.get('size','?'):>15}  {x['path']}\") for x in d]"
+  624  echo
+  625  echo "=== full DE shard sizes (asr_only) ==="
+  626  for SH in 000 100 101 102; do   DIR="data/de${SH}/asr_only";   out=$(curl -fsSL "https://huggingface.co/api/datasets/espnet/yodas-granary/tree/main/${DIR}" 2>/dev/null);   [[ -z "$out" || "$out" == "[]" ]] && continue;   echo "--- $DIR ---";   echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f\"  {x.get('size',0)//1024//1024:>5} MB  {x['path']}\") for x in d]"; done
+  627  df -h . | tail -1
+  628  echo
+  629  for L in de fr es; do   if [[ ! -f ${L}_ast-en.jsonl ]]; then     echo "=== Downloading ${L}_ast-en.jsonl ===";     curl -fL --progress-bar -o ${L}_ast-en.jsonl       "https://huggingface.co/datasets/nvidia/Granary/resolve/main/${L}/yodas/${L}_ast-en.jsonl";   fi; done
+  630  echo
+  631  ls -lh *.jsonl
+  632  shuf -n 3 ~/slt2026_manifests_staging/pretrain_combined.jsonl
+  633  echo
+  634  echo "=== pretrain field schema check ==="
+  635  head -1 ~/slt2026_manifests_staging/pretrain_combined.jsonl | python3 -c "import json,sys; print(list(json.loads(sys.stdin.read()).keys()))"
+  636  echo
+  637  echo "=== es_ast-en.jsonl tail check (is last line truncated?) ==="
+  638  python3 - <<'PY'
+  639  import json
+  640  fp = '/home/nebanfic/granary_yodas_manifests/es_ast-en.jsonl'
+  641  ok = bad = 0
+  642  last_good_idx = -1
+  643  with open(fp, errors='replace') as f:
+  644      for i, line in enumerate(f):
+  645          try:
+  646              json.loads(line)
+  647              ok += 1
+  648              last_good_idx = i
+  649          except Exception:
+  650              bad += 1
+  651  print(f"  good lines: {ok:,}")
+  652  print(f"  bad lines:  {bad}")
+  653  print(f"  last good line idx: {last_good_idx}")
+  654  PY
+  655  echo
+  656  ls -ld /datadisks/disk2 2>&1 | head -3
+  657  ls -ld /datadisks/disk*/nebanfic 2>&1 | head -10
+  658  du -sh ~/granary_yodas_manifests
+  659  ls -lh ~/granary_yodas_manifests
+  660  echo
+  661  echo "=== Removing them ==="
+  662  rm -rf ~/granary_yodas_manifests
+  663  echo "done"
+  664  df -h /home | tail -1
+  665  cd /datadisks/disk2/nebanfic/granary_yodas_manifests
+  666  df -h . | tail -1
+  667  echo
+  668  # ASR manifests (small)
+  669  for L in de es fr nl; do   echo "=== ${L}_asr.jsonl ===";   curl -fL --progress-bar -o ${L}_asr.jsonl     "https://huggingface.co/datasets/nvidia/Granary/resolve/main/${L}/yodas/${L}_asr.jsonl"; done
+  670  # AST-EN manifests (large but text-only)
+  671  for L in de fr es; do   echo "=== ${L}_ast-en.jsonl ===";   curl -fL --progress-bar -o ${L}_ast-en.jsonl     "https://huggingface.co/datasets/nvidia/Granary/resolve/main/${L}/yodas/${L}_ast-en.jsonl"; done
+  672  echo
+  673  ls -lh
+  674  df -h . | tail -1
+  675  echo "=== nl_ast-en file size on HF ==="
+  676  curl -fsSL "https://huggingface.co/api/datasets/nvidia/Granary/tree/main/nl/yodas"   | python3 -c "import json,sys; [print(f\"{x.get('size','?'):>15}  {x['path']}\") for x in json.load(sys.stdin)]"
+  677  echo
+  678  echo "=== Downloading nl_ast-en.jsonl ==="
+  679  curl -fL --progress-bar -o nl_ast-en.jsonl   "https://huggingface.co/datasets/nvidia/Granary/resolve/main/nl/yodas/nl_ast-en.jsonl"
+  680  echo
+  681  ls -lh *.jsonl
+  682  df -h . | tail -1
+  683  cd /home/nebanfic
+  684  python3 scripts/count_combined_after_dedup.py 2>&1 | tail -25
+  685  huggingface-cli login
+  686  source ~/miniconda3/bin/activate
+  687  huggingface-cli login
+  688  huggingface-cli upload   anon-asr-artifacts-2026/multilingual_base_model   /datadisks/disk4/nebanfic/multilingual_baseline/best_model_latest_backup_epoch_24.nemo   model.nemo   --repo-type model   --private   --commit-message "Upload multilingual baseline checkpoint as model.nemo"
+  689  huggingface-cli upload   anon-asr-artifacts-2026/slt2026-manifests   ~/slt2026_manifests_staging   .   --repo-type dataset   --private   --commit-message "Initial training manifests for SLT 2026 submission"
+  690  huggingface-cli upload   anon-asr-artifacts-2026/slt2026-manifests   ~/slt2026_manifests_staging   .   --repo-type dataset   --private   --commit-message "Initial training manifests for SLT 2026 submission"
+  691  HF=/home/nebanfic/miniconda3/bin/huggingface-cli
+  692  echo "=== whoami ==="
+  693  $HF whoami 2>&1 | head -3
+  694  echo
+  695  echo "=== Uploading pretrain_combined.jsonl -> multilingual_manifest/train.jsonl ==="
+  696  $HF upload   anon-asr-artifacts-2026/slt2026-manifests   /home/nebanfic/slt2026_manifests_staging/pretrain_combined.jsonl   multilingual_manifest/train.jsonl   --repo-type dataset   --commit-message "Upload multilingual pretrain manifest"
+  697  tmux attach -t train2
+  698  tmux attach -t train3
+  699  echo "=== Nemotron-3.5 final WER summaries in torch log ==="; grep -inE 'final wer|overall wer|WER: [0-9]|test_wer|fleurs|voxpopuli|common ?voice|\bmls\b' torch_multilingual_new_run.txt | grep -iE 'wer|fleurs|voxpopuli|cv|mls' | tail -40
+  700  pwd
+  701  cd ForeignlangNemotronTraining/
+  702  git add --all
+  703  git commit -m "Ref fixes"
+  704  git push origin main
+  705  git status
+  706  echo '=== hf/huggingface-cli entrypoint location ==='; python3 -c "import shutil,sys; print('hf=',shutil.which('hf')); print('cli=',shutil.which('huggingface-cli'))"; ls -1 $(python3 -c "import sys,os;print(os.path.dirname(sys.executable))") 2>/dev/null | grep -iE '^hf$|huggingface' 
+  707  echo '=== archive listing ==='; tar tf "$M" 2>/dev/null | head -30
+  708  echo '=== extract just the config ==='; tar xf "$M" ./model_config.yaml 2>/dev/null || tar xf "$M" model_config.yaml 2>/dev/null
+  709  CFG=$(ls -1 model_config.yaml 2>/dev/null | head -1)
+  710  echo "cfg=$CFG  size=$(stat -c%s "$CFG" 2>/dev/null)"
+  711  echo '=== identifying strings in config (nebanfic / microsoft / home / datadisks / hostname) ==='
+  712  grep -nEi 'nebanfic|microsoft|/home/|/datadisks/|onnxr|/mnt/|/data/' "$CFG" 2>/dev/null | head -40
+  713  echo '=== (count) ==='; grep -cEi 'nebanfic|microsoft|/home/|/datadisks/|onnxr' "$CFG" 2>/dev/null
+  714  echo; echo '=== which .nemo did the 560ms eval / onnx export reference? ==='; grep -rEsn 'nemotron_es_5000h[^ ]*\.nemo|es_5000h.*best_model|best_model.*es_5000h'   /home/nebanfic/ForeignlangNemotronTraining/es   /home/nebanfic/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b 2>/dev/null | grep -iE '\.nemo|nemo_model|model_path|restore' | head -20
+  715  echo; echo '=== any run/export script naming the checkpoint ==='; grep -rEsl 'nemotron_es_5000h' /home/nebanfic/ForeignlangNemotronTraining 2>/dev/null | head -10
+  716  python3 - <<'PY'
+  717  from huggingface_hub import HfApi
+  718  api = HfApi()
+  719  repo = "anon-asr-artifacts-2026/es_5000h"          # parallels multilingual_base_model
+  720  api.create_repo(repo, repo_type="model", exist_ok=True, private=False)
+  721  api.upload_file(
+  722      path_or_fileobj="/datadisks/disk3/nebanfic/nemotron_es_5000h/best_model.nemo",
+  723      path_in_repo="model.nemo",                     # matches base-model convention
+  724      repo_id=repo,
+  725      repo_type="model",
+  726      commit_message="Add ES 5000h ML-init streaming checkpoint",
+  727  )
+  728  print("done:", f"https://huggingface.co/{repo}")
+  729  PY
+  730  cd ForeignlangNemotronTraining/
+  731  git status
+  732  git add --all
+  733  git commit -m "More upload"
+  734  git push origin main
+  735  git status
+  736  git add --all
+  737  git commit -m "More refs"
+  738  git push origin main
+  739  git status
+  740  git add --all
+  741  git commit -m "More stuff 55"
+  742  git push origin main
+  743  git status
+  744  git add --all
+  745  git commit -m "More results"
+  746  git push origin main
+  747  git status
+  748  git add --all
+  749  git commit -m "More stuff added"
+  750  git push origin main
+  751  source ~/miniconda3/bin/activate
+  752  unset LD_LIBRARY_PATH
+  753  MANI=/datadisks/disk2/nebanfic/datasets/manifests/icelandic_fleurs_test.jsonl
+  754  SMALL=/tmp/icelandic_fleurs_test_50.jsonl
+  755  head -n 50 "$MANI" > "$SMALL"
+  756  PYTHONPATH=/home/nebanfic/open_asr_leaderboard:$PYTHONPATH CUDA_VISIBLE_DEVICES=0 python /home/nebanfic/slt2026_code_staging/eval_model.py --model /datadisks/disk4/nebanfic/multilingual_baseline/best_model_latest_backup_epoch_24.nemo --manifest "$SMALL" --gpu 0
+  757  echo "=== auth ==="
+  758  hf auth whoami 2>&1 | head -5
+  759  echo "=== repo files (slt2026-code, dataset) ==="
+  760  python3 -c "
+  761  from huggingface_hub import HfApi
+  762  api = HfApi()
+  763  for f in api.list_repo_files('anon-asr-artifacts-2026/slt2026-code', repo_type='dataset'):
+  764      print(f)
+  765  " 2>&1 | head -60
+  766  echo "=== does ForeignlangNemotronTraining/eval_model.py differ from staging? ==="
+  767  diff -q /home/nebanfic/ForeignlangNemotronTraining/eval_model.py /home/nebanfic/slt2026_code_staging/eval_model.py 2>&1 && echo IDENTICAL || echo DIFFERS
+  768  hf upload anon-asr-artifacts-2026/slt2026-code   /home/nebanfic/slt2026_code_staging/eval_model.py   eval_model.py   --repo-type dataset   --commit-message "eval_model.py: use BasicMultilingualTextNormalizer (match paper pipeline)" 2>&1 | tail -20
+  769  cd /home/nebanfic/ForeignlangNemotronTraining
+  770  echo "=== git status for eval_model.py ==="
+  771  git status --porcelain eval_model.py 2>&1
+  772  echo "=== py_compile check ==="
+  773  python3 -m py_compile eval_model.py 2>&1 && echo "COMPILES OK" || echo "BROKEN"
+  774  echo "=== normalizer-relevant lines ==="
+  775  grep -nE "BasicMultilingualTextNormalizer|def normalize_text|simple built-in|import re|import unicodedata" eval_model.py | head -20
+  776  source ~/miniconda3/bin/activate && unset LD_LIBRARY_PATH
+  777  OPEN_ASR_LB_ROOT=/home/nebanfic/open_asr_leaderboard   python /home/nebanfic/slt2026_code_staging/onnx_eval/eval_fleurs_onnx.py   --onnx_model /datadisks/disk3/nebanfic/onnx_models_int4_es_5000h   --lang es_419 --name smoke_es_int4 --output_dir /tmp/onnx_smoke --max_samples 5
+  778  for base in   /datadisks/disk3/nebanfic/cv_de_test   /datadisks/disk4/nebanfic/cv_es_test   /datadisks/disk4/nebanfic/multilingual_data/fr/cv24   /datadisks/disk2/nebanfic/cv_is_test   /datadisks/disk3/nebanfic/cv_nl_test   /datadisks/disk2/nebanfic/multilingual_data/pl   /datadisks/disk3/nebanfic/cv_pt_test   /datadisks/disk3/nebanfic/cv-hr ; do     hit=$(find "$base" -maxdepth 3 -name test.tsv 2>/dev/null | head -1);     if [ -n "$hit" ]; then       ver=$(echo "$hit" | grep -o 'cv-corpus-[0-9.]*-[0-9-]*');       n=$(( $(wc -l < "$hit") - 1 ));       echo "  $base";       echo "      -> $ver   (test.tsv rows=$n)   $hit";     else       echo "  $base  -> NO test.tsv found";     fi; done
+  779  cd ForeignlangNemotronTraining/
+  780  git add --all
+  781  git commit -m "mm"
+  782  git push origin main
+  783  PYTHONPATH=/home/nebanfic/open_asr_leaderboard:$PYTHONPATH CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29560     /home/nebanfic/slt2026_code_staging/train_multilingual_nemotron.py     --train_manifest /path/to/combined_train.jsonl     --val_manifest   /path/to/combined_val.jsonl     --eval_dir       /path/to/eval_root     --output_dir /datadisks/disk3/nebanfic/multilingual_baseline_staging_test     --epochs 30 --batch_size 16 --grad_accum 3 --lr 1e-4     --early_stop_patience 8
+  784  PYTHONPATH=/home/nebanfic/open_asr_leaderboard:$PYTHONPATH CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29560     /home/nebanfic/slt2026_code_staging/train_multilingual_nemotron.py     --train_manifest /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --val_manifest   /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --eval_dir       /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --output_dir /datadisks/disk3/nebanfic/multilingual_baseline_staging_test     --epochs 30 --batch_size 16 --grad_accum 3 --lr 1e-4     --early_stop_patience 8
+  785  PYTHONNOUSERSITE=1 PYTHONPATH=/home/nebanfic/open_asr_leaderboard:$PYTHONPATH CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29560     /home/nebanfic/slt2026_code_staging/train_multilingual_nemotron.py     --train_manifest /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --val_manifest /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --output_dir /datadisks/disk3/nebanfic/multilingual_baseline_staging_test     --epochs 30 --batch_size 16 --grad_accum 3 --lr 1e-4     --early_stop_patience 8
+  786  source ~/miniconda3/bin/activate
+  787  PYTHONPATH=/home/nebanfic/open_asr_leaderboard:$PYTHONPATH CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29560     /home/nebanfic/slt2026_code_staging/train_multilingual_nemotron.py     --train_manifest /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --val_manifest   /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --eval_dir       /datadisks/disk4/nebanfic/multilingual_data/combined_train_v2.json     --output_dir /datadisks/disk3/nebanfic/multilingual_baseline_staging_test     --epochs 30 --batch_size 16 --grad_accum 3 --lr 1e-4     --early_stop_patience 8
+  788  ls
+  789  rm -r   phi35-originalq
+  790  ls phi35
+  791  rm -r phi35
+  792  ls
+  793  cd ForeignlangNemotronTraining/
+  794  git status
+  795  git add --all
+  796  git commit -m "Changes so we have backupp"
+  797  git push origin main
+  798  ls
+  799  ls  multilingual_nemo_final_checkpoint_eval 
+  800  cp -rf  multilingual_nemo_final_checkpoint_eval  ForeignlangNemotronTraining/nemotron35_results
+  801  cd ForeignlangNemotronTraining/
+  802  git status
+  803  git diff  paper/wer_results.json
+  804  git status
+  805  git diff  paper/supplements.tex
+  806  g
+  807  git status
+  808  git checkout --  paper/supplements.tex
+  809  git checkout -- paper/wer_results.json
+  810  git add --all
+  811  git commit -m "nemotron 35 results"
+  812  git push origin main
+  813  ls
+  814  history > hh234.txt
+  815  cd ~/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b/streaming
+  816  cd ~/myOliveRecipes/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b/streaming
+  817  cd ~/myOliveRecipes/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b
+  818  pip install -r cpu/requirements.txt
+  819  python cpu/optimize.py
+  820  source ~/miniconda3/bin/activate
+  821  python cpu/optimize.py
+  822  unset LD_LIBRARY_PATH
+  823  python cpu/optimize.py
+  824  olive run --config cpu/nemotron_encoder_int4_cpu.json
+  825  python cpu/optimize.py
+  826  echo "=== README ==="
+  827  cat "$R/README.md"
+  828  echo
+  829  echo "=== cpu/ ==="
+  830  ls "$R/cpu/"
+  831  echo
+  832  echo "=== scripts/ ==="
+  833  ls "$R/scripts/"
+  834  echo "---"
+  835  which olive
+  836  olive --version 2>/dev/null || python -m olive --version 2>/dev/null
+  837  echo "--- conda envs with olive ---"
+  838  for env in ~/miniconda3/envs/*/bin/olive ~/miniconda3/bin/olive; do   [ -x "$env" ] && echo "$env"; done
+  839  echo "=== installed olive* packages ==="
+  840  pip list 2>/dev/null | grep -i olive
+  841  echo
+  842  echo "=== what's in olive/__init__.py ==="
+  843  head -20 ~/miniconda3/lib/python3.13/site-packages/olive/__init__.py
+  844  echo
+  845  echo "=== recipe requirements.txt ==="
+  846  cat ~/myOliveRecipes/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b/cpu/requirements.txt
+  847  echo
+  848  echo "=== optimize.py import lines ==="
+  849  grep -n "import\|from" ~/myOliveRecipes/olive-recipes/nvidia-nemotron-speech-streaming-en-0.6b/cpu/optimize.py | head -30
+  850  pip uninstall -y olive
+  851  pip install --force-reinstall --no-deps "olive-ai[speech] @ git+https://github.com/microsoft/Olive.git@main"
+  852  echo
+  853  echo "=== verify ==="
+  854  python -c "from olive import run; print('OK:', run)"
+  855  python << 'EOF'
+  856  import onnxruntime_genai as og
+  857  print("version:", og.__version__)
+  858  print()
+  859  print("top-level log API:")
+  860  for n in dir(og):
+  861      if "log" in n.lower():
+  862          print("  ", n)
+  863  print()
+  864  help(og.set_log_options)
+  865  EOF
+  866  # Probe with a bogus kwarg — the error message usually lists valid options
+  867  python -c "import onnxruntime_genai as og; og.set_log_options(__bogus__=True)" 2>&1 | head -40
+  868  # Grep the installed shared lib + python bindings for log option flag names
+  869  strings ~/miniconda3/lib/python3.13/site-packages/onnxruntime_genai/*.so 2>/dev/null   | grep -E "^(enabled|warning|info|append_next_token|generate_next_token|hit_eos|hit_max_length|model_input|model_output|model_logits|ort_lib|ansi_tags|value_stats)$"   | sort -u
+  870  echo "=== top level ==="
+  871  ls
+  872  echo
+  873  echo "=== test/ ==="
+  874  ls test/ 2>/dev/null
+  875  echo
+  876  echo "=== build.sh args ==="
+  877  grep -E "test|ctest|pytest" build.sh 2>/dev/null | head -20
+  878  echo
+  879  echo "=== build/ artifacts ==="
+  880  find build -maxdepth 3 -type d 2>/dev/null | head -20
+  881  echo "=== built test binaries ==="
+  882  ls -la build/Linux/RelWithDebInfo/test/
+  883  echo
+  884  echo "=== python tests ==="
+  885  ls test/python/
+  886  echo
+  887  echo "=== CMakeLists test snippet ==="
+  888  grep -nE "add_test|gtest|ctest|GoogleTest" test/CMakeLists.txt | head -20
+  889  echo
+  890  echo "=== build.py test flags ==="
+  891  grep -nE "test|--test|skip_tests|build_tests" build.py | head -20
+  892  echo "=== unit_tests binary location ==="
+  893  find build -name "unit_tests" -type f 2>/dev/null
+  894  echo
+  895  echo "=== built wheel ==="
+  896  ls build/Linux/RelWithDebInfo/wheel/ 2>/dev/null
+  897  echo
+  898  echo "=== test/python/README ==="
+  899  head -60 test/python/README.md 2>/dev/null
+  900  echo
+  901  echo "=== test/python/conftest.py ==="
+  902  head -40 test/python/conftest.py
+  903  echo "=== unit_tests binaries in this repo ==="
+  904  find build -name "unit_tests" -type f 2>/dev/null
+  905  echo
+  906  echo "=== build/ top-level configs ==="
+  907  ls build/ 2>/dev/null
+  908  echo
+  909  echo "=== any executable named *test* in build/ ==="
+  910  find build -maxdepth 5 -type f -executable -name "*test*" 2>/dev/null | head
+  911  echo "=== built wheel ==="
+  912  ls build/Linux/Release/wheel/ 2>/dev/null
+  913  find build/Linux/Release/wheel -name "*.whl" 2>/dev/null
+  914  echo
+  915  echo "=== python test dir ==="
+  916  ls test/python/
+  917  echo
+  918  echo "=== installed onnxruntime_genai location ==="
+  919  python -c "import onnxruntime_genai as og; print(og.__file__); print(og.__version__)" 2>&1
+  920  echo
+  921  echo "=== test/python/requirements.txt ==="
+  922  cat test/python/requirements.txt 2>/dev/null
+  923  echo
+  924  echo "=== existing test_models dir? ==="
+  925  ls test/test_models 2>/dev/null || echo "(none)"
+  926  source ~/miniconda3/bin/activate && cd ~/onnx_tutorials && python 04_genai_generation.py
+  927  ls
+  928  pwd
+  929  python 01_export_and_run.py 
+  930  python 03_providers.py 
+  931  python 01_mlp_export_and_run.py 
+  932  python 03_providers.py 
+  933  ls
+  934  python 01_export_and_run.py 
+  935  python 01_mlp_export_and_run.py 
+  936  python 02_quantize.py 
+  937  pip install olive
+  938  olive
+  939  olive --help
+  940  nvidia-smi
+  941  python 03_providers.py 
+  942  CUDA_VISIBLE_DEVICES=3 python onnx_tutorials/03_providers.py
+  943  CUDA_VISIBLE_DEVICES=3 python 03_providers.py
+  944  python 04_genai_generation.py 
+  945  cd ..
+  946  cd newonnxruntime-genai/
+  947  ./build.sh 
+  948  cd ..
+  949  cd onnxruntime-
+  950  cd onnxruntime-genai/
+  951  ./test/unit_tests --gtest_filter='Model.GreedySearch'
+  952  ./build/Linux/Release/unit_tests --gtest_filter='Sampling.*'
+  953   source ~/miniconda3/bin/activate
+  954  mkdir onnx_tutorials
+  955  python onnx_tutorials/01_export_and_run.py 
+  956  python onnx_tutorial/01_mlp_export_and_run.py
+  957  python onnx_tutorials/01_mlp_export_and_run.py 
+  958  python onnx_tutorials/01_mlp_export_and_run.py   # produces tiny_mlp.onnx
+  959  python onnx_tutorials/02_quantize.py             # produces tiny_mlp_int8.onnx
+  960  python onnx_tutorials/02_quantize.py
+  961  python onnx_tutorials/03_providers.py
+  962  export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64/
+  963  python onnx_tutorials/03_providers.py
+  964  nvidia-smi
+  965    export LD_LIBRARY_PATH=/usr/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+  966  python onnx_tutorials/03_providers.py
+  967  cd newonnxruntime-genai/
+  968  git status
+  969  git checkout main
+  970  git pul
+  971  git pull
+  972  ./build.sh 
+  973  history > hh.txt
