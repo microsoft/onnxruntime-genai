@@ -12,59 +12,59 @@ referenced from each variant's configuration with a path scheme.
 
 A model package is a directory containing a top-level `manifest.json`. The package owns a
 single component that holds the variants onnxruntime-genai loads. By convention the
-component is named `model`. The component directory under `models/` carries a
-`metadata.json` enumerating the variants. Each variant has its own directory containing a
-complete `genai_config.json` along with the ONNX graph files and any other per-variant
-assets.
+component is named `model`. The component is declared inline in the manifest, so its
+variant directories sit directly at the package root. Each variant has its own directory
+containing a complete `genai_config.json` along with the ONNX graph files and any other
+per-variant assets. Files shared across variants (such as tokenizer assets) live in a
+content-addressed `shared_assets/sha256-<hex>/` directory and are referenced with the
+`sha256:` scheme.
 
 ```
 my-model.ortpackage/
 ├── manifest.json
-├── models/
-│   └── model/
-│       ├── metadata.json
-│       ├── openvino-1/
-│       │   ├── genai_config.json
-│       │   ├── model.onnx
-│       │   └── model.onnx.data
-│       └── openvino-2/
-│           ├── genai_config.json
-│           ├── model.onnx
-│           └── model.onnx.data
-└── shared/
-    ├── tokenizer.json
-    └── processor_config.json
+├── openvino-1/
+│   ├── genai_config.json
+│   ├── model.onnx
+│   └── model.onnx.data
+├── openvino-2/
+│   ├── genai_config.json
+│   ├── model.onnx
+│   └── model.onnx.data
+└── shared_assets/
+    └── sha256-<hex>/
+        ├── tokenizer.json
+        └── processor_config.json
 ```
 
-The shape of `manifest.json`, `metadata.json`, and the variant declarations follows the
-ONNX Runtime model package specification. The minimum needed for onnxruntime-genai is:
+The shape of `manifest.json` and the variant declarations follows the ONNX Runtime model
+package specification. The minimum needed for onnxruntime-genai is a single inline
+component named `model`:
 
 ```jsonc
 // manifest.json
 {
   "schema_version": 1,
-  "components": ["model"]
-}
-```
-
-```jsonc
-// models/model/metadata.json
-{
-  "component_name": "model",
-  "variants": {
-    "openvino-1": {
-      "ep": "OpenVINOExecutionProvider",
-      "device": "npu",
-      "compatibility_string": "<compat-string-1>"
-    },
-    "openvino-2": {
-      "ep": "OpenVINOExecutionProvider",
-      "device": "npu",
-      "compatibility_string": "<compat-string-2>"
+  "components": {
+    "model": {
+      "variants": {
+        "openvino-1": {
+          "ep": "OpenVINOExecutionProvider",
+          "device": "npu",
+          "compatibility_string": "<compat-string-1>"
+        },
+        "openvino-2": {
+          "ep": "OpenVINOExecutionProvider",
+          "device": "npu",
+          "compatibility_string": "<compat-string-2>"
+        }
+      }
     }
   }
 }
 ```
+
+Each variant's directory defaults to its name (`openvino-1`, `openvino-2`) relative to the
+package root; declare `variant_directory` on a variant to override that.
 
 In this example both variants target the same execution provider but compile for
 different hardware or software versions. The OpenVINO EP scores each variant's `compatibility_string` at load time and ORT selects the highest-scoring match — callers do
@@ -73,30 +73,33 @@ not need to know which build is best for their machine.
 Each variant directory must contain a `genai_config.json` describing the model to
 onnxruntime-genai. Variant directories are otherwise self-contained: they may hold the
 ONNX graph, external weights, custom op libraries, LoRA adapters, and any other files
-specific to that build.
-
-> **Heads-up.** External weight files (`model.onnx.data`) currently sit inside each
-> variant directory. An upcoming ONNX Runtime change adds content-addressed shared
-> assets, which will let multiple variants of the same model reference a single copy of
-> the weights from the package's `shared_assets/` area. Packages authored under the
-> conventions in this document migrate without genai-side changes: only the weight
-> references inside the variant's `genai_config.json` change form.
+specific to that build. Files that are identical across variants can instead live in a
+content-addressed shared asset and be referenced with the `sha256:` scheme (see below),
+which lets multiple variants share a single on-disk copy.
 
 ## Sharing tokenizer and processor files across variants
 
 Tokenizer assets and processor configuration are typically identical across variants of a
-model. They can live in any sibling directory under the package root and be referenced
-from each variant's `genai_config.json` using the `package:` path scheme.
+model. Rather than duplicating them in every variant directory, store them once as a
+content-addressed *shared asset* and reference them from each variant's `genai_config.json`
+using the `sha256:` path scheme.
 
-Set `model.tokenizer_dir` to the directory holding `tokenizer.json` and friends. The
-value uses the path-scheme syntax described below.
+A shared asset is a directory under the package's `shared_assets/` area named
+`sha256-<hex>`, where `<hex>` is the asset's content digest. ONNX Runtime owns the
+shared-asset model: it discovers `shared_assets/sha256-<hex>/` directories at load time and
+can remap a digest to a custom or external directory through a `shared_assets` override in
+the manifest. Referencing an asset by digest therefore resolves to the right location even
+when the manifest overrides it.
+
+Set `model.tokenizer_dir` to the asset's `sha256:` URI. An optional `/`-separated tail
+selects a subdirectory within the asset.
 
 ```jsonc
-// models/model/openvino-1/genai_config.json
+// openvino-1/genai_config.json
 {
   "model": {
     "type": "phi",
-    "tokenizer_dir": "package:shared",
+    "tokenizer_dir": "sha256:<hex>",
     ...
   },
   "search": {}
@@ -108,17 +111,18 @@ If `tokenizer_dir` is left unset the tokenizer files are looked up alongside
 
 Processor-specific configuration (`model.vision.config_filename`,
 `model.speech.config_filename`) is intentionally left per-variant: those files are small
-and keeping them next to the ONNX graphs avoids needing the `package:` resolver for them.
+and keeping them next to the ONNX graphs avoids needing a shared asset for them.
 
 ## Path scheme
 
-`model.tokenizer_dir` accepts either a plain path or a scheme-prefixed value:
+`model.tokenizer_dir` accepts either a plain path or a scheme-prefixed value. Resolution is
+performed by ONNX Runtime's model package resolver:
 
 | Form | Resolution |
 | --- | --- |
 | *(empty)* | Treated as the variant directory (the directory containing `genai_config.json`). |
-| `package:<relative_path>` | Joined with the package root. Only valid when loading from a model package. |
-| Any other value | Joined with the variant directory, matching how every other path in `genai_config.json` is resolved. |
+| `sha256:<hex>` or `sha256:<hex>/<tail>` | A content-addressed shared asset. Resolves to the asset's directory (honoring manifest `shared_assets` overrides), optionally joined with the confined tail. Only valid when loading from a model package. |
+| Any other value | A relative path resolved against the variant directory, with portable-layout confinement (no absolute paths, no `..`). |
 
 ## Loading a package
 
@@ -182,17 +186,17 @@ auto model_ov = OgaModel::Create(*config);
 
 ## Authoring notes
 
-- Every variant declared in `metadata.json` must have its own directory containing a
-  `genai_config.json`. Variant directories are completely independent — they may differ
-  in any genai_config field, including `context_length`, tokenizer-related defaults, or
-  the set of ONNX graphs they load.
+- Every variant declared in the component's `variants` map must have its own directory
+  containing a `genai_config.json`. Variant directories are completely independent — they
+  may differ in any genai_config field, including `context_length`, tokenizer-related
+  defaults, or the set of ONNX graphs they load.
 - Variants targeting the same execution provider must each declare a distinct
   `compatibility_string` (and typically a `device`) so the EP can score them against the
   local hardware. ONNX Runtime treats the string as opaque and forwards it to the EP's
   validator; the EP defines the syntax.
-- Files outside variant directories (such as the `shared/` directory in the example
-  above) are not interpreted by the runtime. Reference them from
-  `genai_config.json` with the `package:` scheme to keep them shared across variants.
+- Files shared across variants live in a content-addressed shared asset under
+  `shared_assets/sha256-<hex>/`. Reference them from `genai_config.json` with the `sha256:`
+  scheme so multiple variants share a single on-disk copy.
 - The model package's execution provider names must match what ONNX Runtime expects
   (`CPUExecutionProvider`, `CUDAExecutionProvider`, `DmlExecutionProvider`,
   `OpenVINOExecutionProvider`, ...). The short forms used by genai_config (`cuda`, `dml`,

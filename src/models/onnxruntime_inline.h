@@ -1553,6 +1553,8 @@ inline const ModelPackageApi& GetModelPackageApi() {
         Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
     f.ModelPackage_GetVariantEpName =
         Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
+    f.ModelPackage_ResolveStringRef =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn(api);
     f.SelectComponent =
         Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
     f.ReleaseModelPackageComponentContext =
@@ -1613,6 +1615,15 @@ inline std::string OrtModelPackageContext::GetVariantEpName(const char* componen
   const char* ep = nullptr;
   Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(this, component_name, variant_name, &ep));
   return (ep == nullptr) ? std::string{} : std::string{ep};
+}
+
+inline std::string OrtModelPackageContext::ResolveStringRef(const std::string& base_dir,
+                                                            const std::string& input,
+                                                            bool must_exist) const {
+  const char* resolved = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_ResolveStringRef(
+      this, base_dir.empty() ? nullptr : base_dir.c_str(), input.c_str(), must_exist ? 1 : 0, &resolved));
+  return (resolved == nullptr) ? std::string{} : std::string{resolved};
 }
 
 inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(

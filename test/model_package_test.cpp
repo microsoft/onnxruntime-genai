@@ -55,23 +55,27 @@ struct VariantSpec {
 };
 
 // Builds a minimal model package the ORT model_package API can open: a single "model"
-// component whose variants each get a placeholder model.onnx and, optionally, a config.
+// component declared inline in the manifest, whose variants each get a placeholder
+// model.onnx and, optionally, a config. The component is inline so the variant directories
+// live at the package root with no models/ nesting.
 fs_std::path WritePackage(const std::string& suffix, const std::vector<VariantSpec>& variants) {
   const auto root = MakeTempDir(suffix);
 
-  WriteFile(root / "manifest.json",
-            "{ \"schema_version\": 1, \"components\": [\"model\"] }");
-
-  std::string metadata = "{\n  \"component_name\": \"model\",\n  \"variants\": {\n";
+  // The single "model" component is declared inline in the manifest, so its variant
+  // directories sit at the package root: variant_directory defaults to the variant name
+  // relative to the component directory, which is the package root for an inline component.
+  // No models/ nesting and no separate component.json — everything stays at the top level.
+  std::string manifest =
+      "{\n  \"schema_version\": 1,\n  \"components\": {\n    \"model\": {\n      \"variants\": {\n";
   for (size_t i = 0; i < variants.size(); ++i) {
-    metadata += "    \"" + variants[i].name + "\": { \"ep\": \"" + variants[i].ep + "\" }";
-    metadata += (i + 1 == variants.size()) ? "\n" : ",\n";
+    manifest += "        \"" + variants[i].name + "\": { \"ep\": \"" + variants[i].ep + "\" }";
+    manifest += (i + 1 == variants.size()) ? "\n" : ",\n";
   }
-  metadata += "  }\n}\n";
-  WriteFile(root / "models" / "model" / "metadata.json", metadata);
+  manifest += "      }\n    }\n  }\n}\n";
+  WriteFile(root / "manifest.json", manifest);
 
   for (const auto& variant : variants) {
-    const auto variant_dir = root / "models" / "model" / variant.name;
+    const auto variant_dir = root / variant.name;
     WriteFile(variant_dir / "model.onnx", "placeholder");
     if (variant.valid_config) {
       WriteFile(variant_dir / "genai_config.json",
@@ -150,23 +154,28 @@ TEST(ModelPackage, AcceptsFullEpName) {
   EXPECT_NO_THROW(OgaConfig::CreateFromPackageEp(root.string().c_str(), "CPUExecutionProvider"));
 }
 
-TEST(ModelPackage, TokenizerResolvesThroughPackageRoot) {
-  // End-to-end: a real model lives in the cpu variant while its tokenizer lives in the
-  // package's shared/ directory, referenced via a "package:" tokenizer_dir. Loading the
-  // model and tokenizing exercises package_root resolution through the public API.
+TEST(ModelPackage, TokenizerResolvesThroughSharedAsset) {
+  // End-to-end: a real model lives in the cpu variant while its tokenizer lives in a
+  // content-addressed shared asset, referenced via a "sha256:" tokenizer_dir. ORT discovers
+  // the shared_assets/sha256-<hex>/ directory at load time; loading the model and tokenizing
+  // exercises sha256: resolution through the public API.
   const fs_std::path src_model = fs_std::path(MODEL_PATH) / "hf-internal-testing" /
                                  "tiny-random-gpt2-fp32";
 
   const auto root = MakeTempDir("e2e_pkg");
-  const auto variant_dir = root / "models" / "model" / "cpu";
+  const auto variant_dir = root / "cpu";
+  // A valid sha256 URI is "sha256:" + 64 lowercase hex chars; the on-disk asset directory is
+  // shared_assets/sha256-<hex>/. The bytes need not match the digest: ORT discovers the
+  // directory by name, it does not re-hash the contents at load time.
+  const std::string digest(64, 'a');
+  const auto asset_dir = root / "shared_assets" / ("sha256-" + digest);
   fs_std::create_directories(variant_dir);
-  fs_std::create_directories(root / "shared");
+  fs_std::create_directories(asset_dir);
 
+  // Inline single "model" component: the cpu variant directory sits at the package root.
   WriteFile(root / "manifest.json",
-            "{ \"schema_version\": 1, \"components\": [\"model\"] }");
-  WriteFile(root / "models" / "model" / "metadata.json",
-            "{ \"component_name\": \"model\","
-            " \"variants\": { \"cpu\": { \"ep\": \"CPUExecutionProvider\" } } }");
+            "{ \"schema_version\": 1, \"components\": { \"model\": { \"variants\":"
+            " { \"cpu\": { \"ep\": \"CPUExecutionProvider\" } } } } }");
 
   // The model file stays beside genai_config.json in the variant directory.
   std::error_code ec;
@@ -174,21 +183,21 @@ TEST(ModelPackage, TokenizerResolvesThroughPackageRoot) {
                     fs_std::copy_options::overwrite_existing, ec);
   ASSERT_FALSE(ec) << ec.message();
 
-  // The tokenizer files move to the package-level shared/ directory.
+  // The tokenizer files move to the content-addressed shared asset directory.
   for (const auto& entry : fs_std::directory_iterator(src_model)) {
     const auto name = entry.path().filename().string();
     if (name == "past.onnx" || name == "genai_config.json") continue;
-    fs_std::copy_file(entry.path(), root / "shared" / name,
+    fs_std::copy_file(entry.path(), asset_dir / name,
                       fs_std::copy_options::overwrite_existing, ec);
     ASSERT_FALSE(ec) << ec.message();
   }
 
-  // Point tokenizer_dir at the shared/ directory using the "package:" scheme.
+  // Point tokenizer_dir at the shared asset using the "sha256:" scheme.
   std::string config = ReadFile(src_model / "genai_config.json");
   const std::string anchor = "\"type\": \"gpt2\",";
   const auto pos = config.find(anchor);
   ASSERT_NE(pos, std::string::npos);
-  config.insert(pos + anchor.size(), "\n    \"tokenizer_dir\": \"package:shared\",");
+  config.insert(pos + anchor.size(), "\n    \"tokenizer_dir\": \"sha256:" + digest + "\",");
   WriteFile(variant_dir / "genai_config.json", config);
 
   auto oga_config = OgaConfig::CreateFromPackageEp(root.string().c_str(), "cpu");

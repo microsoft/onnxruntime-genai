@@ -282,7 +282,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
+  // Resolve tokenizer_dir (may be empty, relative, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
@@ -840,6 +840,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
     auto load = OpenAndSelectVariant(ort_env, path, ep_str);
     auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
     config->package_root = load.package_root;
+    // Delegate genai_config path resolution to ORT's package resolver, capturing the package
+    // context to keep it alive for the lifetime of the config.
+    auto package_context = load.context;
+    config->package_resolver = [package_context](const fs::path& base_dir,
+                                                 std::string_view value) -> fs::path {
+      return fs::path{package_context->ResolveStringRef(base_dir.string(), std::string{value},
+                                                        /*must_exist=*/false)};
+    };
     return config;
 #else
     throw std::runtime_error(

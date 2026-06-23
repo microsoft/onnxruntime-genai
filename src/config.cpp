@@ -1615,24 +1615,14 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-namespace {
-
-constexpr std::string_view kPackageScheme = "package:";
-
-}  // namespace
-
 fs::path Config::ResolvePath(std::string_view value) const {
   if (value.empty()) {
     return config_path;
   }
-  if (value.size() >= kPackageScheme.size() &&
-      value.compare(0, kPackageScheme.size(), kPackageScheme) == 0) {
-    if (package_root.string().empty()) {
-      throw std::runtime_error("Cannot resolve \"" + std::string{value} +
-                               "\": this model was not loaded from a model package.");
-    }
-    const std::string remainder{value.substr(kPackageScheme.size())};
-    return remainder.empty() ? package_root : package_root / remainder;
+  if (package_resolver) {
+    // Loaded from a model package: ORT owns all path-reference resolution (sha256: shared
+    // assets with manifest overrides, relative paths, confinement).
+    return package_resolver(config_path, value);
   }
   return config_path / std::string{value};
 }
