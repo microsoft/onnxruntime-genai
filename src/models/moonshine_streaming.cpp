@@ -1,10 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <cstring>
-#include <stdexcept>
-#include <vector>
 #include <string>
+#include <vector>
 
 #include "../generators.h"
 #include "moonshine_streaming.h"
@@ -17,9 +15,6 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
 
   encoder_hidden_size = enc.hidden_size;
   num_decoder_layers = dec.num_hidden_layers;
-  num_attention_heads = dec.num_attention_heads;
-  head_size = dec.head_size;
-  vocab_size = config.model.vocab_size;
 
   sample_rate = config.model.sample_rate;
   chunk_samples = config.model.chunk_samples;
@@ -27,9 +22,7 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   bos_token_id = config.model.bos_token_id;
   eos_token_id = config.model.eos_token_id.empty() ? 2 : config.model.eos_token_id[0];
 
-  // Encoder I/O names from config (fall back to upstream defaults)
-  enc_in_audio = enc.inputs.audio_features;
-  if (enc_in_audio.empty()) enc_in_audio = "input_values";
+  // Encoder output name from config (fall back to upstream default).
   enc_out_hidden_states = enc.outputs.hidden_states;
   if (enc_out_hidden_states.empty()) enc_out_hidden_states = "encoder_hidden_states";
 
@@ -47,7 +40,6 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
 
 MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  moonshine_config_ = MoonshineConfig{};
   moonshine_config_.PopulateFromConfig(*config_);
 
   // Create session options

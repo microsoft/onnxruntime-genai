@@ -1,5 +1,18 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+"""Streaming ASR example using the onnxruntime-genai StreamingProcessor API.
+
+Drives any streaming encoder/decoder ASR model exposed through onnxruntime-genai:
+  * NVIDIA Nemotron streaming RNN-T (`nemotron_speech`, multilingual)
+  * Moonshine streaming encoder-decoder (`streaming_enc_dec_asr`, English only)
+
+The runtime pipeline is identical for both: the StreamingProcessor factory
+dispatches per `model.type`, and the Generator routes both through the
+TransducerState path under the hood.
+
+The `--language` flag and the LANG_TO_ID table below are Nemotron-specific;
+Moonshine has no lang_id runtime knob, so leave `--language` unset for it.
+"""
 
 import argparse
 import json
@@ -11,6 +24,8 @@ import onnxruntime_genai as og
 from common import get_config
 
 # Maps short language codes / locale tags to (lang_id, human-readable name).
+# Nemotron-specific: ignored when running a Moonshine model (which is English-only
+# and exposes no lang_id runtime option).
 # Restricted to the languages officially supported by
 # NVIDIA-Nemotron-3.5-ASR-Streaming-Multilingual-0.6b (per model card).
 # IDs follow the canonical prompt_dictionary in model_config.yaml.

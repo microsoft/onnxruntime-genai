@@ -26,16 +26,11 @@ struct MoonshineConfig {
 
   int encoder_hidden_size{620};
   int num_decoder_layers{10};
-  int num_attention_heads{8};
-  int head_size{64};
-  int vocab_size{32768};
 
   int bos_token_id{1};
   int eos_token_id{2};
 
-  // Encoder I/O names
-  std::string enc_in_audio;
-  std::string enc_in_attention_mask;
+  // Encoder output hidden-states tensor name (used by SetExtraInputs).
   std::string enc_out_hidden_states;
 
   // Decoder I/O names (initial decoder, no past KV)

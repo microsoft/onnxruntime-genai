@@ -20,6 +20,7 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
 
  private:
   Model& model_;
+  MoonshineStreamingModel* moonshine_model_;  // cached typed view of model_ (verified non-null in ctor)
   MoonshineConfig config_;
 
   // Audio accumulation buffer

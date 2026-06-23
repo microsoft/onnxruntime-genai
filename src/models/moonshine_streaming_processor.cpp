@@ -13,12 +13,12 @@ namespace Generators {
 
 MoonshineStreamingProcessor::MoonshineStreamingProcessor(Model& model)
     : model_{model} {
-  auto* moonshine_model = dynamic_cast<MoonshineStreamingModel*>(&model);
-  if (!moonshine_model) {
+  moonshine_model_ = dynamic_cast<MoonshineStreamingModel*>(&model);
+  if (!moonshine_model_) {
     throw std::runtime_error("MoonshineStreamingProcessor requires a streaming_enc_dec_asr model type. Got: " +
                              model.config_->model.type);
   }
-  config_ = moonshine_model->moonshine_config_;
+  config_ = moonshine_model_->moonshine_config_;
 
   // Initialize VAD from config (if vad.enabled = true).
   InitVadFromConfig(model);
@@ -40,23 +40,15 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::Flush() {
 }
 
 std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::EncodeAllAudio() {
-  auto* moonshine_model = dynamic_cast<MoonshineStreamingModel*>(&model_);
-  if (!moonshine_model) {
-    throw std::runtime_error("Model is not a MoonshineStreamingModel");
-  }
-
   auto& allocator = model_.allocator_cpu_;
   const int chunk_samples = config_.chunk_samples;
   const int overlap_samples = config_.overlap_samples;
 
-  // Pad audio to a multiple of 80 (encoder frame length).
+  // Moonshine encoder frontend hop = 80 samples (5ms @ 16kHz). Each chunk is
+  // padded up to a multiple of FRAME_LEN inside the loop below, which covers
+  // both the all-chunks-aligned case and the misaligned tail of the last chunk.
   constexpr int FRAME_LEN = 80;
-  size_t audio_len = audio_buffer_.size();
-  size_t rem = audio_len % FRAME_LEN;
-  if (rem) {
-    audio_buffer_.resize(audio_len + FRAME_LEN - rem, 0.0f);
-    audio_len = audio_buffer_.size();
-  }
+  const size_t audio_len = audio_buffer_.size();
 
   // Encode in overlapping chunks.
   std::vector<std::vector<float>> all_enc_data;
@@ -96,7 +88,7 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::EncodeAllAudio() {
     const char* output_names[] = {"encoder_hidden_states"};
     OrtValue* output_values[] = {nullptr};
 
-    moonshine_model->session_encoder_->Run(
+    moonshine_model_->session_encoder_->Run(
         nullptr,
         input_names, input_values, 2,
         output_names, output_values, 1);
