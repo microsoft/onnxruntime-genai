@@ -27,7 +27,12 @@ MoonshineStreamingProcessor::MoonshineStreamingProcessor(Model& model)
 MoonshineStreamingProcessor::~MoonshineStreamingProcessor() = default;
 
 std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::Process(const float* audio_data, size_t num_samples) {
-  // Just accumulate audio - encoding happens on Flush().
+  // VAD gating: drop silent chunks before buffering. Saves encoder work on Flush()
+  // and keeps the prefix-padding / silence-duration semantics consistent with Nemotron.
+  if (ShouldDropChunk(audio_data, num_samples)) {
+    return nullptr;
+  }
+  // Accumulate audio - encoding happens on Flush().
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
   return nullptr;
 }
