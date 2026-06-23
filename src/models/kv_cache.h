@@ -206,10 +206,14 @@ std::string ComposeKeyValueName(const std::string& template_string, int index);
 // supported and throws: the write_indices/nonpad_kv_seqlen index stream lives in
 // InputIDs with no rewind hook, so rewinding would silently desynchronize it.
 //
-// Differs from DefaultKeyValueCache only in the allocator: it consumes mobius's
-// 3D emission directly (vs the 4D [batch, num_kv_heads, seq, head_dim] layout),
-// and kv_hidden may vary per layer (e.g. Gemma-4 sliding GQA 8*256 vs global
-// MQA 1*512), read from each layer's own declared input shape.
+// Distinct from DefaultKeyValueCache in two ways. (1) Layout: it consumes
+// mobius's 3D emission directly (vs the 4D [batch, num_kv_heads, seq, head_dim]
+// layout), and kv_hidden may vary per layer (e.g. Gemma-4 sliding GQA 8*256 vs
+// global MQA 1*512), read from each layer's own declared input shape.
+// (2) RewindTo: DefaultKeyValueCache rewinds by reshaping its buffers, whereas
+// this cache THROWS (rewind is unsupported), because the write_indices /
+// nonpad_kv_seqlen index stream lives in InputIDs with no rewind hook and a
+// silent no-op would desynchronize it.
 struct StaticScatterKeyValueCache : KeyValueCache {
   StaticScatterKeyValueCache(State& state);
 
@@ -228,14 +232,9 @@ struct StaticScatterKeyValueCache : KeyValueCache {
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
-  // Bind offsets recorded by Add() for parity with the other KV caches; unused
-  // here because the shared buffer never needs rebinding between steps.
-  size_t input_index_{~0U}, output_index_{~0U};
 
   // Auto-discovered KV layer indices (sparse for hybrid models).
   std::vector<int> kv_layer_indices_;
-  // Per-layer static shape [batch, max_seq_len, kv_hidden]; kv_hidden may vary.
-  std::vector<std::array<int64_t, 3>> layer_shapes_;
   ONNXTensorElementDataType type_;
 
   // One shared past/present buffer per key and per value tensor (2 per layer).

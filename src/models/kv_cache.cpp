@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "kv_cache.h"
+#include "static_scatter_indices.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
@@ -714,6 +715,22 @@ bool StaticScatterKeyValueCache::IsStaticScatterCache(const Model& model) {
   // would create the cache for a model whose indices never get bound, surfacing
   // as an obscure unbound-input error at Run. Keep this predicate in lockstep
   // with the producer gate in input_ids.cpp.
+  //
+  // NAME-COLLISION ASSUMPTION (rank-3 tightening = TRACKED FOLLOW-UP, not done
+  // here): selection is purely on the presence of both driver inputs, BEFORE the
+  // rank-3 static layout is checked. A model that declares both write_indices and
+  // nonpad_kv_seqlen but uses a 4D KV layout would be routed here and then hit the
+  // ctor's `rank != 3` throw, rather than falling back to Default/Windowed.
+  //
+  // A proper fix would factor KV-input discovery into a shared helper (the index
+  // parse already lives in DiscoverKvLayerIndices(); the missing piece is locating
+  // a KV input name and reading its rank at selection time) so that this predicate
+  // returns false on a rank-4 layout and the factory falls back to Default/
+  // Windowed. That is DEFERRED for this PR: it touches the sensitive factory-
+  // selection path and risks layer-discovery drift for sparse/hybrid models that
+  // may lack a layer-0 KV input. The collision is considered unlikely (the two
+  // driver inputs are specific to this layout), so we accept the ctor throw over a
+  // risky attempt-and-fall-back restructuring until the follow-up lands.
   return model.session_info_.HasInput(model.config_->model.decoder.inputs.write_indices) &&
          model.session_info_.HasInput(model.config_->model.decoder.inputs.nonpad_kv_seqlen);
 }
@@ -732,20 +749,14 @@ StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
   }
 
   // Auto-discover which layer indices have KV cache inputs (mirrors
-  // DefaultKeyValueCache so sparse/hybrid layouts work the same way).
+  // DefaultKeyValueCache so sparse/hybrid layouts work the same way). The strict
+  // parse / dedup lives in DiscoverKvLayerIndices (static_scatter_indices.h) so
+  // it can be unit-tested without standing up a Model.
   {
     const auto& key_template = model_.config_->model.decoder.inputs.past_key_names;
     auto prefix = key_template.substr(0, key_template.find('%'));
     auto suffix = key_template.substr(key_template.find('%') + 2);
-    for (const auto& name : model_.session_info_.GetInputNames()) {
-      if (name.size() > prefix.size() + suffix.size() &&
-          name.compare(0, prefix.size(), prefix) == 0 &&
-          name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-        auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
-        kv_layer_indices_.push_back(std::stoi(idx_str));
-      }
-    }
-    std::sort(kv_layer_indices_.begin(), kv_layer_indices_.end());
+    kv_layer_indices_ = DiscoverKvLayerIndices(model_.session_info_.GetInputNames(), prefix, suffix);
   }
 
   if (!kv_layer_indices_.empty()) {
@@ -768,7 +779,6 @@ StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
   // kv_hidden = num_kv_heads * head_dim and may vary per layer, so read each
   // layer's own declared shape rather than assuming a uniform value.
   const int64_t batch_size = state_.params_->BatchBeamSize();
-  layer_shapes_.resize(layer_count_ * 2);
   caches_.reserve(layer_count_ * 2);
   for (int i = 0; i < layer_count_ * 2; ++i) {
     const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i]);
@@ -787,7 +797,6 @@ StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
       }
     }
     std::array<int64_t, 3> tensor_shape{batch_size, input_shape[1], input_shape[2]};
-    layer_shapes_[i] = tensor_shape;
 
     caches_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
     if (Device().GetType() != DeviceType::WEBGPU) {
@@ -797,9 +806,6 @@ StaticScatterKeyValueCache::StaticScatterKeyValueCache(State& state)
 }
 
 void StaticScatterKeyValueCache::Add() {
-  input_index_ = state_.inputs_.size();
-  output_index_ = state_.outputs_.size();
-
   // Past and present share one buffer: TensorScatter writes new rows in place,
   // so key_cache.{i} (input) and updated_key_cache.{i} (output) point at the
   // same OrtValue and never need rebinding between steps.

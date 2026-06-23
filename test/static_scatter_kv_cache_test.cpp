@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "models/static_scatter_indices.h"
+#include "static_scatter_golden.h"
 #include "test_utils.h"
 
 namespace Generators::test {
@@ -76,6 +78,35 @@ TEST(StaticScatterIndexTracker, MatchesSliceAFixtureGolden) {
   EXPECT_EQ(decode.nonpad_kv_seqlen, 5);
 }
 
+// --- DiscoverKvLayerIndices: the strict layer-index parse the StaticScatter
+// constructor uses to map past_key_values.N.key inputs to layer indices. ---
+
+TEST(DiscoverKvLayerIndices, ParsesAndSortsWellFormedNames) {
+  // Out-of-order, sparse (missing layer 1) -> parsed and sorted ascending.
+  const std::vector<std::string> names{
+      "past_key_values.2.key", "past_key_values.0.key", "other_input",
+      "past_key_values.5.key"};
+  const auto indices = DiscoverKvLayerIndices(names, "past_key_values.", ".key");
+  EXPECT_EQ(indices, (std::vector<int>{0, 2, 5}));
+}
+
+TEST(DiscoverKvLayerIndices, ThrowsOnMalformedIndex) {
+  // "0.bad" must be rejected: std::stoi would have silently accepted it as 0 and
+  // mis-mapped the layer. from_chars rejects the leftover ".bad".
+  const std::vector<std::string> names{"past_key_values.0.bad.key"};
+  EXPECT_THROW(DiscoverKvLayerIndices(names, "past_key_values.", ".key"),
+               std::runtime_error);
+}
+
+TEST(DiscoverKvLayerIndices, ThrowsOnDuplicateIndex) {
+  // Two inputs mapping to the same layer index would double-count and bind the
+  // same cache slot twice -> rejected.
+  const std::vector<std::string> names{"past_key_values.1.key",
+                                       "past_key_values.1.key"};
+  EXPECT_THROW(DiscoverKvLayerIndices(names, "past_key_values.", ".key"),
+               std::runtime_error);
+}
+
 // Shared helpers + frozen golden for the fixture-backed cache tests below. The
 // #366 slice-A fixture (test/models/static-scatter-bias-decoder) is a bias-aware
 // external-KV static-cache decoder: mistral backbone, 2 layers,
@@ -122,6 +153,34 @@ float Sum(const std::vector<float>& values) {
   return std::accumulate(values.begin(), values.end(), 0.0f);
 }
 
+// Element-wise parity tolerance. The fixture runs on the CPU EP (its
+// genai_config declares no provider), so the produced tensors come from the same
+// ORT CPU MEA kernels that generated the golden in golden_io.npz; fp32 agreement
+// is near-exact, well within 1e-3. This is ~4 orders tighter than the headline
+// sum check yet still trivially passes same-kernel noise, while a genuinely wrong
+// (but sum-preserving) output diverges by O(1) and fails.
+constexpr float kParityAtol = 1e-3f;
+
+// Assert every element of *actual* matches *golden* within *atol*. A sum/argmax
+// check alone can pass a wrong-but-sum-preserving output; this compares the full
+// tensor and reports the single worst element for a readable failure.
+void ExpectAllClose(const std::vector<float>& actual, const float* golden,
+                    size_t golden_count, float atol, const char* label) {
+  ASSERT_EQ(actual.size(), golden_count) << label << ": element-count mismatch";
+  double max_abs_diff = 0.0;
+  size_t max_idx = 0;
+  for (size_t i = 0; i < golden_count; ++i) {
+    const double diff = std::abs(static_cast<double>(actual[i]) - static_cast<double>(golden[i]));
+    if (diff > max_abs_diff) {
+      max_abs_diff = diff;
+      max_idx = i;
+    }
+  }
+  EXPECT_LE(max_abs_diff, static_cast<double>(atol))
+      << label << ": max |actual-golden| = " << max_abs_diff << " at index " << max_idx
+      << " (actual=" << actual[max_idx] << ", golden=" << golden[max_idx] << ")";
+}
+
 // The slice-A fixture updates its KV cache with an opset-24 TensorScatter node.
 // Some ORT packages used in CI (e.g. the DirectML and certain CUDA lanes) don't
 // ship a TensorScatter(24) kernel yet, so the static-scatter graph cannot execute
@@ -136,7 +195,16 @@ bool StaticScatterRuntimeAvailable() {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->AppendTokens(std::vector<int32_t>{1});
   } catch (const std::exception& e) {
-    if (std::string(e.what()).find("TensorScatter") != std::string::npos) {
+    // Skip ONLY on the precise "kernel absent" signature. ORT phrases a missing
+    // kernel as: "Could not find an implementation for TensorScatter(24) node ...".
+    // Matching just "TensorScatter" would also swallow a GENUINE TensorScatter
+    // regression (a shape/type/dispatch bug, or a wrong-opset node) and silently
+    // skip parity, masking a real failure as "op not shipped". Require BOTH the
+    // missing-implementation phrase AND the opset-pinned op name; rethrow anything
+    // else as a real test error.
+    const std::string msg = e.what();
+    if (msg.find("Could not find an implementation for") != std::string::npos &&
+        msg.find("TensorScatter(24)") != std::string::npos) {
       return false;
     }
     throw;  // Unrelated failure: let it surface as a real test error.
@@ -196,9 +264,15 @@ TEST(StaticScatterKeyValueCache, EndToEndFixtureParity) {
   auto prefill_logits_vec = ToFloatVector(*prefill_logits);  // last token only: [1,1,256]
   EXPECT_EQ(ArgMax(prefill_logits_vec), kPrefillArgmax);
   EXPECT_NEAR(Sum(prefill_logits_vec), kPrefillLastTokLogitsSum, 1e-2f);
+  ExpectAllClose(prefill_logits_vec, kPrefillLastTokLogitsGolden,
+                 std::size(kPrefillLastTokLogitsGolden), kParityAtol, "prefill logits");
 
   auto prefill_cache = generator->GetOutput("updated_key_cache.0");
-  EXPECT_NEAR(Sum(ToFloatVector(*prefill_cache)), kPrefillUpdatedKeyCache0Sum, 1e-2f);
+  auto prefill_cache_vec = ToFloatVector(*prefill_cache);
+  EXPECT_NEAR(Sum(prefill_cache_vec), kPrefillUpdatedKeyCache0Sum, 1e-2f);
+  ExpectAllClose(prefill_cache_vec, kPrefillUpdatedKeyCache0Golden,
+                 std::size(kPrefillUpdatedKeyCache0Golden), kParityAtol,
+                 "prefill updated_key_cache.0");
 
   // --- Decode: force golden token 5. The tracker advances to write_index=4,
   // nonpad=5; the decode step must read the slot prefill just wrote. ---
@@ -209,9 +283,15 @@ TEST(StaticScatterKeyValueCache, EndToEndFixtureParity) {
   auto decode_logits_vec = ToFloatVector(*decode_logits);  // [1,1,256]
   EXPECT_EQ(ArgMax(decode_logits_vec), kDecodeArgmax);
   EXPECT_NEAR(Sum(decode_logits_vec), kDecodeLogitsSum, 1e-2f);
+  ExpectAllClose(decode_logits_vec, kDecodeLastTokLogitsGolden,
+                 std::size(kDecodeLastTokLogitsGolden), kParityAtol, "decode logits");
 
   auto decode_cache = generator->GetOutput("updated_key_cache.0");
-  EXPECT_NEAR(Sum(ToFloatVector(*decode_cache)), kDecodeUpdatedKeyCache0Sum, 1e-2f);
+  auto decode_cache_vec = ToFloatVector(*decode_cache);
+  EXPECT_NEAR(Sum(decode_cache_vec), kDecodeUpdatedKeyCache0Sum, 1e-2f);
+  ExpectAllClose(decode_cache_vec, kDecodeUpdatedKeyCache0Golden,
+                 std::size(kDecodeUpdatedKeyCache0Golden), kParityAtol,
+                 "decode updated_key_cache.0");
 }
 #endif  // !USE_DML
 
