@@ -1535,32 +1535,25 @@ inline const ModelPackageApi& GetModelPackageApi() {
     if (api == nullptr) {
       return f;
     }
-    f.CreateModelPackageOptionsFromSessionOptions =
-        Experimental::Get_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn(api);
-    f.ReleaseModelPackageOptions =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn(api);
-    f.CreateModelPackageContext =
-        Experimental::Get_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn(api);
-    f.ReleaseModelPackageContext =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn(api);
-    f.ModelPackage_GetComponentCount =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn(api);
-    f.ModelPackage_GetComponentNames =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantCount =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantNames =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantEpName =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
-    f.ModelPackage_ResolveStringRef =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn(api);
-    f.SelectComponent =
-        Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
-    f.ReleaseModelPackageComponentContext =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn(api);
-    f.ModelPackageComponent_GetSelectedVariantFolderPath =
-        Experimental::Get_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn(api);
+    // Resolve each entry by name through OrtApi::GetExperimentalFunction. Member names match
+    // their function's suffix, so the name is "OrtModelPackageApi_<member>_SinceV28".
+#define ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(member) \
+  f.member = reinterpret_cast<decltype(f.member)>( \
+      api->GetExperimentalFunction("OrtModelPackageApi_" #member "_SinceV28"))
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(CreateModelPackageOptionsFromSessionOptions);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageOptions);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(CreateModelPackageContext);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageContext);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetComponentCount);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetComponentNames);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantCount);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantNames);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantEpName);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_ResolveStringRef);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(SelectComponent);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageComponentContext);
+    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
+#undef ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN
     return f;
   }();
   if (fns.CreateModelPackageContext == nullptr) {

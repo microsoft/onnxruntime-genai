@@ -66,7 +66,7 @@ fs_std::path WritePackage(const std::string& suffix, const std::vector<VariantSp
   // relative to the component directory, which is the package root for an inline component.
   // No models/ nesting and no separate component.json — everything stays at the top level.
   std::string manifest =
-      "{\n  \"schema_version\": 1,\n  \"components\": {\n    \"model\": {\n      \"variants\": {\n";
+      "{\n  \"schema_version\": \"1.0\",\n  \"components\": {\n    \"model\": {\n      \"variants\": {\n";
   for (size_t i = 0; i < variants.size(); ++i) {
     manifest += "        \"" + variants[i].name + "\": { \"ep\": \"" + variants[i].ep + "\" }";
     manifest += (i + 1 == variants.size()) ? "\n" : ",\n";
@@ -174,7 +174,7 @@ TEST(ModelPackage, TokenizerResolvesThroughSharedAsset) {
 
   // Inline single "model" component: the cpu variant directory sits at the package root.
   WriteFile(root / "manifest.json",
-            "{ \"schema_version\": 1, \"components\": { \"model\": { \"variants\":"
+            "{ \"schema_version\": \"1.0\", \"components\": { \"model\": { \"variants\":"
             " { \"cpu\": { \"ep\": \"CPUExecutionProvider\" } } } } }");
 
   // The model file stays beside genai_config.json in the variant directory.
