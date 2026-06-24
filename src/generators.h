@@ -175,6 +175,13 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Constructs a Config from `config_path`. For a model package, a variant is selected
+// (auto-detected when `ep` is null/empty). For a flat directory `ep` must be null/empty.
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const char* ep = nullptr,
+                                     std::string_view json_overlay = {});
+
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
