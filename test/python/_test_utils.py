@@ -6,6 +6,90 @@ import os
 import subprocess
 import sys
 
+import importlib
+import importlib.util
+
+
+# Execution providers shipped as separate plug-in libraries that must be registered with
+# ONNX Runtime before use. Maps the GenAI provider name to the Python package that exposes
+# the plug-in library path via get_library_path().
+PLUGIN_EP_PACKAGES = {
+    "webgpu": "onnxruntime_ep_webgpu",
+}
+
+# Tracks plug-in EPs already registered in this process. Registration is process-wide on the
+# shared ORT environment, so it must happen at most once even when multiple test modules import
+# this helper and register at import time.
+_registered_plugin_eps: set[str] = set()
+
+
+def is_ep_plugin_available(provider_name: str) -> bool:
+    """Returns True if the plug-in package backing the given GenAI provider name is installed."""
+    package_name = PLUGIN_EP_PACKAGES.get(provider_name)
+    if package_name is None:
+        return False
+    return importlib.util.find_spec(package_name) is not None
+
+
+def is_webgpu_ep_available() -> bool:
+    """WebGPU ships as a separate plug-in package (onnxruntime-ep-webgpu) rather than in the base
+    onnxruntime build, so its availability is determined by whether that package is installed."""
+    return is_ep_plugin_available("webgpu")
+
+
+def register_plugin_ep(provider_name: str, log: logging.Logger | None = None) -> bool:
+    """Registers a single plug-in execution provider library with ONNX Runtime GenAI.
+
+    Registration is process-wide and idempotent: repeated calls (including from different test
+    modules) register the library at most once. Returns True if the EP is registered (or was
+    already), False if its plug-in package is not installed.
+    """
+    if provider_name in _registered_plugin_eps:
+        return True
+
+    package_name = PLUGIN_EP_PACKAGES.get(provider_name)
+    if package_name is None:
+        raise ValueError(f"Unknown plug-in execution provider: {provider_name!r}")
+
+    try:
+        ep_module = importlib.import_module(package_name)
+    except ImportError:
+        if log:
+            log.info("Skipping plug-in EP '%s': package '%s' is not installed.", provider_name, package_name)
+        return False
+
+    import onnxruntime_genai as og  # noqa: PLC0415 - imported lazily so tests that don't need an EP don't pay for it
+
+    try:
+        og.register_execution_provider_library(ep_module.get_ep_name(), ep_module.get_library_path())
+        _registered_plugin_eps.add(provider_name)
+        if log:
+            log.info("Registered plug-in EP '%s' from package '%s'.", provider_name, package_name)
+        return True
+    except Exception as exc:  # noqa: BLE001 - registration is best-effort for optional EPs
+        if log:
+            log.warning("Failed to register plug-in EP '%s': %s", provider_name, exc)
+        return False
+
+
+def register_webgpu_plugin(log: logging.Logger | None = None) -> bool:
+    """Registers the onnxruntime-ep-webgpu plug-in with ONNX Runtime GenAI (idempotent).
+
+    Returns True if the WebGPU EP is registered (or was already), False if the plug-in package is
+    not installed.
+    """
+    return register_plugin_ep("webgpu", log)
+
+
+def register_plugin_providers(log: logging.Logger | None = None) -> None:
+    """Registers every available plug-in execution provider library with ONNX Runtime GenAI.
+
+    A provider is skipped if its package is not installed; other failures are logged but not raised
+    so the absence of an optional EP never blocks the test session.
+    """
+    for provider_name in PLUGIN_EP_PACKAGES:
+        register_plugin_ep(provider_name, log)
+
 
 def is_windows():
     return sys.platform.startswith("win")

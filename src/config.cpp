@@ -15,12 +15,21 @@
 
 namespace Generators {
 
-// Fix casing of certain historical names to match current Onnxruntime names
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "cpu" || lower_name == "cpuexecutionprovider") {
+  // Strip the shared "ExecutionProvider" suffix so full ORT names normalize like the aliases.
+  constexpr std::string_view kEpSuffix = "executionprovider";
+  if (lower_name.size() > kEpSuffix.size() &&
+      lower_name.compare(lower_name.size() - kEpSuffix.size(), kEpSuffix.size(), kEpSuffix) == 0) {
+    lower_name.resize(lower_name.size() - kEpSuffix.size());
+  }
+  if (lower_name == "cpu") {
     return "CPU";
+  } else if (lower_name == "cuda") {
+    return "cuda";
   } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
@@ -31,7 +40,9 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "OpenVINO";
   } else if (lower_name == "vitisai") {
     return "VitisAI";
-  } else if (lower_name == "nvtensorrtrtx" || lower_name == "nvtensorrtrtxexecutionprovider") {
+  } else if (lower_name == "ryzenai") {
+    return "RyzenAI";
+  } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
   }
   return name;  // Return name unchanged
@@ -1108,6 +1119,8 @@ struct Model_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
       v_.type = JSON::Get<std::string_view>(value);
+    } else if (name == "tokenizer_dir") {
+      v_.tokenizer_dir = JSON::Get<std::string_view>(value);
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {
@@ -1608,6 +1621,28 @@ void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{config};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+}
+
+namespace {
+
+constexpr std::string_view kPackageScheme = "package:";
+
+}  // namespace
+
+fs::path Config::ResolvePath(std::string_view value) const {
+  if (value.empty()) {
+    return config_path;
+  }
+  if (value.size() >= kPackageScheme.size() &&
+      value.compare(0, kPackageScheme.size(), kPackageScheme) == 0) {
+    if (package_root.string().empty()) {
+      throw std::runtime_error("Cannot resolve \"" + std::string{value} +
+                               "\": this model was not loaded from a model package.");
+    }
+    const std::string remainder{value.substr(kPackageScheme.size())};
+    return remainder.empty() ? package_root : package_root / remainder;
+  }
+  return config_path / std::string{value};
 }
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {

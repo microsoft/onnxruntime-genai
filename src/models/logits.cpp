@@ -44,7 +44,7 @@ DeviceSpan<float> Logits::Get() {
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_last, type_);
 
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>)
       logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
 
     logits_of_last_token = output_last_tokens_.get();
@@ -69,8 +69,8 @@ DeviceSpan<float> Logits::Get() {
     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
   }
 
-  // Convert from float16 to float32 if necessary
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
+  // Convert from float16/bfloat16 to float32 if necessary
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
     Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_of_last_token = logits_of_last_token_fp32_.get();
   }
