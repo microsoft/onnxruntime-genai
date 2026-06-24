@@ -258,27 +258,9 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
-  OgaString GetToolCallStartToken() const {
+  OgaString GetGenerationTag(const char* tag_name) const {
     const char* p;
-    OgaCheckResult(OgaModelGetToolCallStartToken(this, &p));
-    return p;
-  }
-
-  OgaString GetToolCallEndToken() const {
-    const char* p;
-    OgaCheckResult(OgaModelGetToolCallEndToken(this, &p));
-    return p;
-  }
-
-  OgaString GetReasoningStartToken() const {
-    const char* p;
-    OgaCheckResult(OgaModelGetReasoningStartToken(this, &p));
-    return p;
-  }
-
-  OgaString GetReasoningEndToken() const {
-    const char* p;
-    OgaCheckResult(OgaModelGetReasoningEndToken(this, &p));
+    OgaCheckResult(OgaModelGetGenerationTag(this, tag_name, &p));
     return p;
   }
 

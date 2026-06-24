@@ -378,30 +378,9 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelGetToolCallStartToken(const OgaModel* model, const char** out) {
+OgaResult* OGA_API_CALL OgaModelGetGenerationTag(const OgaModel* model, const char* tag_name, const char** out) {
   OGA_TRY
-  *out = AllocOgaString(model->GetToolCallStartToken().c_str());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelGetToolCallEndToken(const OgaModel* model, const char** out) {
-  OGA_TRY
-  *out = AllocOgaString(model->GetToolCallEndToken().c_str());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelGetReasoningStartToken(const OgaModel* model, const char** out) {
-  OGA_TRY
-  *out = AllocOgaString(model->GetReasoningStartToken().c_str());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelGetReasoningEndToken(const OgaModel* model, const char** out) {
-  OGA_TRY
-  *out = AllocOgaString(model->GetReasoningEndToken().c_str());
+  *out = AllocOgaString(model->GetGenerationTag(tag_name).c_str());
   return nullptr;
   OGA_CATCH
 }

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <functional>
 #include <random>
 #include <set>
 #include <string>
@@ -286,6 +287,11 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+
+  // TODO: Once ORT Extensions supports an "additional_special_tokens" option, pass the generation
+  // tags (tool_calling/reasoning tokens) here so that models which don't already mark them as
+  // special in their tokenizer_config.json will still get correct skip_special_tokens behavior.
+  // This is needed for the FL SDK's dual-stream special token detection in OnnxChatGenerator::Decode().
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -820,60 +826,45 @@ bool Model::IsPruned() const {
 
 namespace {
 
-struct FallbackTokens {
-  std::string tool_call_start;
-  std::string tool_call_end;
-  std::string reasoning_start;
-  std::string reasoning_end;
-};
-
 // Fallback map for models whose genai_config.json doesn't yet have tool_calling/reasoning sections.
 // Keyed by model.type string from genai_config.json.
-const FallbackTokens* GetFallbackTokens(const std::string& model_type) {
-  static const std::unordered_map<std::string, FallbackTokens> fallback_map = {
-      {"qwen2", {"<tool_call>", "</tool_call>", "", ""}},
-      {"qwen3", {"<tool_call>", "</tool_call>", "<think>", "</think>"}},
-      {"phi3", {"<tool_call>", "</tool_call>", "", ""}},
-      {"gptoss", {"<|start|>", "<|call|>", "", ""}},
+// Inner map: tag_name -> value
+const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
+  static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
+      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
+      {"phi3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
   };
-  auto it = fallback_map.find(model_type);
-  return it != fallback_map.end() ? &it->second : nullptr;
+  auto type_it = fallback_map.find(model_type);
+  if (type_it == fallback_map.end()) return nullptr;
+  auto tag_it = type_it->second.find(tag_name);
+  if (tag_it == type_it->second.end()) return nullptr;
+  return &tag_it->second;
 }
 
 }  // namespace
 
-const std::string& Model::GetToolCallStartToken() const {
-  if (!config_->tool_calling.tool_call_start_token.empty())
-    return config_->tool_calling.tool_call_start_token;
-  const auto* fallback = GetFallbackTokens(config_->model.type);
-  if (fallback) return fallback->tool_call_start;
-  static const std::string empty;
-  return empty;
-}
+const std::string& Model::GetGenerationTag(const std::string& tag_name) const {
+  // Check config first (tool_calling and reasoning sections)
+  static const std::unordered_map<std::string, std::function<const std::string&(const Config&)>> config_accessors = {
+      {"tool_call_start", [](const Config& c) -> const std::string& { return c.tool_calling.tool_call_start_token; }},
+      {"tool_call_end", [](const Config& c) -> const std::string& { return c.tool_calling.tool_call_end_token; }},
+      {"reasoning_start", [](const Config& c) -> const std::string& { return c.reasoning.reasoning_start_token; }},
+      {"reasoning_end", [](const Config& c) -> const std::string& { return c.reasoning.reasoning_end_token; }},
+  };
 
-const std::string& Model::GetToolCallEndToken() const {
-  if (!config_->tool_calling.tool_call_end_token.empty())
-    return config_->tool_calling.tool_call_end_token;
-  const auto* fallback = GetFallbackTokens(config_->model.type);
-  if (fallback) return fallback->tool_call_end;
-  static const std::string empty;
-  return empty;
-}
+  auto accessor_it = config_accessors.find(tag_name);
+  if (accessor_it != config_accessors.end()) {
+    const std::string& config_val = accessor_it->second(*config_);
+    if (!config_val.empty())
+      return config_val;
+  }
 
-const std::string& Model::GetReasoningStartToken() const {
-  if (!config_->reasoning.reasoning_start_token.empty())
-    return config_->reasoning.reasoning_start_token;
-  const auto* fallback = GetFallbackTokens(config_->model.type);
-  if (fallback && !fallback->reasoning_start.empty()) return fallback->reasoning_start;
-  static const std::string empty;
-  return empty;
-}
+  // Fallback to model-type-based map
+  const auto* fallback = GetFallbackTag(config_->model.type, tag_name);
+  if (fallback) return *fallback;
 
-const std::string& Model::GetReasoningEndToken() const {
-  if (!config_->reasoning.reasoning_end_token.empty())
-    return config_->reasoning.reasoning_end_token;
-  const auto* fallback = GetFallbackTokens(config_->model.type);
-  if (fallback && !fallback->reasoning_end.empty()) return fallback->reasoning_end;
   static const std::string empty;
   return empty;
 }
