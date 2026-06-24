@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <filesystem>
 #include <random>
 #include <set>
 #include <string>
@@ -680,7 +681,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    fs::path custom_library_path{custom_library_file_prefix};
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
 
     // Reject path traversal components regardless of absolute/relative
     if (custom_library_file_prefix.find("..") != std::string::npos) {
@@ -689,11 +690,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     // Build the set of allowed directories. The resolved library path must fall
     // within one of these to prevent loading arbitrary libraries from disk.
-    std::vector<fs::path> allowed_dirs;
+    std::vector<std::filesystem::path> allowed_dirs;
 
     // 1. GenAI model folder
     std::error_code ec;
-    auto model_dir = fs::canonical(config_->config_path, ec);
+    auto model_dir = std::filesystem::canonical(config_->config_path, ec);
     if (!ec) allowed_dirs.push_back(model_dir);
 
     // 2. EP library directories
@@ -711,7 +712,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
         for (size_t kvi = 0; kvi < num_entries; kvi++) {
           if (std::string(keys[kvi]) == library_path_metadata_key_name) {
-            auto ep_dir = fs::canonical(fs::path(values[kvi]).parent_path(), ec);
+            auto ep_dir = std::filesystem::canonical(std::filesystem::path(values[kvi]).parent_path(), ec);
             if (!ec) allowed_dirs.push_back(ep_dir);
           }
         }
@@ -722,7 +723,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     {
       char cwd_buffer[PATH_MAX];
       if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
-        auto cwd_dir = fs::canonical(fs::path(cwd_buffer), ec);
+        auto cwd_dir = std::filesystem::canonical(std::filesystem::path(cwd_buffer), ec);
         if (!ec) allowed_dirs.push_back(cwd_dir);
       }
     }
@@ -732,17 +733,17 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     bool resolved = false;
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
-        fs::path candidate = dir / custom_library_path;
-        if (fs::exists(candidate)) {
-          custom_library_file_prefix = fs::canonical(candidate).string();
+        std::filesystem::path candidate = dir / custom_library_path;
+        if (std::filesystem::exists(candidate, ec)) {
+          custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;
           break;
         }
       }
     } else {
       // Absolute path — canonicalize and validate below
-      auto canonical_path = fs::canonical(custom_library_path, ec);
-      if (!ec && fs::exists(canonical_path)) {
+      auto canonical_path = std::filesystem::canonical(custom_library_path, ec);
+      if (!ec && std::filesystem::exists(canonical_path, ec)) {
         custom_library_file_prefix = canonical_path.string();
         resolved = true;
       }
@@ -750,7 +751,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     // Validate that the resolved path is under one of the allowed directories
     if (resolved) {
-      fs::path resolved_canonical = fs::canonical(fs::path(custom_library_file_prefix), ec);
+      std::filesystem::path resolved_canonical =
+          std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
       if (ec) {
         throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
       }
@@ -762,7 +764,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         if (resolved_str.size() >= dir_str.size() &&
             resolved_str.compare(0, dir_str.size(), dir_str) == 0 &&
             (resolved_str.size() == dir_str.size() ||
-             resolved_str[dir_str.size()] == fs::path::preferred_separator)) {
+             resolved_str[dir_str.size()] == std::filesystem::path::preferred_separator)) {
           in_allowed_dir = true;
           break;
         }
