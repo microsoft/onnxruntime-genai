@@ -163,6 +163,26 @@
       "name": "windows_arm64_directml_release",
       "configuration": "Release",
       "configurePreset": "windows_arm64_directml_release"
+    },
+    {
+      "name": "windows_arm64_cuda_release",
+      "configuration": "Release",
+      "configurePreset": "windows_arm64_cuda_release"
+    },
+    {
+      "name": "windows_arm64_cuda_debug",
+      "configuration": "Debug",
+      "configurePreset": "windows_arm64_cuda_debug"
+    },
+    {
+      "name": "windows_arm64_cuda_relwithdebinfo",
+      "configuration": "RelWithDebInfo",
+      "configurePreset": "windows_arm64_cuda_relwithdebinfo"
+    },
+    {
+      "name": "windows_arm64_cuda_minsizerel",
+      "configuration": "MinSizeRel",
+      "configurePreset": "windows_arm64_cuda_minsizerel"
     }
   ]
 }

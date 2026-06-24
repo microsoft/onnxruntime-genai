@@ -11,6 +11,8 @@ using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
 using Microsoft.Extensions.AI;
+using System.Reflection;
+using Microsoft.ML.OnnxRuntime;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -41,8 +43,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             return null;
         }
 
-        private static bool _useCudaModel = false;
-
         private static Lazy<string> _lazyPhi2Path = new Lazy<string>(() =>
         {
             string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
@@ -52,11 +52,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             // Prefer CUDA model if available.
             if (System.IO.Directory.Exists(cudaModelPath))
             {
-                _useCudaModel = true;
                 return cudaModelPath;
             }
 
-            _useCudaModel = false;
             return cpuModelPath;
         });
 
@@ -91,12 +89,74 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static string _adaptersPath => _lazyAdaptersPath.Value;
         private static OgaHandle ogaHandle;
 
+        private static int _epLibrariesRegistered = 0;
+
+        // Execution providers that can be loaded as plugin libraries at test time, mapped to the
+        // platform-independent stem of their library file. The full file name is built as
+        // "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".
+        private static readonly KeyValuePair<string, string>[] _knownEpLibraries = new[]
+        {
+            new KeyValuePair<string, string>("WebGpuExecutionProvider", "onnxruntime_providers_webgpu"),
+        };
+
+        // Resolves the directory containing the execution provider plugin libraries to register.
+        // This is the EPDir MSBuild property (set via /p:EPDir), surfaced as assembly metadata. When
+        // it is not set, no EP-plugins are registered.
+        private static string GetEpDirectory()
+        {
+            return typeof(OnnxRuntimeGenAITests).Assembly
+                .GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(a => a.Key == "EPDir")?.Value;
+        }
+
+        // ONNX Runtime's environment is a process-wide singleton, so registering an execution
+        // provider plugin library with it, also makes the provider available to ONNX Runtime GenAI.
+        private static void RegisterEpLibrariesFromDirectory()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _epLibrariesRegistered, 1) != 0)
+            {
+                return;
+            }
+
+            string epDir = GetEpDirectory();
+            if (string.IsNullOrEmpty(epDir) || !Directory.Exists(epDir))
+            {
+                return;
+            }
+
+            bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+            bool isMac = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+            string prefix = isWindows ? "" : "lib";
+            string suffix = isWindows ? ".dll" : (isMac ? ".dylib" : ".so");
+
+            foreach (KeyValuePair<string, string> ep in _knownEpLibraries)
+            {
+                string epName = ep.Key;
+                string path = Path.Combine(epDir, prefix + ep.Value + suffix);
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    OrtEnv.Instance().RegisterExecutionProviderLibrary(epName, path);
+                    Console.WriteLine($"**** Registered execution provider library '{epName}' -> {path}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"**** Warning: failed to register execution provider library '{epName}': {ex.Message}");
+                }
+            }
+        }
+
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
+            RegisterEpLibrariesFromDirectory();
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
@@ -148,7 +208,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using (var model = new Model(config))
                 {
                     Assert.NotNull(model);
-                    using(var generatorParams = new GeneratorParams(model))
+                    using (var generatorParams = new GeneratorParams(model))
                     {
                         Assert.NotNull(generatorParams);
 
@@ -204,7 +264,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     config.RemoveModelData("past.onnx");
                     Assert.NotNull(model);
-                    using(var generatorParams = new GeneratorParams(model))
+                    using (var generatorParams = new GeneratorParams(model))
                     {
                         Assert.NotNull(generatorParams);
 
@@ -406,7 +466,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    
+
                     using (var generator = new Generator(model, generatorParams))
                     {
                         Assert.NotNull(generator);
@@ -732,16 +792,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 }
 
                 using var logits = generator.GetOutput("logits");
-                if (_useCudaModel)
+                // The adapters model's precision depends on how it was generated (e.g. fp32 for CPU,
+                // fp16 for CUDA/WebGPU), so branch on the actual logits type rather than assuming one.
+                if (logits.Type() == ElementType.float32)
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
-                    // TODO: GetData with float16?
-                }
-                else
-                {
-                    Assert.Equal(ElementType.float32, logits.Type());
                     base_output = logits.GetData<float>().ToArray();
                 }
+                // TODO: GetData with float16 to enable the base/adapter comparison for fp16 models.
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
             }
@@ -759,17 +816,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");
-                if (_useCudaModel)
+                if (logits.Type() == ElementType.float32)
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
-                    // TODO: GetData with float16?
-                }
-                else
-                {
-                    Assert.Equal(ElementType.float32, logits.Type());
                     var adapter_output = logits.GetData<float>().ToArray();
                     Assert.NotEqual(base_output, adapter_output);
                 }
+                // TODO: GetData with float16 to enable the base/adapter comparison for fp16 models.
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
             }
