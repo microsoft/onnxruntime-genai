@@ -33,6 +33,7 @@ from builders import (
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -364,6 +365,8 @@ def create_model(
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
@@ -614,6 +617,12 @@ def get_args():
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                image_height / image_width = Fixed image size used by Nemotron Parse ONNX export.
+                    Default is 768x768. The exported encoder graph is specialized to this resolution.
+                decoder_sequence_length = Dummy decoder sequence length used by Nemotron Parse decoder export.
+                    Default is 8. The decoder graph keeps batch and decoder sequence axes dynamic.
+                export_components = Comma-separated Nemotron Parse components to export: encoder,decoder.
+                    Default is encoder,decoder.
             """),
     )
 
