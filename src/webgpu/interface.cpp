@@ -254,7 +254,8 @@ struct InterfaceImpl : DeviceInterface {
         input_type,
         output_type,
         element_count,
-        "WebGPU",
+        GetType(),
+        "WebGpuExecutionProvider",
         ort_memory_info_,
         session_config_keys,
         session_config_values);
