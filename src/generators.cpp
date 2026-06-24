@@ -432,6 +432,8 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
       throw std::runtime_error("top_p must be between 0.0 and 1.0");
     if (search.top_k < 0)
       throw std::runtime_error("top_k must be 0 or greater");
+    if (search.top_k > params.config.model.vocab_size)
+      throw std::runtime_error("top_k (" + std::to_string(search.top_k) + ") must be less than or equal to vocab_size (" + std::to_string(params.config.model.vocab_size) + ")");
     if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
       sampling_method_ = SamplingMethod::kTopKTopP;
     } else if (search.top_k > 1) {

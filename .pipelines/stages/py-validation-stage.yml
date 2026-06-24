@@ -13,7 +13,7 @@ parameters:
   type: boolean
 - name: enable_win_dml
   type: boolean
-- name: enable_win_arm64_cpu
+- name: enable_win_arm64
   type: boolean
 - name: enable_linux_x64_cpu
   type: boolean
@@ -41,7 +41,7 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_arm64, true) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'arm64'
@@ -59,12 +59,12 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '13.0'
-        cuda_display_version: '130'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         ep: 'cuda'
         os: 'win'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
@@ -99,12 +99,12 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '13.0')) }}:
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '13.1')) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: '13.0'
-        cuda_display_version: '130'
+        cuda_version: '13.1'
+        cuda_display_version: '131'
         ep: 'cuda'
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
