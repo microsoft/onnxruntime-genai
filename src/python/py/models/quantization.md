@@ -111,8 +111,7 @@ expand to a base method plus flags, producing identical models:
 | `k_quant_mixed` | `int4_algo_config=k_quant` + `last_matmul_weight_int8=true` + `int8_mixed_layers=true` |
 | `k_quant_linear` | `int4_algo_config=k_quant` + `last_matmul_weight_int8=true` + `int8_linear_attn=true` |
 
-For backward compatibility, the bare `k_quant` value also defaults `last_matmul_weight_int8=true`
-(its historical behavior). Set `last_matmul_weight_int8=false` explicitly to override.
+Only the legacy aliases (`k_quant_last`, `k_quant_mixed`, `k_quant_linear`) and/or an explicit `last_matmul_weight_int8=true` flag upgrade the LM head; the bare `k_quant` base method does not imply any int8 placement.
 
 ## Examples
 

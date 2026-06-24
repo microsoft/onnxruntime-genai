@@ -282,17 +282,16 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 ```
 
-#### Disable QK Norm Fusion
+#### Enable QK Norm Fusion
 
-This scenario is for when you want to emit explicit Q/K normalization nodes instead of passing Q/K norm weights directly into GroupQueryAttention.
+This scenario is for when you want to pass Q/K norm weights directly into GroupQueryAttention instead of emitting explicit Q/K normalization nodes.
 
 ```
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=0
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=1
 
 # From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=0
-```
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=1
 
 #### Enable CUDA Graph
 
