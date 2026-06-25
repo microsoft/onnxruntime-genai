@@ -13,19 +13,30 @@ Provides high-level telemetry for:
 - Error/crash reporting
 """
 
-import atexit
 import base64
 import os
 import platform
 import threading
 import traceback
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .constants import CONNECTION_STRING
-from .deviceid import get_encrypted_device_id_and_status
+from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
-from .library.telemetry_logger import TelemetryLogger, get_telemetry_logger, set_app_version
+from .library.options import OneCollectorExporterOptions
+from .library.serialization import CommonSchemaJsonSerializationHelper
+from .offline_store import (
+    LATENCY_NORMAL,
+    LATENCY_REAL_TIME,
+    PERSISTENCE_CRITICAL,
+    PERSISTENCE_NORMAL,
+    OfflineStorageSqlite,
+    StorageRecord,
+)
 from .system_info import get_execution_provider_info, get_system_info
+from .uploader import EventUploader
 
 # Event names
 HEARTBEAT_EVENT = "GenAIHeartbeat"
@@ -128,6 +139,13 @@ class GenAITelemetry:
 
             self._initialized = True
             self._enabled = True
+            self._store = None
+            self._uploader = None
+            self._instrumentation_key = ""
+            self._envelope_ikey = ""
+            self._app_version = "unknown"
+            self._app_instance_id = uuid.uuid4().hex
+            self._app_name = "onnxruntime-genai"
 
             # Check opt-out conditions
             if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1":
@@ -136,30 +154,82 @@ class GenAITelemetry:
                 self._enabled = False
 
             if not self._enabled:
-                self._logger = None
                 return
 
             try:
-                version = _get_app_version()
-                set_app_version(version)
+                self._app_version = _get_app_version()
                 connection_string = base64.b64decode(CONNECTION_STRING).decode()
-                self._logger = get_telemetry_logger(
-                    connection_string, service_name="onnxruntime-genai", shutdown_on_exit=False
+                options = OneCollectorExporterOptions(connection_string=connection_string)
+                options.validate()
+                self._instrumentation_key = options.instrumentation_key
+                self._envelope_ikey = (
+                    f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
                 )
+
                 event_source.disable()
+
+                # Durable, shared-capable offline store. Events survive process
+                # exit on disk, so no exit-time flush is required. A single file
+                # may be shared across apps; rows are partitioned by tenant_token.
+                db_path = os.path.join(get_telemetry_base_dir(), "telemetry_offline.db")
+                self._store = OfflineStorageSqlite(db_path)
+
+                # The uploader drains this tenant's rows (including any left by a
+                # previous run) in the background.
+                self._uploader = EventUploader(
+                    self._store,
+                    instrumentation_key=self._instrumentation_key,
+                    tenant_token=self._instrumentation_key,
+                )
+                self._uploader.start()
+
                 self._log_heartbeat()
-                # The LoggerProvider is created with shutdown_on_exit=False, so OTel
-                # does not register its own (unbounded, blocking) flush at exit. We
-                # register a bounded best-effort flush instead so a slow/unreachable
-                # collector cannot delay process exit beyond the budget below.
-                atexit.register(self._atexit_flush)
             except Exception:
-                self._logger = None
+                self._store = None
+                self._uploader = None
                 self._enabled = False
+
+    def _emit(
+        self,
+        event_name: str,
+        attributes: Optional[dict[str, Any]] = None,
+        latency: int = LATENCY_NORMAL,
+        persistence: int = PERSISTENCE_NORMAL,
+    ) -> None:
+        """Serialize an event to a Common Schema envelope and persist it durably."""
+        if not self._enabled or self._store is None:
+            return
+        try:
+            data = {
+                "app_name": self._app_name,
+                "app_version": self._app_version,
+                "app_instance_id": self._app_instance_id,
+            }
+            if attributes:
+                data.update(attributes)
+            envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
+                event_name=event_name,
+                timestamp=datetime.now(timezone.utc),
+                ikey=self._envelope_ikey,
+                data=data,
+            )
+            payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
+            self._store.store_record(
+                StorageRecord(
+                    tenant_token=self._instrumentation_key,
+                    payload=payload,
+                    latency=latency,
+                    persistence=persistence,
+                )
+            )
+            if self._uploader is not None:
+                self._uploader.request_drain()
+        except Exception:
+            pass
 
     def _log_heartbeat(self) -> None:
         """Log initial heartbeat with system info for MAD/DAD tracking."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
 
         try:
@@ -190,16 +260,16 @@ class GenAITelemetry:
                 "process_name": sys_info.get("process_name", ""),
                 "available_providers": ",".join(ep_info.get("available_providers", [])),
             }
-            self._logger.log(HEARTBEAT_EVENT, attributes)
+            self._emit(HEARTBEAT_EVENT, attributes, latency=LATENCY_REAL_TIME, persistence=PERSISTENCE_CRITICAL)
         except Exception:
             pass
 
     def log(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
         """Log a generic telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
-            self._logger.log(event_name, attributes)
+            self._emit(event_name, attributes)
         except Exception:
             pass
 
@@ -228,7 +298,7 @@ class GenAITelemetry:
         extra_options: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log a ModelBuilder telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
             attributes = {
@@ -255,7 +325,7 @@ class GenAITelemetry:
             }
             if extra_options:
                 attributes["extra_options"] = str(extra_options)
-            self._logger.log(MODEL_BUILD_EVENT, attributes)
+            self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
             pass
 
@@ -283,7 +353,7 @@ class GenAITelemetry:
         peak_memory_cpu_mb: float = 0.0,
     ) -> None:
         """Log a benchmark telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
             attributes = {
@@ -308,7 +378,7 @@ class GenAITelemetry:
                 "peak_memory_gpu_mb": peak_memory_gpu_mb,
                 "peak_memory_cpu_mb": peak_memory_cpu_mb,
             }
-            self._logger.log(BENCHMARK_EVENT, attributes)
+            self._emit(BENCHMARK_EVENT, attributes)
         except Exception:
             pass
 
@@ -322,7 +392,7 @@ class GenAITelemetry:
         model_file_size_bytes: int = 0,
     ) -> None:
         """Log a model loading telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
             attributes = {
@@ -333,7 +403,7 @@ class GenAITelemetry:
                 "num_sessions": num_sessions,
                 "model_file_size_bytes": model_file_size_bytes,
             }
-            self._logger.log(MODEL_LOAD_EVENT, attributes)
+            self._emit(MODEL_LOAD_EVENT, attributes)
         except Exception:
             pass
 
@@ -350,7 +420,7 @@ class GenAITelemetry:
         gpu_memory_used_mb: float = 0.0,
     ) -> None:
         """Log an inference telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
             attributes = {
@@ -364,7 +434,7 @@ class GenAITelemetry:
                 "memory_used_mb": memory_used_mb,
                 "gpu_memory_used_mb": gpu_memory_used_mb,
             }
-            self._logger.log(INFERENCE_EVENT, attributes)
+            self._emit(INFERENCE_EVENT, attributes)
         except Exception:
             pass
 
@@ -377,7 +447,7 @@ class GenAITelemetry:
         execution_provider: str = "",
     ) -> None:
         """Log an error/crash telemetry event."""
-        if not self._enabled or not self._logger:
+        if not self._enabled or self._store is None:
             return
         try:
             attributes = {
@@ -387,54 +457,54 @@ class GenAITelemetry:
                 "model_name": model_name,
                 "execution_provider": execution_provider,
             }
-            self._logger.log(ERROR_EVENT, attributes)
+            self._emit(ERROR_EVENT, attributes)
         except Exception:
             pass
 
     def disable_telemetry(self) -> None:
-        """Disable telemetry."""
+        """Disable telemetry and stop the background uploader."""
         self._enabled = False
-        if self._logger:
-            self._logger.disable_telemetry()
+        if self._uploader is not None:
+            self._uploader.stop()
+            self._uploader = None
 
     def enable_telemetry(self) -> None:
-        """Enable telemetry."""
+        """Enable telemetry (restarts the uploader if it was stopped)."""
         self._enabled = True
-        if self._logger:
-            self._logger.enable_telemetry()
+        if self._store is not None and self._uploader is None:
+            try:
+                self._uploader = EventUploader(
+                    self._store,
+                    instrumentation_key=self._instrumentation_key,
+                    tenant_token=self._instrumentation_key,
+                )
+                self._uploader.start()
+            except Exception:
+                self._uploader = None
 
-    def shutdown(self) -> None:
-        """Shutdown the telemetry system and flush pending events.
+    def shutdown(self, flush_seconds: float = 5.0) -> None:
+        """Best-effort flush of pending events, then stop the uploader.
 
-        This performs a blocking flush bounded only by the transport timeout.
-        Prefer this when you can afford to wait for delivery (e.g. tests). For
-        process exit, the registered atexit handler uses a bounded flush.
+        Durability does not depend on this: any events not delivered remain in
+        the on-disk store and are uploaded on the next run. Process exit is never
+        blocked because the uploader runs on a daemon thread.
         """
-        if self._logger:
-            self._logger.shutdown()
-
-    # Maximum time the atexit flush may delay process exit. The flush runs on a
-    # daemon thread; if it exceeds this budget the thread is abandoned (and
-    # killed at interpreter exit) so an unreachable collector never hangs exit.
-    _EXIT_FLUSH_BUDGET_SECONDS = 2.0
-
-    def _safe_shutdown(self) -> None:
-        try:
-            if self._logger:
-                self._logger.shutdown()
-        except Exception:
-            pass
-
-    def _atexit_flush(self) -> None:
-        """Best-effort delivery of any buffered events without hanging exit."""
-        if not self._logger:
-            return
-        try:
-            flush_thread = threading.Thread(target=self._safe_shutdown, daemon=True)
-            flush_thread.start()
-            flush_thread.join(self._EXIT_FLUSH_BUDGET_SECONDS)
-        except Exception:
-            pass
+        if self._uploader is not None:
+            try:
+                # Quiesce the background drainer (waits for any in-flight send),
+                # release leases it may hold, then drain synchronously as the
+                # sole drainer so there is no race over reserved rows.
+                self._uploader.stop_loop()
+                if self._store is not None:
+                    self._store.release_reserved(self._instrumentation_key)
+                self._uploader.flush(flush_seconds)
+            except Exception:
+                pass
+            finally:
+                self._uploader.close()
+                self._uploader = None
+        if self._store is not None:
+            self._store.close()
 
 
 # Module-level convenience functions
