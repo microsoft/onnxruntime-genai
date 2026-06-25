@@ -365,6 +365,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   // Release the generator before printing results
   generator.reset();
+  new_gen.reset();
 
   {
     std::cout << "Batch size: " << opts.batch_size
