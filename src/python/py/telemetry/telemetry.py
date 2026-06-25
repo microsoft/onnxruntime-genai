@@ -25,8 +25,9 @@ from typing import Any, Optional
 from .constants import CONNECTION_STRING
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
-from .library.options import OneCollectorExporterOptions
+from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
+from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
@@ -156,15 +157,18 @@ class GenAITelemetry:
             self._app_version = "unknown"
             self._app_instance_id = uuid.uuid4().hex
             self._app_name = "onnxruntime-genai"
+            self._heartbeat_thread: Optional[threading.Thread] = None
 
-            # Check opt-out conditions
-            if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1":
+            # CI / automated-testing: send nothing at all — not even the device-id
+            # heartbeat — so pipelines don't pollute usage data.
+            if _is_ci_environment():
                 self._enabled = False
-            elif _is_ci_environment():
-                self._enabled = False
-
-            if not self._enabled:
                 return
+
+            # User opt-out (ORTGENAI_DISABLE_TELEMETRY=1): the device-id heartbeat
+            # is still sent (for device counting), but all detailed events are
+            # suppressed — no durable store, no uploader.
+            user_opt_out = os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1"
 
             try:
                 self._app_version = _get_app_version()
@@ -178,24 +182,26 @@ class GenAITelemetry:
 
                 event_source.disable()
 
-                # Durable on-disk queue: events survive process exit, so no
-                # exit-time flush is required.
+                # Device-id heartbeat: sent on every non-CI run (including user
+                # opt-out). Best-effort and off-thread (system info uses blocking
+                # subprocesses), independent of the detailed-event store.
+                self._heartbeat_thread = threading.Thread(
+                    target=self._send_heartbeat, name="genai-telemetry-heartbeat", daemon=True
+                )
+                self._heartbeat_thread.start()
+
+                if user_opt_out:
+                    self._enabled = False
+                    return
+
+                # Fully enabled: durable on-disk queue + uploader for detailed
+                # events (survive process exit; no exit-time flush needed).
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
-
-                # The uploader drains the queue (including any rows left by a
-                # previous run) in the background.
                 self._uploader = EventUploader(
                     self._store, instrumentation_key=self._instrumentation_key
                 )
                 self._uploader.start()
-
-                # The heartbeat collects system info via blocking subprocesses
-                # (nvidia-smi/wmic/sysctl); run it off the host thread so the
-                # first telemetry call never stalls the caller.
-                threading.Thread(
-                    target=self._log_heartbeat, name="genai-telemetry-heartbeat", daemon=True
-                ).start()
             except Exception:
                 self._store = None
                 self._uploader = None
@@ -226,40 +232,63 @@ class GenAITelemetry:
         except Exception:
             pass
 
-    def _log_heartbeat(self) -> None:
-        """Log initial heartbeat with system info for MAD/DAD tracking."""
-        if not self._enabled or self._store is None:
-            return
+    def _build_heartbeat_attributes(self) -> dict[str, Any]:
+        """Collect device-id + system info for the heartbeat event."""
+        device_id, id_status = get_encrypted_device_id_and_status()
+        sys_info = get_system_info()
+        ep_info = get_execution_provider_info()
+        return {
+            "device_id": device_id,
+            "device_id_status": id_status.value,
+            "os": sys_info.get("os", ""),
+            "os_version": sys_info.get("os_version", ""),
+            "os_release": sys_info.get("os_release", ""),
+            "os_arch": sys_info.get("os_arch", ""),
+            "processor_count": sys_info.get("processor_count", 0),
+            "cpu_model": sys_info.get("cpu_model", ""),
+            "total_memory_mb": sys_info.get("total_memory_mb", 0),
+            "gpu_name": sys_info.get("gpu_name", ""),
+            "gpu_driver_version": sys_info.get("gpu_driver_version", ""),
+            "gpu_memory_mb": sys_info.get("gpu_memory_mb", 0),
+            "gpu_count": sys_info.get("gpu_count", 0),
+            "device_manufacturer": sys_info.get("device_manufacturer", ""),
+            "device_model": sys_info.get("device_model", ""),
+            "python_version": sys_info.get("python_version", ""),
+            "ort_version": sys_info.get("ort_version", ""),
+            "user_locale": sys_info.get("user_locale", ""),
+            "user_timezone": sys_info.get("user_timezone", ""),
+            "process_name": sys_info.get("process_name", ""),
+            "available_providers": ",".join(ep_info.get("available_providers", [])),
+        }
 
+    def _send_heartbeat(self) -> None:
+        """Send the device-id heartbeat directly (best-effort, no durable store).
+
+        Runs on a background thread on every non-CI run, including when the user
+        has opted out of detailed telemetry, so device counting still works. It
+        deliberately does not touch the detailed-event store/uploader, so an
+        opt-out run never uploads anything other than this heartbeat.
+        """
         try:
-            device_id, id_status = get_encrypted_device_id_and_status()
-            sys_info = get_system_info()
-            ep_info = get_execution_provider_info()
-
-            attributes = {
-                "device_id": device_id,
-                "device_id_status": id_status.value,
-                "os": sys_info.get("os", ""),
-                "os_version": sys_info.get("os_version", ""),
-                "os_release": sys_info.get("os_release", ""),
-                "os_arch": sys_info.get("os_arch", ""),
-                "processor_count": sys_info.get("processor_count", 0),
-                "cpu_model": sys_info.get("cpu_model", ""),
-                "total_memory_mb": sys_info.get("total_memory_mb", 0),
-                "gpu_name": sys_info.get("gpu_name", ""),
-                "gpu_driver_version": sys_info.get("gpu_driver_version", ""),
-                "gpu_memory_mb": sys_info.get("gpu_memory_mb", 0),
-                "gpu_count": sys_info.get("gpu_count", 0),
-                "device_manufacturer": sys_info.get("device_manufacturer", ""),
-                "device_model": sys_info.get("device_model", ""),
-                "python_version": sys_info.get("python_version", ""),
-                "ort_version": sys_info.get("ort_version", ""),
-                "user_locale": sys_info.get("user_locale", ""),
-                "user_timezone": sys_info.get("user_timezone", ""),
-                "process_name": sys_info.get("process_name", ""),
-                "available_providers": ",".join(ep_info.get("available_providers", [])),
+            data = {
+                "app_name": self._app_name,
+                "app_version": self._app_version,
+                "app_instance_id": self._app_instance_id,
             }
-            self._emit(HEARTBEAT_EVENT, attributes)
+            data.update(self._build_heartbeat_attributes())
+            envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
+                event_name=HEARTBEAT_EVENT,
+                timestamp=datetime.now(timezone.utc),
+                ikey=self._envelope_ikey,
+                data=data,
+            )
+            payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
+            transport = HttpJsonPostTransport(
+                endpoint=OneCollectorTransportOptions.DEFAULT_ENDPOINT,
+                ikey=self._instrumentation_key,
+                compression=CompressionType.DEFLATE,
+            )
+            transport.send(payload, OneCollectorTransportOptions().timeout_seconds, item_count=1)
         except Exception:
             pass
 
@@ -471,9 +500,23 @@ class GenAITelemetry:
             self._uploader = None
 
     def enable_telemetry(self) -> None:
-        """Enable telemetry (restarts the uploader if it was stopped)."""
+        """Enable telemetry (creates/restarts the uploader if needed).
+
+        Has no effect when telemetry was hard-disabled for CI/testing, in which
+        case no instrumentation key was ever resolved.
+        """
+        if not self._instrumentation_key:
+            return
         self._enabled = True
-        if self._store is not None and self._uploader is None:
+        if self._store is None:
+            try:
+                db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
+                self._store = OfflineEventStore(db_path)
+            except Exception:
+                self._store = None
+                self._enabled = False
+                return
+        if self._uploader is None:
             try:
                 self._uploader = EventUploader(
                     self._store, instrumentation_key=self._instrumentation_key
