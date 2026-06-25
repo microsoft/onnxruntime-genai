@@ -16,9 +16,10 @@
 namespace Generators {
 
 namespace {
-constexpr std::string_view kTurboQuantDisabled = "0";
-constexpr std::string_view kTurboQuantInt4 = "4";
-constexpr std::string_view kTurboQuantOptionName = "turboQuant";
+constexpr std::string_view kKvCacheQuantizationBitsDisabled = "0";
+constexpr std::string_view kKvCacheQuantizationBits4 = "4";
+constexpr std::string_view kKvCacheQuantizationBits8 = "8";
+constexpr std::string_view kKvCacheQuantizationBitsOptionName = "kvCacheQuantizationBits";
 }  // namespace
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
@@ -1493,8 +1494,8 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   JSON::Parse(element, json.str());
 }
 
-int GetTurboQuantBitWidth(const Config::SessionOptions& session_options,
-                          std::string_view provider_name) {
+int GetKvCacheQuantizationBits(const Config::SessionOptions& session_options,
+                               std::string_view provider_name) {
   const auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto provider_options_it = session_options.provider_options.rbegin();
        provider_options_it != session_options.provider_options.rend();
@@ -1506,21 +1507,26 @@ int GetTurboQuantBitWidth(const Config::SessionOptions& session_options,
     const auto option_it = std::find_if(provider_options_it->options.begin(),
                                         provider_options_it->options.end(),
                                         [](const Config::NamedString& option) {
-                                          return option.first == kTurboQuantOptionName;
+                                          return option.first == kKvCacheQuantizationBitsOptionName;
                                         });
-    if (option_it == provider_options_it->options.end() || option_it->second == kTurboQuantDisabled) {
+    if (option_it == provider_options_it->options.end() || option_it->second == kKvCacheQuantizationBitsDisabled) {
       return 0;
     }
 
-    const auto& turbo_quant = option_it->second;
+    const auto& quantization_bits = option_it->second;
 
-    if (turbo_quant == kTurboQuantInt4) {
+    if (quantization_bits == kKvCacheQuantizationBits4) {
       return 4;
     }
 
-    throw std::runtime_error("Unsupported turboQuant value: " + turbo_quant +
-                             ". Only " + std::string(kTurboQuantDisabled) +
-                             " (disabled) and " + std::string(kTurboQuantInt4) +
+    if (quantization_bits == kKvCacheQuantizationBits8) {
+      return 8;
+    }
+
+    throw std::runtime_error("Unsupported kvCacheQuantizationBits value: " + quantization_bits +
+                             ". Only " + std::string(kKvCacheQuantizationBitsDisabled) +
+                             " (disabled), " + std::string(kKvCacheQuantizationBits4) +
+                             ", and " + std::string(kKvCacheQuantizationBits8) +
                              " are supported.");
   }
 
