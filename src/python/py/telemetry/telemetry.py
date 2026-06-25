@@ -143,7 +143,9 @@ class GenAITelemetry:
                 version = _get_app_version()
                 set_app_version(version)
                 connection_string = base64.b64decode(CONNECTION_STRING).decode()
-                self._logger = get_telemetry_logger(connection_string)
+                self._logger = get_telemetry_logger(
+                    connection_string, service_name="onnxruntime-genai", shutdown_on_exit=False
+                )
                 event_source.disable()
                 self._log_heartbeat()
                 # The LoggerProvider is created with shutdown_on_exit=False, so OTel
