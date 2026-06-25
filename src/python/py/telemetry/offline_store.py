@@ -74,6 +74,10 @@ class OfflineEventStore:
     def is_open(self) -> bool:
         return self._conn is not None
 
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
     def store(self, payload: bytes) -> bool:
         """Append one serialized event; trims the oldest rows if over capacity."""
         if not payload:
