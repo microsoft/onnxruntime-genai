@@ -71,6 +71,7 @@ void MoonshineStreamingProcessor::ResetState() {
   memory_len_ = 0;
   cached_k_cross_.reset();
   cached_v_cross_.reset();
+  memory_in_cross_kv_ = 0;
   cross_kv_valid_ = false;
   audio_buffer_.clear();
 }
@@ -226,7 +227,7 @@ void MoonshineStreamingProcessor::RunFrontendAndAccumulate(const float* audio, s
 
   encoder_frames_emitted_ = stable_count;
   adapter_pos_offset_ += new_frames;
-  cross_kv_valid_ = false;  // memory changed; force cross_kv refresh
+  cross_kv_valid_ = false;  // memory grew; cached cross-KV needs to catch up.
 }
 
 void MoonshineStreamingProcessor::RefreshCrossKv() {
@@ -234,12 +235,24 @@ void MoonshineStreamingProcessor::RefreshCrossKv() {
 
   auto& alloc = model_.allocator_cpu_;
   const int decoder_dim = config_.decoder_dim;
+  const int new_frames = memory_len_ - memory_in_cross_kv_;
+  if (new_frames <= 0) {
+    cross_kv_valid_ = true;
+    return;
+  }
 
-  auto mem_shape = std::array<int64_t, 3>{1, memory_len_, decoder_dim};
+  // Run cross_kv.onnx on JUST the new memory frames. cross_kv is a pure
+  // per-frame projection (Cast/MatMulInteger/Reshape/Transpose/Concat over
+  // layers, no softmax / positional / cross-frame ops), so the projection
+  // for the new rows is identical regardless of whether we re-project the
+  // full memory each time.
+  auto mem_shape = std::array<int64_t, 3>{1, new_frames, decoder_dim};
   auto mem_tensor =
       OrtValue::CreateTensor(alloc, mem_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  std::memcpy(mem_tensor->GetTensorMutableData<float>(), accumulated_memory_.data(),
-              static_cast<size_t>(memory_len_) * decoder_dim * sizeof(float));
+  std::memcpy(mem_tensor->GetTensorMutableData<float>(),
+              accumulated_memory_.data() +
+                  static_cast<size_t>(memory_in_cross_kv_) * decoder_dim,
+              static_cast<size_t>(new_frames) * decoder_dim * sizeof(float));
 
   const char* ck_in_names[]  = {"memory"};
   OrtValue*   ck_in_values[] = {mem_tensor.get()};
@@ -250,8 +263,52 @@ void MoonshineStreamingProcessor::RefreshCrossKv() {
       ck_in_names, ck_in_values, 1,
       ck_out_names, ck_out_values, 2);
 
-  cached_k_cross_ = std::make_shared<Tensor>(std::unique_ptr<OrtValue>(ck_out_values[0]));
-  cached_v_cross_ = std::make_shared<Tensor>(std::unique_ptr<OrtValue>(ck_out_values[1]));
+  std::unique_ptr<OrtValue> k_new(ck_out_values[0]);
+  std::unique_ptr<OrtValue> v_new(ck_out_values[1]);
+
+  if (memory_in_cross_kv_ == 0) {
+    // First chunk of the stream: nothing to concat with.
+    cached_k_cross_ = std::make_shared<Tensor>(std::move(k_new));
+    cached_v_cross_ = std::make_shared<Tensor>(std::move(v_new));
+  } else {
+    // Concat cached [L,1,H,M_old,D] + new [L,1,H,new_frames,D] along dim 3.
+    const int L = config_.num_decoder_layers;
+    const int H = config_.num_decoder_heads;
+    const int D = config_.decoder_head_size;
+    const int M_old = memory_in_cross_kv_;
+    const int M_total = memory_len_;
+    auto concat_shape = std::array<int64_t, 5>{L, 1, H, M_total, D};
+
+    auto concat_one = [&](const float* old_data, const float* new_data) {
+      auto out =
+          OrtValue::CreateTensor(alloc, concat_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      float* dst = out->GetTensorMutableData<float>();
+      const size_t row_old = static_cast<size_t>(M_old) * D;
+      const size_t row_new = static_cast<size_t>(new_frames) * D;
+      const size_t row_total = static_cast<size_t>(M_total) * D;
+      for (int l = 0; l < L; ++l) {
+        for (int h = 0; h < H; ++h) {
+          const size_t lh = static_cast<size_t>(l) * H + h;
+          std::memcpy(dst + lh * row_total,
+                      old_data + lh * row_old,
+                      row_old * sizeof(float));
+          std::memcpy(dst + lh * row_total + row_old,
+                      new_data + lh * row_new,
+                      row_new * sizeof(float));
+        }
+      }
+      return out;
+    };
+
+    auto k_full = concat_one(cached_k_cross_->ort_tensor_->GetTensorData<float>(),
+                             k_new->GetTensorData<float>());
+    auto v_full = concat_one(cached_v_cross_->ort_tensor_->GetTensorData<float>(),
+                             v_new->GetTensorData<float>());
+    cached_k_cross_ = std::make_shared<Tensor>(std::move(k_full));
+    cached_v_cross_ = std::make_shared<Tensor>(std::move(v_full));
+  }
+
+  memory_in_cross_kv_ = memory_len_;
   cross_kv_valid_ = true;
 }
 

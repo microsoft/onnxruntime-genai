@@ -152,15 +152,35 @@ void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extr
   const int cap = static_cast<int>(std::ceil(duration_sec * config_.tokens_per_second));
   const int max_tokens = std::min(cap, config_.max_seq_len);
 
-  // Full AR decode from BOS to EOS-or-cap.
+  // ---- Decode pass (optimised) ----------------------------------------
+  // Cross-KV changes every chunk (memory grew), so cached self-KV from the
+  // previous pass is invalid. But the model accepts a dynamic seq dim on
+  // its token input, so we can teacher-force the already-committed prefix
+  // in ONE parallel decoder call instead of `emitted_count_` sequential AR
+  // steps — turning the per-chunk O(emitted_count) decoder calls into O(1)
+  // for the prefix, then a small AR loop for the new suffix.
   std::vector<int32_t> current_pass;
   current_pass.reserve(static_cast<size_t>(max_tokens));
-  int64_t input_tok = config_.bos_token_id;
-  for (int i = 0; i < max_tokens; ++i) {
-    int next_tok = RunDecoderStep(input_tok);
+
+  // Prefix: [BOS] + previously-emitted tokens. Even if emitted_count_ == 0
+  // (first chunk of a stream), this is just [BOS] — same single-call cost
+  // as the old AR-from-BOS first step.
+  std::vector<int64_t> prefix;
+  prefix.reserve(emitted_count_ + 1);
+  prefix.push_back(config_.bos_token_id);
+  for (size_t i = 0; i < emitted_count_; ++i) {
+    prefix.push_back(static_cast<int64_t>(previous_pass_tokens_[i]));
+    current_pass.push_back(previous_pass_tokens_[i]);
+  }
+  int next_tok = RunDecoderForward(prefix);
+
+  // AR loop for the suffix only. Cap is the total max tokens, so we have
+  // `max_tokens - emitted_count_` budget for new tokens.
+  const int suffix_budget = max_tokens - static_cast<int>(emitted_count_);
+  for (int i = 0; i < suffix_budget; ++i) {
     if (next_tok == config_.eos_token_id) break;
     current_pass.push_back(static_cast<int32_t>(next_tok));
-    input_tok = static_cast<int64_t>(next_tok);
+    next_tok = RunDecoderForward(std::vector<int64_t>{static_cast<int64_t>(next_tok)});
   }
 
   // Compute the new "committed" frontier:
@@ -208,22 +228,38 @@ void MoonshineStreamingState::StepToken() {
   }
 }
 
-int MoonshineStreamingState::RunDecoderStep(int64_t input_token) {
-  *token_tensor_->GetTensorMutableData<int64_t>() = input_token;
+int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& tokens) {
+  const int64_t n = static_cast<int64_t>(tokens.size());
+  // Build a [1, N] int64 token tensor. For N==1, reuse the preallocated
+  // token_tensor_ to save an allocation per AR step.
+  OrtValue* token_input_ptr;
+  std::unique_ptr<OrtValue> owned_multi_tok;
+  if (n == 1) {
+    *token_tensor_->GetTensorMutableData<int64_t>() = tokens[0];
+    token_input_ptr = token_tensor_.get();
+  } else {
+    auto shape = std::array<int64_t, 2>{1, n};
+    owned_multi_tok = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
+                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    std::memcpy(owned_multi_tok->GetTensorMutableData<int64_t>(),
+                tokens.data(), static_cast<size_t>(n) * sizeof(int64_t));
+    token_input_ptr = owned_multi_tok.get();
+  }
 
-  // decoder_kv inputs: token, k_self, v_self, out_k_cross, out_v_cross.
+  // decoder_kv inputs: token[1,N], k_self, v_self, out_k_cross, out_v_cross.
   const char* in_names[] = {"token", "k_self", "v_self", "out_k_cross", "out_v_cross"};
   OrtValue* in_values[]  = {
-      token_tensor_.get(),
+      token_input_ptr,
       k_self_.get(),
       v_self_.get(),
       k_cross_tensor_->ort_tensor_.get(),
       v_cross_tensor_->ort_tensor_.get(),
   };
 
-  // decoder_kv outputs: logits, out_k_self, out_v_self, out_k_cross, out_v_cross.
-  // The cross-KV outputs are passthroughs of the inputs; we discard them and
-  // keep the chunk-scoped input tensors alive ourselves.
+  // decoder_kv outputs: logits[1,N,vocab], out_k_self, out_v_self,
+  // out_k_cross, out_v_cross. The cross-KV outputs are passthroughs of the
+  // inputs; we discard them and keep the chunk-scoped input tensors alive
+  // ourselves.
   const char* out_names[]  = {"logits", "out_k_self", "out_v_self", "out_k_cross", "out_v_cross"};
   OrtValue*   out_values[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
 
@@ -238,7 +274,7 @@ int MoonshineStreamingState::RunDecoderStep(int64_t input_token) {
   (void)std::unique_ptr<OrtValue>(out_values[3]);
   (void)std::unique_ptr<OrtValue>(out_values[4]);
 
-  // Greedy argmax over the last-row logits.
+  // Greedy argmax over the LAST position's logits (predicting token N).
   auto lshape = logits->GetTensorTypeAndShapeInfo()->GetShape();
   const int64_t seq = (lshape.size() >= 3) ? lshape[1] : 1;
   const int64_t vocab = lshape.back();

@@ -62,9 +62,14 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   std::vector<float> accumulated_memory_;
   int memory_len_{0};
 
-  // Cached cross-KV tensors. Reused unless memory grew this chunk.
+  // Cached cross-KV tensors. cross_kv.onnx is a pure per-frame projection
+  // (no positional / cross-frame ops), so we run it incrementally: when
+  // memory grows by `new_frames`, run cross_kv on just those rows and
+  // concat the result into the cached [L, 1, H, M, D] tensor. This turns
+  // the per-chunk cross-KV cost from O(memory_len) into O(new_frames).
   std::shared_ptr<Tensor> cached_k_cross_;
   std::shared_ptr<Tensor> cached_v_cross_;
+  int memory_in_cross_kv_{0};  // memory frames already projected into cached.
   bool cross_kv_valid_{false};
 
   // ---- Helpers -----------------------------------------------------------

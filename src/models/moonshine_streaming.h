@@ -147,7 +147,9 @@ struct MoonshineStreamingState : TransducerState {
   std::unique_ptr<OrtValue> k_self_;
   std::unique_ptr<OrtValue> v_self_;
 
-  // Pre-allocated [1, 1] int64 token tensor (mutated each step).
+  // Pre-allocated [1, 1] int64 token tensor (mutated each AR step). A
+  // separate [1, N] tensor is created on-the-fly when teacher-forcing the
+  // committed prefix in one parallel call.
   std::unique_ptr<OrtValue> token_tensor_;
 
   // Tokens queued for incremental delivery via StepToken(). Contains the
@@ -169,8 +171,12 @@ struct MoonshineStreamingState : TransducerState {
   // reset the commit tracking.
   int64_t previous_memory_len_{0};
 
-  /// Run one decoder_kv step, return the argmax token. Updates k_self_/v_self_.
-  int RunDecoderStep(int64_t input_token);
+  /// Run decoder_kv with `tokens` as input (length >= 1). decoder_kv accepts
+  /// a dynamic seq dim, so this is one call regardless of length. Updates
+  /// k_self_/v_self_ (grown by `tokens.size()`) and returns the argmax of
+  /// the LAST position's logits — i.e. the predicted token that would come
+  /// after `tokens`.
+  int RunDecoderForward(const std::vector<int64_t>& tokens);
   void ResetSelfKv();
 };
 
