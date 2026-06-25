@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -10,73 +14,44 @@
 namespace Generators {
 
 void MoonshineConfig::PopulateFromConfig(const Config& config) {
-  const auto& enc = config.model.encoder;
-  const auto& dec = config.model.decoder;
+  const auto& m = config.model;
+  const auto& enc = m.encoder;
+  const auto& dec = m.decoder;
 
-  encoder_hidden_size = enc.hidden_size;
-  num_decoder_layers = dec.num_hidden_layers;
+  if (m.sample_rate > 0) sample_rate = m.sample_rate;
+  if (m.chunk_samples > 0) chunk_samples = m.chunk_samples;
+  if (m.bos_token_id > 0) bos_token_id = m.bos_token_id;
+  if (!m.eos_token_id.empty()) eos_token_id = m.eos_token_id[0];
 
-  sample_rate = config.model.sample_rate;
-  chunk_samples = config.model.chunk_samples;
-  if (config.model.overlap_samples > 0) overlap_samples = config.model.overlap_samples;
+  if (enc.hidden_size > 0) encoder_dim = enc.hidden_size;
+  if (dec.hidden_size > 0) decoder_dim = dec.hidden_size;
+  if (dec.num_hidden_layers > 0) num_decoder_layers = dec.num_hidden_layers;
+  if (dec.num_attention_heads > 0) num_decoder_heads = dec.num_attention_heads;
+  if (dec.head_size > 0) decoder_head_size = dec.head_size;
 
-  bos_token_id = config.model.bos_token_id;
-  eos_token_id = config.model.eos_token_id.empty() ? 2 : config.model.eos_token_id[0];
-
-  // Encoder output name from config (fall back to upstream default).
-  enc_out_hidden_states = enc.outputs.hidden_states;
-  if (enc_out_hidden_states.empty()) enc_out_hidden_states = "encoder_hidden_states";
-
-  // Decoder I/O names
-  dec_in_input_ids = dec.inputs.input_ids;
-  if (dec_in_input_ids.empty()) dec_in_input_ids = "decoder_input_ids";
-  dec_in_encoder_hidden_states = dec.inputs.encoder_hidden_states;
-  if (dec_in_encoder_hidden_states.empty()) dec_in_encoder_hidden_states = "encoder_hidden_states";
-
-  // Decoder-with-past filename (lives in the pipeline list)
-  if (!dec.pipeline.empty()) {
-    dec_past_filename = dec.pipeline[0].filename;
-  }
+  if (!enc.filename.empty()) frontend_filename = enc.filename;
+  if (!dec.filename.empty()) decoder_kv_filename = dec.filename;
 }
 
 MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   moonshine_config_.PopulateFromConfig(*config_);
 
-  // Create session options
-  encoder_session_options_ = OrtSessionOptions::Create();
-  decoder_session_options_ = OrtSessionOptions::Create();
-  decoder_past_session_options_ = OrtSessionOptions::Create();
-
-  if (config_->model.encoder.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
-  }
+  session_options_ = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true);
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_past_session_options_, true);
+                                 *session_options_, true);
 
-  // Load sessions
-  std::string encoder_filename = config_->model.encoder.filename;
-  if (encoder_filename.empty()) encoder_filename = "encoder_model_int8.onnx";
+  session_frontend_   = CreateSession(ort_env, moonshine_config_.frontend_filename,   session_options_.get());
+  session_encoder_    = CreateSession(ort_env, moonshine_config_.encoder_filename,    session_options_.get());
+  session_adapter_    = CreateSession(ort_env, moonshine_config_.adapter_filename,    session_options_.get());
+  session_cross_kv_   = CreateSession(ort_env, moonshine_config_.cross_kv_filename,   session_options_.get());
+  session_decoder_kv_ = CreateSession(ort_env, moonshine_config_.decoder_kv_filename, session_options_.get());
 
-  std::string decoder_filename = config_->model.decoder.filename;
-  if (decoder_filename.empty()) decoder_filename = "decoder_model_int8.onnx";
-
-  std::string decoder_past_filename = moonshine_config_.dec_past_filename;
-  if (decoder_past_filename.empty()) decoder_past_filename = "decoder_with_past_model_int8.onnx";
-
-  session_encoder_ = CreateSession(ort_env, encoder_filename, encoder_session_options_.get());
-  session_decoder_ = CreateSession(ort_env, decoder_filename, decoder_session_options_.get());
-  session_decoder_past_ = CreateSession(ort_env, decoder_past_filename, decoder_past_session_options_.get());
-
+  session_info_.Add(*session_frontend_);
   session_info_.Add(*session_encoder_);
-  session_info_.Add(*session_decoder_);
-  session_info_.Add(*session_decoder_past_);
+  session_info_.Add(*session_adapter_);
+  session_info_.Add(*session_cross_kv_);
+  session_info_.Add(*session_decoder_kv_);
 }
 
 std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
@@ -90,17 +65,29 @@ MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& 
       moonshine_model_{model} {
   config_ = model.moonshine_config_;
 
-  // Idle until SetExtraInputs() supplies encoder_hidden_states for a chunk.
+  // Idle until SetExtraInputs() supplies cross-KV for a chunk.
   chunk_done_ = true;
 
-  // Pre-allocate decoder_input_ids (shape [1,1], dtype int64) seeded with BOS.
-  auto ids_shape = std::array<int64_t, 2>{1, 1};
-  decoder_input_ids_ = OrtValue::CreateTensor(model.allocator_cpu_, ids_shape,
-                                              ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  *decoder_input_ids_->GetTensorMutableData<int64_t>() = config_.bos_token_id;
+  // Pre-allocate single-token int64 tensor [1, 1].
+  auto tok_shape = std::array<int64_t, 2>{1, 1};
+  token_tensor_ = OrtValue::CreateTensor(model.allocator_cpu_, tok_shape,
+                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+  ResetSelfKv();
 }
 
 MoonshineStreamingState::~MoonshineStreamingState() = default;
+
+void MoonshineStreamingState::ResetSelfKv() {
+  // [num_decoder_layers, 1, num_decoder_heads, 0, head_size] float32.
+  auto shape = std::array<int64_t, 5>{
+      config_.num_decoder_layers, 1, config_.num_decoder_heads, 0,
+      config_.decoder_head_size};
+  k_self_ = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
+                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  v_self_ = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
+                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+}
 
 DeviceSpan<float> MoonshineStreamingState::Run(int /*total_length*/,
                                                DeviceSpan<int32_t>& /*next_tokens*/,
@@ -110,197 +97,164 @@ DeviceSpan<float> MoonshineStreamingState::Run(int /*total_length*/,
 }
 
 void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  std::shared_ptr<Tensor> k_cross;
+  std::shared_ptr<Tensor> v_cross;
+  bool is_final = false;
   for (const auto& input : extra_inputs) {
-    if (input.name == config_.enc_out_hidden_states ||
-        input.name == "encoder_hidden_states") {
-      encoder_hidden_states_tensor_ = input.tensor;
-      decode_mode_ = true;
-      chunk_done_ = false;
-      first_decode_ = true;
-
-      // Reset KV caches and last-step buffer for the new chunk.
-      self_kv_cache_.clear();
-      cross_kv_cache_.clear();
-      last_tokens_.clear();
-
-      // Reset decoder_input_ids to BOS
-      *decoder_input_ids_->GetTensorMutableData<int64_t>() = config_.bos_token_id;
-      break;
+    if (input.name == "k_cross" || input.name == "out_k_cross") {
+      k_cross = input.tensor;
+    } else if (input.name == "v_cross" || input.name == "out_v_cross") {
+      v_cross = input.tensor;
+    } else if (input.name == "is_final") {
+      if (input.tensor && input.tensor->ort_tensor_) {
+        is_final = (*input.tensor->ort_tensor_->GetTensorData<int64_t>()) != 0;
+      }
     }
   }
+  if (!k_cross || !v_cross) return;  // No new chunk this call.
+
+  k_cross_tensor_ = std::move(k_cross);
+  v_cross_tensor_ = std::move(v_cross);
+
+  // Reset per-pass decoder state. (Self-KV gets rebuilt fresh each pass since
+  // we re-decode from BOS over the full accumulated memory.)
+  ResetSelfKv();
+  pending_tokens_.clear();
+  pending_idx_ = 0;
+  last_tokens_.clear();
+
+  // cross-KV shape is [num_decoder_layers, 1, num_decoder_heads, memory_len, head_size].
+  int64_t memory_len = 0;
+  if (k_cross_tensor_ && k_cross_tensor_->ort_tensor_) {
+    auto shape = k_cross_tensor_->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    if (shape.size() >= 5) memory_len = shape[3];
+  }
+
+  // Detect new utterance: if memory_len shrinks vs the previous call, the
+  // processor was Flush()'d (or this is the first chunk after construction).
+  // Reset commit tracking and the running transcript so the next stream
+  // starts clean.
+  if (memory_len < previous_memory_len_) {
+    previous_pass_tokens_.clear();
+    emitted_count_ = 0;
+    all_tokens_.clear();
+  }
+  previous_memory_len_ = memory_len;
+
+  if (memory_len <= 0) {
+    chunk_done_ = true;
+    return;
+  }
+
+  // Per-chunk token cap (matches the official moonshine streaming impl).
+  const float duration_sec =
+      static_cast<float>(memory_len) * config_.seconds_per_memory_frame;
+  const int cap = static_cast<int>(std::ceil(duration_sec * config_.tokens_per_second));
+  const int max_tokens = std::min(cap, config_.max_seq_len);
+
+  // Full AR decode from BOS to EOS-or-cap.
+  std::vector<int32_t> current_pass;
+  current_pass.reserve(static_cast<size_t>(max_tokens));
+  int64_t input_tok = config_.bos_token_id;
+  for (int i = 0; i < max_tokens; ++i) {
+    int next_tok = RunDecoderStep(input_tok);
+    if (next_tok == config_.eos_token_id) break;
+    current_pass.push_back(static_cast<int32_t>(next_tok));
+    input_tok = static_cast<int64_t>(next_tok);
+  }
+
+  // Compute the new "committed" frontier:
+  //   * on Flush (is_final): commit every token of the current pass.
+  //   * otherwise: commit up to the longest-common-prefix with the previous
+  //     pass — beyond that point, the model might still rewrite, so hold
+  //     those tokens back until a future chunk confirms them.
+  size_t commit_end;
+  if (is_final) {
+    commit_end = current_pass.size();
+  } else {
+    size_t lcp = 0;
+    while (lcp < previous_pass_tokens_.size() && lcp < current_pass.size() &&
+           previous_pass_tokens_[lcp] == current_pass[lcp]) {
+      ++lcp;
+    }
+    commit_end = lcp;
+  }
+
+  // Emit only the slice (emitted_count_ .. commit_end] we haven't emitted
+  // yet. Guard against monotonicity violations (commit_end shouldn't go
+  // backwards once tokens are emitted, but if it does — e.g. model retracts
+  // an earlier token — we silently skip rather than try to "un-emit").
+  if (commit_end > emitted_count_ && commit_end <= current_pass.size()) {
+    pending_tokens_.assign(
+        current_pass.begin() + static_cast<std::ptrdiff_t>(emitted_count_),
+        current_pass.begin() + static_cast<std::ptrdiff_t>(commit_end));
+    emitted_count_ = commit_end;
+  }
+  previous_pass_tokens_ = std::move(current_pass);
+  chunk_done_ = pending_tokens_.empty();
 }
 
 void MoonshineStreamingState::StepToken() {
   last_tokens_.clear();
-
-  if (!decode_mode_ || !encoder_hidden_states_tensor_) {
+  if (pending_idx_ >= pending_tokens_.size()) {
     chunk_done_ = true;
     return;
   }
-
-  if (first_decode_) {
-    RunInitialDecoder();
-    first_decode_ = false;
-  } else {
-    RunDecoderWithPast();
+  const int32_t tok = pending_tokens_[pending_idx_++];
+  last_tokens_.push_back(tok);
+  all_tokens_.push_back(tok);
+  if (pending_idx_ >= pending_tokens_.size()) {
+    chunk_done_ = true;
   }
+}
 
-  // Greedy argmax over the last-step logits.
-  auto logits_data = logits_->GetTensorData<float>();
-  auto logits_shape = logits_->GetTensorTypeAndShapeInfo()->GetShape();
-  int64_t vocab = logits_shape.back();
+int MoonshineStreamingState::RunDecoderStep(int64_t input_token) {
+  *token_tensor_->GetTensorMutableData<int64_t>() = input_token;
 
-  float max_val = logits_data[0];
+  // decoder_kv inputs: token, k_self, v_self, out_k_cross, out_v_cross.
+  const char* in_names[] = {"token", "k_self", "v_self", "out_k_cross", "out_v_cross"};
+  OrtValue* in_values[]  = {
+      token_tensor_.get(),
+      k_self_.get(),
+      v_self_.get(),
+      k_cross_tensor_->ort_tensor_.get(),
+      v_cross_tensor_->ort_tensor_.get(),
+  };
+
+  // decoder_kv outputs: logits, out_k_self, out_v_self, out_k_cross, out_v_cross.
+  // The cross-KV outputs are passthroughs of the inputs; we discard them and
+  // keep the chunk-scoped input tensors alive ourselves.
+  const char* out_names[]  = {"logits", "out_k_self", "out_v_self", "out_k_cross", "out_v_cross"};
+  OrtValue*   out_values[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+
+  moonshine_model_.session_decoder_kv_->Run(
+      nullptr,
+      in_names, in_values, 5,
+      out_names, out_values, 5);
+
+  auto logits = std::unique_ptr<OrtValue>(out_values[0]);
+  k_self_ = std::unique_ptr<OrtValue>(out_values[1]);
+  v_self_ = std::unique_ptr<OrtValue>(out_values[2]);
+  (void)std::unique_ptr<OrtValue>(out_values[3]);
+  (void)std::unique_ptr<OrtValue>(out_values[4]);
+
+  // Greedy argmax over the last-row logits.
+  auto lshape = logits->GetTensorTypeAndShapeInfo()->GetShape();
+  const int64_t seq = (lshape.size() >= 3) ? lshape[1] : 1;
+  const int64_t vocab = lshape.back();
+  const float* ldata = logits->GetTensorData<float>() + (seq - 1) * vocab;
+  float max_val = ldata[0];
   int max_idx = 0;
   for (int i = 1; i < vocab; ++i) {
-    if (logits_data[i] > max_val) {
-      max_val = logits_data[i];
+    if (ldata[i] > max_val) {
+      max_val = ldata[i];
       max_idx = i;
     }
   }
-
-  const int last_token = max_idx;
-
-  if (last_token == config_.eos_token_id) {
-    chunk_done_ = true;
-    decode_mode_ = false;
-    return;
-  }
-
-  last_tokens_.push_back(static_cast<int32_t>(last_token));
-  all_tokens_.push_back(static_cast<int32_t>(last_token));
-
-  // Feed the emitted token into the next decoder step.
-  *decoder_input_ids_->GetTensorMutableData<int64_t>() = last_token;
+  return max_idx;
 }
 
-void MoonshineStreamingState::RunInitialDecoder() {
-  auto* enc_ort = encoder_hidden_states_tensor_->ort_tensor_.get();
-
-  // Inputs: decoder_input_ids + encoder_hidden_states
-  std::vector<const char*> input_names = {
-      config_.dec_in_input_ids.c_str(),
-      config_.dec_in_encoder_hidden_states.c_str()};
-  std::vector<OrtValue*> input_values = {
-      decoder_input_ids_.get(),
-      enc_ort};
-
-  // Outputs: logits + present_self_*_0..N-1 + present_cross_*_0..N-1
-  std::vector<std::string> output_name_strings;
-  output_name_strings.push_back("logits");
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    output_name_strings.push_back("present_self_key_" + std::to_string(i));
-    output_name_strings.push_back("present_self_value_" + std::to_string(i));
-  }
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    output_name_strings.push_back("present_cross_key_" + std::to_string(i));
-    output_name_strings.push_back("present_cross_value_" + std::to_string(i));
-  }
-
-  std::vector<const char*> output_names;
-  output_names.reserve(output_name_strings.size());
-  for (const auto& s : output_name_strings) output_names.push_back(s.c_str());
-
-  size_t num_outputs = output_names.size();
-  std::vector<OrtValue*> output_values(num_outputs, nullptr);
-
-  moonshine_model_.session_decoder_->Run(
-      nullptr,
-      input_names.data(), input_values.data(), input_names.size(),
-      output_names.data(), output_values.data(), num_outputs);
-
-  // Take ownership of outputs
-  logits_ = std::unique_ptr<OrtValue>(output_values[0]);
-
-  self_kv_cache_.clear();
-  cross_kv_cache_.clear();
-
-  for (int i = 0; i < config_.num_decoder_layers * 2; ++i) {
-    self_kv_cache_.push_back(std::unique_ptr<OrtValue>(output_values[1 + i]));
-  }
-  int cross_start = 1 + config_.num_decoder_layers * 2;
-  for (int i = 0; i < config_.num_decoder_layers * 2; ++i) {
-    cross_kv_cache_.push_back(std::unique_ptr<OrtValue>(output_values[cross_start + i]));
-  }
-}
-
-void MoonshineStreamingState::RunDecoderWithPast() {
-  auto* enc_ort = encoder_hidden_states_tensor_->ort_tensor_.get();
-
-  std::vector<std::string> input_name_strings;
-  std::vector<OrtValue*> input_values;
-
-  // decoder_input_ids
-  input_name_strings.push_back(config_.dec_in_input_ids);
-  input_values.push_back(decoder_input_ids_.get());
-
-  // encoder_hidden_states
-  input_name_strings.push_back(config_.dec_in_encoder_hidden_states);
-  input_values.push_back(enc_ort);
-
-  // Self KV (past_self_key_i, past_self_value_i)
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    input_name_strings.push_back("past_self_key_" + std::to_string(i));
-    input_values.push_back(self_kv_cache_[i * 2].get());
-    input_name_strings.push_back("past_self_value_" + std::to_string(i));
-    input_values.push_back(self_kv_cache_[i * 2 + 1].get());
-  }
-
-  // Cross KV (present_cross_key_i_orig, present_cross_value_i_orig)
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    input_name_strings.push_back("present_cross_key_" + std::to_string(i) + "_orig");
-    input_values.push_back(cross_kv_cache_[i * 2].get());
-    input_name_strings.push_back("present_cross_value_" + std::to_string(i) + "_orig");
-    input_values.push_back(cross_kv_cache_[i * 2 + 1].get());
-  }
-
-  std::vector<const char*> input_names;
-  input_names.reserve(input_name_strings.size());
-  for (const auto& s : input_name_strings) input_names.push_back(s.c_str());
-
-  // Outputs: logits + present_self_* + present_cross_*
-  std::vector<std::string> output_name_strings;
-  output_name_strings.push_back("logits");
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    output_name_strings.push_back("present_self_key_" + std::to_string(i));
-    output_name_strings.push_back("present_self_value_" + std::to_string(i));
-  }
-  for (int i = 0; i < config_.num_decoder_layers; ++i) {
-    output_name_strings.push_back("present_cross_key_" + std::to_string(i));
-    output_name_strings.push_back("present_cross_value_" + std::to_string(i));
-  }
-
-  std::vector<const char*> output_names;
-  output_names.reserve(output_name_strings.size());
-  for (const auto& s : output_name_strings) output_names.push_back(s.c_str());
-
-  size_t num_outputs = output_names.size();
-  std::vector<OrtValue*> output_values(num_outputs, nullptr);
-
-  moonshine_model_.session_decoder_past_->Run(
-      nullptr,
-      input_names.data(), input_values.data(), input_names.size(),
-      output_names.data(), output_values.data(), num_outputs);
-
-  logits_ = std::unique_ptr<OrtValue>(output_values[0]);
-
-  // Self KV grows by 1 each step.
-  for (int i = 0; i < config_.num_decoder_layers * 2; ++i) {
-    self_kv_cache_[i] = std::unique_ptr<OrtValue>(output_values[1 + i]);
-  }
-  // Cross KV is pass-through; still take ownership of the new outputs.
-  int cross_start = 1 + config_.num_decoder_layers * 2;
-  for (int i = 0; i < config_.num_decoder_layers * 2; ++i) {
-    cross_kv_cache_[i] = std::unique_ptr<OrtValue>(output_values[cross_start + i]);
-  }
-}
-
-OrtValue* MoonshineStreamingState::GetInput(const char* /*name*/) {
-  return nullptr;
-}
-
-OrtValue* MoonshineStreamingState::GetOutput(const char* /*name*/) {
-  return nullptr;
-}
+OrtValue* MoonshineStreamingState::GetInput(const char* /*name*/) { return nullptr; }
+OrtValue* MoonshineStreamingState::GetOutput(const char* /*name*/) { return nullptr; }
 
 }  // namespace Generators
