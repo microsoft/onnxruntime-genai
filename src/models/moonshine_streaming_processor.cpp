@@ -288,12 +288,10 @@ void MoonshineStreamingProcessor::RefreshCrossKv() {
   auto& alloc = model_.allocator_cpu_;
   const int decoder_dim = config_.decoder_dim;
   const int new_frames = memory_len_ - memory_in_cross_kv_;
-  if (new_frames <= 0) {
-    cross_kv_valid_ = true;
-    return;
-  }
+  // Invariant: when cross_kv_valid_ is false and memory_len_ > 0,
+  // memory_in_cross_kv_ < memory_len_ (both are reset together).
 
-  // Run cross_kv.onnx on JUST the new memory frames. cross_kv is a pure
+  // Run cross_kv on JUST the new memory frames. cross_kv is a pure
   // per-frame projection (Cast/MatMulInteger/Reshape/Transpose/Concat over
   // layers, no softmax / positional / cross-frame ops), so the projection
   // for the new rows is identical regardless of whether we re-project the

@@ -2,20 +2,31 @@
 // Licensed under the MIT License.
 //
 // MoonshineStreamingProcessor: real-time chunk-by-chunk streaming for the
-// official UsefulSensors Moonshine streaming ONNX export.
+// official UsefulSensors Moonshine streaming export (loaded as ORT-format
+// `.ort` files; see MoonshineConfig::*_filename defaults).
 //
-// Pipeline per chunk:
-//   1. frontend.onnx   : audio → new feature frames + updated state buffers.
-//   2. (accumulate)    : append new features to a persistent buffer.
-//   3. encoder.onnx    : run on a sliding window of accumulated features
-//                        ([encoder_frames_emitted - left_context_frames :
-//                          total_features]); slice the new-stable rows.
-//   4. adapter.onnx    : run on the new-stable rows with a monotonically
-//                        increasing pos_offset; append to accumulated memory.
-//   5. cross_kv.onnx   : recompute from the full accumulated memory whenever
-//                        memory grew; cache the {k_cross, v_cross} tensors
-//                        and emit them via NamedTensors so the State can
-//                        feed them to decoder_kv on every step.
+// Pipeline per chunk (chunk_samples-aligned, default 500ms @ 16kHz):
+//   1. frontend  : audio → new feature frames + updated state buffers
+//                  (causal; carries sample / conv-cache state across chunks).
+//   2. accumulate: append new features to a persistent buffer.
+//   3. encoder   : run on a sliding window of accumulated features
+//                  ([encoder_frames_emitted - left_context_frames :
+//                    total_features]); slice the new-stable rows.
+//   4. adapter   : run on the new-stable rows with a monotonically
+//                  increasing pos_offset; append output to accumulated memory.
+//   5. cross_kv  : run *incrementally* on just the new memory rows
+//                  (cross_kv is a pure per-frame projection with no
+//                  cross-frame ops), then concat into the cached
+//                  [L,1,H,M,D] {k_cross,v_cross} tensors and emit them
+//                  via NamedTensors so the State can feed them to
+//                  decoder_kv on every step.
+//
+// Segment boundaries:
+//   * Hard memory cap (max_segment_memory_frames) — always active.
+//   * VAD-detected silence past min_segment_memory_frames — active when
+//     genai_config.json declares a `vad` section.
+// On either boundary, EmitCrossKv(is_final=true) is returned and a state
+// reset is scheduled for the next Process() call.
 //
 // The State (MoonshineStreamingState) is responsible for re-decoding from
 // BOS on every chunk with the current cross-KV.
@@ -72,9 +83,11 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   int memory_in_cross_kv_{0};  // memory frames already projected into cached.
   bool cross_kv_valid_{false};
 
-  // Set when a segment hit the hard memory cap. The next Process() call
-  // resets all state before doing anything else, so the new segment starts
-  // from a clean BOS. Matches upstream Moonshine's per-VAD-segment reset.
+  // Set when the current chunk closed a segment (hard memory cap reached
+  // OR VAD detected silence past min_segment_memory_frames). The next
+  // Process() call resets all state before doing anything else so the new
+  // segment starts from a clean BOS. Matches upstream Moonshine's
+  // per-VAD-segment reset.
   bool needs_reset_{false};
 
   // ---- Helpers -----------------------------------------------------------
@@ -87,8 +100,10 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   ///             lookahead held back) — used by Flush().
   void RunFrontendAndAccumulate(const float* audio, size_t num, bool is_final);
 
-  /// If !cross_kv_valid_, run cross_kv.onnx on the full accumulated memory
-  /// and refresh cached_k_cross_ / cached_v_cross_. No-op otherwise.
+  /// If !cross_kv_valid_, run cross_kv incrementally on just the memory
+  /// rows produced since the last refresh and concat them into the cached
+  /// {k_cross, v_cross}. No-op when cross_kv is already valid or memory is
+  /// empty.
   void RefreshCrossKv();
 
   /// Build a NamedTensors holding the cached {k_cross, v_cross}; nullptr if

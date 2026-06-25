@@ -89,12 +89,15 @@ struct MoonshineConfig {
   // disable VAD-based segmentation entirely (hard cap still applies).
   int min_segment_memory_frames{250};
 
-  // ONNX filenames (resolved relative to the model directory).
-  std::string frontend_filename{"frontend.onnx"};
-  std::string encoder_filename{"encoder.onnx"};
-  std::string adapter_filename{"adapter.onnx"};
-  std::string cross_kv_filename{"cross_kv.onnx"};
-  std::string decoder_kv_filename{"decoder_kv.onnx"};
+  // ONNX filenames (resolved relative to the model directory). Defaults
+  // point to the .ort exports which are pre-optimized and load/run faster
+  // than raw .onnx. Override per-variant via genai_config.json's encoder
+  // and decoder filename fields (other three are not configurable yet).
+  std::string frontend_filename{"frontend.ort"};
+  std::string encoder_filename{"encoder.ort"};
+  std::string adapter_filename{"adapter.ort"};
+  std::string cross_kv_filename{"cross_kv.ort"};
+  std::string decoder_kv_filename{"decoder_kv.ort"};
 
   void PopulateFromConfig(const Config& config);
 };

@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "../filesystem.h"
 #include "../generators.h"
 #include "moonshine_streaming.h"
 
@@ -46,20 +45,6 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   if (!dec.filename.empty()) decoder_kv_filename = dec.filename;
 }
 
-// If <stem>.ort exists in `model_dir`, return that filename; otherwise
-// return `default_name` unchanged. ORT-format files are pre-optimized and
-// usually load + run faster than raw .onnx.
-static std::string PreferOrt(const fs::path& model_dir,
-                             const std::string& default_name) {
-  auto dot = default_name.find_last_of('.');
-  std::string stem = (dot == std::string::npos) ? default_name : default_name.substr(0, dot);
-  std::string ort_name = stem + ".ort";
-  if (fs::exists(model_dir / ort_name)) {
-    return ort_name;
-  }
-  return default_name;
-}
-
 MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   moonshine_config_.PopulateFromConfig(*config_);
@@ -67,14 +52,6 @@ MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config,
   session_options_ = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *session_options_, true);
-
-  // Auto-prefer .ort over .onnx if both exist in the model directory.
-  const auto& model_dir = config_->config_path;
-  moonshine_config_.frontend_filename   = PreferOrt(model_dir, moonshine_config_.frontend_filename);
-  moonshine_config_.encoder_filename    = PreferOrt(model_dir, moonshine_config_.encoder_filename);
-  moonshine_config_.adapter_filename    = PreferOrt(model_dir, moonshine_config_.adapter_filename);
-  moonshine_config_.cross_kv_filename   = PreferOrt(model_dir, moonshine_config_.cross_kv_filename);
-  moonshine_config_.decoder_kv_filename = PreferOrt(model_dir, moonshine_config_.decoder_kv_filename);
 
   session_frontend_   = CreateSession(ort_env, moonshine_config_.frontend_filename,   session_options_.get());
   session_encoder_    = CreateSession(ort_env, moonshine_config_.encoder_filename,    session_options_.get());
@@ -166,11 +143,12 @@ void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
 
   // Detect new segment: if memory_len shrinks vs the previous call, the
-  // processor was either Flush()'d or hit its hard memory cap and reset.
+  // processor was Flush()'d, hit its hard memory cap, or detected a
+  // VAD-silence segment boundary — and reset its accumulated memory.
   // Drop the per-pass commit tracking so the next pass starts from BOS,
-  // but keep `all_tokens_` so the running transcript spans hard-cap
-  // segment boundaries (callers see one continuous transcript). Users who
-  // want a fresh transcript should create a new Generator.
+  // but keep `all_tokens_` so the running transcript spans segment
+  // boundaries (callers see one continuous transcript). Users who want a
+  // fresh transcript should create a new Generator.
   if (memory_len < previous_memory_len_) {
     previous_pass_tokens_.clear();
     emitted_count_ = 0;
