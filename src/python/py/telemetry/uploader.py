@@ -20,16 +20,21 @@ import threading
 import time
 from typing import Optional
 
-import requests
-
 from .library.options import CompressionType, OneCollectorTransportOptions
 from .library.payload_builder import PayloadBuilder
 from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
+from .process_lock import ProcessDrainLock
 
 
 class EventUploader:
-    """Drains the offline store and ships events over HTTP on a daemon thread."""
+    """Drains the offline store and ships events over HTTP on a daemon thread.
+
+    When several processes share one telemetry database, a single-holder
+    advisory lock ensures only one of them drains at a time, so the same event
+    is never uploaded by two concurrent drainers. Processes that do not hold the
+    lock keep writing events durably; the holder drains them.
+    """
 
     def __init__(
         self,
@@ -47,13 +52,12 @@ class EventUploader:
         self._max_items = max_items_per_drain
         self._send_timeout = send_timeout_seconds
         self._idle_backoff = idle_backoff_seconds
+        self._drain_lock = ProcessDrainLock(store.db_path + ".lock")
 
-        self._session = requests.Session()
         self._transport = HttpJsonPostTransport(
             endpoint=endpoint,
             ikey=instrumentation_key,
             compression=compression,
-            session=self._session,
         )
 
         self._wake = threading.Event()
@@ -73,10 +77,7 @@ class EventUploader:
         self._wake.set()
 
     def stop_loop(self, join_timeout_seconds: float = 12.0) -> None:
-        """Stop the background loop and wait for any in-flight send to finish.
-
-        Leaves the HTTP session open so a final synchronous flush can still run.
-        """
+        """Stop the background loop and wait for any in-flight send to finish."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
@@ -84,14 +85,11 @@ class EventUploader:
             self._thread = None
 
     def close(self) -> None:
-        """Release the HTTP session. Call after stop_loop()/flush()."""
-        try:
-            self._session.close()
-        except Exception:
-            pass
+        """Release the single-drainer lock (urllib holds no persistent connection)."""
+        self._drain_lock.release()
 
     def stop(self, timeout_seconds: float = 12.0) -> None:
-        """Stop the loop and close the session (convenience)."""
+        """Stop the loop and release the drain lock (convenience)."""
         self.stop_loop(timeout_seconds)
         self.close()
 
@@ -136,7 +134,13 @@ class EventUploader:
         return (0, len(included))
 
     def flush(self, max_seconds: float = 5.0) -> None:
-        """Best-effort drain of all pending events, bounded by max_seconds."""
+        """Best-effort drain of all pending events, bounded by max_seconds.
+
+        Only drains if this process holds the single-drainer lock; otherwise the
+        events stay durably on disk for the lock holder (or the next run).
+        """
+        if not self._drain_lock.acquire():
+            return
         deadline = time.time() + max_seconds
         while time.time() < deadline:
             delivered, left = self.drain_once()
@@ -148,13 +152,16 @@ class EventUploader:
     def _run(self) -> None:
         while not self._stop.is_set():
             transient_failure = 0
-            try:
-                delivered, left = self.drain_once()
-                while delivered > 0 and not self._stop.is_set():
+            # Only one process drains at a time. If another holds the lock, skip
+            # draining this cycle; our events remain durable for the holder.
+            if self._drain_lock.acquire():
+                try:
                     delivered, left = self.drain_once()
-                transient_failure = left
-            except Exception:
-                transient_failure = 1
+                    while delivered > 0 and not self._stop.is_set():
+                        delivered, left = self.drain_once()
+                    transient_failure = left
+                except Exception:
+                    transient_failure = 1
 
             wait = self._idle_backoff if transient_failure else self._drain_interval
             self._wake.wait(wait)

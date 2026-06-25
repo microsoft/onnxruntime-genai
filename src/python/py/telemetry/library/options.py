@@ -7,9 +7,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
-
-import requests
+from typing import Optional
 
 from .connection_string_parser import ConnectionStringParser
 
@@ -35,7 +33,6 @@ class OneCollectorTransportOptions:
     max_items_per_payload: int = DEFAULT_MAX_ITEMS_PER_PAYLOAD
     compression: CompressionType = CompressionType.DEFLATE
     timeout_seconds: float = 10.0
-    http_client_factory: Optional[Callable[[], requests.Session]] = None
 
     def validate(self) -> None:
         """Validate the transport options.

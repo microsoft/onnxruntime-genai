@@ -356,5 +356,113 @@ class TestConnectionStringParser(unittest.TestCase):
             ConnectionStringParser("SomeOtherKey=value")
 
 
+class TestOfflineEventStore(unittest.TestCase):
+    """Test the SQLite-backed durable event queue."""
+
+    def _new_store(self, **kw):
+        import tempfile
+        from telemetry.offline_store import OfflineEventStore
+        db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
+        return OfflineEventStore(db, **kw)
+
+    def test_store_and_fifo_batch(self):
+        s = self._new_store()
+        for i in range(5):
+            s.store(f'{{"e":{i}}}'.encode())
+        self.assertEqual(s.count(), 5)
+        batch = s.get_batch(3)
+        self.assertEqual([p for _, p in batch], [b'{"e":0}', b'{"e":1}', b'{"e":2}'])
+
+    def test_delete(self):
+        s = self._new_store()
+        s.store(b'{"a":1}')
+        s.store(b'{"b":2}')
+        ids = [i for i, _ in s.get_batch(10)]
+        s.delete(ids[:1])
+        self.assertEqual(s.count(), 1)
+
+    def test_trim_to_watermark(self):
+        s = self._new_store(max_records=8)
+        for i in range(20):
+            s.store(f'{{"i":{i}}}'.encode())
+        # Over capacity trims back to ~75%.
+        self.assertLessEqual(s.count(), 8)
+
+    def test_empty_payload_rejected(self):
+        s = self._new_store()
+        self.assertFalse(s.store(b""))
+
+    def test_user_version_stamped(self):
+        import sqlite3
+        from telemetry.offline_store import SCHEMA_VERSION
+        s = self._new_store()
+        v = sqlite3.connect(s.db_path).execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(v, SCHEMA_VERSION)
+
+
+class TestProcessDrainLock(unittest.TestCase):
+    """Test the cross-platform single-drainer advisory lock."""
+
+    def _lock_path(self):
+        import tempfile
+        return os.path.join(tempfile.mkdtemp(), "telemetry.db.lock")
+
+    def test_mutual_exclusion(self):
+        from telemetry.process_lock import ProcessDrainLock
+        path = self._lock_path()
+        a = ProcessDrainLock(path)
+        b = ProcessDrainLock(path)
+        self.assertTrue(a.acquire())
+        self.assertFalse(b.acquire())  # held by a
+        a.release()
+        self.assertTrue(b.acquire())  # released
+        b.release()
+
+    def test_reacquire_is_idempotent(self):
+        from telemetry.process_lock import ProcessDrainLock
+        a = ProcessDrainLock(self._lock_path())
+        self.assertTrue(a.acquire())
+        self.assertTrue(a.acquire())  # already held
+        self.assertTrue(a.held)
+        a.release()
+        self.assertFalse(a.held)
+
+
+class TestUploaderDrainLogic(unittest.TestCase):
+    """Test the uploader's success/poison/transient handling (no real network)."""
+
+    def _setup(self):
+        import tempfile
+        from telemetry.offline_store import OfflineEventStore
+        from telemetry.uploader import EventUploader
+        db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
+        store = OfflineEventStore(db)
+        uploader = EventUploader(store, instrumentation_key="abc-def")
+        return store, uploader
+
+    def test_success_deletes(self):
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        uploader._transport.send = lambda *a, **k: (True, 204)
+        delivered, left = uploader.drain_once()
+        self.assertEqual((delivered, left), (1, 0))
+        self.assertEqual(store.count(), 0)
+
+    def test_poison_4xx_dropped(self):
+        store, uploader = self._setup()
+        store.store(b'{"bad":1}')
+        uploader._transport.send = lambda *a, **k: (False, 400)
+        uploader.drain_once()
+        self.assertEqual(store.count(), 0)  # dropped, not retried forever
+
+    def test_transient_5xx_retained(self):
+        store, uploader = self._setup()
+        store.store(b'{"later":1}')
+        uploader._transport.send = lambda *a, **k: (False, 503)
+        delivered, left = uploader.drain_once()
+        self.assertEqual((delivered, left), (0, 1))
+        self.assertEqual(store.count(), 1)  # kept for retry
+
+
 if __name__ == "__main__":
     unittest.main()

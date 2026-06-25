@@ -45,7 +45,6 @@ def _onnxruntime_dependency() -> str:
 def _get_install_requires():
     install_requires = [
         'numpy>=1.21.6',
-        'requests>=2.28.0',
     ]
     if package_name != "onnxruntime-genai-winml":
         install_requires.append(_onnxruntime_dependency())
