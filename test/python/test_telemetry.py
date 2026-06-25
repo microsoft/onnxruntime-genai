@@ -24,52 +24,126 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 
 
-class TestOptOut(unittest.TestCase):
-    """Test telemetry opt-out mechanisms."""
+class _HermeticTelemetryTestCase(unittest.TestCase):
+    """Base for tests that construct ``GenAITelemetry``.
+
+    Guarantees no unit test touches the network or the real user profile: the
+    HTTP transport is stubbed (``self.mock_send``) and the durable-store
+    directory is redirected to a temp dir. Ambient CI / opt-out signals are
+    cleared so each test's chosen mode is not masked by the test runner's
+    environment.
+    """
+
+    _ENV_SIGNALS = (
+        "ORTGENAI_DISABLE_TELEMETRY",
+        "CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL",
+        "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID",
+    )
 
     def setUp(self):
-        """Reset singleton state between tests."""
+        import tempfile
         from telemetry.telemetry import GenAITelemetry
         GenAITelemetry._instance = None
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._patchers = []
+
+        env_patcher = patch.dict(os.environ, {}, clear=False)
+        env_patcher.start()
+        self._patchers.append(env_patcher)
+        for var in self._ENV_SIGNALS:
+            os.environ.pop(var, None)
+
+        send_patcher = patch(
+            "telemetry.library.transport.HttpJsonPostTransport.send",
+            return_value=(True, 204),
+        )
+        self.mock_send = send_patcher.start()
+        self._patchers.append(send_patcher)
+
+        dir_patcher = patch(
+            "telemetry.telemetry.get_telemetry_base_dir", return_value=self._tmpdir
+        )
+        dir_patcher.start()
+        self._patchers.append(dir_patcher)
 
     def tearDown(self):
+        import shutil
         from telemetry.telemetry import GenAITelemetry
+        instance = GenAITelemetry._instance
+        if instance is not None:
+            # Quiesce background threads before un-stubbing the network.
+            if instance._uploader is not None:
+                instance._uploader.stop_loop(5)
+            if instance._heartbeat_thread is not None:
+                instance._heartbeat_thread.join(10)
+        for p in reversed(self._patchers):
+            p.stop()
         GenAITelemetry._instance = None
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
-    def test_env_var_disables_telemetry(self):
+    def _join_heartbeat(self):
         from telemetry.telemetry import GenAITelemetry
+        t = GenAITelemetry._instance
+        if t is not None and t._heartbeat_thread is not None:
+            t._heartbeat_thread.join(10)
+
+
+class TestOptOut(_HermeticTelemetryTestCase):
+    """Test the three-state telemetry semantics: enabled / opt-out / CI."""
+
+    def test_ci_sends_nothing(self):
+        from telemetry.telemetry import GenAITelemetry
+        os.environ["CI"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
+        # CI suppresses even the device-id heartbeat.
+        self.assertIsNone(t._heartbeat_thread)
+        self.assertFalse(self.mock_send.called)
 
-    @patch.dict(os.environ, {"CI": "true"}, clear=False)
-    def test_ci_env_disables_telemetry(self):
+    def test_github_actions_sends_nothing(self):
         from telemetry.telemetry import GenAITelemetry
-        # Remove ORTGENAI_DISABLE_TELEMETRY if set
-        env = os.environ.copy()
-        env.pop("ORTGENAI_DISABLE_TELEMETRY", None)
-        with patch.dict(os.environ, env, clear=True):
-            os.environ["CI"] = "true"
-            t = GenAITelemetry()
-            self.assertFalse(t._enabled)
+        os.environ["GITHUB_ACTIONS"] = "true"
+        t = GenAITelemetry()
+        self.assertFalse(t._enabled)
+        self.assertIsNone(t._heartbeat_thread)
+        self.assertFalse(self.mock_send.called)
 
-    @patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False)
-    def test_github_actions_disables_telemetry(self):
+    def test_opt_out_sends_heartbeat_only(self):
         from telemetry.telemetry import GenAITelemetry
-        env = os.environ.copy()
-        env.pop("ORTGENAI_DISABLE_TELEMETRY", None)
-        with patch.dict(os.environ, env, clear=True):
-            os.environ["GITHUB_ACTIONS"] = "true"
-            t = GenAITelemetry()
-            self.assertFalse(t._enabled)
+        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        t = GenAITelemetry()
+        # Detailed telemetry is off (no store), but the device-id heartbeat
+        # still goes out so device counting keeps working.
+        self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
+        self.assertIsNotNone(t._heartbeat_thread)
+        self._join_heartbeat()
+        self.assertTrue(self.mock_send.called)
+        # Detailed-event methods remain no-ops and must not raise.
+        t.log_model_build(action="create_model", duration_ms=1.0, success=True)
+
+    def test_enabled_sends_heartbeat_and_creates_store(self):
+        from telemetry.telemetry import GenAITelemetry
+        t = GenAITelemetry()
+        self._join_heartbeat()
+        self.assertTrue(t._enabled)
+        self.assertIsNotNone(t._store)
+        self.assertTrue(self.mock_send.called)
 
     def test_disable_enable_api(self):
         from telemetry.telemetry import GenAITelemetry
         t = GenAITelemetry()
+        self._join_heartbeat()
+        self.assertTrue(t._enabled)
+        self.assertIsNotNone(t._store)
         t.disable_telemetry()
         self.assertFalse(t._enabled)
         t.enable_telemetry()
         self.assertTrue(t._enabled)
+        self.assertIsNotNone(t._store)
+
 
 
 class TestDeviceId(unittest.TestCase):
@@ -129,22 +203,17 @@ class TestSystemInfo(unittest.TestCase):
         self.assertIsInstance(info["available_providers"], list)
 
 
-class TestTelemetryEvents(unittest.TestCase):
-    """Test telemetry event emission (with telemetry disabled to avoid network calls)."""
+class TestTelemetryEvents(_HermeticTelemetryTestCase):
+    """Detailed-event methods are safe no-ops when telemetry is opted out."""
 
-    def setUp(self):
+    def _opted_out_telemetry(self):
         from telemetry.telemetry import GenAITelemetry
-        GenAITelemetry._instance = None
+        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        return GenAITelemetry()
 
-    def tearDown(self):
-        from telemetry.telemetry import GenAITelemetry
-        GenAITelemetry._instance = None
-
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_log_model_build_when_disabled(self):
         """Ensure log_model_build doesn't crash when telemetry is disabled."""
-        from telemetry.telemetry import GenAITelemetry
-        t = GenAITelemetry()
+        t = self._opted_out_telemetry()
         # Should not raise
         t.log_model_build(
             action="create_model",
@@ -163,11 +232,9 @@ class TestTelemetryEvents(unittest.TestCase):
             execution_provider="cuda",
         )
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_log_benchmark_when_disabled(self):
         """Ensure log_benchmark doesn't crash when telemetry is disabled."""
-        from telemetry.telemetry import GenAITelemetry
-        t = GenAITelemetry()
+        t = self._opted_out_telemetry()
         t.log_benchmark(
             model_name="test-model",
             precision="fp16",
@@ -181,10 +248,8 @@ class TestTelemetryEvents(unittest.TestCase):
             time_to_first_token_ms=50.0,
         )
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_log_model_load_when_disabled(self):
-        from telemetry.telemetry import GenAITelemetry
-        t = GenAITelemetry()
+        t = self._opted_out_telemetry()
         t.log_model_load(
             model_name="test-model",
             model_type="phi3",
@@ -193,10 +258,8 @@ class TestTelemetryEvents(unittest.TestCase):
             num_sessions=3,
         )
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_log_inference_when_disabled(self):
-        from telemetry.telemetry import GenAITelemetry
-        t = GenAITelemetry()
+        t = self._opted_out_telemetry()
         t.log_inference(
             model_name="test-model",
             time_to_first_token_ms=45.0,
@@ -205,10 +268,8 @@ class TestTelemetryEvents(unittest.TestCase):
             input_token_count=50,
         )
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_log_error_when_disabled(self):
-        from telemetry.telemetry import GenAITelemetry
-        t = GenAITelemetry()
+        t = self._opted_out_telemetry()
         t.log_error(
             exception_type="RuntimeError",
             exception_message="Test error",
@@ -216,18 +277,15 @@ class TestTelemetryEvents(unittest.TestCase):
         )
 
 
-class TestActionDecorator(unittest.TestCase):
+class TestActionDecorator(_HermeticTelemetryTestCase):
     """Test the @action decorator and ActionContext."""
 
     def setUp(self):
-        from telemetry.telemetry import GenAITelemetry
-        GenAITelemetry._instance = None
+        super().setUp()
+        # Action helpers construct the singleton lazily; keep them opted out so
+        # they emit no detailed events during the test.
+        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
 
-    def tearDown(self):
-        from telemetry.telemetry import GenAITelemetry
-        GenAITelemetry._instance = None
-
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_action_decorator_success(self):
         from telemetry.telemetry_extensions import action
 
@@ -238,7 +296,6 @@ class TestActionDecorator(unittest.TestCase):
         result = my_function()
         self.assertEqual(result, 42)
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_action_decorator_exception(self):
         from telemetry.telemetry_extensions import action
 
@@ -249,7 +306,6 @@ class TestActionDecorator(unittest.TestCase):
         with self.assertRaises(ValueError):
             my_failing_function()
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_action_context_manager(self):
         from telemetry.telemetry_extensions import ActionContext
 
@@ -259,7 +315,6 @@ class TestActionDecorator(unittest.TestCase):
 
         self.assertEqual(result, 2)
 
-    @patch.dict(os.environ, {"ORTGENAI_DISABLE_TELEMETRY": "1"})
     def test_action_context_manager_exception(self):
         from telemetry.telemetry_extensions import ActionContext
 
