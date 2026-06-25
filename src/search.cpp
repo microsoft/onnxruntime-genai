@@ -580,4 +580,43 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   }
 }
 
+void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
+  if (ngram_size <= 0)
+    return;
+
+  const int sequence_length = sequences_.GetSequenceLength();
+  // Need at least one complete n-gram in history before anything can be banned.
+  if (sequence_length < ngram_size)
+    return;
+
+  const int prefix_length = ngram_size - 1;
+  const int batch_beam_size = params_->BatchBeamSize();
+  for (int i = 0; i < batch_beam_size; i++) {
+    std::span<float> const beam_token_scores = GetScores(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CopyDeviceToCpu();
+
+    // The prefix we are about to extend: the trailing (ngram_size - 1) tokens.
+    std::span<const int32_t> const target_prefix = sequence.subspan(sequence_length - prefix_length, prefix_length);
+
+    // Scan every historical n-gram. Its first (ngram_size - 1) tokens form a prefix
+    // and its last token is what followed. If the prefix matches the trailing prefix,
+    // ban that following token so the same n-gram cannot repeat.
+    const int last_start = sequence_length - ngram_size;
+    for (int start = 0; start <= last_start; start++) {
+      bool matches = true;
+      for (int j = 0; j < prefix_length; j++) {
+        if (sequence[start + j] != target_prefix[j]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        const int32_t banned_token = sequence[start + prefix_length];
+        if (banned_token >= 0 && banned_token < params_->config.model.vocab_size)
+          beam_token_scores[banned_token] = std::numeric_limits<float>::lowest();
+      }
+    }
+  }
+}
+
 }  // namespace Generators
