@@ -8,6 +8,13 @@
 This package provides an OpenTelemetry exporter that sends telemetry data
 to Microsoft OneCollector using the Common Schema JSON format.
 
+The OpenTelemetry-based exporter (OneCollectorLogExporter / TelemetryLogger)
+is optional: it is imported only when the ``opentelemetry`` packages are
+installed. The transport, serialization, retry, and payload-building helpers
+have no OpenTelemetry dependency and are always available, so an application
+that ships its own uploader (e.g. a SQLite-backed offline store) can use this
+package without installing OpenTelemetry.
+
 Example usage:
 
     from onecollector_exporter import (
@@ -40,7 +47,6 @@ Example usage:
 from .callback_manager import CallbackManager, PayloadTransmittedCallbackArgs
 from .connection_string_parser import ConnectionStringParser
 from .event_source import OneCollectorEventId, OneCollectorEventSource, event_source
-from .exporter import OneCollectorLogExporter
 from .options import (
     CompressionType,
     OneCollectorExporterOptions,
@@ -50,12 +56,6 @@ from .options import (
 from .payload_builder import PayloadBuilder
 from .retry import RetryHandler
 from .serialization import CommonSchemaJsonSerializationHelper
-from .telemetry_logger import (
-    TelemetryLogger,
-    get_telemetry_logger,
-    log_event,
-    shutdown_telemetry,
-)
 from .transport import HttpJsonPostTransport, ITransport
 
 __version__ = "0.0.1"
@@ -71,14 +71,30 @@ __all__ = [
     "OneCollectorEventSource",
     "OneCollectorExporterOptions",
     "OneCollectorExporterValidationError",
-    "OneCollectorLogExporter",
     "OneCollectorTransportOptions",
     "PayloadBuilder",
     "PayloadTransmittedCallbackArgs",
     "RetryHandler",
-    "TelemetryLogger",
     "event_source",
-    "get_telemetry_logger",
-    "log_event",
-    "shutdown_telemetry",
 ]
+
+# The OpenTelemetry exporter is optional. Import it only if opentelemetry is
+# installed; applications using their own uploader do not need it.
+try:
+    from .exporter import OneCollectorLogExporter
+    from .telemetry_logger import (
+        TelemetryLogger,
+        get_telemetry_logger,
+        log_event,
+        shutdown_telemetry,
+    )
+
+    __all__ += [
+        "OneCollectorLogExporter",
+        "TelemetryLogger",
+        "get_telemetry_logger",
+        "log_event",
+        "shutdown_telemetry",
+    ]
+except ImportError:
+    pass
