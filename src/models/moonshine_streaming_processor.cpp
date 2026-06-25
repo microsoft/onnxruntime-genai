@@ -73,12 +73,22 @@ void MoonshineStreamingProcessor::ResetState() {
   cached_v_cross_.reset();
   memory_in_cross_kv_ = 0;
   cross_kv_valid_ = false;
+  needs_reset_ = false;
   audio_buffer_.clear();
 }
 
 std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::Process(const float* audio_data,
                                                                    size_t num_samples) {
-  if (ShouldDropChunk(audio_data, num_samples)) return nullptr;
+  // If the previous chunk crossed a segment boundary (hard cap or VAD
+  // silence), start a fresh segment now. The audio queued from this call
+  // belongs to the new segment. Preserve any leftover sub-chunk audio
+  // across the reset so we don't drop up to chunk_samples-1 samples at
+  // every segment boundary.
+  if (needs_reset_) {
+    auto carry = std::move(audio_buffer_);
+    ResetState();  // clears needs_reset_ (and audio_buffer_) too
+    audio_buffer_ = std::move(carry);
+  }
 
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
 
@@ -90,9 +100,51 @@ std::unique_ptr<NamedTensors> MoonshineStreamingProcessor::Process(const float* 
   std::vector<float> chunk(audio_buffer_.begin(), audio_buffer_.begin() + chunk_size);
   audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + chunk_size);
 
+  // ---- VAD-based segmentation ------------------------------------------
+  // Run the per-chunk silence verdict ONCE. Routing:
+  //   * silent + past min_segment threshold → flush as is_final + reset.
+  //     This is the "break even for short silences after 5s" semantic.
+  //   * silent + pre-min threshold + nothing in memory yet → drop the chunk
+  //     to avoid wasting the encoder on leading silence. Within an
+  //     in-progress segment (memory_len_ > 0), short silences are kept and
+  //     encoded so the lookahead boundary stays continuous.
+  //   * speech (or VAD disabled) → fall through to the normal pipeline.
+  const bool chunk_silent = IsChunkSilent(chunk.data(), chunk.size());
+  if (chunk_silent) {
+    const bool past_min_segment = config_.min_segment_memory_frames > 0 &&
+                                  memory_len_ >= config_.min_segment_memory_frames;
+    if (past_min_segment) {
+      // Flush any held-back lookahead frames (the previous speech's tail)
+      // into memory before breaking, so the final emit covers the full
+      // accumulated utterance.
+      RunFrontendAndAccumulate(nullptr, 0, /*is_final=*/true);
+      if (memory_len_ == 0) return nullptr;
+      RefreshCrossKv();
+      needs_reset_ = true;
+      return EmitCrossKv(/*is_final=*/true);
+    }
+    if (memory_len_ == 0) {
+      // Pre-utterance silence: skip the encoder entirely.
+      return nullptr;
+    }
+    // Mid-segment short silence (< min_segment): fall through and encode
+    // normally — preserves context for the lookahead boundary.
+  }
+
   RunFrontendAndAccumulate(chunk.data(), chunk.size(), /*is_final=*/false);
   if (memory_len_ == 0) return nullptr;  // No stable frames yet.
   RefreshCrossKv();
+
+  // Hard-cap reset: if this chunk pushed memory past the segment cap,
+  // emit is_final so the State commits ALL current-pass tokens, then
+  // schedule a reset for the next call. The next Process() will see
+  // memory_len shrink and the State will auto-reset its self-KV / commit
+  // tracking via the existing `memory_len < previous_memory_len_` check.
+  if (config_.max_segment_memory_frames > 0 &&
+      memory_len_ >= config_.max_segment_memory_frames) {
+    needs_reset_ = true;
+    return EmitCrossKv(/*is_final=*/true);
+  }
   return EmitCrossKv(/*is_final=*/false);
 }
 

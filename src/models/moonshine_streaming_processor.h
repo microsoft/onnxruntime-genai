@@ -72,6 +72,11 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   int memory_in_cross_kv_{0};  // memory frames already projected into cached.
   bool cross_kv_valid_{false};
 
+  // Set when a segment hit the hard memory cap. The next Process() call
+  // resets all state before doing anything else, so the new segment starts
+  // from a clean BOS. Matches upstream Moonshine's per-VAD-segment reset.
+  bool needs_reset_{false};
+
   // ---- Helpers -----------------------------------------------------------
   void ResetState();
 

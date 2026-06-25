@@ -71,6 +71,24 @@ struct MoonshineConfig {
   float tokens_per_second{6.5f};
   float seconds_per_memory_frame{0.020f};
 
+  // Hard-cap on accumulated memory before forcing a state reset. Mirrors
+  // upstream Moonshine's `vad_max_segment_duration` (they use 15s; we use
+  // 10s for slightly tighter O(N^2) bounds). Without this, the parallel
+  // teacher-forcing per chunk costs O(emitted_tokens) which sums to O(N^2)
+  // over the full audio. With the cap, each "segment" is independent and
+  // the AR loop stays small. 500 frames = 10s @ 50fps. Set <=0 to disable.
+  int max_segment_memory_frames{500};
+
+  // Minimum accumulated memory before VAD-detected silence is allowed to
+  // trigger a segment break. Below this threshold, silent chunks are dropped
+  // (treated as pre/inter-utterance pause) but do NOT cut the segment — we
+  // want enough committed speech behind us that an early-segment short
+  // silence (e.g. comma-pause, breath) doesn't fragment the transcript.
+  // After this threshold, any silent chunk triggers an is_final flush + reset.
+  // 250 frames = 5s @ 50fps. Only active when VAD is enabled; set <=0 to
+  // disable VAD-based segmentation entirely (hard cap still applies).
+  int min_segment_memory_frames{250};
+
   // ONNX filenames (resolved relative to the model directory).
   std::string frontend_filename{"frontend.onnx"};
   std::string encoder_filename{"encoder.onnx"};

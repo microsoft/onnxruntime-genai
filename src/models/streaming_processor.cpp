@@ -35,6 +35,13 @@ void StreamingProcessor::EnableVadFromModel() {
   consecutive_silence_chunks_ = 0;
 }
 
+bool StreamingProcessor::IsChunkSilent(const float* chunk_data, size_t chunk_size) {
+  if (!vad_) {
+    return false;
+  }
+  return !vad_->ContainsSpeech(chunk_data, chunk_size);
+}
+
 bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_size) {
   if (!vad_) {
     return false;
