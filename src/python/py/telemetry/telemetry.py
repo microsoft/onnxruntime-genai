@@ -27,14 +27,7 @@ from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
 from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
-from .offline_store import (
-    LATENCY_NORMAL,
-    LATENCY_REAL_TIME,
-    PERSISTENCE_CRITICAL,
-    PERSISTENCE_NORMAL,
-    OfflineStorageSqlite,
-    StorageRecord,
-)
+from .offline_store import OfflineEventStore
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
 
@@ -168,18 +161,15 @@ class GenAITelemetry:
 
                 event_source.disable()
 
-                # Durable, shared-capable offline store. Events survive process
-                # exit on disk, so no exit-time flush is required. A single file
-                # may be shared across apps; rows are partitioned by tenant_token.
-                db_path = os.path.join(get_telemetry_base_dir(), "telemetry_offline.db")
-                self._store = OfflineStorageSqlite(db_path)
+                # Durable on-disk queue: events survive process exit, so no
+                # exit-time flush is required.
+                db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
+                self._store = OfflineEventStore(db_path)
 
-                # The uploader drains this tenant's rows (including any left by a
+                # The uploader drains the queue (including any rows left by a
                 # previous run) in the background.
                 self._uploader = EventUploader(
-                    self._store,
-                    instrumentation_key=self._instrumentation_key,
-                    tenant_token=self._instrumentation_key,
+                    self._store, instrumentation_key=self._instrumentation_key
                 )
                 self._uploader.start()
 
@@ -189,13 +179,7 @@ class GenAITelemetry:
                 self._uploader = None
                 self._enabled = False
 
-    def _emit(
-        self,
-        event_name: str,
-        attributes: Optional[dict[str, Any]] = None,
-        latency: int = LATENCY_NORMAL,
-        persistence: int = PERSISTENCE_NORMAL,
-    ) -> None:
+    def _emit(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
         if not self._enabled or self._store is None:
             return
@@ -214,14 +198,7 @@ class GenAITelemetry:
                 data=data,
             )
             payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
-            self._store.store_record(
-                StorageRecord(
-                    tenant_token=self._instrumentation_key,
-                    payload=payload,
-                    latency=latency,
-                    persistence=persistence,
-                )
-            )
+            self._store.store(payload)
             if self._uploader is not None:
                 self._uploader.request_drain()
         except Exception:
@@ -260,7 +237,7 @@ class GenAITelemetry:
                 "process_name": sys_info.get("process_name", ""),
                 "available_providers": ",".join(ep_info.get("available_providers", [])),
             }
-            self._emit(HEARTBEAT_EVENT, attributes, latency=LATENCY_REAL_TIME, persistence=PERSISTENCE_CRITICAL)
+            self._emit(HEARTBEAT_EVENT, attributes)
         except Exception:
             pass
 
@@ -474,9 +451,7 @@ class GenAITelemetry:
         if self._store is not None and self._uploader is None:
             try:
                 self._uploader = EventUploader(
-                    self._store,
-                    instrumentation_key=self._instrumentation_key,
-                    tenant_token=self._instrumentation_key,
+                    self._store, instrumentation_key=self._instrumentation_key
                 )
                 self._uploader.start()
             except Exception:
@@ -492,11 +467,9 @@ class GenAITelemetry:
         if self._uploader is not None:
             try:
                 # Quiesce the background drainer (waits for any in-flight send),
-                # release leases it may hold, then drain synchronously as the
-                # sole drainer so there is no race over reserved rows.
+                # then drain synchronously as the sole drainer so there is no
+                # race over the same rows.
                 self._uploader.stop_loop()
-                if self._store is not None:
-                    self._store.release_reserved(self._instrumentation_key)
                 self._uploader.flush(flush_seconds)
             except Exception:
                 pass
