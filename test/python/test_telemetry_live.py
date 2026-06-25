@@ -71,7 +71,12 @@ def main():
         on_payload_transmitted, include_failures=True
     )
 
-    print("[2/8] Heartbeat already enqueued during init.")
+    # The heartbeat is emitted on a background thread (system-info collection
+    # uses blocking subprocesses), so give it a moment to be enqueued/sent
+    # before we add the rest. The callback above captures its delivery whenever
+    # it happens.
+    print("[2/8] Letting the background heartbeat be collected/enqueued...")
+    time.sleep(2.0)
 
     print("[3/8] log_model_build ...")
     telemetry.log_model_build(
@@ -140,9 +145,9 @@ def main():
     print(f"  HTTP payloads: {len(transmission_results)}, failures: {failures}, items delivered: {sent_items}")
     print()
 
-    if remaining == 0 and failures == 0 and pending_before >= 6:
+    if remaining == 0 and failures == 0 and sent_items >= 6:
         print("=" * 60)
-        print(f"ALL {pending_before} EVENTS DELIVERED (store drained, HTTP 2xx)")
+        print(f"ALL EVENTS DELIVERED ({sent_items} items, store drained, HTTP 2xx)")
         print("=" * 60)
         return 0
     print("=" * 60)
