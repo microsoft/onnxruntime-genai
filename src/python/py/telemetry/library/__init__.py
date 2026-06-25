@@ -5,8 +5,36 @@
 
 """OneCollector Exporter for OpenTelemetry Python.
 
-Vendored from Olive (olive/telemetry/library/) and adapted for
-ONNX Runtime GenAI telemetry integration.
+This package provides an OpenTelemetry exporter that sends telemetry data
+to Microsoft OneCollector using the Common Schema JSON format.
+
+Example usage:
+
+    from onecollector_exporter import (
+        OneCollectorLogExporter,
+        OneCollectorExporterOptions,
+        get_telemetry_logger,
+    )
+
+    # Option 1: Use with OpenTelemetry SDK directly
+    options = OneCollectorExporterOptions(
+        connection_string="InstrumentationKey=your-key-here"
+    )
+    exporter = OneCollectorLogExporter(options=options)
+
+    # Add to logger provider
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+    provider = LoggerProvider()
+    provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+
+    # Option 2: Use the simplified telemetry logger
+    logger = get_telemetry_logger(
+        connection_string="InstrumentationKey=your-key-here"
+    )
+    logger.log("MyEvent", {"key": "value"})
+    logger.shutdown()
 """
 
 from .callback_manager import CallbackManager, PayloadTransmittedCallbackArgs
