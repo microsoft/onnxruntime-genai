@@ -5,15 +5,15 @@
 // pipeline (frontend → encoder → adapter → cross_kv → decoder_kv).
 //
 // Per audio chunk (in the StreamingProcessor):
-//   frontend.onnx  : causal audio frontend with explicit sample / conv-cache
-//                    state buffers that persist across chunks.
-//   encoder.onnx   : stateless sliding-window attention encoder.
-//   adapter.onnx   : adds positional encoding using a global pos_offset
-//                    (= encoder frame count BEFORE this chunk).
-//   cross_kv.onnx  : precomputes cross-attention K/V from the chunk's memory.
+//   frontend  : causal audio frontend with explicit sample / conv-cache
+//               state buffers that persist across chunks.
+//   encoder   : stateless sliding-window attention encoder.
+//   adapter   : adds positional encoding using a global pos_offset
+//               (= encoder frame count BEFORE this chunk).
+//   cross_kv  : precomputes cross-attention K/V from the chunk's memory.
 //
 // Per emitted token (in the State):
-//   decoder_kv.onnx: one autoregressive step. Reads (token, self_K, self_V,
+//   decoder_kv: one autoregressive step. Reads (token, self_K, self_V,
 //                    cross_K, cross_V) → (logits, new_self_K, new_self_V,
 //                    cross_K passthrough, cross_V passthrough). Self-KV
 //                    persists across chunks within a stream until an EOS
@@ -44,7 +44,7 @@ struct MoonshineConfig {
   // Encoder geometry (frontend output / encoder hidden dim).
   int encoder_dim{768};
 
-  // Decoder geometry (from decoder_kv.onnx self-KV shape [layers,1,heads,T,head_size]).
+  // Decoder geometry (from decoder_kv self-KV shape [layers,1,heads,T,head_size]).
   int num_decoder_layers{14};
   int num_decoder_heads{10};
   int decoder_head_size{64};
@@ -89,15 +89,14 @@ struct MoonshineConfig {
   // disable VAD-based segmentation entirely (hard cap still applies).
   int min_segment_memory_frames{250};
 
-  // ONNX filenames (resolved relative to the model directory). Defaults
-  // point to the .ort exports which are pre-optimized and load/run faster
-  // than raw .onnx. Override per-variant via genai_config.json's encoder
-  // and decoder filename fields (other three are not configurable yet).
-  std::string frontend_filename{"frontend.ort"};
-  std::string encoder_filename{"encoder.ort"};
-  std::string adapter_filename{"adapter.ort"};
-  std::string cross_kv_filename{"cross_kv.ort"};
-  std::string decoder_kv_filename{"decoder_kv.ort"};
+  // Pipeline component filenames. All 5 are loaded from
+  // genai_config.json's `model.moonshine` section — there are no defaults.
+  // PopulateFromConfig throws if any is missing.
+  std::string frontend_filename;
+  std::string encoder_filename;
+  std::string adapter_filename;
+  std::string cross_kv_filename;
+  std::string decoder_kv_filename;
 
   void PopulateFromConfig(const Config& config);
 };
@@ -107,6 +106,60 @@ struct MoonshineStreamingModel : Model {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
+
+  // ------------------------------------------------------------------
+  // Stateless ONNX pipeline wrappers.
+  //
+  // The streaming pipeline has five sessions (frontend, encoder, adapter,
+  // cross_kv, decoder_kv). The methods below are thin, stateless wrappers
+  // around the corresponding `session_*_->Run(...)` calls so that callers
+  // (Processor today; State tomorrow) don't have to know the exact input
+  // and output names of each graph. All per-stream state (accumulated
+  // features, memory, KV caches, frontend ring buffers, ...) lives in the
+  // caller — these methods are pure compute.
+  // ------------------------------------------------------------------
+
+  struct FrontendOutputs {
+    std::unique_ptr<OrtValue> features;       // [1, F_new, encoder_dim]
+    std::unique_ptr<OrtValue> sample_buffer;  // ring buffer state out
+    std::unique_ptr<OrtValue> sample_len;
+    std::unique_ptr<OrtValue> conv1_buffer;
+    std::unique_ptr<OrtValue> conv2_buffer;
+    std::unique_ptr<OrtValue> frame_count;
+  };
+
+  FrontendOutputs RunFrontend(OrtValue& audio_chunk,
+                              OrtValue& sample_buffer,
+                              OrtValue& sample_len,
+                              OrtValue& conv1_buffer,
+                              OrtValue& conv2_buffer,
+                              OrtValue& frame_count) const;
+
+  std::unique_ptr<OrtValue> RunEncoder(OrtValue& features) const;
+
+  std::unique_ptr<OrtValue> RunAdapter(OrtValue& encoded,
+                                       OrtValue& pos_offset) const;
+
+  struct CrossKvOutputs {
+    std::unique_ptr<OrtValue> k_cross;
+    std::unique_ptr<OrtValue> v_cross;
+  };
+
+  CrossKvOutputs RunCrossKv(OrtValue& memory) const;
+
+  struct DecoderKvOutputs {
+    std::unique_ptr<OrtValue> logits;
+    std::unique_ptr<OrtValue> k_self_out;
+    std::unique_ptr<OrtValue> v_self_out;
+  };
+
+  // Runs one decoder step. The k_cross / v_cross tensors are pass-through
+  // outputs of the graph; we discard them (caller already owns the inputs).
+  DecoderKvOutputs RunDecoderKv(OrtValue& token,
+                                OrtValue& k_self,
+                                OrtValue& v_self,
+                                OrtValue& k_cross,
+                                OrtValue& v_cross) const;
 
   std::unique_ptr<OrtSession> session_frontend_;
   std::unique_ptr<OrtSession> session_encoder_;

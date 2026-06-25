@@ -315,6 +315,41 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    // Moonshine streaming pipeline filenames. The pipeline has 5 stages that
+    // do NOT map cleanly onto the generic Encoder/Decoder slots (frontend
+    // and adapter are bespoke), so each is listed explicitly. All 5 are
+    // required for `model.type == "streaming_enc_dec_asr"`; the loader
+    // throws if any is empty.
+    //
+    // The numeric fields default to 0 (sentinel for "unset"); MoonshineConfig
+    // falls back to its C++ default for any field left at 0. To keep the
+    // genai_config.json self-documenting, shipping configs list every field.
+    struct Moonshine {
+      std::string frontend_filename;
+      std::string encoder_filename;
+      std::string adapter_filename;
+      std::string cross_kv_filename;
+      std::string decoder_kv_filename;
+
+      // Frontend state buffer shapes (channels are derived from encoder_dim).
+      int sample_buffer_size{};
+      int conv1_buffer_size{};
+      int conv2_buffer_size{};
+
+      // Encoder sliding-window geometry.
+      int total_lookahead{};
+      int left_context_frames{};
+
+      // Decoder token-emission cap & frame rate.
+      int max_seq_len{};
+      float tokens_per_second{};
+      float seconds_per_memory_frame{};
+
+      // Segmentation limits (hard cap + VAD-silence min duration), in memory frames.
+      int max_segment_memory_frames{};
+      int min_segment_memory_frames{};
+    } moonshine;
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;

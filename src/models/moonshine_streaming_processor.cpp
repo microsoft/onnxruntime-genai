@@ -169,7 +169,7 @@ void MoonshineStreamingProcessor::RunFrontendAndAccumulate(const float* audio, s
   const int encoder_dim = config_.encoder_dim;
   const int decoder_dim = config_.decoder_dim;
 
-  // ----- frontend.onnx ---------------------------------------------------
+  // ----- frontend -------------------------------------------------------
   // Always run, even with num==0 on Flush, to allow it to drain any
   // sub-frame samples it may have buffered. Note: the frontend's audio input
   // dim must be > 0, so we skip the call if there's nothing to feed.
@@ -179,25 +179,15 @@ void MoonshineStreamingProcessor::RunFrontendAndAccumulate(const float* audio, s
         OrtValue::CreateTensor(alloc, audio_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     std::memcpy(audio_tensor->GetTensorMutableData<float>(), audio, num * sizeof(float));
 
-    const char* fe_in_names[]  = {"audio_chunk", "sample_buffer", "sample_len",
-                                  "conv1_buffer", "conv2_buffer", "frame_count"};
-    OrtValue*   fe_in_values[] = {audio_tensor.get(), sample_buffer_.get(), sample_len_.get(),
-                                  conv1_buffer_.get(), conv2_buffer_.get(), frame_count_.get()};
-    const char* fe_out_names[] = {"features", "sample_buffer_out", "sample_len_out",
-                                  "conv1_buffer_out", "conv2_buffer_out", "frame_count_out"};
-    OrtValue*   fe_out_values[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-
-    moonshine_model_->session_frontend_->Run(
-        nullptr,
-        fe_in_names, fe_in_values, 6,
-        fe_out_names, fe_out_values, 6);
-
-    auto features  = std::unique_ptr<OrtValue>(fe_out_values[0]);
-    sample_buffer_ = std::unique_ptr<OrtValue>(fe_out_values[1]);
-    sample_len_    = std::unique_ptr<OrtValue>(fe_out_values[2]);
-    conv1_buffer_  = std::unique_ptr<OrtValue>(fe_out_values[3]);
-    conv2_buffer_  = std::unique_ptr<OrtValue>(fe_out_values[4]);
-    frame_count_   = std::unique_ptr<OrtValue>(fe_out_values[5]);
+    auto fe = moonshine_model_->RunFrontend(*audio_tensor, *sample_buffer_,
+                                            *sample_len_, *conv1_buffer_,
+                                            *conv2_buffer_, *frame_count_);
+    auto features  = std::move(fe.features);
+    sample_buffer_ = std::move(fe.sample_buffer);
+    sample_len_    = std::move(fe.sample_len);
+    conv1_buffer_  = std::move(fe.conv1_buffer);
+    conv2_buffer_  = std::move(fe.conv2_buffer);
+    frame_count_   = std::move(fe.frame_count);
 
     auto fshape = features->GetTensorTypeAndShapeInfo()->GetShape();
     if (fshape.size() >= 3 && fshape[1] > 0) {
@@ -232,15 +222,7 @@ void MoonshineStreamingProcessor::RunFrontendAndAccumulate(const float* audio, s
               accumulated_features_.data() + static_cast<size_t>(window_start) * encoder_dim,
               static_cast<size_t>(window_size) * encoder_dim * sizeof(float));
 
-  const char* enc_in_names[]  = {"features"};
-  OrtValue*   enc_in_values[] = {enc_in_tensor.get()};
-  const char* enc_out_names[] = {"encoded"};
-  OrtValue*   enc_out_values[1] = {nullptr};
-  moonshine_model_->session_encoder_->Run(
-      nullptr,
-      enc_in_names, enc_in_values, 1,
-      enc_out_names, enc_out_values, 1);
-  auto encoded = std::unique_ptr<OrtValue>(enc_out_values[0]);
+  auto encoded = moonshine_model_->RunEncoder(*enc_in_tensor);
 
   // Slice [:, start_idx : start_idx + new_frames] from encoded[1, window_size, encoder_dim].
   auto new_enc_shape = std::array<int64_t, 3>{1, new_frames, encoder_dim};
@@ -251,21 +233,13 @@ void MoonshineStreamingProcessor::RunFrontendAndAccumulate(const float* audio, s
                   static_cast<size_t>(start_idx) * encoder_dim,
               static_cast<size_t>(new_frames) * encoder_dim * sizeof(float));
 
-  // ----- adapter.onnx ----------------------------------------------------
+  // ----- adapter --------------------------------------------------------
   auto pos_shape = std::array<int64_t, 1>{1};
   auto pos_tensor =
       OrtValue::CreateTensor(alloc, pos_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   *pos_tensor->GetTensorMutableData<int64_t>() = adapter_pos_offset_;
 
-  const char* ad_in_names[]  = {"encoded", "pos_offset"};
-  OrtValue*   ad_in_values[] = {new_enc_tensor.get(), pos_tensor.get()};
-  const char* ad_out_names[] = {"memory"};
-  OrtValue*   ad_out_values[1] = {nullptr};
-  moonshine_model_->session_adapter_->Run(
-      nullptr,
-      ad_in_names, ad_in_values, 2,
-      ad_out_names, ad_out_values, 1);
-  auto memory_tensor = std::unique_ptr<OrtValue>(ad_out_values[0]);
+  auto memory_tensor = moonshine_model_->RunAdapter(*new_enc_tensor, *pos_tensor);
 
   // Append adapter output to accumulated memory.
   auto mshape = memory_tensor->GetTensorTypeAndShapeInfo()->GetShape();
@@ -304,17 +278,9 @@ void MoonshineStreamingProcessor::RefreshCrossKv() {
                   static_cast<size_t>(memory_in_cross_kv_) * decoder_dim,
               static_cast<size_t>(new_frames) * decoder_dim * sizeof(float));
 
-  const char* ck_in_names[]  = {"memory"};
-  OrtValue*   ck_in_values[] = {mem_tensor.get()};
-  const char* ck_out_names[] = {"k_cross", "v_cross"};
-  OrtValue*   ck_out_values[2] = {nullptr, nullptr};
-  moonshine_model_->session_cross_kv_->Run(
-      nullptr,
-      ck_in_names, ck_in_values, 1,
-      ck_out_names, ck_out_values, 2);
-
-  std::unique_ptr<OrtValue> k_new(ck_out_values[0]);
-  std::unique_ptr<OrtValue> v_new(ck_out_values[1]);
+  auto ck = moonshine_model_->RunCrossKv(*mem_tensor);
+  std::unique_ptr<OrtValue> k_new = std::move(ck.k_cross);
+  std::unique_ptr<OrtValue> v_new = std::move(ck.v_cross);
 
   if (memory_in_cross_kv_ == 0) {
     // First chunk of the stream: nothing to concat with.

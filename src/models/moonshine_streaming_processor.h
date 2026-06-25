@@ -67,13 +67,13 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   int total_features_{0};
   // Number of features already adapted into memory.
   int encoder_frames_emitted_{0};
-  // Running pos_offset fed to adapter.onnx (== total memory frames so far).
+  // Running pos_offset fed to the adapter (== total memory frames so far).
   int64_t adapter_pos_offset_{0};
   // Accumulated decoder memory ([memory_len_, decoder_dim]).
   std::vector<float> accumulated_memory_;
   int memory_len_{0};
 
-  // Cached cross-KV tensors. cross_kv.onnx is a pure per-frame projection
+  // Cached cross-KV tensors. cross_kv is a pure per-frame projection
   // (no positional / cross-frame ops), so we run it incrementally: when
   // memory grows by `new_frames`, run cross_kv on just those rows and
   // concat the result into the cached [L, 1, H, M, D] tensor. This turns

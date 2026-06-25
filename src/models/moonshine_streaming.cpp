@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   const auto& m = config.model;
   const auto& enc = m.encoder;
   const auto& dec = m.decoder;
+  const auto& ms  = m.moonshine;
 
   if (m.sample_rate > 0) sample_rate = m.sample_rate;
   if (m.chunk_samples > 0) chunk_samples = m.chunk_samples;
@@ -41,8 +43,37 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   if (dec.num_attention_heads > 0) num_decoder_heads = dec.num_attention_heads;
   if (dec.head_size > 0) decoder_head_size = dec.head_size;
 
-  if (!enc.filename.empty()) frontend_filename = enc.filename;
-  if (!dec.filename.empty()) decoder_kv_filename = dec.filename;
+  // Per-variant tuning from the moonshine section. Sentinel 0 (the
+  // struct's default) means "not present in JSON, keep the C++ default".
+  if (ms.sample_buffer_size > 0)        sample_buffer_size        = ms.sample_buffer_size;
+  if (ms.conv1_buffer_size > 0)         conv1_buffer_size         = ms.conv1_buffer_size;
+  if (ms.conv2_buffer_size > 0)         conv2_buffer_size         = ms.conv2_buffer_size;
+  if (ms.total_lookahead > 0)           total_lookahead           = ms.total_lookahead;
+  if (ms.left_context_frames > 0)       left_context_frames       = ms.left_context_frames;
+  if (ms.max_seq_len > 0)               max_seq_len               = ms.max_seq_len;
+  if (ms.tokens_per_second > 0.0f)      tokens_per_second         = ms.tokens_per_second;
+  if (ms.seconds_per_memory_frame > 0.0f) seconds_per_memory_frame = ms.seconds_per_memory_frame;
+  if (ms.max_segment_memory_frames > 0) max_segment_memory_frames = ms.max_segment_memory_frames;
+  if (ms.min_segment_memory_frames > 0) min_segment_memory_frames = ms.min_segment_memory_frames;
+
+  // Pipeline filenames — all 5 must be present in the moonshine config block.
+  auto require = [](const std::string& s, const char* field) {
+    if (s.empty()) {
+      throw std::runtime_error(
+          std::string("moonshine streaming model: genai_config.json must set model.moonshine.") +
+          field);
+    }
+  };
+  require(ms.frontend_filename,   "frontend_filename");
+  require(ms.encoder_filename,    "encoder_filename");
+  require(ms.adapter_filename,    "adapter_filename");
+  require(ms.cross_kv_filename,   "cross_kv_filename");
+  require(ms.decoder_kv_filename, "decoder_kv_filename");
+  frontend_filename   = ms.frontend_filename;
+  encoder_filename    = ms.encoder_filename;
+  adapter_filename    = ms.adapter_filename;
+  cross_kv_filename   = ms.cross_kv_filename;
+  decoder_kv_filename = ms.decoder_kv_filename;
 }
 
 MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -69,6 +100,98 @@ MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config,
 std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
                                                             const GeneratorParams& params) const {
   return std::make_unique<MoonshineStreamingState>(*this, params);
+}
+
+// ----------------------------------------------------------------------------
+// Stateless session-call wrappers. These exist so callers (Processor /
+// State) don't have to know per-graph input and output names.
+// ----------------------------------------------------------------------------
+
+MoonshineStreamingModel::FrontendOutputs MoonshineStreamingModel::RunFrontend(
+    OrtValue& audio_chunk,
+    OrtValue& sample_buffer,
+    OrtValue& sample_len,
+    OrtValue& conv1_buffer,
+    OrtValue& conv2_buffer,
+    OrtValue& frame_count) const {
+  const char* in_names[]  = {"audio_chunk", "sample_buffer", "sample_len",
+                             "conv1_buffer", "conv2_buffer", "frame_count"};
+  OrtValue*   in_values[] = {&audio_chunk, &sample_buffer, &sample_len,
+                             &conv1_buffer, &conv2_buffer, &frame_count};
+  const char* out_names[] = {"features", "sample_buffer_out", "sample_len_out",
+                             "conv1_buffer_out", "conv2_buffer_out", "frame_count_out"};
+  OrtValue*   out_values[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+
+  session_frontend_->Run(nullptr,
+                         in_names, in_values, 6,
+                         out_names, out_values, 6);
+
+  return FrontendOutputs{
+      std::unique_ptr<OrtValue>(out_values[0]),
+      std::unique_ptr<OrtValue>(out_values[1]),
+      std::unique_ptr<OrtValue>(out_values[2]),
+      std::unique_ptr<OrtValue>(out_values[3]),
+      std::unique_ptr<OrtValue>(out_values[4]),
+      std::unique_ptr<OrtValue>(out_values[5]),
+  };
+}
+
+std::unique_ptr<OrtValue> MoonshineStreamingModel::RunEncoder(OrtValue& features) const {
+  const char* in_names[]  = {"features"};
+  OrtValue*   in_values[] = {&features};
+  const char* out_names[] = {"encoded"};
+  OrtValue*   out_values[1] = {nullptr};
+  session_encoder_->Run(nullptr,
+                        in_names, in_values, 1,
+                        out_names, out_values, 1);
+  return std::unique_ptr<OrtValue>(out_values[0]);
+}
+
+std::unique_ptr<OrtValue> MoonshineStreamingModel::RunAdapter(OrtValue& encoded,
+                                                              OrtValue& pos_offset) const {
+  const char* in_names[]  = {"encoded", "pos_offset"};
+  OrtValue*   in_values[] = {&encoded, &pos_offset};
+  const char* out_names[] = {"memory"};
+  OrtValue*   out_values[1] = {nullptr};
+  session_adapter_->Run(nullptr,
+                        in_names, in_values, 2,
+                        out_names, out_values, 1);
+  return std::unique_ptr<OrtValue>(out_values[0]);
+}
+
+MoonshineStreamingModel::CrossKvOutputs MoonshineStreamingModel::RunCrossKv(OrtValue& memory) const {
+  const char* in_names[]  = {"memory"};
+  OrtValue*   in_values[] = {&memory};
+  const char* out_names[] = {"k_cross", "v_cross"};
+  OrtValue*   out_values[2] = {nullptr, nullptr};
+  session_cross_kv_->Run(nullptr,
+                         in_names, in_values, 1,
+                         out_names, out_values, 2);
+  return CrossKvOutputs{
+      std::unique_ptr<OrtValue>(out_values[0]),
+      std::unique_ptr<OrtValue>(out_values[1]),
+  };
+}
+
+MoonshineStreamingModel::DecoderKvOutputs MoonshineStreamingModel::RunDecoderKv(
+    OrtValue& token, OrtValue& k_self, OrtValue& v_self,
+    OrtValue& k_cross, OrtValue& v_cross) const {
+  const char* in_names[]  = {"token", "k_self", "v_self", "out_k_cross", "out_v_cross"};
+  OrtValue*   in_values[] = {&token, &k_self, &v_self, &k_cross, &v_cross};
+  const char* out_names[] = {"logits", "out_k_self", "out_v_self",
+                             "out_k_cross", "out_v_cross"};
+  OrtValue*   out_values[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  session_decoder_kv_->Run(nullptr,
+                           in_names, in_values, 5,
+                           out_names, out_values, 5);
+  // Discard the cross-KV pass-throughs; the caller already owns the inputs.
+  (void)std::unique_ptr<OrtValue>(out_values[3]);
+  (void)std::unique_ptr<OrtValue>(out_values[4]);
+  return DecoderKvOutputs{
+      std::unique_ptr<OrtValue>(out_values[0]),
+      std::unique_ptr<OrtValue>(out_values[1]),
+      std::unique_ptr<OrtValue>(out_values[2]),
+  };
 }
 
 MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& model,
@@ -261,32 +384,16 @@ int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& token
   }
 
   // decoder_kv inputs: token[1,N], k_self, v_self, out_k_cross, out_v_cross.
-  const char* in_names[] = {"token", "k_self", "v_self", "out_k_cross", "out_v_cross"};
-  OrtValue* in_values[]  = {
-      token_input_ptr,
-      k_self_.get(),
-      v_self_.get(),
-      k_cross_tensor_->ort_tensor_.get(),
-      v_cross_tensor_->ort_tensor_.get(),
-  };
-
-  // decoder_kv outputs: logits[1,N,vocab], out_k_self, out_v_self,
-  // out_k_cross, out_v_cross. The cross-KV outputs are passthroughs of the
-  // inputs; we discard them and keep the chunk-scoped input tensors alive
-  // ourselves.
-  const char* out_names[]  = {"logits", "out_k_self", "out_v_self", "out_k_cross", "out_v_cross"};
-  OrtValue*   out_values[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-
-  moonshine_model_.session_decoder_kv_->Run(
-      nullptr,
-      in_names, in_values, 5,
-      out_names, out_values, 5);
-
-  auto logits = std::unique_ptr<OrtValue>(out_values[0]);
-  k_self_ = std::unique_ptr<OrtValue>(out_values[1]);
-  v_self_ = std::unique_ptr<OrtValue>(out_values[2]);
-  (void)std::unique_ptr<OrtValue>(out_values[3]);
-  (void)std::unique_ptr<OrtValue>(out_values[4]);
+  // The cross-KV input tensors are kept alive by us for the whole chunk;
+  // RunDecoderKv discards the (pass-through) cross-KV outputs internally.
+  auto dk = moonshine_model_.RunDecoderKv(*token_input_ptr,
+                                          *k_self_,
+                                          *v_self_,
+                                          *k_cross_tensor_->ort_tensor_,
+                                          *v_cross_tensor_->ort_tensor_);
+  auto logits = std::move(dk.logits);
+  k_self_ = std::move(dk.k_self_out);
+  v_self_ = std::move(dk.v_self_out);
 
   // Greedy argmax over the LAST position's logits (predicting token N).
   auto lshape = logits->GetTensorTypeAndShapeInfo()->GetShape();
