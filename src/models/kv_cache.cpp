@@ -151,9 +151,9 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
 namespace {
 
 // Compute the compressed KV cache head dimension for quantized KV caches.
-// The quantizer packs each head into (1 + head_size/8) u32 words: one fp32 scale followed by
-// head_size values quantized to 4 bits. The tensor dimension depends on the element type.
-// Quantization requires head_size >= 8 and a power of 2 (packing 8 indices per u32 needs
+// The quantizer packs each head into (1 + head_size / indices_per_word) u32 words: one fp32 scale followed by
+// head_size values quantized to 4 or 8 bits (4-bit: 8 values/u32, 8-bit: 4 values/u32).
+// The tensor dimension depends on the element type.
 // head_size >= 8). If kv_cache_quantization_bits is enabled with an invalid head_size, this
 // throws instead of silently falling back.
 //
