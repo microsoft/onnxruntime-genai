@@ -113,7 +113,7 @@ def main():
         execution_provider="cuda",
     )
 
-    pending_before = telemetry._store.record_count(tenant)
+    pending_before = telemetry._store.count()
     print(f"  Enqueued; pending in store before flush: {pending_before}")
 
     print("[8/8] Flushing uploader (drain store) ...")
@@ -121,9 +121,9 @@ def main():
 
     # Re-open the store read-only to confirm it drained (uploader deletes on 2xx).
     from telemetry.deviceid import get_telemetry_base_dir
-    from telemetry.offline_store import OfflineStorageSqlite
-    db_path = os.path.join(get_telemetry_base_dir(), "telemetry_offline.db")
-    remaining = OfflineStorageSqlite(db_path).record_count(tenant)
+    from telemetry.offline_store import OfflineEventStore
+    db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
+    remaining = OfflineEventStore(db_path).count()
 
     print()
     print("=" * 60)

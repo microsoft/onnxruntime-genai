@@ -5,14 +5,19 @@
 
 """Background uploader that drains the SQLite offline store to OneCollector.
 
-Mirrors the Microsoft 1DS C++ SDK upload loop: reserve a batch of records
-(leased so other workers/processes don't double-send), POST them, then delete
-on success or release (with retry increment) on failure. Because durability is
-provided by the on-disk store, the process can exit at any time without losing
-events -- there is no exit-time flush requirement.
+Reads the oldest batch of events, POSTs them, and:
+- deletes them on success (HTTP 2xx),
+- deletes them on a permanent, non-retryable failure (e.g. HTTP 4xx) so a
+  poison event cannot block the queue forever,
+- leaves them on a transient failure (network error / HTTP 5xx / timeout) to be
+  retried on the next cycle or the next process run.
+
+Durability is provided by the on-disk store, so the process can exit at any time
+without losing events and without an exit-time flush.
 """
 
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -20,30 +25,26 @@ import requests
 from .library.options import CompressionType, OneCollectorTransportOptions
 from .library.payload_builder import PayloadBuilder
 from .library.transport import HttpJsonPostTransport
-from .offline_store import OfflineStorageSqlite
+from .offline_store import OfflineEventStore
 
 
 class EventUploader:
-    """Drains the offline store for a single tenant and ships events over HTTP."""
+    """Drains the offline store and ships events over HTTP on a daemon thread."""
 
     def __init__(
         self,
-        store: OfflineStorageSqlite,
+        store: OfflineEventStore,
         instrumentation_key: str,
-        tenant_token: str,
         endpoint: str = OneCollectorTransportOptions.DEFAULT_ENDPOINT,
         compression: CompressionType = CompressionType.DEFLATE,
         drain_interval_seconds: float = 2.0,
         max_items_per_drain: int = 256,
-        lease_time_ms: int = 30_000,
         send_timeout_seconds: float = 10.0,
         idle_backoff_seconds: float = 30.0,
     ):
         self._store = store
-        self._tenant_token = tenant_token
         self._drain_interval = drain_interval_seconds
         self._max_items = max_items_per_drain
-        self._lease_time_ms = lease_time_ms
         self._send_timeout = send_timeout_seconds
         self._idle_backoff = idle_backoff_seconds
 
@@ -97,60 +98,64 @@ class EventUploader:
     # ----- draining ------------------------------------------------------
 
     def drain_once(self) -> tuple[int, int]:
-        """Attempt to upload one batch. Returns (sent_count, failed_count)."""
-        records = self._store.get_and_reserve_records(
-            lease_time_ms=self._lease_time_ms,
-            tenant_token=self._tenant_token,
-            max_count=self._max_items,
-        )
-        if not records:
+        """Attempt to upload one batch. Returns (delivered_count, left_count).
+
+        ``left_count`` is non-zero only when a transient failure leaves rows on
+        disk for a later retry; permanently-rejected rows are dropped (counted as
+        delivered for loop-termination purposes since they leave the queue).
+        """
+        batch = self._store.get_batch(self._max_items)
+        if not batch:
             return (0, 0)
 
         builder = PayloadBuilder(
             max_size_bytes=OneCollectorTransportOptions.DEFAULT_MAX_PAYLOAD_SIZE_BYTES,
             max_items=OneCollectorTransportOptions.DEFAULT_MAX_ITEMS_PER_PAYLOAD,
         )
-        ids = [r.record_id for r in records]
-        for r in records:
-            if not builder.can_add(r.payload) and not builder.is_empty:
+        included: list[int] = []
+        for row_id, payload in batch:
+            if not builder.can_add(payload) and not builder.is_empty:
                 break
-            builder.add(r.payload)
-        payload = builder.build()
+            builder.add(payload)
+            included.append(row_id)
+        payload_bytes = builder.build()
 
         try:
-            success, _status = self._transport.send(payload, self._send_timeout, item_count=len(ids))
+            success, status = self._transport.send(payload_bytes, self._send_timeout, item_count=len(included))
         except Exception:
-            success = False
+            success, status = (False, None)
 
         if success:
-            self._store.delete_records(ids)
-            return (len(ids), 0)
-        self._store.release_records(ids, increment_retry=True)
-        return (0, len(ids))
+            self._store.delete(included)
+            return (len(included), 0)
+        if not HttpJsonPostTransport.is_retryable(status):
+            # Permanent rejection (e.g. 4xx): drop so it can't block the queue.
+            self._store.delete(included)
+            return (len(included), 0)
+        # Transient failure: leave the rows for the next attempt.
+        return (0, len(included))
 
     def flush(self, max_seconds: float = 5.0) -> None:
         """Best-effort drain of all pending events, bounded by max_seconds."""
-        import time
-
         deadline = time.time() + max_seconds
         while time.time() < deadline:
-            sent, failed = self.drain_once()
-            if sent == 0 and failed == 0:
-                return  # nothing left
-            if failed:
-                return  # network down; leave the rest on disk for next run
+            delivered, left = self.drain_once()
+            if delivered == 0 and left == 0:
+                return  # queue empty
+            if left:
+                return  # transient failure; leave the rest for next run
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            transient_failure = 0
             try:
-                sent, failed = self.drain_once()
-                while sent > 0 and not self._stop.is_set():
-                    sent, failed = self.drain_once()
+                delivered, left = self.drain_once()
+                while delivered > 0 and not self._stop.is_set():
+                    delivered, left = self.drain_once()
+                transient_failure = left
             except Exception:
-                failed = 1
+                transient_failure = 1
 
-            # Wait until nudged, the poll interval elapses, or (when offline)
-            # a longer backoff elapses.
-            wait = self._idle_backoff if failed else self._drain_interval
+            wait = self._idle_backoff if transient_failure else self._drain_interval
             self._wake.wait(wait)
             self._wake.clear()
