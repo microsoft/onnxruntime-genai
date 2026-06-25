@@ -33,6 +33,9 @@ GpuMemoryInfo GetGpuMemoryUsage() {
     const HRESULT enum_hr = factory->EnumAdapters1(i, &adapter1);
     if (enum_hr == DXGI_ERROR_NOT_FOUND) break;
     if (FAILED(enum_hr) || adapter1 == nullptr) {
+      if (adapter1 != nullptr) {
+        adapter1->Release();
+      }
       continue;
     }
 
