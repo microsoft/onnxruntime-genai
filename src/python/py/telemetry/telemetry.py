@@ -88,6 +88,20 @@ def _get_app_version() -> str:
     return "unknown"
 
 
+def _redact_paths(text: str) -> str:
+    """Replace absolute filesystem paths with their basename (drops usernames)."""
+    import re
+
+    # Windows drive paths (C:\Users\me\x) and POSIX absolute paths (/home/me/x).
+    pattern = re.compile(r"(?:[A-Za-z]:\\[^\s\"']+)|(?:/[^\s\"':]+(?:/[^\s\"':]+)+)")
+
+    def _basename(match: "re.Match") -> str:
+        raw = match.group(0)
+        return raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or raw
+
+    return pattern.sub(_basename, text)
+
+
 def _format_exception_message(ex: BaseException, tb=None) -> str:
     """Format an exception and trim local paths for privacy."""
     formatted = traceback.format_exception(type(ex), ex, tb, limit=5)
@@ -102,6 +116,9 @@ def _format_exception_message(ex: BaseException, tb=None) -> str:
         elif line_trunc.startswith('File "'):
             idx = line_trunc[len('File "') :].find('"')
             line_trunc = line_trunc[idx + len('File "') :]
+        else:
+            # Exception message / other lines: redact any absolute paths.
+            line_trunc = _redact_paths(line_trunc)
         lines.append(line_trunc)
     return "\n".join(lines)
 
@@ -173,7 +190,12 @@ class GenAITelemetry:
                 )
                 self._uploader.start()
 
-                self._log_heartbeat()
+                # The heartbeat collects system info via blocking subprocesses
+                # (nvidia-smi/wmic/sysctl); run it off the host thread so the
+                # first telemetry call never stalls the caller.
+                threading.Thread(
+                    target=self._log_heartbeat, name="genai-telemetry-heartbeat", daemon=True
+                ).start()
             except Exception:
                 self._store = None
                 self._uploader = None
@@ -439,10 +461,13 @@ class GenAITelemetry:
             pass
 
     def disable_telemetry(self) -> None:
-        """Disable telemetry and stop the background uploader."""
+        """Disable telemetry and stop the background uploader (non-blocking)."""
         self._enabled = False
         if self._uploader is not None:
-            self._uploader.stop()
+            # Signal the daemon thread to wind down without joining, so opting
+            # out never blocks the caller. The thread releases the drain lock on
+            # exit; any already-stored events go out on the next run.
+            self._uploader.signal_stop()
             self._uploader = None
 
     def enable_telemetry(self) -> None:
@@ -466,11 +491,11 @@ class GenAITelemetry:
         """
         if self._uploader is not None:
             try:
-                # Quiesce the background drainer (waits for any in-flight send),
-                # then drain synchronously as the sole drainer so there is no
-                # race over the same rows.
-                self._uploader.stop_loop()
-                self._uploader.flush(flush_seconds)
+                # Quiesce the background drainer first. Only drain synchronously
+                # if it actually stopped, so we never double-send rows a still
+                # in-flight send is processing.
+                if self._uploader.stop_loop():
+                    self._uploader.flush(flush_seconds)
             except Exception:
                 pass
             finally:

@@ -76,13 +76,34 @@ class EventUploader:
         """Nudge the uploader to drain promptly (e.g. after logging an event)."""
         self._wake.set()
 
-    def stop_loop(self, join_timeout_seconds: float = 12.0) -> None:
-        """Stop the background loop and wait for any in-flight send to finish."""
+    def stop_loop(self, join_timeout_seconds: float = 5.0) -> bool:
+        """Stop the background loop and wait briefly for it to exit.
+
+        Returns True if the thread actually stopped (so a caller may safely drain
+        as the sole drainer), False if it is still alive (e.g. stuck in an
+        in-flight send) — in which case the caller must NOT drain, to avoid
+        double-sending the rows the thread is still processing.
+        """
         self._stop.set()
         self._wake.set()
-        if self._thread is not None:
-            self._thread.join(join_timeout_seconds)
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(join_timeout_seconds)
+        stopped = not thread.is_alive()
+        if stopped:
             self._thread = None
+        return stopped
+
+    def signal_stop(self) -> None:
+        """Ask the loop to stop without blocking the caller.
+
+        The daemon thread winds down on its next wake; the drain lock is released
+        when it exits (or by the OS at process exit). Use this for the opt-out
+        path so disabling telemetry never blocks the host.
+        """
+        self._stop.set()
+        self._wake.set()
 
     def close(self) -> None:
         """Release the single-drainer lock (urllib holds no persistent connection)."""
@@ -150,19 +171,24 @@ class EventUploader:
                 return  # transient failure; leave the rest for next run
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            transient_failure = 0
-            # Only one process drains at a time. If another holds the lock, skip
-            # draining this cycle; our events remain durable for the holder.
-            if self._drain_lock.acquire():
-                try:
-                    delivered, left = self.drain_once()
-                    while delivered > 0 and not self._stop.is_set():
+        try:
+            while not self._stop.is_set():
+                transient_failure = 0
+                # Only one process drains at a time. If another holds the lock, skip
+                # draining this cycle; our events remain durable for the holder.
+                if self._drain_lock.acquire():
+                    try:
                         delivered, left = self.drain_once()
-                    transient_failure = left
-                except Exception:
-                    transient_failure = 1
+                        while delivered > 0 and not self._stop.is_set():
+                            delivered, left = self.drain_once()
+                        transient_failure = left
+                    except Exception:
+                        transient_failure = 1
 
-            wait = self._idle_backoff if transient_failure else self._drain_interval
-            self._wake.wait(wait)
-            self._wake.clear()
+                wait = self._idle_backoff if transient_failure else self._drain_interval
+                self._wake.wait(wait)
+                self._wake.clear()
+        finally:
+            # Release the single-drainer lock when the loop exits so another
+            # process can take over (also released by close()/OS on exit).
+            self._drain_lock.release()
