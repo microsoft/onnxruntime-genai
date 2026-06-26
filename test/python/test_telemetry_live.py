@@ -58,6 +58,7 @@ def main():
                     "status_code": status_code,
                     "payload_size_bytes": len(payload),
                     "item_count": item_count,
+                    "has_heartbeat": b"GenAIHeartbeat" in bytes(payload),
                 }
             )
         return succeeded, status_code
@@ -82,10 +83,10 @@ def main():
             return 1
         print("  OK: store + uploader initialized")
 
-        # The heartbeat is sent directly on a background thread (system-info
-        # collection uses blocking subprocesses); wait for that thread so its
-        # send is recorded before we add the detailed events.
-        print("[2/8] Letting the background heartbeat be collected/sent...")
+        # The heartbeat is enqueued on a background thread (system-info
+        # collection uses blocking subprocesses); wait for that thread so it is
+        # in the store before we add the detailed events.
+        print("[2/8] Letting the background heartbeat be collected/enqueued...")
         if telemetry._heartbeat_thread is not None:
             telemetry._heartbeat_thread.join(20)
 
@@ -153,14 +154,14 @@ def main():
             print(f"  {ok} payload {i+1}: status={r['status_code']} items={r['item_count']} size={r['payload_size_bytes']}B")
         failures = sum(1 for r in transmission_results if not r["succeeded"])
         sent_items = sum(r["item_count"] for r in transmission_results if r["succeeded"])
-        heartbeat_sent = any(r["succeeded"] and r["item_count"] == 1 for r in transmission_results)
+        heartbeat_sent = any(r["succeeded"] and r["has_heartbeat"] for r in transmission_results)
     print(f"  pending before flush: {pending_before}")
     print(f"  remaining in store after flush: {remaining}")
     print(f"  HTTP payloads: {len(transmission_results)}, failures: {failures}, items delivered: {sent_items}")
     print(f"  heartbeat delivered: {heartbeat_sent}")
     print()
 
-    # 1 heartbeat (direct) + 5 detailed (uploader) = 6 items.
+    # 1 heartbeat + 5 detailed = 6 items, all through the durable uploader.
     if remaining == 0 and failures == 0 and sent_items >= 6 and heartbeat_sent:
         print("=" * 60)
         print(f"ALL EVENTS DELIVERED ({sent_items} items: heartbeat + 5 detailed, store drained, HTTP 2xx)")

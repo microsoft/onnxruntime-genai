@@ -54,9 +54,15 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         for var in self._ENV_SIGNALS:
             os.environ.pop(var, None)
 
+        self.sent_payloads = []
+
+        def _record_send(payload, timeout_sec, item_count=1):
+            self.sent_payloads.append(bytes(payload))
+            return (True, 204)
+
         send_patcher = patch(
             "telemetry.library.transport.HttpJsonPostTransport.send",
-            return_value=(True, 204),
+            side_effect=_record_send,
         )
         self.mock_send = send_patcher.start()
         self._patchers.append(send_patcher)
@@ -93,6 +99,34 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         if t is not None and t._heartbeat_thread is not None:
             t._heartbeat_thread.join()
 
+    def _deliver(self):
+        """Join the heartbeat and drain the uploader so every queued event is
+        recorded in ``self.sent_payloads`` deterministically."""
+        from telemetry.telemetry import GenAITelemetry
+        t = GenAITelemetry._instance
+        if t is None:
+            return None
+        if t._heartbeat_thread is not None:
+            t._heartbeat_thread.join()
+        if t._uploader is not None:
+            t._uploader.stop_loop()
+            for _ in range(20):
+                if t._store is None or t._store.count() == 0:
+                    break
+                t._uploader.drain_once()
+        return t
+
+    def _sent_event_names(self):
+        names = []
+        for payload in self.sent_payloads:
+            for token in (
+                b"GenAIHeartbeat", b"GenAIModelBuild", b"GenAIBenchmark",
+                b"GenAIModelLoad", b"GenAIInference", b"GenAIAction", b"GenAIError",
+            ):
+                if token in payload:
+                    names.append(token.decode())
+        return names
+
 
 class TestOptOut(_HermeticTelemetryTestCase):
     """Test the three-state telemetry semantics: enabled / opt-out / CI."""
@@ -102,8 +136,8 @@ class TestOptOut(_HermeticTelemetryTestCase):
         os.environ["CI"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
+        # CI creates no store/uploader and no heartbeat — nothing is recorded.
         self.assertIsNone(t._store)
-        # CI suppresses even the device-id heartbeat.
         self.assertIsNone(t._heartbeat_thread)
         self.assertFalse(self.mock_send.called)
 
@@ -112,30 +146,35 @@ class TestOptOut(_HermeticTelemetryTestCase):
         os.environ["GITHUB_ACTIONS"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
         self.assertIsNone(t._heartbeat_thread)
         self.assertFalse(self.mock_send.called)
 
-    def test_opt_out_sends_heartbeat_only(self):
+    def test_opt_out_records_heartbeat_only(self):
         from telemetry.telemetry import GenAITelemetry
         os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
-        # Detailed telemetry is off (no store), but the device-id heartbeat
-        # still goes out so device counting keeps working.
+        # Detailed events are not recorded, but the heartbeat is durably queued.
         self.assertFalse(t._enabled)
-        self.assertIsNone(t._store)
+        self.assertIsNotNone(t._store)
         self.assertIsNotNone(t._heartbeat_thread)
-        self._join_heartbeat()
-        self.assertTrue(self.mock_send.called)
-        # Detailed-event methods remain no-ops and must not raise.
+        # A detailed-event method must be a no-op and must not raise.
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
+        self._deliver()
+        # The heartbeat went out; no detailed event did.
+        self.assertIn("GenAIHeartbeat", self._sent_event_names())
+        self.assertNotIn("GenAIModelBuild", self._sent_event_names())
 
-    def test_enabled_sends_heartbeat_and_creates_store(self):
+    def test_enabled_records_heartbeat_and_events(self):
         from telemetry.telemetry import GenAITelemetry
         t = GenAITelemetry()
-        self._join_heartbeat()
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
-        self.assertTrue(self.mock_send.called)
+        t.log_model_build(action="create_model", duration_ms=1.0, success=True)
+        self._deliver()
+        names = self._sent_event_names()
+        self.assertIn("GenAIHeartbeat", names)
+        self.assertIn("GenAIModelBuild", names)
 
     def test_disable_enable_api(self):
         from telemetry.telemetry import GenAITelemetry
@@ -154,13 +193,14 @@ class TestOptOut(_HermeticTelemetryTestCase):
         os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         self._join_heartbeat()
+        # Opt-out still creates the store (for the heartbeat) but keeps detailed
+        # events disabled.
         self.assertFalse(t._enabled)
-        self.assertIsNone(t._store)
+        self.assertIsNotNone(t._store)
         # The environment opt-out is the master switch: a programmatic enable
         # must not silently resume detailed telemetry.
         t.enable_telemetry()
         self.assertFalse(t._enabled)
-        self.assertIsNone(t._store)
 
 
 class TestPathRedaction(unittest.TestCase):
