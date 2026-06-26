@@ -98,20 +98,35 @@ def _get_cpu_model() -> str:
 
 
 def _get_total_memory_mb() -> int:
-    """Get total system memory in MB."""
+    """Get total system memory in MB using only the standard library."""
     try:
-        import psutil
-        return int(psutil.virtual_memory().total / (1024 * 1024))
-    except ImportError:
-        pass
+        system = platform.system()
+        if system == "Windows":
+            import ctypes
 
-    try:
-        if platform.system() == "Linux":
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys / (1024 * 1024))
+        elif system == "Linux":
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
                         return int(line.split()[1]) // 1024
-        elif platform.system() == "Darwin":
+        elif system == "Darwin":
             result = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
                 capture_output=True, text=True, timeout=5

@@ -144,14 +144,20 @@ def action(func: _TFunc) -> _TFunc:
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any):
-        invoked_from = _resolve_invoked_from()
-        action_name = func.__name__
+        # Resolve telemetry context defensively: instrumentation (including
+        # inspect.stack()) must never propagate into the wrapped call.
+        try:
+            invoked_from = _resolve_invoked_from()
+            action_name = func.__name__
 
-        # Try to resolve class name for methods
-        if args and hasattr(args[0], "__class__"):
-            cls_name = args[0].__class__.__name__
-            if cls_name != "type":
-                action_name = f"{cls_name}.{func.__name__}" if func.__name__ != "run" else cls_name
+            # Try to resolve class name for methods
+            if args and hasattr(args[0], "__class__"):
+                cls_name = args[0].__class__.__name__
+                if cls_name != "type":
+                    action_name = f"{cls_name}.{func.__name__}" if func.__name__ != "run" else cls_name
+        except Exception:
+            invoked_from = "unknown"
+            action_name = getattr(func, "__name__", "unknown")
 
         start_time = time.perf_counter()
         success = True
