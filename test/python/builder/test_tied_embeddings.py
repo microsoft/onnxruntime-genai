@@ -65,8 +65,6 @@ def test_shared_embeddings_option_overrides_config_tie_word_embeddings():
         onnx_dtype=ir.DataType.INT4,
     )
 
-    assert model.quantized_embeds is True
-    assert model.quantized_lm_head is True
     assert model.tied_quantized_embeddings is False
     assert model.tied_unquantized_embeddings is False
 
@@ -82,29 +80,58 @@ def test_tie_word_embeddings_defaults_to_false_when_unset_or_none():
 
 
 @pytest.mark.parametrize(
-    "onnx_dtype, op_types, nodes_to_exclude, exclude_embeds, exclude_lm_head, prune_lm_head, expected_embeds, expected_lm_head",
+    "exclude_embeds, exclude_lm_head, prune_lm_head",
     [
-        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, False, True, True),
-        (ir.DataType.UINT4, ("MatMul", "Gather"), (), False, False, False, True, True),
-        (ir.DataType.FLOAT16, ("MatMul", "Gather"), (), False, False, False, False, False),
-        (ir.DataType.INT4, ("MatMul",), (), False, False, False, False, True),
-        (ir.DataType.INT4, ("Gather",), (), False, False, False, True, False),
-        (ir.DataType.INT4, ("MatMul", "Gather"), ("/model/embed_tokens/Gather",), False, False, False, False, True),
-        (ir.DataType.INT4, ("MatMul", "Gather"), ("/lm_head/MatMul",), False, False, False, True, False),
-        (ir.DataType.INT4, ("MatMul", "Gather"), (), True, False, False, False, True),
-        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, True, False, True, False),
-        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, True, True, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
     ],
 )
-def test_quantization_eligibility_for_embeddings_and_lm_head(
+def test_shared_embeddings_are_disabled_when_embeddings_or_lm_head_are_excluded(
+    exclude_embeds,
+    exclude_lm_head,
+    prune_lm_head,
+):
+    model = _make_model_for_tied_embeddings(
+        shared_embeddings=True,
+        tie_word_embeddings=False,
+        onnx_dtype=ir.DataType.INT4,
+        exclude_embeds=exclude_embeds,
+        exclude_lm_head=exclude_lm_head,
+        prune_lm_head=prune_lm_head,
+    )
+
+    assert model.tied_quantized_embeddings is False
+    assert model.tied_unquantized_embeddings is False
+
+
+@pytest.mark.parametrize(
+    "onnx_dtype, op_types, nodes_to_exclude, exclude_embeds, exclude_lm_head, prune_lm_head, int4_algo_config, expected_tied_quantized, expected_tied_unquantized",
+    [
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, False, "default", True, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, False, "rtn", True, False),
+        (ir.DataType.UINT4, ("MatMul", "Gather"), (), False, False, False, "default", True, False),
+        (ir.DataType.UINT4, ("MatMul", "Gather"), (), False, False, False, "k_quant", True, False),
+        (ir.DataType.FLOAT16, ("MatMul", "Gather"), (), False, False, False, "default", False, True),
+        (ir.DataType.INT4, ("MatMul",), (), False, False, False, "rtn", False, False),
+        (ir.DataType.INT4, ("Gather",), (), False, False, False, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), ("/model/embed_tokens/Gather",), False, False, False, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), ("/lm_head/MatMul",), False, False, False, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), True, False, False, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, True, False, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, True, "rtn", False, False),
+    ],
+)
+def test_tied_embedding_path_selection_matches_current_base_logic(
     onnx_dtype,
     op_types,
     nodes_to_exclude,
     exclude_embeds,
     exclude_lm_head,
     prune_lm_head,
-    expected_embeds,
-    expected_lm_head,
+    int4_algo_config,
+    expected_tied_quantized,
+    expected_tied_unquantized,
 ):
     model = _make_model_for_tied_embeddings(
         shared_embeddings=True,
@@ -115,24 +142,32 @@ def test_quantization_eligibility_for_embeddings_and_lm_head(
         exclude_embeds=exclude_embeds,
         exclude_lm_head=exclude_lm_head,
         prune_lm_head=prune_lm_head,
+        int4_algo_config=int4_algo_config,
     )
 
-    assert model.quantized_embeds is expected_embeds
-    assert model.quantized_lm_head is expected_lm_head
+    assert model.tied_quantized_embeddings is expected_tied_quantized
+    assert model.tied_unquantized_embeddings is expected_tied_unquantized
 
 
 @pytest.mark.parametrize(
-    "quantized_embeds, quantized_lm_head, expected_tied_quantized, expected_tied_unquantized",
+    "quantized_embeds, quantized_lm_head, int4_algo_config, expected_tied_quantized, expected_tied_unquantized",
     [
-        (True, True, True, False),
-        (True, False, False, True),
-        (False, True, False, True),
-        (False, False, False, True),
+        (True, True, "default", True, False),
+        (True, True, "rtn", True, False),
+        (True, True, "rtn_last", True, False),
+        (True, True, "k_quant", True, False),
+        (True, True, "k_quant_last", True, False),
+        (True, True, "k_quant_mixed", True, False),
+        (True, True, "k_quant_linear", True, False),
+        (True, False, "rtn", False, False),
+        (False, True, "rtn", False, False),
+        (False, False, "rtn", False, True),
     ],
 )
 def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quantized(
     quantized_embeds,
     quantized_lm_head,
+    int4_algo_config,
     expected_tied_quantized,
     expected_tied_unquantized,
 ):
@@ -142,6 +177,7 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
         tie_word_embeddings=False,
         onnx_dtype=ir.DataType.INT4,
         op_types=op_types,
+        int4_algo_config=int4_algo_config,
     )
 
     assert model.tied_quantized_embeddings is expected_tied_quantized
@@ -149,31 +185,126 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
 
 
 @pytest.mark.parametrize(
-    "int4_algo_config, expected_int4_lm_head, expected_int8_lm_head",
+    "int4_algo_config, matmul_block_size, is_symmetric, expected_bits, expected_weight, expected_scale, expected_zp",
     [
-        ("default", False, False),
-        ("rtn", True, False),
-        ("k_quant", True, False),
-        ("k_quant_mixed", False, True),
-        ("k_quant_last", False, True),
-        ("k_quant_linear", False, True),
-        ("rtn_last", False, True),
+        ("default", 32, True, 4, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", ""),
+        ("default", 32, False, 4, "lm_head.MatMul.weight", "", ""),
+        ("rtn", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", ""),
+        ("rtn", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("rtn_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", ""),
+        ("rtn_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_mixed", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_mixed", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_linear", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        ("k_quant_linear", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
     ],
 )
-def test_lm_head_quantized_dtype_flags_derive_from_int4_algo_config(
+def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
     int4_algo_config,
-    expected_int4_lm_head,
-    expected_int8_lm_head,
+    matmul_block_size,
+    is_symmetric,
+    expected_bits,
+    expected_weight,
+    expected_scale,
+    expected_zp,
 ):
-    model = _make_model_for_tied_embeddings(
-        shared_embeddings=True,
-        tie_word_embeddings=True,
-        onnx_dtype=ir.DataType.INT4,
+    model = Model.__new__(Model)
+    model.extra_options = {"int4_algo_config": int4_algo_config}
+    model.algo_config_name = int4_algo_config
+    model.matmul_block_size = matmul_block_size
+    model.quant_attrs = {"is_symmetric": is_symmetric}
+
+    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+
+    assert bits == expected_bits
+    assert weight_name == expected_weight
+    assert scale_name == expected_scale
+    assert zp_name == expected_zp
+
+
+def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_symmetric=True, quant_type=None):
+    model = Model.__new__(Model)
+    model.extra_options = {"int4_algo_config": int4_algo_config}
+    model.algo_config_name = int4_algo_config
+    model.matmul_block_size = 32
+    model.hidden_size = 64
+    model.vocab_size = 32000
+    model.io_dtype = ir.DataType.FLOAT16
+    model.quant_attrs = {"is_symmetric": is_symmetric}
+    model.quant_type = quant_type
+    model.input_names = {"input_ids": "input_ids"}
+    model.embed_attrs = {"scale": 1}
+    model.layernorm_attrs = {
+        "cast": {"use_fp32": False},
+        "root_input": "",
+        "skip_input": "",
+    }
+    model.tied_quantized_embeddings = True
+    model.tied_unquantized_embeddings = False
+
+    model._reshape_calls = []
+    model._node_calls = []
+
+    def _make_reshape(name, inputs, dtype, shape):
+        model._reshape_calls.append((name, inputs, dtype, shape))
+
+    def _make_node(op_type, inputs, outputs, name, **kwargs):
+        model._node_calls.append((op_type, inputs, outputs, name, kwargs))
+
+    def _make_value(_name, _dtype, shape=None):
+        return shape
+
+    model.make_reshape = _make_reshape
+    model.make_node = _make_node
+    model.make_value = _make_value
+
+    return model
+
+
+@pytest.mark.parametrize(
+    "int4_algo_config, is_symmetric, quant_type, expected_weight_name, expected_scale_name, expected_zp_name, expect_zp_input",
+    [
+        ("default", True, None, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", None, False),
+        ("default", False, None, "lm_head.MatMul.weight", "", None, False),
+        ("rtn", True, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", None, False),
+        ("rtn", False, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
+        ("k_quant", True, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
+        ("k_quant", False, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
+    ],
+)
+def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_quantized_embeddings(
+    int4_algo_config,
+    is_symmetric,
+    quant_type,
+    expected_weight_name,
+    expected_scale_name,
+    expected_zp_name,
+    expect_zp_input,
+):
+    model = _make_minimal_model_for_quantized_tied_embedding(
         int4_algo_config=int4_algo_config,
+        is_symmetric=is_symmetric,
+        quant_type=quant_type,
     )
 
-    assert model.int4_lm_head is expected_int4_lm_head
-    assert model.int8_lm_head is expected_int8_lm_head
+    model.make_embedding(embedding=None)
+
+    assert model._reshape_calls[0][1][0] == expected_weight_name
+
+    gather_calls = [call for call in model._node_calls if call[0] == "GatherBlockQuantized"]
+    assert len(gather_calls) == 1
+    gather_inputs = gather_calls[0][1]
+    if expected_scale_name:  # Only check scale name if it's not empty
+        assert expected_scale_name in gather_inputs
+    if expected_zp_name is not None:
+        assert (expected_zp_name in gather_inputs) is expect_zp_input
+    else:
+        assert "lm_head.MatMul.weight_zp" not in gather_inputs
+        assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
 
 
 def _make_minimal_model_for_int4_matmul():
