@@ -92,8 +92,9 @@ RecurrentState::RecurrentState(State& state)
 
   if (state_.params_->use_graph_capture && !share_buffers_) {
     throw std::runtime_error(
-        "Graph capture requires past_present_share_buffer=true for models with recurrent state. "
-        "Set past_present_share_buffer to true in genai_config.json.");
+        "Graph capture requires past/present buffer sharing for models with recurrent state. "
+        "Ensure past_present_share_buffer=true in genai_config.json and num_beams=1 "
+        "(beam search disables buffer sharing).");
   }
 
   if (!share_buffers_) {
@@ -126,8 +127,8 @@ void RecurrentState::Add() {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    // Shared: alias input=output for stable addresses.
-    // WebGPU: separate past/present buffers to avoid aliasing violation.
+    // Shared buffers: alias input=output for stable addresses (required for graph capture).
+    // Separate buffers: use distinct past/present allocations with per-step pointer swap.
     state_.inputs_.push_back(share_buffers_ ? presents_[i].get() : pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
