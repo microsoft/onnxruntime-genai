@@ -35,7 +35,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
     """
 
     _ENV_SIGNALS = (
-        "ORTGENAI_DISABLE_TELEMETRY",
+        "ORT_DISABLE_TELEMETRY",
         "CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL",
         "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID",
     )
@@ -152,7 +152,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_opt_out_records_heartbeat_only(self):
         from telemetry.telemetry import GenAITelemetry
-        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         # Detailed events are not recorded, but the heartbeat is durably queued.
         self.assertFalse(t._enabled)
@@ -190,7 +190,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_enable_telemetry_does_not_override_env_opt_out(self):
         from telemetry.telemetry import GenAITelemetry
-        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         self._join_heartbeat()
         # Opt-out still creates the store (for the heartbeat) but keeps detailed
@@ -289,7 +289,7 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
 
     def _opted_out_telemetry(self):
         from telemetry.telemetry import GenAITelemetry
-        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         return GenAITelemetry()
 
     def test_log_model_build_when_disabled(self):
@@ -365,7 +365,7 @@ class TestActionDecorator(_HermeticTelemetryTestCase):
         super().setUp()
         # Action helpers construct the singleton lazily; keep them opted out so
         # they emit no detailed events during the test.
-        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 
     def test_action_decorator_success(self):
         from telemetry.telemetry_extensions import action

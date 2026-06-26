@@ -38,7 +38,7 @@ def main():
     except Exception:
         pass
 
-    os.environ.pop("ORTGENAI_DISABLE_TELEMETRY", None)
+    os.environ.pop("ORT_DISABLE_TELEMETRY", None)
     os.environ.pop("CI", None)
     os.environ.pop("GITHUB_ACTIONS", None)
     os.environ.pop("TF_BUILD", None)
