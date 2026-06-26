@@ -276,8 +276,6 @@ class GenAITelemetry:
             "device_model": sys_info.get("device_model", ""),
             "python_version": sys_info.get("python_version", ""),
             "ort_version": sys_info.get("ort_version", ""),
-            "user_locale": sys_info.get("user_locale", ""),
-            "user_timezone": sys_info.get("user_timezone", ""),
             "process_name": sys_info.get("process_name", ""),
             "available_providers": ",".join(ep_info.get("available_providers", [])),
         }
