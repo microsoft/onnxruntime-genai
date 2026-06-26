@@ -15,7 +15,9 @@
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
+#include "models/parakeet.h"
 #include "models/silero_vad.h"
+#include "models/model_package.h"
 
 namespace Generators {
 
@@ -233,7 +235,20 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
 
 OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaConfig>(std::make_unique<Generators::Config>(fs::path(config_path), std::string_view{}));
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out) {
+  OGA_TRY
+  if (!Generators::IsModelPackage(fs::path{config_path})) {
+    throw std::runtime_error(std::string("\"") + config_path +
+                             "\" is not a model package. Use OgaCreateConfig for a flat model directory.");
+  }
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path, ep);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
   return nullptr;
   OGA_CATCH
 }
@@ -481,9 +496,10 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
   OGA_TRY
-  // For RNNT models, search_ is not used; return tokens from last StepToken
-  if (auto* speech_state = dynamic_cast<Generators::NemotronSpeechState*>(generator->state_.get())) {
-    auto tokens = speech_state->GetStepTokens();
+  // Transducer models (RNNT, TDT) bypass the standard search; return tokens
+  // emitted by the most recent StepToken() call.
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    auto tokens = transducer->GetStepTokens();
     *out = tokens.data();
     *out_count = tokens.size();
     return nullptr;
@@ -588,10 +604,18 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* generator, OgaTenso
 }
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* generator, size_t index) {
+  // Transducer models (RNNT, TDT) bypass the standard search; the orchestrator
+  // state owns the accumulated transcript directly.
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    return transducer->GetAllTokens().size();
+  }
   return generator->GetSequence(static_cast<int>(index)).size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index) {
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    return transducer->GetAllTokens().data();
+  }
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
 }
 
@@ -652,6 +676,8 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
 
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
+  if (count > 0 && strings == nullptr)
+    throw std::runtime_error("EncodeBatch: strings pointer must not be null when count > 0");
   auto tensor = tokenizer->EncodeBatch(std::span<const char*>(strings, count));
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;

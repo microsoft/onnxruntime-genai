@@ -48,6 +48,31 @@ TEST(CAPITests, Config) {
 #endif
 }
 
+// Regression test: appending CPU provider should not throw.
+// See https://github.com/microsoft/onnxruntime-genai/pull/2179
+TEST(CAPITests, AppendCpuProvider) {
+#if TEST_PHI2
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->ClearProviders();
+  config->AppendProvider("cpu");
+  auto model = OgaModel::Create(*config);
+  ASSERT_NE(model.get(), nullptr);
+
+  // Also test other case variants
+  auto config2 = OgaConfig::Create(PHI2_PATH);
+  config2->ClearProviders();
+  config2->AppendProvider("CPU");
+  auto model2 = OgaModel::Create(*config2);
+  ASSERT_NE(model2.get(), nullptr);
+
+  auto config3 = OgaConfig::Create(PHI2_PATH);
+  config3->ClearProviders();
+  config3->AppendProvider("CPUExecutionProvider");
+  auto model3 = OgaModel::Create(*config3);
+  ASSERT_NE(model3.get(), nullptr);
+#endif
+}
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
@@ -105,6 +130,21 @@ TEST(CAPITests, TokenizerCAPI) {
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
       throw std::runtime_error("Stream token decoding mismatch");
   }
+#endif
+}
+
+TEST(CAPITests, EncodeBatchEmptyInputThrows) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  // EncodeBatch with zero strings should throw, not crash with SIGFPE
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 0), std::runtime_error);
+
+  // Invalid pointers with count > 0 should also be rejected deterministically.
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 1), std::runtime_error);
+  const char* bad_strings[] = {nullptr};
+  ASSERT_THROW(tokenizer->EncodeBatch(bad_strings, 1), std::runtime_error);
 #endif
 }
 
@@ -1466,7 +1506,7 @@ TEST(CAPITests, RewindQwen25CAPI) {
   // Save first-run output
   auto seq_len = generator->GetSequenceCount(0);
   std::vector<int32_t> first_output(seq_len);
-  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+  std::copy(generator->GetSequenceData(0), generator->GetSequenceData(0) + seq_len, first_output.begin());
 
   // RewindTo(0) - full rewind
   generator->RewindTo(0);
@@ -1700,4 +1740,79 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   auto mel3 = processor->Process(silence.data(), silence.size());
   ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
+}
+
+#ifndef PARAKEET_TDT_PATH
+#define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_JFK
+#define PARAKEET_TDT_AUDIO_JFK MODEL_PATH "audios/jfk.flac"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_TEDLIUM
+#define PARAKEET_TDT_AUDIO_TEDLIUM MODEL_PATH "audios/tedlium_long_120s.flac"
+#endif
+
+// Test that the Parakeet TDT model + processor + generator construct correctly.
+TEST(CAPITests, ParakeetTdtCreate) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+namespace {
+std::string RunParakeetTdt(const std::string& audio_path) {
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+
+  std::vector<const char*> paths{audio_path.c_str()};
+  auto audios = OgaAudios::Load(paths);
+  auto inputs = processor->ProcessAudios("", audios.get());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*inputs);
+
+  std::string transcription;
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+    auto count = generator->GetSequenceCount(0);
+    if (count == 0) continue;
+    auto last = generator->GetSequenceData(0)[count - 1];
+    if (auto piece = tokenizer_stream->Decode(last); piece && *piece) {
+      transcription += piece;
+    }
+  }
+  return transcription;
+}
+}  // namespace
+
+// Transcribe the bundled JFK clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeJfk) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_JFK))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_JFK;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_JFK);
+  EXPECT_FALSE(transcription.empty());
+}
+
+// Transcribe a 120s TED clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeLong) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_TEDLIUM))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_TEDLIUM;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_TEDLIUM);
+  EXPECT_FALSE(transcription.empty());
 }

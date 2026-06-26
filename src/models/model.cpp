@@ -1,21 +1,27 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "../generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
+#include "parakeet.h"
+#include "parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -23,6 +29,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
@@ -32,12 +39,9 @@
 #if defined(_WIN32)
 #include <direct.h>
 #define GETCWD _getcwd
-#define CHDIR _wchdir
-#include <windows.h>
 #else
 #include <unistd.h>
 #define GETCWD getcwd
-#define CHDIR chdir
 #include <limits.h>
 #endif
 
@@ -45,36 +49,8 @@ namespace Generators {
 
 namespace {
 
-class DirGuard {
- private:
-  fs::path original_dir_;
-
- public:
-  DirGuard() {
-    char buffer[PATH_MAX];
-    if (GETCWD(buffer, sizeof(buffer))) {
-      original_dir_ = fs::path(buffer);
-    } else {
-      throw std::runtime_error("Failed to get current working directory");
-    }
-  }
-
-  DirGuard(const DirGuard&) = delete;
-  DirGuard& operator=(const DirGuard&) = delete;
-  DirGuard(DirGuard&&) = delete;
-
-  void ChangeTo(const fs::path& new_dir) {
-    if (CHDIR(new_dir.c_str()) != 0) {
-      throw std::runtime_error("Failed to change directory to: " + new_dir.string());
-    }
-  }
-
-  ~DirGuard() {
-    if (CHDIR(original_dir_.c_str()) != 0 && g_log.enabled) {
-      Log("warning", "Failed to change back to original directory: " + original_dir_.string());
-    }
-  }
-};
+constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
+    "session.model_external_initializers_file_folder_path";
 
 }  // namespace
 
@@ -306,7 +282,9 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
+  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -362,6 +340,15 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
 }
 
 std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  if (strings.empty()) {
+    throw std::runtime_error("EncodeBatch: input strings must not be empty");
+  }
+  for (size_t i = 0; i < strings.size(); i++) {
+    if (strings[i] == nullptr) {
+      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
+    }
+  }
+
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
@@ -433,7 +420,37 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
+  const char* provider_name = device_type_names[static_cast<int>(type)];
+  Config::ProviderOptions init_session_provider_options{provider_name, {}};
+
+  // Forward only global/singleton WebGPU options to the init session so that the
+  // process-wide WebGpuContext singleton is initialized with the correct settings.
+  // Per-session options (enableGraphCapture, enableInt64, etc.) are excluded
+  // because they are meaningless for the trivial initialization model.
+  if (type == DeviceType::WEBGPU) {
+    constexpr std::array<std::string_view, 7> kWebGpuGlobalOptions = {
+        "deviceId",
+        "webgpuInstance",
+        "webgpuDevice",
+        "dawnBackendType",
+        "powerPreference",
+        "validationMode",
+        "dawnProcTable",
+    };
+    for (const auto& user_po : config.model.decoder.session_options.provider_options) {
+      if (user_po.name == provider_name) {
+        for (const auto& opt : user_po.options) {
+          if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
+            init_session_provider_options.options.emplace_back(opt);
+          }
+        }
+        init_session_provider_options.device_filtering_options = user_po.device_filtering_options;
+        break;
+      }
+    }
+  }
+
+  provider_options_list.emplace_back(std::move(init_session_provider_options));
   // QnnHtpShared is a special case. This allocator is only made available when the provider option
   // 'enable_htp_shared_memory_allocator' is set to 1.
   if (type == DeviceType::QNN) {
@@ -772,21 +789,12 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // TODO (baijumeswani): Loading ONNX models from memory that hold references to data stored in external files
-    // is not supported at the moment. This limitation stems from the fact that ONNX models typically
-    // reference these external files using relative paths to the model file. When loading a model from memory,
-    // the relative paths may not resolve correctly, leading to issues in locating the referenced data.
-    // To work around this, we change the current working directory to the model's config path
-    // before creating the session. This allows the model to resolve relative paths correctly.
-    // Note that this is not a problem for models that do not reference external files.
-    // This is a temporary solution and can be potentially addressed by exposing means to set a working directory
-    // for the OrtSession through the ONNX Runtime API.
-    // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
-    DirGuard dir_guard;
-    dir_guard.ChangeTo(config_->config_path);
-    auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
-
-    return session;
+    // For models loaded from memory that reference external data files, tell ORT where to find them
+    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
+    const fs::path external_initializers_path = fs::absolute(config_->config_path);
+    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                    external_initializers_path.string().c_str());
+    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
   // Otherwise, load the model from the file system
@@ -814,8 +822,38 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = CreateConfig(ort_env, config_path, /*ep=*/nullptr, config_overlay);
   return CreateModel(ort_env, std::move(config));
+}
+
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, const char* ep,
+                                     std::string_view json_overlay) {
+  const std::string ep_str = (ep != nullptr) ? std::string{ep} : std::string{};
+  const fs::path path{config_path};
+
+  if (IsModelPackage(path)) {
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+    if (!json_overlay.empty()) {
+      throw std::runtime_error(
+          "Loading a model package with runtime settings is not supported.");
+    }
+    auto load = OpenAndSelectVariant(ort_env, path, ep_str);
+    auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
+    config->package_root = load.package_root;
+    return config;
+#else
+    throw std::runtime_error(
+        "Model package support requires building onnxruntime-genai against "
+        "ONNX Runtime with the OrtModelPackageApi experimental functions.");
+#endif
+  }
+
+  if (!ep_str.empty()) {
+    throw std::runtime_error(
+        "An execution provider was specified, but \"" + path.string() +
+        "\" is not a model package. Drop the ep argument to load a flat directory.");
+  }
+  return std::make_unique<Config>(path, json_overlay);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
@@ -830,6 +868,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+  if (ModelType::IsTDT(config->model.type))
+    return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
@@ -936,6 +976,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
+          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
@@ -943,7 +984,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>}} {
+          {"qwen3_5", Processor::Create<QwenImageProcessor>},
+          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
+          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

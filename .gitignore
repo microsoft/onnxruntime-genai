@@ -10,7 +10,7 @@ src/csharp/AssemblyInfo.cs
 /ort
 /build
 /build_*
-/test/test_models/*
+/test/models/*
 /cache_models
 /onnxruntime-linux-x64-*
 *.csv
@@ -29,22 +29,17 @@ examples/python/genai_models
 examples/python/hf_cache
 examples/csharp/ModelChat/models
 
-!test/test_models/hf-internal-testing/
-!test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
-!test/test_models/hf-internal-testing/tiny-qwen35-cuda/*.onnx
-!test/test_models/grammars/
-!test/test_models/qwen-vision-preprocessing/
-!test/test_models/qwen-vision-preprocessing/*.onnx
-!test/test_models/qwen3-vl-vision-preprocessing/
-!test/test_models/qwen3-vl-vision-preprocessing/*.onnx
-!test/test_models/qwen35-hybrid-preprocessing/
-!test/test_models/qwen35-hybrid-preprocessing/*.onnx
-!test/test_models/mistral3-vision-preprocessing/
-!test/test_models/multimodal-decoder-no-input-ids/
-!test/test_models/multimodal-decoder-no-input-ids/*
-!test/test_models/multimodal-decoder-with-input-ids/
-!test/test_models/multimodal-decoder-with-input-ids/*
-!test/test_models/create_decoder_input_ids_test_models.py
+!test/models/gemma4/*
+!test/models/hf-internal-testing/*
+!test/models/mistral3/*
+!test/models/multimodal-decoder-no-input-ids/*
+!test/models/multimodal-decoder-with-input-ids/*
+!test/models/phi3-v/*
+!test/models/pipeline-model/*.json
+!test/models/qwen2-5-vl/*
+!test/models/qwen3-5/*
+!test/models/qwen3-vl/*
+!test/models/whisper/*
 
 .ipynb_checkpoints/
 /src/java/.gradle

@@ -148,6 +148,80 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
   }
 }
 
+namespace {
+
+// Auto-detect a fixed kv-cache shape from the model's past_key input shapes,
+// and, when detected, apply the implied configuration:
+//   - reject beam search (num_beams != 1),
+//   - force past_present_share_buffer on,
+//   - log info on the detected size,
+//   - warn if search.max_length exceeds the detected size.
+// Returns the detected static seq_len, or 0 if the model has symbolic
+// kv-cache dims or per-layer static sizes disagree.
+//
+// Background: some compiled backends (e.g. AMD RyzenAI) emit models where the
+// kv-cache seq_len dimension is a static positive integer instead of a
+// symbolic dim. In that case the cache must be allocated to exactly that size
+// and reused as a shared past/present buffer; max_length cannot drive the
+// size because ORT rejects any tensor that doesn't match the model's static
+// dim.
+//
+// Limitation: only uniform per-layer static sizes are recognised — every
+// past_key layer must declare the same fixed seq_len. Models that declare
+// different static seq_lens per layer (e.g. a mix of full-attention and
+// sliding-window layers with distinct static caps) fall through to dynamic
+// handling. Lifting this restriction would extend the existing layer_shapes_
+// infrastructure used for per-layer head_dim detection in
+// DefaultKeyValueCache: store the per-layer detected seq_len into
+// layer_shapes_[i][2] instead of a single scalar, and let the share-buffer
+// branch's per-layer loop do the rest. Deferred until a model in the wild
+// actually needs it.
+int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
+                                       const std::vector<std::string>& input_name_strings,
+                                       int layer_count,
+                                       const Config::Search& search,
+                                       bool& past_present_share_buffer) {
+  if (layer_count <= 0) return 0;
+
+  // input_name_strings stores [past_key.0, past_value.0, past_key.1, past_value.1, ...].
+  int64_t common_seq_len = 0;
+  for (int i = 0; i < layer_count; ++i) {
+    auto input_shape = session_info.GetInputShape(input_name_strings[i * 2]);
+    if (input_shape.size() < 2) return 0;
+    const int64_t seq_dim = input_shape[input_shape.size() - 2];
+    if (seq_dim <= 0) return 0;  // symbolic/dynamic dim (typically -1)
+    if (common_seq_len == 0) {
+      common_seq_len = seq_dim;
+    } else if (common_seq_len != seq_dim) {
+      return 0;
+    }
+  }
+
+  if (search.num_beams != 1) {
+    throw std::runtime_error(
+        "Beam search (num_beams > 1) is not supported for models with a fixed kv-cache "
+        "shape (model expects seq_len=" +
+        std::to_string(common_seq_len) + ").");
+  }
+  past_present_share_buffer = true;
+  if (g_log.enabled) {
+    Log("info", "DefaultKeyValueCache: auto-detected fixed kv-cache seq_len=" +
+                    std::to_string(common_seq_len) +
+                    "; allocating shared past/present buffer to that size.");
+  }
+  if (search.max_length > static_cast<int>(common_seq_len) &&
+      g_log.enabled && g_log.warning) {
+    Log("warning", "Model has fixed kv-cache seq_len=" +
+                       std::to_string(common_seq_len) +
+                       " but search.max_length=" +
+                       std::to_string(search.max_length) +
+                       "; cache is sized to the model's limit, so generation beyond it will fail.");
+  }
+  return common_seq_len;
+}
+
+}  // namespace
+
 DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
@@ -207,25 +281,36 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  // Auto-detect per-layer head_dim from ONNX session input shapes.
-  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
-  // full-attention layers use global_head_dim=512.
+  // Auto-detect per-layer KV cache shape from ONNX session input shapes.
+  // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
+  // (e.g. num_kv_heads=8, head_dim=256) while global/full-attention layers are MQA
+  // (num_kv_heads=1, head_dim=512). Both the KV-head count and the head_dim can vary
+  // per layer, so detect and store both. (Previously only head_dim was handled, which
+  // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
+  // "past_key_values.5.key index 1 Got 8 Expected 1".)
   {
-    bool has_varying_head_dim = false;
-    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
+    constexpr size_t kKvHeadsAxis = 1;
+    constexpr size_t kHeadDimAxis = 3;
+    std::vector<int64_t> per_layer_kv_heads(layer_count_, shape_[kKvHeadsAxis]);
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[kHeadDimAxis]);
+    // num_kv_heads and head_dim are static per-layer model properties known ahead of
+    // time, and shape_ already holds the config defaults (decoder.num_key_value_heads /
+    // .head_size), so a single flag suffices: set it if any layer's KV shape differs from
+    // those defaults. (The > 0 checks ignore any non-concrete dim, leaving that layer at
+    // the config default.)
+    bool has_per_layer_variation = false;
     for (int i = 0; i < layer_count_; ++i) {
-      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
-      if (!input_shape.empty()) {
-        int64_t layer_head_dim = input_shape.back();
-        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
-          has_varying_head_dim = true;
-        }
-        if (layer_head_dim > 0) {
-          per_layer_head_dim[i] = layer_head_dim;
-        }
+      const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (input_shape.size() == 4) {
+        if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
+        if (input_shape[kHeadDimAxis] > 0) per_layer_head_dim[i] = input_shape[kHeadDimAxis];
+        if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
+            per_layer_head_dim[i] != shape_[kHeadDimAxis])
+          has_per_layer_variation = true;
       }
     }
-    if (has_varying_head_dim) {
+    if (has_per_layer_variation) {
       if (layer_shapes_.empty()) {
         layer_shapes_.resize(layer_count_);
         for (int i = 0; i < layer_count_; ++i) {
@@ -233,14 +318,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         }
       }
       for (int i = 0; i < layer_count_; ++i) {
-        layer_shapes_[i][3] = per_layer_head_dim[i];
+        layer_shapes_[i][kKvHeadsAxis] = per_layer_kv_heads[i];
+        layer_shapes_[i][kHeadDimAxis] = per_layer_head_dim[i];
       }
       if (g_log.enabled) {
-        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
-                        std::to_string(layer_count_) + " KV cache layers");
+        Log("info",
+            "DefaultKeyValueCache: Detected per-layer KV shape variation "
+            "(num_kv_heads/head_dim) across " +
+                std::to_string(layer_count_) + " KV cache layers");
       }
 
-      // Create per-layer empty past tensors since head_dim varies across layers
+      // Create per-layer empty past tensors since the KV shape varies across layers
       empty_pasts_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
         std::array<int64_t, 4> empty_shape = layer_shapes_[i];
@@ -249,6 +337,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
     }
   }
+
+  const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
+      model_.session_info_, input_name_strings_, layer_count_,
+      state_.params_->search, past_present_share_buffer_);
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
@@ -299,12 +391,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       shape_[2] = std::min(max_length, sliding_window_size);
     }
   } else if (past_present_share_buffer_) {
-    shape_[2] = state_.params_->search.max_length;
+    // For fixed kv-cache models the cache size comes from the model graph,
+    // not from max_length — see the auto-detection block earlier in this ctor.
+    const int64_t cache_seq_len = fixed_kv_seq_len > 0
+                                      ? fixed_kv_seq_len
+                                      : static_cast<int64_t>(state_.params_->search.max_length);
+    shape_[2] = cache_seq_len;
 
     // If per-layer shapes exist (from head_dim auto-detection), update their sequence dim too
     if (!layer_shapes_.empty()) {
       for (int i = 0; i < layer_count_; ++i) {
-        layer_shapes_[i][2] = state_.params_->search.max_length;
+        layer_shapes_[i][2] = cache_seq_len;
       }
     }
   }

@@ -49,7 +49,6 @@ steps:
       if ("$(ep)" -eq "directml") {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e dml --non_interactive
       } elseif ("$(ep)" -eq "webgpu") {
-        $env:TEST_WEBGPU = "true"
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e $(ep) --non_interactive
       } else {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} -e $(ep) --non_interactive

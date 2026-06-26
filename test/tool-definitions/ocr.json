@@ -1,0 +1,85 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "perform_ocr",
+            "description": "Perform OCR on the provided input. Args: input_data: Can be one of: - File path to an image - URL to an image - Raw image bytes language: Tesseract language code (default: 'eng') config: Tesseract configuration options (default: '--oem 3 --psm 6') Returns: Extracted text from the image Usage: perform_ocr('/path/to/image.jpg') perform_ocr('https://example.com/image.jpg') perform_ocr(image_bytes) ",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input_data": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "format": "binary",
+                                "type": "string"
+                            }
+                        ],
+                        "title": "Input Data"
+                    },
+                    "language": {
+                        "default": "eng",
+                        "title": "Language",
+                        "type": "string"
+                    },
+                    "config": {
+                        "default": "--oem 3 --psm 6",
+                        "title": "Config",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "input_data"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_supported_languages",
+            "description": "Get list of supported OCR languages. Returns: List of supported language codes Usage: get_supported_languages() ",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_output",
+            "description": "Returns the output for any information that is requested",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "text"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit",
+            "description": "Exit because the agent's task is complete",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }
+        }
+    }
+]

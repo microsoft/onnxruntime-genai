@@ -7,10 +7,10 @@
 
 namespace Generators {
 
-Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name)
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
-             0, model_.config_->model.decoder.hidden_size},
+             0, hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_.GetInputDataType(name)
                 : model_.session_info_.GetOutputDataType(name)},

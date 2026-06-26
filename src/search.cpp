@@ -170,6 +170,7 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
+  k = std::min(k, vocab_size);
   std::vector<int> indices(vocab_size);
   std::vector<float> top_k_scores(k);
 
@@ -328,6 +329,9 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   assert(temperature > 0.0f);
+
+  // Clamp k to vocab_size to prevent out-of-bounds access in partial_sort
+  k = std::min(k, params_->config.model.vocab_size);
 
   // --- Buffers allocated once to avoid re-allocations in the batch loop ---
   std::vector<int32_t> indices(params_->config.model.vocab_size);

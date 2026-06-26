@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -14,11 +15,22 @@
 
 namespace Generators {
 
-// Fix casing of certain historical names to match current Onnxruntime names
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "qnn") {
+  // Strip the shared "ExecutionProvider" suffix so full ORT names normalize like the aliases.
+  constexpr std::string_view kEpSuffix = "executionprovider";
+  if (lower_name.size() > kEpSuffix.size() &&
+      lower_name.compare(lower_name.size() - kEpSuffix.size(), kEpSuffix.size(), kEpSuffix) == 0) {
+    lower_name.resize(lower_name.size() - kEpSuffix.size());
+  }
+  if (lower_name == "cpu") {
+    return "CPU";
+  } else if (lower_name == "cuda") {
+    return "cuda";
+  } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
     return "WebGPU";
@@ -28,6 +40,8 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "OpenVINO";
   } else if (lower_name == "vitisai") {
     return "VitisAI";
+  } else if (lower_name == "ryzenai") {
+    return "RyzenAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
   }
@@ -250,6 +264,8 @@ struct EncoderInputs_Element : JSON::Element {
       v_.cache_last_time = JSON::Get<std::string_view>(value);
     } else if (name == "cache_last_channel_len") {
       v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
+    } else if (name == "lang_id") {
+      v_.lang_id = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -340,6 +356,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
+    } else if (name == "targets_length") {
+      v_.targets_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -373,6 +393,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "outputs_length") {
+      v_.outputs_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -778,6 +800,8 @@ struct Vision_Element : JSON::Element {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
       v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_visual_tokens") {
+      v_.num_visual_tokens = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "window_size") {
       v_.window_size = static_cast<int>(JSON::Get<double>(value));
     } else {
@@ -1039,6 +1063,8 @@ struct EmbeddingOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1093,6 +1119,8 @@ struct Model_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
       v_.type = JSON::Get<std::string_view>(value);
+    } else if (name == "tokenizer_dir") {
+      v_.tokenizer_dir = JSON::Get<std::string_view>(value);
     } else if (name == "vocab_size") {
       v_.vocab_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "context_length") {
@@ -1129,6 +1157,8 @@ struct Model_Element : JSON::Element {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
       v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "left_context") {
@@ -1145,6 +1175,10 @@ struct Model_Element : JSON::Element {
       v_.blank_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_samples") {
+      v_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "right_context_samples") {
+      v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1153,6 +1187,8 @@ struct Model_Element : JSON::Element {
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
       return eos_token_id_;
+    if (name == "tdt_durations")
+      return tdt_durations_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1186,6 +1222,7 @@ struct Model_Element : JSON::Element {
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
+  Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
@@ -1576,6 +1613,28 @@ void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{config};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+}
+
+namespace {
+
+constexpr std::string_view kPackageScheme = "package:";
+
+}  // namespace
+
+fs::path Config::ResolvePath(std::string_view value) const {
+  if (value.empty()) {
+    return config_path;
+  }
+  if (value.size() >= kPackageScheme.size() &&
+      value.compare(0, kPackageScheme.size(), kPackageScheme) == 0) {
+    if (package_root.string().empty()) {
+      throw std::runtime_error("Cannot resolve \"" + std::string{value} +
+                               "\": this model was not loaded from a model package.");
+    }
+    const std::string remainder{value.substr(kPackageScheme.size())};
+    return remainder.empty() ? package_root : package_root / remainder;
+  }
+  return config_path / std::string{value};
 }
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {

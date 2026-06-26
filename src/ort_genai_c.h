@@ -239,6 +239,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
 /**
+ * \brief Creates an OgaConfig from a model package directory, using the supplied execution
+ *        provider to select a variant.
+ *
+ * `config_path` must refer to a model package; passing a flat directory returns an error.
+ * When the package declares exactly one execution provider across its variants, `ep` may
+ * be null or empty (the EP is auto-detected). Otherwise `ep` selects which variant is
+ * loaded.
+ *
+ * To load a model with an explicit EP, pass the resulting OgaConfig to
+ * OgaCreateModelFromConfig. OgaCreateModel does not accept an ep argument because the
+ * config carries everything needed.
+ *
+ * \param[in] config_path Path to the model package, encoded in UTF-8.
+ * \param[in] ep Execution provider name, or null/empty for auto-detection.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out);
+
+/**
  * \brief Clear the list of providers in the given config
  * \param[in] config The config to clear the providers from.
  * \return OgaResult containing the error message if the clearing of the providers failed.
@@ -433,8 +453,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorP
 /**
  * \brief Sets the guidance type and data for the Generator params
  * \param[in] params The generator params to set the guidance on
- * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
- * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar.
+ * \param[in] data The input string, which is the guidance data.
  * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */

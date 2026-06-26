@@ -126,6 +126,7 @@ struct EmbeddingState : State {
   std::unique_ptr<MultiModalFeatures> audio_features_;        // Optional model input
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
+  std::unique_ptr<Embeddings> per_layer_inputs_;  // Optional model output (Gemma4)
 };
 
 struct DecoderState : State {
@@ -145,6 +146,7 @@ struct DecoderState : State {
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
+  std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   DefaultKeyValueCache kv_cache_{*this};                // Model input

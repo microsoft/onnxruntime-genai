@@ -67,6 +67,19 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
   const auto head_size = model_.config_->model.decoder.head_size;
   const auto context_length = model_.config_->model.context_length;
 
+  // SlideLayer requires context_length - window_size to be at least one full window.
+  // Reject invalid values before shape arithmetic can underflow.
+  const int64_t minimum_context_length = 2 * static_cast<int64_t>(initial_window_size);
+  if (context_length <= 0 ||
+      context_length < minimum_context_length) {
+    throw std::runtime_error("Invalid sliding window configuration: context_length (" +
+                             std::to_string(context_length) +
+                             ") must be greater than or equal to 2 * sliding_window.window_size (2 * " +
+                             std::to_string(initial_window_size) + " = " +
+                             std::to_string(minimum_context_length) +
+                             "). Please check the model.context_length and sliding_window.window_size attributes in the model configuration.");
+  }
+
   const auto initial_key_cache_shape_in =
       CacheTensorShape{num_key_value_heads, 1, head_size, context_length - initial_window_size};
 
