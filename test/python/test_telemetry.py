@@ -149,6 +149,42 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
 
+    def test_enable_telemetry_does_not_override_env_opt_out(self):
+        from telemetry.telemetry import GenAITelemetry
+        os.environ["ORTGENAI_DISABLE_TELEMETRY"] = "1"
+        t = GenAITelemetry()
+        self._join_heartbeat()
+        self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
+        # The environment opt-out is the master switch: a programmatic enable
+        # must not silently resume detailed telemetry.
+        t.enable_telemetry()
+        self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
+
+
+class TestPathRedaction(unittest.TestCase):
+    """Test absolute-path redaction in error telemetry."""
+
+    def test_keeps_filenames_drops_directories_and_usernames(self):
+        from telemetry.telemetry import _redact_paths
+        self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err model.onnx")
+        self.assertEqual(_redact_paths("/var/data/run/output.log"), "output.log")
+        # Last segment is a directory/username (no extension) -> fully redacted.
+        self.assertEqual(_redact_paths("at /home/bob"), "at <path>")
+        # UNC paths are redacted too.
+        self.assertEqual(_redact_paths(r"unc \\server\share\secret"), "unc <path>")
+
+    def test_format_exception_message_redacts_source_line_paths(self):
+        from telemetry.telemetry import _format_exception_message
+        try:
+            raise RuntimeError(r"open C:\Users\alice\secret\weights.bin failed")
+        except RuntimeError as exc:
+            message = _format_exception_message(exc, exc.__traceback__)
+        # The username must not survive in the source line or the message.
+        self.assertNotIn("alice", message)
+        self.assertIn("weights.bin", message)
+
 
 
 class TestDeviceId(unittest.TestCase):

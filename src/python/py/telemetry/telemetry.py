@@ -90,37 +90,58 @@ def _get_app_version() -> str:
 
 
 def _redact_paths(text: str) -> str:
-    """Replace absolute filesystem paths with their basename (drops usernames)."""
+    """Replace absolute filesystem paths with a non-identifying token.
+
+    Keeps a trailing filename (one containing an extension) because it is useful
+    for debugging and is not personal data; drops everything else, including
+    paths whose last segment is itself a directory or username (e.g. /home/alice
+    or a UNC share root), which a bare-basename redaction would expose.
+    """
     import re
 
-    # Windows drive paths (C:\Users\me\x) and POSIX absolute paths (/home/me/x).
-    pattern = re.compile(r"(?:[A-Za-z]:\\[^\s\"']+)|(?:/[^\s\"':]+(?:/[^\s\"':]+)+)")
+    # Windows drive paths (C:\Users\me\x), UNC paths (\\server\share\me\x), and
+    # POSIX absolute paths (/home/me/x).
+    pattern = re.compile(
+        r"(?:[A-Za-z]:\\[^\s\"']+)"
+        r"|(?:\\\\[^\s\"']+)"
+        r"|(?:/[^\s\"':]+(?:/[^\s\"':]+)+)"
+    )
 
-    def _basename(match: "re.Match") -> str:
-        raw = match.group(0)
-        return raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or raw
+    def _redact(match: "re.Match") -> str:
+        base = match.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if base in (".", "..") or "." not in base:
+            return "<path>"
+        return base
 
-    return pattern.sub(_basename, text)
+    return pattern.sub(_redact, text)
 
 
 def _format_exception_message(ex: BaseException, tb=None) -> str:
-    """Format an exception and trim local paths for privacy."""
+    """Format an exception and strip local paths for privacy.
+
+    Each entry from ``traceback.format_exception`` is a multi-line string (the
+    ``File "..."`` line plus the offending source line), so we process every
+    physical line: filenames are trimmed to a package-relative form, and any
+    absolute path that remains on a source or message line is redacted so a
+    username embedded in it cannot leak.
+    """
     formatted = traceback.format_exception(type(ex), ex, tb, limit=5)
     lines = []
-    for line in formatted:
-        line_trunc = line.strip()
-        # Trim paths to relative paths within the package
-        if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
-            idx = line_trunc.find("onnxruntime_genai")
-            if idx != -1:
-                line_trunc = line_trunc[idx:]
-        elif line_trunc.startswith('File "'):
-            idx = line_trunc[len('File "') :].find('"')
-            line_trunc = line_trunc[idx + len('File "') :]
-        else:
-            # Exception message / other lines: redact any absolute paths.
+    for chunk in formatted:
+        for raw_line in chunk.splitlines():
+            line_trunc = raw_line.strip()
+            # Trim file paths to a relative path within the package.
+            if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
+                idx = line_trunc.find("onnxruntime_genai")
+                if idx != -1:
+                    line_trunc = line_trunc[idx:]
+            elif line_trunc.startswith('File "'):
+                idx = line_trunc[len('File "') :].find('"')
+                line_trunc = line_trunc[idx + len('File "') :]
+            # Redact any absolute path that remains (source lines, message, and
+            # the tail of File lines).
             line_trunc = _redact_paths(line_trunc)
-        lines.append(line_trunc)
+            lines.append(line_trunc)
     return "\n".join(lines)
 
 
@@ -480,7 +501,7 @@ class GenAITelemetry:
         try:
             attributes = {
                 "exception_type": exception_type,
-                "exception_message": exception_message,
+                "exception_message": _redact_paths(exception_message),
                 "action": action,
                 "model_name": model_name,
                 "execution_provider": execution_provider,
@@ -508,6 +529,10 @@ class GenAITelemetry:
         """
         with self._lock:
             if not self._instrumentation_key:
+                return
+            # The environment opt-out / CI is the user's master switch: a
+            # programmatic enable must not override ORTGENAI_DISABLE_TELEMETRY.
+            if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1" or _is_ci_environment():
                 return
             self._enabled = True
             if self._store is None:
@@ -537,14 +562,19 @@ class GenAITelemetry:
         if self._uploader is not None:
             try:
                 # Quiesce the background drainer first. Only drain synchronously
-                # if it actually stopped, so we never double-send rows a still
-                # in-flight send is processing.
+                # AND release the single-drainer lock if the thread actually
+                # stopped. If it is still mid-send, leave the lock with the live
+                # daemon thread (it releases on wind-down / at process exit);
+                # force-releasing here would let another drainer re-send the
+                # batch the thread is still processing.
                 if self._uploader.stop_loop():
-                    self._uploader.flush(flush_seconds)
+                    try:
+                        self._uploader.flush(flush_seconds)
+                    finally:
+                        self._uploader.close()
             except Exception:
                 pass
             finally:
-                self._uploader.close()
                 self._uploader = None
         if self._store is not None:
             self._store.close()
