@@ -72,11 +72,16 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         from telemetry.telemetry import GenAITelemetry
         instance = GenAITelemetry._instance
         if instance is not None:
-            # Quiesce background threads before un-stubbing the network.
+            # Quiesce background threads before un-stubbing the network. The
+            # heartbeat join is unbounded on purpose: if it returned while the
+            # thread were still alive, restoring the real transport would let it
+            # POST real device data from a unit test. The heartbeat is bounded by
+            # system_info's per-probe subprocess timeouts (and cached after the
+            # first call), so this never hangs the suite.
             if instance._uploader is not None:
                 instance._uploader.stop_loop(5)
             if instance._heartbeat_thread is not None:
-                instance._heartbeat_thread.join(10)
+                instance._heartbeat_thread.join()
         for p in reversed(self._patchers):
             p.stop()
         GenAITelemetry._instance = None
@@ -86,7 +91,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         from telemetry.telemetry import GenAITelemetry
         t = GenAITelemetry._instance
         if t is not None and t._heartbeat_thread is not None:
-            t._heartbeat_thread.join(10)
+            t._heartbeat_thread.join()
 
 
 class TestOptOut(_HermeticTelemetryTestCase):
