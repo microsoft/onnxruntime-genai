@@ -74,12 +74,12 @@ std::string DeobfuscateKey() {
   return decoded;
 }
 
-// Case-insensitive check for common "disabled" values used by the env opt-out.
-bool IsEnvOptOut(const std::string& value) {
+// Case-insensitive check for "truthy" values used by the ORT_TELEMETRY_DISABLED env opt-out.
+bool IsEnvTruthy(const std::string& value) {
   std::string v;
   v.reserve(value.size());
   for (char c : value) v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-  return v == "0" || v == "false" || v == "off" || v == "no" || v == "disabled" || v == "n";
+  return v == "1" || v == "true" || v == "yes" || v == "on" || v == "y";
 }
 
 // Generate a random v4 UUID as a hex string (e.g. "f81d4fae-7dec-41d0-8f12-00a0c91e6bf6").
@@ -189,8 +189,9 @@ void GenAiTelemetry::Initialize() {
   std::lock_guard<std::mutex> lock(init_mutex_);
   if (initialized_.load()) return;
 
-  // Environment opt-out: do not initialize the SDK or write any identifier.
-  if (IsEnvOptOut(GetEnv("ORTGENAI_TELEMETRY_ENABLED"))) {
+  // Environment opt-out: do not initialize the SDK or write any identifier. ORT_TELEMETRY_DISABLED is
+  // the single opt-out variable honored by both ONNX Runtime and onnxruntime-genai.
+  if (IsEnvTruthy(GetEnv("ORT_TELEMETRY_DISABLED"))) {
     enabled_.store(false);
     return;
   }

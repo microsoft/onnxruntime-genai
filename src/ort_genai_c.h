@@ -96,7 +96,7 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
  * \brief Enable or disable telemetry data collection.
  *
  * Telemetry can also be disabled at compile time (ENABLE_TELEMETRY=OFF) or via
- * the environment variable ORTGENAI_TELEMETRY_ENABLED=0.
+ * the environment variable ORT_TELEMETRY_DISABLED=1 (shared with ONNX Runtime).
  *
  * \param[in] enabled true to enable telemetry, false to disable.
  */

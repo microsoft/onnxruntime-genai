@@ -9,7 +9,7 @@
 //
 // Opt-out mechanisms (in priority order):
 //   1. Compile-time:  ENABLE_TELEMETRY=OFF (zero overhead, no telemetry code)
-//   2. Environment:   ORTGENAI_TELEMETRY_ENABLED=0 (no events sent)
+//   2. Environment:   ORT_TELEMETRY_DISABLED=1 (no events sent; shared with ONNX Runtime)
 //   3. Runtime API:   OgaSetTelemetryEnabled(false) (dynamic control)
 
 #pragma once
