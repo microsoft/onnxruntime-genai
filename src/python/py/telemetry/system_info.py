@@ -9,12 +9,10 @@ Collects HW/OS/GPU metadata modeled on Foundry Local's DeviceIdEvent
 and ORT's LogProcessInfo for MAD/DAD tracking.
 """
 
-import locale
 import os
 import platform
 import subprocess
 import sys
-import time
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -51,18 +49,6 @@ def get_system_info() -> dict[str, Any]:
 
     # ORT version
     info["ort_version"] = _get_ort_version()
-
-    # Locale and timezone
-    try:
-        current_locale = locale.getlocale()[0]
-        if current_locale:
-            info["user_locale"] = current_locale
-        else:
-            current_locale = locale.setlocale(locale.LC_CTYPE)
-            info["user_locale"] = current_locale if isinstance(current_locale, str) else ""
-    except Exception:
-        info["user_locale"] = ""
-    info["user_timezone"] = time.tzname[0] if time.tzname else ""
 
     # Process info
     info["process_name"] = os.path.basename(sys.argv[0]) if sys.argv else ""
