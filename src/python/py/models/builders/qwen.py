@@ -29,10 +29,10 @@ class Qwen3Model(QwenModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention_init(self, config):
+    def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init(config)
+        super().make_attention_init()
 
 
 class Qwen25VLTextModel(Model):
@@ -945,8 +945,6 @@ class VideoChatFlashQwenModel(QwenModel):
             token=self.hf_token,
             **extra_kwargs,
         )
-
-
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
@@ -1011,31 +1009,45 @@ class Qwen35TextModel(Model):
         # SkipSimplifiedLayerNormalization can be used directly.
         self.layernorm_attrs["add_offset"] = 1
 
-        # Position IDs input.
-        # In text-only mode the runtime provides standard 2D [B, S] position_ids.
-        # We expand them to 3D [3, B, S] inside the graph so mRoPE works unchanged.
-        # In VL mode the pipeline provides 3D position_ids directly.
-        if self.is_text_only:
-            self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+        # Text-only mRoPE collapses to standard 1D RoPE because
+        # Qwen3_5TextRotaryEmbedding expands a 2D position_ids to 3 identical
+        # axes and apply_interleaved_mrope returns freqs[0] unchanged. When
+        # GQA can perform fused RoPE we therefore bypass the manual mRoPE
+        # subgraph entirely, which removes the Shape -> Memcpy path that
+        # blocks WebGPU graph capture.
+        self.use_text_only_fused_rope = (
+            self.is_text_only and self.attention_attrs["use_rope_in_attn"]
+        )
+
+        if self.use_text_only_fused_rope:
+            # Standard 2D cos/sin caches consumed by GQA's cos_cache/sin_cache inputs.
+            self.make_rotary_embedding_caches()
         else:
-            self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
-        self.input_names["position_ids"] = "position_ids"
+            # Position IDs input.
+            # In text-only mode the runtime provides standard 2D [B, S] position_ids.
+            # We expand them to 3D [3, B, S] inside the graph so mRoPE works unchanged.
+            # In VL mode the pipeline provides 3D position_ids directly.
+            if self.is_text_only:
+                self.input_shapes["position_ids"] = ["batch_size", "sequence_length"]
+            else:
+                self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+            self.input_names["position_ids"] = "position_ids"
 
-        # mRoPE config
-        self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
-        if not self.mrope_sections:
-            raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
-        if len(self.mrope_sections) != 3:
-            raise ValueError(
-                f"Expected 3 MRoPE sections [T, H, W], got {len(self.mrope_sections)}: {self.mrope_sections}"
-            )
-        self.mrope_rotary_dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
+            # mRoPE config
+            self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
+            if not self.mrope_sections:
+                raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
+            if len(self.mrope_sections) != 3:
+                raise ValueError(
+                    f"Expected 3 MRoPE sections [T, H, W], got {len(self.mrope_sections)}: {self.mrope_sections}"
+                )
+            self.mrope_rotary_dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
 
-        # Force RoPE computation in float32 for numerical stability
-        self.rope_attrs["cast_to_fp32"] = True
+            # Force RoPE computation in float32 for numerical stability
+            self.rope_attrs["cast_to_fp32"] = True
 
-        # Pre-compute cos/sin cache tables and interleaving masks for mRoPE
-        self._make_rotary_caches()
+            # Pre-compute cos/sin cache tables and interleaving masks for mRoPE
+            self._make_rotary_caches()
 
         # Store linear attention config
         self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
@@ -1052,8 +1064,10 @@ class Qwen35TextModel(Model):
         # Full attention uses QK norm and output gating
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        # Disable fused RoPE in attention op - we apply mRoPE manually
-        self.attention_attrs["use_rope_in_attn"] = False
+        if not self.use_text_only_fused_rope:
+            # mRoPE is applied manually before GQA, so disable fused RoPE
+            # in the attention op.
+            self.attention_attrs["use_rope_in_attn"] = False
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1126,6 +1140,10 @@ class Qwen35TextModel(Model):
         self.output_names["present.value"] = filtered_value_outputs
 
     def make_position_ids_reformatting(self):
+        if self.use_text_only_fused_rope:
+            # Fused RoPE in GQA consumes seqlens_k internally, so there is
+            # no position_ids tensor on the data flow to reformat.
+            return None
         if self.is_text_only:
             # The graph input is 2D position_ids [B, S].
             # Expand to 3D [3, B, S] for mRoPE by stacking 3 copies.
@@ -1151,7 +1169,8 @@ class Qwen35TextModel(Model):
 
     def make_preprocessing_nodes(self):
         super().make_preprocessing_nodes()
-        self.position_ids_reformatted = self.make_position_ids_reformatting()
+        if not self.use_text_only_fused_rope:
+            self.position_ids_reformatted = self.make_position_ids_reformatting()
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
@@ -1265,7 +1284,7 @@ class Qwen35TextModel(Model):
         self.make_qk_norm(layer_id, attn)
 
         # 5. Apply interleaved mRoPE to Q and K
-        if self.attention_attrs["rope"]:
+        if self.attention_attrs["rope"] and not self.use_text_only_fused_rope:
             q_shape = ["batch_size", "sequence_length", self.num_attn_heads * self.head_size]
             k_shape = ["batch_size", "sequence_length", self.num_kv_heads * self.head_size]
 
@@ -1300,6 +1319,12 @@ class Qwen35TextModel(Model):
         present_k = f"present.{layer_id}.key"
         present_v = f"present.{layer_id}.value"
 
+        # Under the text-only bypass GQA performs RoPE internally using the
+        # standard 2D cos/sin caches; otherwise mRoPE was applied above and
+        # GQA receives empty cache names so do_rotary stays disabled.
+        cos_cache = "cos_cache" if self.use_text_only_fused_rope else ""
+        sin_cache = "sin_cache" if self.use_text_only_fused_rope else ""
+
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name,
@@ -1310,8 +1335,8 @@ class Qwen35TextModel(Model):
             past_v=past_v,
             present_k=present_k,
             present_v=present_v,
-            cos_cache="",
-            sin_cache="",
+            cos_cache=cos_cache,
+            sin_cache=sin_cache,
         )
         attn_output = f"{attn_name}/output_0"
 
@@ -2119,7 +2144,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
-        algo_config = self.quant_attrs.get("algo_config")
+        algo_config = self.quant_attrs["int4"].get("algo_config")
         if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
@@ -2258,7 +2283,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
                           shape=["batch_size", "sequence_length", 1])
 
-        gated_mul_name = f"{basename}/Mul"
+        gated_mul_name = f"{basename}/GatedMul"
         self.make_mul(gated_mul_name,
                       [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
                       dtype=self.io_dtype,
