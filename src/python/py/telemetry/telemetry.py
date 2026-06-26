@@ -491,13 +491,14 @@ class GenAITelemetry:
 
     def disable_telemetry(self) -> None:
         """Disable telemetry and stop the background uploader (non-blocking)."""
-        self._enabled = False
-        if self._uploader is not None:
-            # Signal the daemon thread to wind down without joining, so opting
-            # out never blocks the caller. The thread releases the drain lock on
-            # exit; any already-stored events go out on the next run.
-            self._uploader.signal_stop()
-            self._uploader = None
+        with self._lock:
+            self._enabled = False
+            if self._uploader is not None:
+                # Signal the daemon thread to wind down without joining, so opting
+                # out never blocks the caller. The thread releases the drain lock on
+                # exit; any already-stored events go out on the next run.
+                self._uploader.signal_stop()
+                self._uploader = None
 
     def enable_telemetry(self) -> None:
         """Enable telemetry (creates/restarts the uploader if needed).
@@ -505,25 +506,26 @@ class GenAITelemetry:
         Has no effect when telemetry was hard-disabled for CI/testing, in which
         case no instrumentation key was ever resolved.
         """
-        if not self._instrumentation_key:
-            return
-        self._enabled = True
-        if self._store is None:
-            try:
-                db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
-                self._store = OfflineEventStore(db_path)
-            except Exception:
-                self._store = None
-                self._enabled = False
+        with self._lock:
+            if not self._instrumentation_key:
                 return
-        if self._uploader is None:
-            try:
-                self._uploader = EventUploader(
-                    self._store, instrumentation_key=self._instrumentation_key
-                )
-                self._uploader.start()
-            except Exception:
-                self._uploader = None
+            self._enabled = True
+            if self._store is None:
+                try:
+                    db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
+                    self._store = OfflineEventStore(db_path)
+                except Exception:
+                    self._store = None
+                    self._enabled = False
+                    return
+            if self._uploader is None:
+                try:
+                    self._uploader = EventUploader(
+                        self._store, instrumentation_key=self._instrumentation_key
+                    )
+                    self._uploader.start()
+                except Exception:
+                    self._uploader = None
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort flush of pending events, then stop the uploader.
