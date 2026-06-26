@@ -88,19 +88,13 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  if (!state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)) {
+  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+
+  if (state_.params_->use_graph_capture && !share_buffers_) {
     throw std::runtime_error(
-        "RecurrentState requires past_present_share_buffer=true. "
+        "Graph capture requires past_present_share_buffer=true for models with recurrent state. "
         "Set past_present_share_buffer to true in genai_config.json.");
   }
-
-  // WebGPU prohibits binding the same buffer as both read-only (input) and
-  // read-write (output) storage in the same compute pass, so it must use
-  // separate past/present buffers with swap. All other EPs share buffers
-  // for stable addresses (required by TRT-RTX graph replay, beneficial elsewhere).
-  // TODO: Remove WebGPU special case once the ORT WebGPU EP adds a
-  // LinearAttention kernel with native past/present buffer sharing support.
-  share_buffers_ = model_.p_device_kvcache_->GetType() != DeviceType::WEBGPU;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);

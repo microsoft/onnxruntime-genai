@@ -88,6 +88,25 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
 
+// Expose Ort::Experimental::Get_*_Fn accessors used by onnxruntime_inline.h without pulling
+// in onnxruntime_experimental_cxx_api.h (which transitively includes onnxruntime_cxx_api.h
+// and conflicts with genai's vendored Ort wrappers). Only the C typedefs from
+// onnxruntime_experimental_c_api.h (already included above) are needed here.
+#if ORT_GENAI_HAS_EXPERIMENTAL_C_API
+namespace Ort {
+namespace Experimental {
+#define ORT_EXPERIMENTAL_API(VER, RET, NAME, ...)                                      \
+  inline OrtExperimental_##NAME##_SinceV##VER##_Fn Get_##NAME##_SinceV##VER##_Fn(      \
+      const OrtApi* api) {                                                             \
+    return reinterpret_cast<OrtExperimental_##NAME##_SinceV##VER##_Fn>(                \
+        api->GetExperimentalFunction(kOrtExperimental_##NAME##_SinceV##VER##_FnName)); \
+  }
+#include "onnxruntime_experimental_c_api.inc"
+#undef ORT_EXPERIMENTAL_API
+}  // namespace Experimental
+}  // namespace Ort
+#endif
+
 // Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
 // available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
 #if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
