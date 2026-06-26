@@ -12,10 +12,10 @@ set the environment variable before running:
 
 ```bash
 # Windows (PowerShell)
-$env:ORTGENAI_DISABLE_TELEMETRY = "1"
+$env:ORT_DISABLE_TELEMETRY = "1"
 
 # Linux / macOS
-export ORTGENAI_DISABLE_TELEMETRY=1
+export ORT_DISABLE_TELEMETRY=1
 ```
 
 When telemetry is disabled this way, no detailed usage events are sent. A
@@ -25,7 +25,7 @@ performance, or error data.
 
 In CI/CD environments (detected automatically via `CI`, `TF_BUILD`,
 `GITHUB_ACTIONS`, `JENKINS_URL`, and similar variables) nothing is sent at all —
-not even the heartbeat. Setting `ORTGENAI_DISABLE_TELEMETRY=1` in a CI/CD
+not even the heartbeat. Setting `ORT_DISABLE_TELEMETRY=1` in a CI/CD
 environment is therefore fully silent.
 
 ## What is collected
@@ -35,7 +35,7 @@ environment is therefore fully silent.
 | State | Device-id heartbeat | Detailed usage events |
 | --- | --- | --- |
 | Enabled (default) | Yes | Yes |
-| `ORTGENAI_DISABLE_TELEMETRY=1` | Yes | No |
+| `ORT_DISABLE_TELEMETRY=1` | Yes | No |
 | CI/CD environment | No | No |
 
 ### Device-id heartbeat

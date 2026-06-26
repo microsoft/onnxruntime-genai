@@ -148,7 +148,7 @@ class GenAITelemetry:
     """Singleton telemetry manager for ONNX Runtime GenAI.
 
     Thread-safe singleton that sends telemetry to Microsoft OneCollector.
-    Auto-disabled in CI environments. Opt-out via ORTGENAI_DISABLE_TELEMETRY=1.
+    Auto-disabled in CI environments. Opt-out via ORT_DISABLE_TELEMETRY=1.
     """
 
     _instance: Optional["GenAITelemetry"] = None
@@ -185,10 +185,10 @@ class GenAITelemetry:
                 self._enabled = False
                 return
 
-            # User opt-out (ORTGENAI_DISABLE_TELEMETRY=1): detailed events are not
+            # User opt-out (ORT_DISABLE_TELEMETRY=1): detailed events are not
             # recorded, but the device-id heartbeat is still written (durably) so
             # device counting keeps working.
-            user_opt_out = os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1"
+            user_opt_out = os.environ.get("ORT_DISABLE_TELEMETRY") == "1"
 
             try:
                 self._app_version = _get_app_version()
@@ -529,8 +529,8 @@ class GenAITelemetry:
             if not self._instrumentation_key:
                 return
             # The environment opt-out / CI is the user's master switch: a
-            # programmatic enable must not override ORTGENAI_DISABLE_TELEMETRY.
-            if os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1" or _is_ci_environment():
+            # programmatic enable must not override ORT_DISABLE_TELEMETRY.
+            if os.environ.get("ORT_DISABLE_TELEMETRY") == "1" or _is_ci_environment():
                 return
             self._enabled = True
             if self._store is None:
