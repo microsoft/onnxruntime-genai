@@ -258,9 +258,9 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
-  OgaString GetGenerationTag(const char* tag_name) const {
+  OgaString GetTag(const char* tag_name) const {
     const char* p;
-    OgaCheckResult(OgaModelGetGenerationTag(this, tag_name, &p));
+    OgaCheckResult(OgaModelGetTag(this, tag_name, &p));
     return p;
   }
 

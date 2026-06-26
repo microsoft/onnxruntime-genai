@@ -163,10 +163,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   bool IsPruned() const;
 
-  // Generic generation tag accessor (reads from config with model-type fallback).
+  // Generic tag accessor (reads from config with model-type fallback).
   // Known tag names: "tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end".
   // Returns the tag value, or an empty string if the model doesn't define the tag.
-  const std::string& GetGenerationTag(const std::string& tag_name) const;
+  const std::string& GetTag(const std::string& tag_name) const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;

@@ -1818,14 +1818,14 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
 }
 
 // Test tool_calling and reasoning config parsing and fallback map
-TEST(CAPITests, GenerationTags_Fallback) {
+TEST(CAPITests, Tags_Fallback) {
   // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → empty tags
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto tool_start = model->GetGenerationTag("tool_call_start");
-  auto tool_end = model->GetGenerationTag("tool_call_end");
-  auto reasoning_start = model->GetGenerationTag("reasoning_start");
-  auto reasoning_end = model->GetGenerationTag("reasoning_end");
+  auto tool_start = model->GetTag("tool_call_start");
+  auto tool_end = model->GetTag("tool_call_end");
+  auto reasoning_start = model->GetTag("reasoning_start");
+  auto reasoning_end = model->GetTag("reasoning_end");
 
   EXPECT_STREQ(static_cast<const char*>(tool_start), "");
   EXPECT_STREQ(static_cast<const char*>(tool_end), "");
@@ -1833,7 +1833,7 @@ TEST(CAPITests, GenerationTags_Fallback) {
   EXPECT_STREQ(static_cast<const char*>(reasoning_end), "");
 }
 
-TEST(CAPITests, GenerationTags_FromConfig) {
+TEST(CAPITests, Tags_FromConfig) {
   // Create a temporary model directory with tool_calling and reasoning sections
   auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
   std::filesystem::create_directories(temp_dir);
@@ -1881,10 +1881,10 @@ TEST(CAPITests, GenerationTags_FromConfig) {
 
   auto model = OgaModel::Create(temp_dir.string().c_str());
 
-  auto tool_start = model->GetGenerationTag("tool_call_start");
-  auto tool_end = model->GetGenerationTag("tool_call_end");
-  auto reasoning_start = model->GetGenerationTag("reasoning_start");
-  auto reasoning_end = model->GetGenerationTag("reasoning_end");
+  auto tool_start = model->GetTag("tool_call_start");
+  auto tool_end = model->GetTag("tool_call_end");
+  auto reasoning_start = model->GetTag("reasoning_start");
+  auto reasoning_end = model->GetTag("reasoning_end");
 
   EXPECT_STREQ(static_cast<const char*>(tool_start), "<tool_call>");
   EXPECT_STREQ(static_cast<const char*>(tool_end), "</tool_call>");

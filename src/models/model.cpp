@@ -845,7 +845,7 @@ const std::string* GetFallbackTag(const std::string& model_type, const std::stri
 
 }  // namespace
 
-const std::string& Model::GetGenerationTag(const std::string& tag_name) const {
+const std::string& Model::GetTag(const std::string& tag_name) const {
   // Check config first (tool_calling and reasoning sections)
   static const std::unordered_map<std::string, std::function<const std::string&(const Config&)>> config_accessors = {
       {"tool_call_start", [](const Config& c) -> const std::string& { return c.tool_calling.tool_call_start_token; }},

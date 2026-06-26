@@ -378,9 +378,9 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelGetGenerationTag(const OgaModel* model, const char* tag_name, const char** out) {
+OgaResult* OGA_API_CALL OgaModelGetTag(const OgaModel* model, const char* tag_name, const char** out) {
   OGA_TRY
-  *out = AllocOgaString(model->GetGenerationTag(tag_name).c_str());
+  *out = AllocOgaString(model->GetTag(tag_name).c_str());
   return nullptr;
   OGA_CATCH
 }
