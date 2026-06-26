@@ -25,9 +25,8 @@ from typing import Any, Optional
 from .constants import CONNECTION_STRING
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
-from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
+from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
-from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
@@ -180,15 +179,15 @@ class GenAITelemetry:
             self._app_name = "onnxruntime-genai"
             self._heartbeat_thread: Optional[threading.Thread] = None
 
-            # CI / automated-testing: send nothing at all — not even the device-id
-            # heartbeat — so pipelines don't pollute usage data.
+            # CI / automated-testing: record and send nothing at all — not even
+            # the device-id heartbeat — so pipelines don't pollute usage data.
             if _is_ci_environment():
                 self._enabled = False
                 return
 
-            # User opt-out (ORTGENAI_DISABLE_TELEMETRY=1): the device-id heartbeat
-            # is still sent (for device counting), but all detailed events are
-            # suppressed — no durable store, no uploader.
+            # User opt-out (ORTGENAI_DISABLE_TELEMETRY=1): detailed events are not
+            # recorded, but the device-id heartbeat is still written (durably) so
+            # device counting keeps working.
             user_opt_out = os.environ.get("ORTGENAI_DISABLE_TELEMETRY") == "1"
 
             try:
@@ -203,26 +202,27 @@ class GenAITelemetry:
 
                 event_source.disable()
 
-                # Device-id heartbeat: sent on every non-CI run (including user
-                # opt-out). Best-effort and off-thread (system info uses blocking
-                # subprocesses), independent of the detailed-event store.
-                self._heartbeat_thread = threading.Thread(
-                    target=self._send_heartbeat, name="genai-telemetry-heartbeat", daemon=True
-                )
-                self._heartbeat_thread.start()
+                # Detailed events are recorded only when enabled; the heartbeat
+                # ignores this gate.
+                self._enabled = not user_opt_out
 
-                if user_opt_out:
-                    self._enabled = False
-                    return
-
-                # Fully enabled: durable on-disk queue + uploader for detailed
-                # events (survive process exit; no exit-time flush needed).
+                # Durable on-disk queue + uploader. Events survive process exit,
+                # so there is no exit-time flush. The uploader retries until
+                # delivery, which makes the device-id heartbeat reliable even on
+                # opt-out.
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
                 self._uploader = EventUploader(
                     self._store, instrumentation_key=self._instrumentation_key
                 )
                 self._uploader.start()
+
+                # The heartbeat collects system info via blocking subprocesses;
+                # build and enqueue it off the host thread.
+                self._heartbeat_thread = threading.Thread(
+                    target=self._send_heartbeat, name="genai-telemetry-heartbeat", daemon=True
+                )
+                self._heartbeat_thread.start()
             except Exception:
                 self._store = None
                 self._uploader = None
@@ -281,13 +281,16 @@ class GenAITelemetry:
         }
 
     def _send_heartbeat(self) -> None:
-        """Send the device-id heartbeat directly (best-effort, no durable store).
+        """Enqueue the device-id heartbeat in the durable store.
 
-        Runs on a background thread on every non-CI run, including when the user
-        has opted out of detailed telemetry, so device counting still works. It
-        deliberately does not touch the detailed-event store/uploader, so an
-        opt-out run never uploads anything other than this heartbeat.
+        Runs on a background thread on every non-CI run (including user opt-out)
+        so device counting works and is retried until delivered. The heartbeat
+        deliberately ignores the ``_enabled`` gate that suppresses detailed
+        events on opt-out; only detailed events are withheld from opted-out
+        users.
         """
+        if self._store is None:
+            return
         try:
             data = {
                 "app_name": self._app_name,
@@ -302,12 +305,9 @@ class GenAITelemetry:
                 data=data,
             )
             payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
-            transport = HttpJsonPostTransport(
-                endpoint=OneCollectorTransportOptions.DEFAULT_ENDPOINT,
-                ikey=self._instrumentation_key,
-                compression=CompressionType.DEFLATE,
-            )
-            transport.send(payload, OneCollectorTransportOptions().timeout_seconds, item_count=1)
+            self._store.store(payload)
+            if self._uploader is not None:
+                self._uploader.request_drain()
         except Exception:
             pass
 
