@@ -18,6 +18,14 @@ $env:ORT_DISABLE_TELEMETRY = "1"
 export ORT_DISABLE_TELEMETRY=1
 ```
 
+When running the model builder from the command line, you can pass the
+`--disable_telemetry` flag instead, which sets `ORT_DISABLE_TELEMETRY=1` for that
+run:
+
+```bash
+python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cpu --disable_telemetry
+```
+
 When telemetry is disabled this way, no detailed usage events are sent. A
 minimal device-id heartbeat (described below) is still sent outside CI/CD
 environments so Microsoft can count active devices; it contains no model,
