@@ -543,6 +543,12 @@ def get_args():
     )
 
     parser.add_argument(
+        "--disable_telemetry",
+        action="store_true",
+        help="Disable collection of anonymous usage telemetry (equivalent to setting ORT_DISABLE_TELEMETRY=1).",
+    )
+
+    parser.add_argument(
         "--extra_options",
         required=False,
         metavar="KEY=VALUE",
@@ -633,6 +639,10 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
+    # Honor --disable_telemetry before create_model constructs the telemetry
+    # singleton, so a disabled run records no detailed events.
+    if args.disable_telemetry:
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     extra_options = parse_extra_options(args.extra_options, args.execution_provider)
     create_model(
         args.model_name,
