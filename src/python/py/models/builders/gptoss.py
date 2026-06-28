@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 import onnx_ir as ir
 import torch
+from pathlib import Path
 
 from .base import Model
 
@@ -20,6 +21,120 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
+        self._mxfp4_weight_map = None
+        self._mxfp4_snapshot_dir = None
+        self._mxfp4_tensor_cache = {}
+
+    def _get_mxfp4_snapshot_dir(self):
+        if self._mxfp4_snapshot_dir is not None:
+            return self._mxfp4_snapshot_dir
+
+        model_path = Path(self.model_name_or_path)
+        if model_path.is_dir():
+            self._mxfp4_snapshot_dir = model_path
+            return self._mxfp4_snapshot_dir
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as e:
+            raise RuntimeError("huggingface_hub is required to locate original GPT-OSS MXFP4 weights.") from e
+
+        self._mxfp4_snapshot_dir = Path(
+            snapshot_download(
+                self.model_name_or_path,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                local_files_only=True,
+            )
+        )
+        return self._mxfp4_snapshot_dir
+
+    def _get_mxfp4_weight_map(self):
+        if self._mxfp4_weight_map is not None:
+            return self._mxfp4_weight_map
+
+        snapshot_dir = self._get_mxfp4_snapshot_dir()
+        index_path = snapshot_dir / "model.safetensors.index.json"
+        if index_path.exists():
+            import json
+
+            with open(index_path) as f:
+                self._mxfp4_weight_map = json.load(f)["weight_map"]
+        else:
+            safetensors_files = sorted(snapshot_dir.glob("*.safetensors"))
+            if len(safetensors_files) != 1:
+                raise RuntimeError(
+                    f"Could not locate original GPT-OSS MXFP4 safetensors index in {snapshot_dir}."
+                )
+            self._mxfp4_weight_map = None
+        return self._mxfp4_weight_map
+
+    def _load_original_mxfp4_tensor(self, tensor_name):
+        if tensor_name in self._mxfp4_tensor_cache:
+            return self._mxfp4_tensor_cache[tensor_name]
+
+        snapshot_dir = self._get_mxfp4_snapshot_dir()
+        weight_map = self._get_mxfp4_weight_map()
+
+        if weight_map is None:
+            candidate_files = sorted(snapshot_dir.glob("*.safetensors"))
+        else:
+            if tensor_name not in weight_map:
+                raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in safetensors index.")
+            candidate_files = [snapshot_dir / weight_map[tensor_name]]
+
+        try:
+            from safetensors import safe_open
+        except ImportError as e:
+            raise RuntimeError("safetensors is required to load original GPT-OSS MXFP4 weights.") from e
+
+        for tensor_file in candidate_files:
+            with safe_open(tensor_file, framework="pt", device="cpu") as f:
+                if tensor_name in f.keys():
+                    tensor = f.get_tensor(tensor_name)
+                    self._mxfp4_tensor_cache[tensor_name] = tensor
+                    return tensor
+
+        raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in {snapshot_dir}.")
+
+    @staticmethod
+    def pack_original_mxfp4_blocks_for_qmoe(blocks):
+        """Pack GPT-OSS checkpoint MXFP4 blocks to QMoE's column-major layout.
+
+        GPT-OSS stores blocks as [E, N, K/32, 16], with each byte holding two
+        adjacent K-axis FP4 e2m1 codes for the same output row N. CUDA QMoE
+        expects [E, K, N/2], with each byte holding two adjacent N-axis codes for
+        the same K (even N in low nibble, odd N in high nibble).
+        """
+        if blocks.dtype != torch.uint8:
+            blocks = blocks.to(torch.uint8)
+        if blocks.ndim != 4 or blocks.shape[-1] != 16:
+            raise ValueError(f"GPT-OSS MXFP4 blocks must have shape [E, N, K/32, 16], got {tuple(blocks.shape)}.")
+        if blocks.shape[1] % 2 != 0:
+            raise ValueError(f"GPT-OSS MXFP4 output dimension N must be even, got {blocks.shape[1]}.")
+
+        even_n = blocks[:, 0::2, :, :]
+        odd_n = blocks[:, 1::2, :, :]
+        packed_even_k = ((odd_n & 0x0F) << 4) | (even_n & 0x0F)
+        packed_odd_k = ((odd_n >> 4) << 4) | (even_n >> 4)
+        packed = torch.stack((packed_even_k, packed_odd_k), dim=-1)
+        return packed.permute(0, 2, 3, 4, 1).reshape(blocks.shape[0], blocks.shape[2] * 32, blocks.shape[1] // 2).contiguous()
+
+    def make_original_mxfp4_qmoe_initializers(self, layer_id, proj, weight_name, scales_name, global_scales_name):
+        blocks = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.mlp.experts.{proj}_blocks")
+        scales = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.mlp.experts.{proj}_scales")
+        if scales.dtype != torch.uint8:
+            scales = scales.to(torch.uint8)
+        expected_scale_shape = blocks.shape[:-1]
+        if tuple(scales.shape) != tuple(expected_scale_shape):
+            raise ValueError(
+                f"GPT-OSS MXFP4 scales for layer {layer_id} {proj} must have shape {tuple(expected_scale_shape)}, "
+                f"got {tuple(scales.shape)}."
+            )
+
+        self.make_initializer(self.pack_original_mxfp4_blocks_for_qmoe(blocks), weight_name)
+        self.make_fp8e8m0_initializer(scales, scales_name)
+        self.make_initializer(torch.ones(blocks.shape[0], dtype=torch.float32), global_scales_name)
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -597,7 +712,7 @@ class GPTOSSModel(Model):
         # Transpose for all EPs/ops; the CUDA QMoE path is no exception (keeping
         # the original orientation swaps N and K, which silently corrupts the
         # quantized weights/scales and yields garbage output).
-        if not has_quark_experts:
+        if not has_quark_experts and not is_fp4_moe:
             gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
             down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
@@ -615,45 +730,20 @@ class GPTOSSModel(Model):
             )
         else:
             if is_fp4_moe and not has_quark_experts:
-                # MXFP4 path: quantize each expert to FP4 e2m1 weights with ue8m0 block
-                # scales. The CUDA QMoE FP4 op consumes column-major packed weights
-                # [E, K, N/2] uint8, FLOAT8E8M0 block scales [E, N, K//32], and per-expert
-                # float32 global scales [E] (fed at QMoE inputs 15/16).
-                gate_up_packed_list, gate_up_block_scales_list, gate_up_global_list = [], [], []
-                down_packed_list, down_block_scales_list, down_global_list = [], [], []
-
-                for i in range(self.moe_attrs["num_experts"]):
-                    p1, bs1, g1 = self.make_mxfp4_weights(gate_up_proj_layout[i], 32)
-                    gate_up_packed_list.append(p1)
-                    gate_up_block_scales_list.append(bs1)
-                    gate_up_global_list.append(g1)
-                    p2, bs2, g2 = self.make_mxfp4_weights(down_proj_layout[i], 32)
-                    down_packed_list.append(p2)
-                    down_block_scales_list.append(bs2)
-                    down_global_list.append(g2)
-
+                # Preserve the original GPT-OSS checkpoint MXFP4 experts. The
+                # Hugging Face loader may expose dequantized BF16 weights here;
+                # re-quantizing those changes many FP4 codes/scales. Read the
+                # original *_blocks/*_scales tensors and only repack their byte
+                # layout for CUDA QMoE.
                 self.moe_attrs["block_size"] = 32
-
-                gate_up_packed_tensor = torch.stack(gate_up_packed_list, dim=0).to(torch.uint8)
-                gate_up_block_scales_tensor = torch.stack(gate_up_block_scales_list, dim=0).to(torch.uint8)
-                down_packed_tensor = torch.stack(down_packed_list, dim=0).to(torch.uint8)
-                down_block_scales_tensor = torch.stack(down_block_scales_list, dim=0).to(torch.uint8)
-                gate_up_global_tensor = torch.tensor(gate_up_global_list, dtype=torch.float32)
-                down_global_tensor = torch.tensor(down_global_list, dtype=torch.float32)
-
-                # Packed FP4 weights [E, K, N/2] uint8
-                self.make_initializer(gate_up_packed_tensor, gate_up_proj_weight)
-                self.make_initializer(down_packed_tensor, down_proj_weight)
-
-                # Block scales as FLOAT8E8M0 [E, N, K//32]
-                self.make_fp8e8m0_initializer(gate_up_block_scales_tensor, gate_up_proj_scales)
-                self.make_fp8e8m0_initializer(down_block_scales_tensor, down_proj_scales)
-
-                # Per-expert float32 global scales [E]
                 gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
                 down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
-                self.make_initializer(gate_up_global_tensor, gate_up_proj_global_scales)
-                self.make_initializer(down_global_tensor, down_proj_global_scales)
+                self.make_original_mxfp4_qmoe_initializers(
+                    layer_id, "gate_up_proj", gate_up_proj_weight, gate_up_proj_scales, gate_up_proj_global_scales
+                )
+                self.make_original_mxfp4_qmoe_initializers(
+                    layer_id, "down_proj", down_proj_weight, down_proj_scales, down_proj_global_scales
+                )
             else:
                 if has_quark_experts:
                     # Use pre-quantized Quark experts

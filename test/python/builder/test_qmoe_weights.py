@@ -201,6 +201,23 @@ def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
         GPTOSSModel.make_moe_fused(model, 0, mlp, "root")
 
 
+def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():
+    blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
+    packed = GPTOSSModel.pack_original_mxfp4_blocks_for_qmoe(blocks)
+
+    low_codes = blocks & 0x0F
+    high_codes = blocks >> 4
+    codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
+    codes[..., 0::2] = low_codes
+    codes[..., 1::2] = high_codes
+    codes = codes.reshape(2, 4, 64)
+    codes_kn = codes.permute(0, 2, 1).contiguous()
+    expected = (codes_kn[..., 1::2] << 4) | codes_kn[..., 0::2]
+
+    assert packed.shape == (2, 64, 2)
+    assert torch.equal(packed, expected)
+
+
 class _FakeMoEModel:
     """Minimal stand-in exposing ``make_qmoe_weights`` and recording which
     quantization path it dispatched to."""
