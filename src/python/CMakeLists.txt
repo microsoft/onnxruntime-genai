@@ -62,8 +62,9 @@ if(BUILD_WHEEL)
     # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${GENERATE_TYPE_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
-    # Install build-time tools into an isolated directory to avoid polluting the global/user site-packages
-    COMMAND ${PYTHON_EXECUTABLE} -m pip install --target "${GENERATE_TYPE_DIR}/stubgen_tools" pybind11-stubgen numpy
+    # Install build-time tools into an isolated directory to avoid polluting the global/user site-packages.
+    # Pin numpy<2 to match the project's test requirements and avoid version-conflict regressions.
+    COMMAND ${PYTHON_EXECUTABLE} -m pip install --target "${GENERATE_TYPE_DIR}/stubgen_tools" pybind11-stubgen "numpy<2"
     # cmake -E env sets PYTHONPATH for the following executable; the next line is the continuation of this single COMMAND
     COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${GENERATE_TYPE_DIR}/stubgen_tools"
             ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir "${WHEEL_TARGET_NAME}"
