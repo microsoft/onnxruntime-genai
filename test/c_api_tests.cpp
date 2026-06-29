@@ -1836,6 +1836,7 @@ TEST(CAPITests, Tags_Fallback) {
 TEST(CAPITests, Tags_FromConfig) {
   // Create a temporary model directory with tool_calling and reasoning sections
   auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
+  std::filesystem::remove_all(temp_dir);  // Clean up any leftover from a previous failed run
   std::filesystem::create_directories(temp_dir);
 
   // Copy minimal model files from tiny-random-gpt2
