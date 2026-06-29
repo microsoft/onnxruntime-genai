@@ -722,6 +722,17 @@ DeviceSpan<float> Generator::GetLogits() {
   return search_->GetLogits();
 }
 
+void Generator::SnapshotState() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  state_->SnapshotState();
+}
+
+void Generator::SetHiddenStates(std::shared_ptr<Tensor> hidden_states) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  hidden_states_input_ = std::move(hidden_states);  // keep alive until the feeder copies it
+  state_->SetHiddenStates(hidden_states_input_ ? hidden_states_input_->GetOrtTensor() : nullptr);
+}
+
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }

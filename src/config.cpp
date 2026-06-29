@@ -350,6 +350,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.block_table = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -387,6 +389,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -673,6 +677,97 @@ struct Decoder_Element : JSON::Element {
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
+};
+
+struct MtpInputs_Element : JSON::Element {
+  explicit MtpInputs_Element(Config::Model::Mtp::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_names") {
+      v_.past_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_names") {
+      v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Inputs& v_;
+};
+
+struct MtpOutputs_Element : JSON::Element {
+  explicit MtpOutputs_Element(Config::Model::Mtp::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_names") {
+      v_.present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_names") {
+      v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Outputs& v_;
+};
+
+struct Mtp_Element : JSON::Element {
+  explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "head_size") {
+      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "main_hidden_states") {
+      v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Mtp& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  MtpInputs_Element inputs_{v_.inputs};
+  MtpOutputs_Element outputs_{v_.outputs};
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -1214,6 +1309,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "mtp") {
+      return mtp_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1228,6 +1326,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Mtp_Element mtp_{v_.mtp};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {

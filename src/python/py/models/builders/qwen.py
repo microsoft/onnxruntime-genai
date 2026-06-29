@@ -6,6 +6,9 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 
+import copy
+import glob
+import json
 import os
 import numpy as np
 import onnx_ir as ir
@@ -2070,6 +2073,46 @@ class Qwen35TextModel(Model):
         del self.output_names["present.key"]
         del self.output_names["present.value"]
 
+        # When the MTP head is exported, advertise it (and the main model's
+        # hidden-states output it consumes) in genai_config.json so the runtime
+        # can load mtp.onnx for self-speculative decoding.
+        if getattr(self, "enable_mtp", False):
+            self._add_mtp_to_genai_config(out_dir)
+
+    def _add_mtp_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path, "r") as f:
+            genai_config = json.load(f)
+
+        # Expose the main decoder's hidden-states output (the MTP head's input).
+        decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
+        decoder_outputs.setdefault("hidden_states", "hidden_states")
+
+        genai_config["model"]["mtp"] = {
+            "filename": "mtp.onnx",
+            "num_hidden_layers": 1,
+            "num_key_value_heads": self.num_kv_heads,
+            "head_size": self.head_size,
+            "main_hidden_states": "hidden_states",
+            "inputs": {
+                "input_ids": "input_ids",
+                "hidden_states": "hidden_states",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+            },
+        }
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+        print("Added 'mtp' section to genai_config.json")
+
 
 class Qwen35MoeTextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
@@ -2124,6 +2167,183 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
                 del algo_config.customized_weight_config[k]
+
+        # Keep the routing-critical projections out of INT4 quantization.
+        # The MoE router selects the top-k experts and the shared-expert gate
+        # scales the always-on expert. Both are tiny matmuls, but 4-bit rounding
+        # of their weights perturbs the routing logits enough to flip top-k
+        # expert selection (measured ~1.4 of 8 experts change per token), which
+        # injects a large error into every MoE layer. Excluding them costs only
+        # a few MB but materially improves quantized-model accuracy.
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.INT8}:
+            nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
+            for i in range(self.num_layers):
+                router_node = f"/model/layers.{i}/moe/router/MatMul"
+                shared_gate_node = f"/model/layers.{i}/shared_expert_gate/MatMul"
+                if router_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(router_node)
+                if shared_gate_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(shared_gate_node)
+
+        # MTP (multi-token prediction) self-speculative head.
+        # When ``enable_mtp`` is set, an auxiliary ``mtp.onnx`` model is exported
+        # alongside the main model (see ``Qwen35MtpHead``). It is disabled for the
+        # MTP head itself (``is_mtp_head``) to avoid infinite recursion.
+        self.mtp_head = None
+        self.enable_mtp = bool(extra_options.get("enable_mtp", False)) and not getattr(self, "is_mtp_head", False)
+        if self.enable_mtp:
+            # Stash the constructor arguments so the MTP head can be built from a
+            # pristine config after the main model has been generated.
+            self._mtp_config = copy.deepcopy(config)
+            self._mtp_io_dtype = io_dtype
+            self._mtp_onnx_dtype = onnx_dtype
+            self._mtp_ep = ep
+            self._mtp_cache_dir = cache_dir
+            self._mtp_extra_options = copy.deepcopy(extra_options)
+
+    def make_model(self, input_path):
+        # Build the main decoder model first.
+        super().make_model(input_path)
+
+        # Then build the auxiliary MTP head (separate ONNX graph + file).
+        if self.enable_mtp:
+            print("Building MTP (multi-token prediction) head -> mtp.onnx")
+            mtp_extra_options = self._mtp_extra_options
+            mtp_extra_options.pop("enable_mtp", None)  # prevent recursion
+            mtp_extra_options["exclude_embeds"] = False  # MTP head embeds input_ids
+            mtp_extra_options["filename"] = "mtp.onnx"
+            # The MTP head is a leaf model whose only output is logits. It must not
+            # inherit the main model's hidden-states/lm-head output options, which
+            # would make the final-norm output double as a graph output and feed the
+            # lm_head, creating a graph cycle.
+            mtp_extra_options.pop("include_hidden_states", None)
+            mtp_extra_options.pop("exclude_lm_head", None)
+            self.mtp_head = Qwen35MtpHead(
+                self._mtp_config,
+                self._mtp_io_dtype,
+                self._mtp_onnx_dtype,
+                self._mtp_ep,
+                self._mtp_cache_dir,
+                mtp_extra_options,
+            )
+            self.mtp_head.make_model(input_path)
+
+    def save_model(self, out_dir):
+        super().save_model(out_dir)
+        if self.mtp_head is not None:
+            self.mtp_head.save_model(out_dir)
+            # Deduplicate the embedding + lm_head weights, which the MTP head shares
+            # bit-identically with the main model: redirect mtp.onnx's copies to the
+            # main model's external data file and pack them out of mtp.onnx.data
+            # (~2 GB on disk; the two sessions then mmap the same bytes on the host).
+            self._share_mtp_embedding_lm_head(out_dir)
+
+    @staticmethod
+    def _share_mtp_embedding_lm_head(out_dir, main_file="model.onnx", mtp_file="mtp.onnx"):
+        """Redirect mtp.onnx's embed_tokens/lm_head external data to model.onnx.data
+        and remove the duplicated bytes from mtp.onnx.data.
+
+        Only tensors that are byte-identical (same name/dtype/shape and matching
+        sampled bytes) are shared; anything that differs (e.g. a quantized main
+        lm_head vs an fp16 MTP lm_head) is left untouched. Failures are non-fatal —
+        the exported models remain valid (just larger) if sharing is skipped.
+        """
+        import onnx
+
+        shared_names = ["model.embed_tokens.weight", "lm_head.MatMul.weight"]
+        main_onnx = os.path.join(out_dir, main_file)
+        mtp_onnx = os.path.join(out_dir, mtp_file)
+        main_data_name = main_file + ".data"
+        mtp_data_name = mtp_file + ".data"
+        main_data = os.path.join(out_dir, main_data_name)
+        mtp_data = os.path.join(out_dir, mtp_data_name)
+        if not (os.path.exists(main_onnx) and os.path.exists(mtp_onnx) and
+                os.path.exists(main_data) and os.path.exists(mtp_data)):
+            return
+
+        def ext_info(tensor):
+            d = {e.key: e.value for e in tensor.external_data}
+            return d.get("location"), int(d.get("offset", 0)), int(d.get("length", 0))
+
+        def set_ext(tensor, location, offset, length):
+            del tensor.external_data[:]
+            tensor.data_location = onnx.TensorProto.EXTERNAL
+            for k, v in (("location", location), ("offset", str(offset)), ("length", str(length))):
+                entry = tensor.external_data.add()
+                entry.key, entry.value = k, str(v)
+
+        def sampled_equal(path_a, off_a, path_b, off_b, length, chunks=8, chunk_size=1 << 20):
+            with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+                for i in range(chunks):
+                    off = (length // chunks) * i
+                    n = min(chunk_size, length - off)
+                    fa.seek(off_a + off); fb.seek(off_b + off)
+                    if fa.read(n) != fb.read(n):
+                        return False
+            return True
+
+        try:
+            main = onnx.load(main_onnx, load_external_data=False)
+            main_info = {}
+            for t in main.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc == main_data_name:
+                    main_info[t.name] = (t.data_type, tuple(t.dims), off, ln)
+
+            mtp = onnx.load(mtp_onnx, load_external_data=False)
+            mtp_inits = {t.name: t for t in mtp.graph.initializer}
+
+            redirect, remove = {}, set()
+            for name in shared_names:
+                if name not in mtp_inits or name not in main_info:
+                    continue
+                t = mtp_inits[name]
+                loc, off, ln = ext_info(t)
+                m_dt, m_dims, m_off, m_len = main_info[name]
+                if loc != mtp_data_name or t.data_type != m_dt or tuple(t.dims) != m_dims or ln != m_len:
+                    continue
+                if not sampled_equal(main_data, m_off, mtp_data, off, ln):
+                    continue
+                redirect[name] = (m_off, m_len)
+                remove.add((off, ln))
+
+            if not redirect:
+                return
+
+            # Rebuild mtp.onnx.data with the redirected tensors packed out, in
+            # ascending-offset order, assigning tight new offsets.
+            kept = []
+            for t in mtp.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc != mtp_data_name or (t.name in redirect and (off, ln) in remove):
+                    continue
+                kept.append((off, ln, t))
+            kept.sort(key=lambda x: x[0])
+
+            tmp_data = mtp_data + ".tmp"
+            with open(mtp_data, "rb") as fin, open(tmp_data, "wb") as fout:
+                new_off = 0
+                for old_off, ln, t in kept:
+                    fin.seek(old_off)
+                    remaining = ln
+                    while remaining:
+                        buf = fin.read(min(1 << 22, remaining))
+                        fout.write(buf)
+                        remaining -= len(buf)
+                    set_ext(t, mtp_data_name, new_off, ln)
+                    new_off += ln
+            for name, (m_off, m_len) in redirect.items():
+                set_ext(mtp_inits[name], main_data_name, m_off, m_len)
+
+            os.replace(tmp_data, mtp_data)
+            onnx.save(mtp, mtp_onnx)  # proto only; external data already written
+            saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
+            print(f"Shared MTP embedding + lm_head with the main model "
+                  f"(saved {saved_mb:.0f} MB from {mtp_data_name})")
+        except Exception as exc:  # noqa: BLE001 - sharing is a best-effort optimization
+            print(f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
+                  f"the duplicated copies remain in {mtp_data_name}.")
+
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
@@ -2258,9 +2478,236 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
                           shape=["batch_size", "sequence_length", 1])
 
-        gated_mul_name = f"{basename}/Mul"
+        gated_mul_name = f"{basename}/gate/Mul"
         self.make_mul(gated_mul_name,
                       [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
                       dtype=self.io_dtype,
                       shape=["batch_size", "sequence_length", self.hidden_size])
         return f"{gated_mul_name}/output_0"
+
+
+class _LinearWeight:
+    """Lightweight stand-in for ``nn.Linear`` exposing only ``weight`` (and a
+    ``None`` bias), so ``make_matmul`` / ``make_lm_head`` can consume a raw weight
+    tensor loaded directly from safetensors."""
+
+    def __init__(self, weight):
+        self.weight = weight
+        self.bias = None
+
+
+class _RMSNormWeight:
+    """Lightweight stand-in for an RMSNorm module exposing only ``weight``."""
+
+    def __init__(self, weight):
+        self.weight = weight
+
+
+class Qwen35MtpHead(Qwen35MoeTextModel):
+    """Qwen3.6 multi-token-prediction (MTP) self-speculative head builder.
+
+    Emits a separate ``mtp.onnx`` graph that predicts token ``t_{i+2}`` from the
+    main model's last hidden state ``h_i`` (post-final-norm) and the just-emitted
+    token ``t_{i+1}``::
+
+        h'_i   = fc(concat[ pre_fc_norm_embedding(embed(t_{i+1})),
+                            pre_fc_norm_hidden(h_i) ])
+        h''_i  = MtpDecoderLayer(h'_i)       # one full-attention + MoE layer
+        logits = lm_head(mtp.norm(h''_i))
+
+    The single MTP decoder layer is a ``full_attention`` GQA + MoE layer, so it
+    reuses the parent's ``_make_full_attention`` / ``make_moe`` / mRoPE machinery
+    unchanged. The ``mtp.*`` weights are loaded directly from the source
+    safetensors because HF ``transformers`` discards them on ``from_pretrained``.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Mark as the MTP head so the parent does not recursively build another.
+        self.is_mtp_head = True
+
+        # The MTP head is a single full-attention decoder layer.
+        config = copy.deepcopy(config)
+        text_config = getattr(config, "text_config", config)
+        text_config.num_hidden_layers = 1
+        text_config.layer_types = ["full_attention"]
+        config.num_hidden_layers = 1
+        config.layer_types = ["full_attention"]
+
+        # Keep a copy of the (single-layer, full-attention) text config so the HF
+        # ``Qwen3_5MoeDecoderLayer`` for the MTP layer can be instantiated later.
+        self._mtp_layer_config = copy.deepcopy(text_config)
+        self._mtp_layer_config.layer_types = ["full_attention"]
+        self._mtp_layer_config.num_hidden_layers = 1
+
+        # Force a single hidden layer regardless of the original config value.
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["num_hidden_layers"] = 1
+
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.model_type = "Qwen3_5_Moe_textForCausalLM"
+
+        # The MTP head consumes the main model's last hidden state as an extra
+        # input (alongside the standard input_ids / position_ids / KV cache).
+        self.input_names["hidden_states"] = "hidden_states"
+        self.input_types["hidden_states"] = self.io_dtype
+        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+
+    def make_model(self, input_path):
+        # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
+        self.make_inputs_and_outputs()
+
+        # Load MTP-specific weights (discarded by HF ``from_pretrained``).
+        self._load_mtp_weights(input_path)
+
+        # Preprocessing: GQA mask (seqlens_k / total_seq_len) + mRoPE position_ids.
+        self.make_preprocessing_nodes()
+
+        # h'_i = fc(concat[pre_fc_norm_embedding(embed(t_{i+1})),
+        #                   pre_fc_norm_hidden(h_i)])
+        projected = self._make_mtp_input_projection()
+        self.layernorm_attrs["root_input"] = projected
+        self.layernorm_attrs["skip_input"] = projected
+        self.layernorm_attrs["first_layernorm"] = True
+
+        # One full-attention + MoE decoder layer (reuses parent machinery).
+        self.make_layer(0, self._mtp_layer)
+
+        # Final norm (mtp.norm) -> lm_head.
+        self.make_layernorm(
+            1, _RMSNormWeight(self._mtp_norm_weight), skip=True, simple=True, location="final_norm"
+        )
+        self.make_lm_head(_LinearWeight(self._lm_head_weight))
+
+        self.make_postprocessing_nodes()
+
+        # Free the large MTP layer module now that the graph is built.
+        del self._mtp_layer
+
+    def _load_mtp_weights(self, input_path):
+        try:
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
+        except ImportError as exc:
+            raise ImportError(
+                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
+            ) from exc
+        import safetensors.torch as safetensors_torch
+
+        model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
+        shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
+        if not shards:
+            raise FileNotFoundError(
+                f"No .safetensors files found in '{model_dir}' for MTP weight loading."
+            )
+
+        mtp_state = {}
+        embed_weight = None
+        lm_head_weight = None
+        # The embedding tensor name varies: plain text models use
+        # "model.embed_tokens.weight" while the Qwen3.6 VL checkpoint nests it
+        # under "model.language_model.embed_tokens.weight".
+        embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
+        for shard in shards:
+            with safetensors_torch.safe_open(shard, framework="pt") as f:
+                for key in f.keys():
+                    if key.startswith("mtp."):
+                        mtp_state[key] = f.get_tensor(key)
+                    elif key in embed_keys:
+                        embed_weight = f.get_tensor(key)
+                    elif key == "lm_head.weight":
+                        lm_head_weight = f.get_tensor(key)
+
+        if not mtp_state:
+            raise ValueError(
+                f"No 'mtp.*' weights found in '{model_dir}'; this model has no MTP head."
+            )
+        if embed_weight is None:
+            raise ValueError(
+                "Could not find the token embedding weight "
+                "('model.embed_tokens.weight' or 'model.language_model.embed_tokens.weight') "
+                "for the MTP head embedding."
+            )
+        if lm_head_weight is None:
+            raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
+
+        self._embed_weight = embed_weight
+        self._lm_head_weight = lm_head_weight
+        self._fc_weight = mtp_state["mtp.fc.weight"]
+        self._pre_fc_norm_embedding_weight = mtp_state["mtp.pre_fc_norm_embedding.weight"]
+        self._pre_fc_norm_hidden_weight = mtp_state["mtp.pre_fc_norm_hidden.weight"]
+        self._mtp_norm_weight = mtp_state["mtp.norm.weight"]
+
+        # Build the single MTP decoder layer (full-attention + MoE) and load its
+        # weights from the ``mtp.layers.0.*`` entries.
+        mtp_layer = Qwen3_5MoeDecoderLayer(self._mtp_layer_config, layer_idx=0)
+        layer_state = {
+            key[len("mtp.layers.0."):]: value
+            for key, value in mtp_state.items()
+            if key.startswith("mtp.layers.0.")
+        }
+        missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
+        if unexpected:
+            raise ValueError(f"Unexpected keys when loading the MTP decoder layer: {unexpected}")
+        if missing:
+            print(f"Warning: missing keys when loading the MTP decoder layer: {missing}")
+        mtp_layer.eval()
+        self._mtp_layer = mtp_layer
+
+    def _make_offset_rmsnorm(self, name, root_input, weight_tensor):
+        """Build a non-skip SimplifiedLayerNormalization with the ``(1 + weight)``
+        offset (used by the two pre-fc RMSNorms in the MTP head)."""
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(weight_tensor + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+        output = f"{name}/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=[root_input, weight_name],
+            outputs=[output],
+            name=name,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        return output
+
+    def _make_mtp_input_projection(self):
+        """Build ``fc(concat[pre_fc_norm_embedding(embed(input_ids)),
+        pre_fc_norm_hidden(hidden_states)])`` and return its output name."""
+        basename = "/model/mtp"
+
+        # embed(input_ids) -> [B, S, H]
+        embed_weight = "model.embed_tokens.weight"
+        self.make_initializer(self._embed_weight, embed_weight, to=self.io_dtype)
+        embed_gather = f"{basename}/embed_tokens/Gather"
+        embed_out = f"{embed_gather}/output_0"
+        self.make_node(
+            "Gather",
+            inputs=[embed_weight, self.input_names["input_ids"]],
+            outputs=[embed_out],
+            name=embed_gather,
+        )
+        self.make_value(embed_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+
+        # pre_fc_norm_embedding(embed) and pre_fc_norm_hidden(hidden_states)
+        e_norm = self._make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_embedding", embed_out, self._pre_fc_norm_embedding_weight
+        )
+        h_norm = self._make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_hidden", self.input_names["hidden_states"], self._pre_fc_norm_hidden_weight
+        )
+
+        # concat([e_norm, h_norm], axis=-1) -> [B, S, 2H]
+        concat_name = f"{basename}/fc/Concat"
+        self.make_concat(
+            concat_name,
+            [e_norm, h_norm],
+            self.io_dtype,
+            ["batch_size", "sequence_length", 2 * self.hidden_size],
+            axis=-1,
+        )
+
+        # fc: [2H -> H]
+        fc_name = self.make_matmul(_LinearWeight(self._fc_weight), f"{basename}/fc/MatMul", f"{concat_name}/output_0")
+        return f"{fc_name}/output_0"
+

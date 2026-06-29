@@ -82,6 +82,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  // Largest per-step input length captured as a CUDA graph. Defaults to 1 (single-token decode).
+  // MTP speculative decoding sets this to 2 so the 2-token verify shape is also graph-captured.
+  int max_graph_capture_length{1};
   bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
@@ -105,6 +108,8 @@ struct Generator : LeakChecked<Generator> {
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+  void SnapshotState();                     // Snapshot recurrent state for speculative rollback (e.g. MTP)
+  void SetHiddenStates(std::shared_ptr<Tensor> hidden_states);  // Stage hidden_states input for next step (MTP head)
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
@@ -115,7 +120,6 @@ struct Generator : LeakChecked<Generator> {
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<ExtraInput> extra_inputs_;
   void SetInputs(const NamedTensors& inputs);
-
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
@@ -123,6 +127,7 @@ struct Generator : LeakChecked<Generator> {
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
+  std::shared_ptr<Tensor> hidden_states_input_;  // Kept alive while staged for the model's hidden_states input (MTP head)
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
