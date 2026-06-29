@@ -52,6 +52,52 @@ namespace {
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
 
+bool RunIndexMatches(std::string_view spec, int idx) {
+  size_t pos = 0;
+  while (pos < spec.size()) {
+    size_t comma = spec.find(',', pos);
+    std::string_view tok = spec.substr(pos, (comma == std::string_view::npos ? spec.size() : comma) - pos);
+    pos = (comma == std::string_view::npos) ? spec.size() : comma + 1;
+
+    // Trim spaces
+    while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.remove_prefix(1);
+    while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.remove_suffix(1);
+    if (tok.empty()) continue;
+
+    if (tok == "*") return true;
+
+    size_t dash = tok.find('-');
+    auto parse = [](std::string_view s, int& out) {
+      if (s.empty()) return false;
+      int v = 0;
+      for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+      }
+      out = v;
+      return true;
+    };
+
+    if (dash == std::string_view::npos) {
+      int n;
+      if (parse(tok, n) && n == idx) return true;
+    } else {
+      std::string_view lhs = tok.substr(0, dash);
+      std::string_view rhs = tok.substr(dash + 1);
+      int a;
+      if (!parse(lhs, a)) throw std::runtime_error("Invalid run_profiling.runs token: " + std::string(tok));
+      if (rhs.empty()) {
+        if (idx >= a) return true;
+      } else {
+        int b;
+        if (!parse(rhs, b)) throw std::runtime_error("Invalid run_profiling.runs token: " + std::string(tok));
+        if (idx >= a && idx <= b) return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 State::State(const GeneratorParams& params, const Model& model)
@@ -132,8 +178,24 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
+#if ORT_API_VERSION >= 25
+  {
+    const auto& rp = model_.config_->model.decoder.run_profiling;
+    if (rp.enabled) {
+      if (RunIndexMatches(rp.runs, run_count_)) {
+        std::string p = rp.output_prefix + std::to_string(run_count_);
+        run_options_->EnableProfiling(fs::path(p).c_str());
+      } else {
+        run_options_->DisableProfiling();
+      }
+    }
+  }
+#endif
+
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
+
+  ++run_count_;
 
   extra_outputs_.RegisterOutputs();
 

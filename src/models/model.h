@@ -58,6 +58,7 @@ struct State {
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false);
   bool first_run_{true};
+  int run_count_{0};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
