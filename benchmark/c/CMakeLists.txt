@@ -28,6 +28,10 @@ target_include_directories(model_benchmark PRIVATE
 
 target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 
+if(WIN32)
+  target_link_libraries(model_benchmark PRIVATE dxgi.lib)
+endif()
+
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})

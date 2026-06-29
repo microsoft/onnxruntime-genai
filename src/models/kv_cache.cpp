@@ -150,6 +150,35 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
 
 namespace {
 
+// Compute the compressed KV cache head dimension for quantized KV caches.
+// The quantizer packs each head into (1 + head_size / indices_per_word) u32 words: one fp32 scale followed by
+// head_size values quantized to 4 or 8 bits (4-bit: 8 values/u32, 8-bit: 4 values/u32).
+// The tensor dimension depends on the element type.
+// If kv_cache_quantization_bits is enabled with an invalid head_size (< 8 or non-power-of-2), this throws.
+// throws instead of silently falling back.
+//
+// NOTE: this is the allocator side of a contract that ONNX shape inference cannot express
+// (it still reports the uncompressed head_size). The same formula lives in the WebGPU kernel
+// at onnxruntime/contrib_ops/webgpu/bert/turbo_quant_hadamard.h (see the "present-KV allocator
+// contract" comment) and must be kept in sync; the kernel validates the resulting buffer size
+// at runtime and fails with INVALID_ARGUMENT on a mismatch.
+int64_t ComputeQuantizedKvCacheHeadSize(int head_size, int kv_cache_quantization_bits, ONNXTensorElementDataType type) {
+  if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+    const bool is_power_of_two = head_size > 0 && (head_size & (head_size - 1)) == 0;
+    if (head_size < 8 || !is_power_of_two) {
+      throw std::runtime_error(
+          "KV cache quantization requires head_size to be a power of 2 and >= 8, but got head_size=" +
+          std::to_string(head_size) + ".");
+    }
+    // 4-bit packs 8 indices per u32; 8-bit packs 4 indices per u32. One extra u32 holds the scale.
+    const int indices_per_word = (kv_cache_quantization_bits == 8) ? 4 : 8;
+    const int compressed_u32_words = head_size / indices_per_word + 1;
+    const int bytes_per_element = static_cast<int>(Ort::SizeOf(type));
+    return static_cast<int64_t>(compressed_u32_words * (4 / bytes_per_element));  // 4 bytes per u32
+  }
+  return head_size;
+}
+
 // Auto-detect a fixed kv-cache shape from the model's past_key input shapes,
 // and, when detected, apply the implied configuration:
 //   - reject beam search (num_beams != 1),
@@ -226,7 +255,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0,
+             model_.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
@@ -279,6 +309,19 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+
+  // Detect KV cache quantization configuration from provider options.
+  const int kv_cache_quantization_bits = GetKvCacheQuantizationBits(model_.config_->model.decoder.session_options);
+
+  // When KV cache quantization is enabled, compute the compressed KV cache head dimension.
+  if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+    shape_[3] = ComputeQuantizedKvCacheHeadSize(model_.config_->model.decoder.head_size, kv_cache_quantization_bits, type_);
+    if (g_log.enabled) {
+      Log("info", "DefaultKeyValueCache: KV cache quantization " + std::to_string(kv_cache_quantization_bits) +
+                      "-bit enabled, compressed kv_cache head_size=" + std::to_string(shape_[3]));
+    }
+  }
+
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   // Auto-detect per-layer KV cache shape from ONNX session input shapes.
@@ -288,6 +331,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // per layer, so detect and store both. (Previously only head_dim was handled, which
   // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
   // "past_key_values.5.key index 1 Got 8 Expected 1".)
+  // When KV cache quantization is active, the ONNX model reports uncompressed head dimensions;
+  // we must apply compression before comparing/storing.
   {
     // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
     constexpr size_t kKvHeadsAxis = 1;
@@ -304,7 +349,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
       if (input_shape.size() == 4) {
         if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
-        if (input_shape[kHeadDimAxis] > 0) per_layer_head_dim[i] = input_shape[kHeadDimAxis];
+        if (input_shape[kHeadDimAxis] > 0) {
+          // The ONNX model reports uncompressed head dimensions; when KV cache quantization
+          // is active apply compression before comparing/storing (no-op when disabled).
+          per_layer_head_dim[i] =
+              ComputeQuantizedKvCacheHeadSize(static_cast<int>(input_shape[kHeadDimAxis]), kv_cache_quantization_bits, type_);
+        }
         if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
             per_layer_head_dim[i] != shape_[kHeadDimAxis])
           has_per_layer_variation = true;
