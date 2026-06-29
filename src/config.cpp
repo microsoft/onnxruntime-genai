@@ -6,6 +6,9 @@
 #include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
+#include "pipeline_config_schema.h"
+#include "pipeline_presets.h"
+#include "v1_translator.h"
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -1545,17 +1548,172 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
   }
 }
 
+// --- Pipeline v2 config element parsers (inline in config.cpp) ---
+// These are lightweight visitor classes that populate PipelineConfig
+// from the "pipeline" JSON object in v2 configs.
+
+struct PipelineSession_Element : JSON::Element {
+  explicit PipelineSession_Element(PipelineConfig::Session& s) : s_{s} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "file") { s_.file = std::string(JSON::Get<std::string_view>(value)); return; }
+    if (name == "role") { s_.role = std::string(JSON::Get<std::string_view>(value)); return; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::Session& s_;
+};
+
+struct PipelineSessions_Element : JSON::Element {
+  explicit PipelineSessions_Element(std::map<std::string, PipelineConfig::Session>& sessions)
+      : sessions_{sessions} {}
+  Element& OnObject(std::string_view name) override {
+    auto [it, _] = sessions_.emplace(std::string(name), PipelineConfig::Session{});
+    current_.emplace(it->second);
+    return *current_;
+  }
+ private:
+  std::map<std::string, PipelineConfig::Session>& sessions_;
+  std::optional<PipelineSession_Element> current_;
+};
+
+struct PipelineFlowStep_Element : JSON::Element {
+  explicit PipelineFlowStep_Element(PipelineConfig::FlowStep& step) : step_{step} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto sv = JSON::Get<std::string_view>(value);
+    if (name == "run") { step_.run = std::string(sv); return; }
+    if (name == "when") { step_.when = std::string(sv); return; }
+    if (name == "loop") { step_.loop = std::string(sv); return; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::FlowStep& step_;
+};
+
+struct PipelineFlow_Element : JSON::Element {
+  explicit PipelineFlow_Element(std::vector<PipelineConfig::FlowStep>& flow) : flow_{flow} {}
+  Element& OnObject(std::string_view /*name*/) override {
+    flow_.emplace_back();
+    current_.emplace(flow_.back());
+    return *current_;
+  }
+ private:
+  std::vector<PipelineConfig::FlowStep>& flow_;
+  std::optional<PipelineFlowStep_Element> current_;
+};
+
+struct PipelineDataflowWire_Element : JSON::Element {
+  explicit PipelineDataflowWire_Element(PipelineConfig::DataflowWire& wire) : wire_{wire} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto sv = JSON::Get<std::string_view>(value);
+    if (name == "from_session") { wire_.from_session = std::string(sv); return; }
+    if (name == "from_output") { wire_.from_output = std::string(sv); return; }
+    if (name == "to_session") { wire_.to_session = std::string(sv); return; }
+    if (name == "to_input") { wire_.to_input = std::string(sv); return; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::DataflowWire& wire_;
+};
+
+struct PipelineDataflow_Element : JSON::Element {
+  explicit PipelineDataflow_Element(std::vector<PipelineConfig::DataflowWire>& df)
+      : dataflow_{df} {}
+  Element& OnObject(std::string_view /*name*/) override {
+    dataflow_.emplace_back();
+    current_.emplace(dataflow_.back());
+    return *current_;
+  }
+ private:
+  std::vector<PipelineConfig::DataflowWire>& dataflow_;
+  std::optional<PipelineDataflowWire_Element> current_;
+};
+
+struct PipelineKVCache_Element : JSON::Element {
+  explicit PipelineKVCache_Element(PipelineConfig::StateConfig::KVCache& kv) : kv_{kv} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto sv = JSON::Get<std::string_view>(value);
+    if (name == "format") { kv_.format = std::string(sv); return; }
+    if (name == "past_key_pattern") { kv_.past_key_pattern = std::string(sv); return; }
+    if (name == "present_key_pattern") { kv_.present_key_pattern = std::string(sv); return; }
+    if (name == "past_value_pattern") { kv_.past_value_pattern = std::string(sv); return; }
+    if (name == "present_value_pattern") { kv_.present_value_pattern = std::string(sv); return; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::StateConfig::KVCache& kv_;
+};
+
+struct PipelinePositionIds_Element : JSON::Element {
+  explicit PipelinePositionIds_Element(PipelineConfig::StateConfig::PositionIds& pos) : pos_{pos} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "strategy") { pos_.strategy = std::string(JSON::Get<std::string_view>(value)); return; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::StateConfig::PositionIds& pos_;
+};
+
+struct PipelineState_Element : JSON::Element {
+  explicit PipelineState_Element(PipelineConfig::StateConfig& state) : state_{state} {}
+  Element& OnObject(std::string_view name) override {
+    if (name == "kv_cache") { kv_.emplace(state_.kv_cache); return *kv_; }
+    if (name == "position_ids") { pos_.emplace(state_.position_ids); return *pos_; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig::StateConfig& state_;
+  std::optional<PipelineKVCache_Element> kv_;
+  std::optional<PipelinePositionIds_Element> pos_;
+};
+
+// Top-level "pipeline" object element — routes to sessions/flow/dataflow/state
+struct Pipeline_V2_Element : JSON::Element {
+  explicit Pipeline_V2_Element(PipelineConfig& config) : config_{config} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "extends") {
+      config_.extends = std::string(JSON::Get<std::string_view>(value));
+      return;
+    }
+    if (name == "generation_loop") {
+      config_.generation_loop = std::string(JSON::Get<std::string_view>(value));
+      return;
+    }
+    throw JSON::unknown_value_error{};
+  }
+  Element& OnObject(std::string_view name) override {
+    if (name == "sessions") { sessions_.emplace(config_.sessions); return *sessions_; }
+    if (name == "state") { state_.emplace(config_.state); return *state_; }
+    throw JSON::unknown_value_error{};
+  }
+  Element& OnArray(std::string_view name) override {
+    if (name == "flow") { flow_.emplace(config_.flow); return *flow_; }
+    if (name == "dataflow") { dataflow_.emplace(config_.dataflow); return *dataflow_; }
+    throw JSON::unknown_value_error{};
+  }
+ private:
+  PipelineConfig& config_;
+  std::optional<PipelineSessions_Element> sessions_;
+  std::optional<PipelineFlow_Element> flow_;
+  std::optional<PipelineDataflow_Element> dataflow_;
+  std::optional<PipelineState_Element> state_;
+};
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
-  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
-    // No top-level scalar values currently supported
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "version") {
+      config_.version = static_cast<int>(JSON::Get<double>(value));
+      return;
+    }
+    // Ignore unknown top-level scalars for forward compatibility
   }
 
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
     if (name == "engine") return engine_element_;
+    if (name == "pipeline") return pipeline_element_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1563,6 +1721,7 @@ struct Root_Element : JSON::Element {
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
   Engine_Element engine_element_{config_.engine};
+  Pipeline_V2_Element pipeline_element_{config_.pipeline_config};
 };
 
 struct RootObject_Element : JSON::Element {
@@ -1639,6 +1798,30 @@ fs::path Config::ResolvePath(std::string_view value) const {
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+
+  // Resolve pipeline config: for v2, apply preset + validate; for v1, translate
+  if (version >= 2) {
+    if (pipeline_config.extends.has_value()) {
+      auto preset = GetPreset(pipeline_config.extends.value());
+      // User config overrides preset defaults
+      PipelineConfig user_overrides = std::move(pipeline_config);
+      pipeline_config = std::move(preset);
+      ApplyOverrides(pipeline_config, user_overrides);
+    }
+    NormalizePipelineConfig(pipeline_config);
+    ValidatePipelineConfig(pipeline_config);
+
+    // Sync v2 pipeline decoder session file to model.decoder.filename
+    // so that DecoderOnly_Model's constructor loads the correct session.
+    auto decoder_it = pipeline_config.sessions.find("decoder");
+    if (decoder_it != pipeline_config.sessions.end() &&
+        !decoder_it->second.file.empty()) {
+      model.decoder.filename = decoder_it->second.file;
+    }
+  } else {
+    // Auto-translate v1 config so pipeline_config is always populated
+    pipeline_config = TranslateV1Config(*this);
+  }
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
