@@ -426,6 +426,9 @@ struct Abstract {
  */
 struct Allocator : OrtAllocator {
   static Allocator& GetWithDefaultOptions();  ///< ::OrtAllocator default instance that is owned by Onnxruntime
+  /// Wraps the internal allocator owned by `session` (forwards to OrtApi::CreateAllocator). The returned Allocator
+  /// becomes invalid when `session` is destroyed -- callers must ensure the Allocator is destroyed before the
+  /// OrtSession.
   static std::unique_ptr<Allocator> Create(const OrtSession& session, const OrtMemoryInfo& memory_info);
 
   void* Alloc(size_t size);
