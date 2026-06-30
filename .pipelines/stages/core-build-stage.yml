@@ -31,10 +31,7 @@ parameters:
   default: 'RelWithDebInfo'
 - name: ort_build_version
   type: string
-  default: 'default'
-- name: ort_build_source
-  type: string
-  default: 'NuGet'
+  default: '1.26.0'
 
 stages:
 - stage: core_build_${{ parameters.ep }}
@@ -50,7 +47,6 @@ stages:
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_linux_arm64, true) }}:
     - template: jobs/core-build-job.yml
@@ -61,7 +57,6 @@ stages:
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_win_x64, true) }}:
     - template: jobs/core-build-job.yml
@@ -72,7 +67,6 @@ stages:
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_win_arm64, true) }}:
     - template: jobs/core-build-job.yml
@@ -83,7 +77,6 @@ stages:
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_macos_arm64, true) }}:
     - template: jobs/core-build-job.yml
@@ -93,4 +86,3 @@ stages:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}

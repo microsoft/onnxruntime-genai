@@ -103,13 +103,6 @@ parameters:
     displayName: 'ONNX Runtime version to build against (packaging always supplies --ort_home).'
     type: string
     default: '1.26.0'
-  - name: ort_build_source
-    displayName: 'Package source for build-time ORT download.'
-    type: string
-    default: 'Ort-Nightly'
-    values:
-      - 'NuGet'
-      - 'Ort-Nightly'
   - name: nuget_version_type
     displayName: 'NuGet version type'
     type: string
@@ -155,7 +148,6 @@ extends:
             enable_macos_arm64: ${{ parameters.enable_macos_arm64_cpu }}
             build_config: ${{ parameters.build_config }}
             ort_build_version: ${{ parameters.ort_build_version }}
-            ort_build_source: ${{ parameters.ort_build_source }}
 
       - ${{ if or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_linux_arm64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true)) }}:
         - template: stages/core-build-stage.yml
@@ -169,7 +161,6 @@ extends:
             cuda_version: ${{ parameters.cuda_version }}
             build_config: ${{ parameters.build_config }}
             ort_build_version: ${{ parameters.ort_build_version }}
-            ort_build_source: ${{ parameters.ort_build_source }}
 
       # ============================ Stage 2: Python wheels (per EP, consumes core) ============================
       - ${{ if and(eq(parameters.enable_python, true), or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_macos_arm64_cpu, true))) }}:
@@ -185,7 +176,6 @@ extends:
             build_config: ${{ parameters.build_config }}
             ort_version: ${{ parameters.ort_version }}
             ort_build_version: ${{ parameters.ort_build_version }}
-            ort_build_source: ${{ parameters.ort_build_source }}
 
       - ${{ if and(eq(parameters.enable_python, true), or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_linux_arm64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true))) }}:
         - template: stages/sdk-packaging-stage.yml
@@ -200,7 +190,6 @@ extends:
             build_config: ${{ parameters.build_config }}
             ort_version: ${{ parameters.ort_cuda_version }}
             ort_build_version: ${{ parameters.ort_build_version }}
-            ort_build_source: ${{ parameters.ort_build_source }}
 
       # ============================ Android AAR (self-contained build scripts) ============================
       - ${{ if eq(parameters.enable_android, true) }}:

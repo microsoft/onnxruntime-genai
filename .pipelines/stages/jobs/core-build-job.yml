@@ -17,10 +17,7 @@ parameters:
   default: 'RelWithDebInfo'
 - name: ort_build_version
   type: string
-  default: 'default'
-- name: ort_build_source
-  type: string
-  default: 'NuGet'
+  default: '1.26.0'
 
 jobs:
 - job: core_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}
@@ -106,7 +103,6 @@ jobs:
         arch: ${{ parameters.arch }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/build-core-win-step.yml
@@ -115,7 +111,6 @@ jobs:
         arch: ${{ parameters.arch }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/build-core-macos-step.yml
@@ -123,6 +118,5 @@ jobs:
         arch: ${{ parameters.arch }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - template: steps/compliant-and-cleanup-step.yml

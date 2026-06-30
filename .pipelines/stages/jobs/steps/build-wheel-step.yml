@@ -16,10 +16,7 @@ parameters:
   default: 'RelWithDebInfo'
 - name: ort_build_version
   type: string
-  default: 'default'
-- name: ort_build_source
-  type: string
-  default: 'NuGet'
+  default: '1.26.0'
 
 steps:
 - template: utils/set-nightly-build-option-variable.yml
@@ -31,11 +28,8 @@ steps:
       $packageName = "Microsoft.ML.OnnxRuntime"
       $version = "${{ parameters.ort_build_version }}"
       $org = "aiinfra"; $proj = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"; $feed = "7982ae20-ed19-4a35-a362-a96ac99897b7"
-      if ("${{ parameters.ort_build_source }}" -eq "Ort-Nightly") {
-        $url = "https://pkgs.dev.azure.com/$org/$proj/_apis/packaging/feeds/$feed/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
-      } else {
-        $url = "https://www.nuget.org/api/v2/package/$packageName/$version"
-      }
+      # Single source: always the CFS (aiinfra) ADO feed; never public nuget.org.
+      $url = "https://pkgs.dev.azure.com/$org/$proj/_apis/packaging/feeds/$feed/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
       $dl = "$(Agent.TempDirectory)\ort_pkg.zip"
       Invoke-WebRequest -Uri $url -OutFile $dl -ErrorAction Stop
       $ex = "$(Agent.TempDirectory)\ort_extracted"
@@ -74,11 +68,8 @@ steps:
       package_name="Microsoft.ML.OnnxRuntime"
       version="${{ parameters.ort_build_version }}"
       org="aiinfra"; proj="2692857e-05ef-43b4-ba9c-ccf1c22c437c"; feed="7982ae20-ed19-4a35-a362-a96ac99897b7"
-      if [ "${{ parameters.ort_build_source }}" = "Ort-Nightly" ]; then
-        url="https://pkgs.dev.azure.com/${org}/${proj}/_apis/packaging/feeds/${feed}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
-      else
-        url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
-      fi
+      # Single source: always the CFS (aiinfra) ADO feed; never public nuget.org.
+      url="https://pkgs.dev.azure.com/${org}/${proj}/_apis/packaging/feeds/${feed}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
       dl="$(Agent.TempDirectory)/ort_pkg.zip"
       curl --fail --retry 5 --retry-all-errors -L -o "$dl" "$url"
       ex="$(Agent.TempDirectory)/ort_extracted"; mkdir -p "$ex"; unzip -o "$dl" -d "$ex"

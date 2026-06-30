@@ -9,10 +9,7 @@ parameters:
   default: 'RelWithDebInfo'
 - name: ort_build_version
   type: string
-  default: 'default'
-- name: ort_build_source
-  type: string
-  default: 'NuGet'
+  default: '1.26.0'
 
 steps:
 - checkout: self
@@ -57,12 +54,8 @@ steps:
     feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
     feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
     version="${{ parameters.ort_build_version }}"
-    source="${{ parameters.ort_build_source }}"
-    if [ "$source" = "Ort-Nightly" ]; then
-        url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
-    else
-        url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
-    fi
+    # Single source: always the CFS (aiinfra) ADO feed; never public nuget.org.
+    url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
     download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
     curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
     extract_path="$(Agent.TempDirectory)/ort_build_extracted"

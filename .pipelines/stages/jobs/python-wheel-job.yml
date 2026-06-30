@@ -21,10 +21,7 @@ parameters:
   default: ''
 - name: ort_build_version
   type: string
-  default: 'default'
-- name: ort_build_source
-  type: string
-  default: 'NuGet'
+  default: '1.26.0'
 # Python minor versions to build wheels for (manylinux on Linux).
 - name: python_versions
   type: object
@@ -101,7 +98,6 @@ jobs:
         arch: ${{ parameters.arch }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
         python_versions: ${{ parameters.python_versions }}
 
   - ${{ if ne(parameters.os, 'linux') }}:
@@ -112,6 +108,5 @@ jobs:
         arch: ${{ parameters.arch }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
 
   - template: steps/compliant-and-cleanup-step.yml
