@@ -13,6 +13,21 @@
 
 namespace Generators {
 
+// Turn a logits row into the probability distribution the accept step compares against.
+static std::vector<float> LogitsToDistribution(std::span<const float> logits, bool greedy,
+                                               const Config::Search& search, int vocab_size,
+                                               SampledCategorical& sampled) {
+  if (greedy) {
+    // Greedy accept/correct/bonus only needs argmax.
+    std::vector<float> onehot(static_cast<size_t>(vocab_size), 0.0f);
+    const int32_t idx = static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
+    onehot[static_cast<size_t>(idx)] = 1.0f;
+    return onehot;
+  }
+  ComputeSampledCategorical(logits, search.top_k, search.top_p, search.temperature, sampled);
+  return ScatterToFullVocab(sampled, vocab_size);
+}
+
 // Each call emits exactly one token. The first call of a round runs the whole round (RunRound)
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
@@ -88,19 +103,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   const auto& search = params.search;
   const bool greedy = g.IsGreedySampling();
 
+  // Reused scratch buffer for the sampling path of LogitsToDistribution.
   SampledCategorical sampled;
-  auto to_dist = [&search, greedy, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
-    if (greedy) {
-      // Greedy accept/correct/bonus only needs argmax, so avoid exp() over the full vocab.
-      std::vector<float> onehot(static_cast<size_t>(vocab_size), 0.0f);
-      const int32_t idx = static_cast<int32_t>(
-          std::max_element(logits.begin(), logits.end()) - logits.begin());
-      onehot[static_cast<size_t>(idx)] = 1.0f;
-      return onehot;
-    }
-    ComputeSampledCategorical(logits, search.top_k, search.top_p, search.temperature, sampled);
-    return ScatterToFullVocab(sampled, vocab_size);
-  };
 
   // Propose: draft produces K candidate tokens.
   auto t_propose_start = clock::now();
@@ -135,7 +139,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   if (!use_anchor) {
     auto pending_cpu_pos0 = g.search_->GetLogits().CopyDeviceToCpu();
     target_probs_pos0 =
-        to_dist({pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)});
+        LogitsToDistribution({pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)},
+                             greedy, search, vocab_size, sampled);
   }
 
   // Verify: score the anchor (when present) plus the K proposed tokens in one target pass.
@@ -197,10 +202,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     int prop_row0 = 0;
     if (use_anchor) {
       prop_row0 = 1;
-      target_probs_pos0 = to_dist(row(0));
+      target_probs_pos0 = LogitsToDistribution(row(0), greedy, search, vocab_size, sampled);
     }
     for (int i = 0; i < K; i++)
-      target_dists[i] = to_dist(row(prop_row0 + i));
+      target_dists[i] = LogitsToDistribution(row(prop_row0 + i), greedy, search, vocab_size, sampled);
   } else {
     // Pruned model - one target pass per token. Guard against out of sync cache.
     if (use_anchor)
@@ -214,7 +219,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       single_buf.CopyCpuToDevice();
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single_buf, {});
       auto cpu = lgt.CopyDeviceToCpu();
-      target_dists[i] = to_dist({cpu.data(), static_cast<size_t>(vocab_size)});
+      target_dists[i] = LogitsToDistribution({cpu.data(), static_cast<size_t>(vocab_size)},
+                                             greedy, search, vocab_size, sampled);
     }
   }
 
