@@ -1530,3 +1530,108 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
+
+#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+
+namespace Ort {
+
+inline const ModelPackageApi& GetModelPackageApi() {
+  static const ModelPackageApi fns = []() {
+    ModelPackageApi f;
+    if (api == nullptr) {
+      return f;
+    }
+    f.CreateModelPackageOptionsFromSessionOptions =
+        Experimental::Get_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn(api);
+    f.ReleaseModelPackageOptions =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn(api);
+    f.CreateModelPackageContext =
+        Experimental::Get_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn(api);
+    f.ReleaseModelPackageContext =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn(api);
+    f.ModelPackage_GetComponentCount =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn(api);
+    f.ModelPackage_GetComponentNames =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantCount =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantNames =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantEpName =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
+    f.SelectComponent =
+        Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
+    f.ReleaseModelPackageComponentContext =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn(api);
+    f.ModelPackageComponent_GetSelectedVariantFolderPath =
+        Experimental::Get_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn(api);
+    return f;
+  }();
+  if (fns.CreateModelPackageContext == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build. "
+        "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
+  }
+  return fns;
+}
+
+}  // namespace Ort
+
+inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
+                                                                              const OrtSessionOptions& session_options) {
+  OrtModelPackageOptions* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageOptionsFromSessionOptions(&env, &session_options, &p));
+  return std::unique_ptr<OrtModelPackageOptions>{p};
+}
+
+inline std::unique_ptr<OrtModelPackageContext> OrtModelPackageContext::Create(const ORTCHAR_T* package_root) {
+  OrtModelPackageContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageContext(package_root, &p));
+  return std::unique_ptr<OrtModelPackageContext>{p};
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetComponentNames() const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetComponentNames(this, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const char* component_name) const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantNames(this, component_name, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::string OrtModelPackageContext::GetVariantEpName(const char* component_name,
+                                                            const char* variant_name) const {
+  const char* ep = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(this, component_name, variant_name, &ep));
+  return (ep == nullptr) ? std::string{} : std::string{ep};
+}
+
+inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(
+    const char* component_name, const OrtModelPackageOptions& options) const {
+  OrtModelPackageComponentContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().SelectComponent(this, component_name, &options, &p));
+  return std::unique_ptr<OrtModelPackageComponentContext>{p};
+}
+
+inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelectedVariantFolderPath() const {
+  const ORTCHAR_T* path = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFolderPath(this, &path));
+  return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
+}
+
+#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
