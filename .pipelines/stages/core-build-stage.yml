@@ -1,34 +1,28 @@
-# Stage 1 — Core native build matrix (single source of truth for the support matrix).
-# Each enabled (platform, device, arch) builds the native core once via build.py and
-# publishes the C/C++ SDK + exported core artifact consumed by Stage 2 SDK jobs.
+# Stage 1 — Core native build for a single execution provider (EP).
+# Invoked once per EP (cpu, cuda) so a failure in one EP's core build never skips
+# the other EP's downstream SDK stages (failure isolation at EP granularity).
+# Each enabled (platform, arch) builds the native core once via build.py and publishes
+# the C/C++ SDK + exported core artifact consumed by the matching Stage 2 SDK stages.
 parameters:
-- name: enable_linux_x64_cpu
+- name: ep
+  type: string            # 'cpu' | 'cuda'
+- name: ep_label
+  type: string            # display label, e.g. 'CPU' | 'CUDA'
+- name: enable_linux_x64
   type: boolean
-  default: true
-- name: enable_linux_arm64_cpu
+  default: false
+- name: enable_linux_arm64
   type: boolean
-  default: true
-- name: enable_linux_x64_cuda
+  default: false
+- name: enable_win_x64
   type: boolean
-  default: true
-- name: enable_linux_arm64_cuda
+  default: false
+- name: enable_win_arm64
   type: boolean
-  default: true
-- name: enable_win_x64_cpu
+  default: false
+- name: enable_macos_arm64
   type: boolean
-  default: true
-- name: enable_win_arm64_cpu
-  type: boolean
-  default: true
-- name: enable_win_x64_cuda
-  type: boolean
-  default: true
-- name: enable_win_arm64_cuda
-  type: boolean
-  default: true
-- name: enable_macos_arm64_cpu
-  type: boolean
-  default: true
+  default: false
 - name: cuda_version
   type: string
   default: '13.1'
@@ -43,99 +37,60 @@ parameters:
   default: 'NuGet'
 
 stages:
-- stage: core_build
-  displayName: 'Core Build'
+- stage: core_build_${{ parameters.ep }}
+  displayName: 'Core Build · ${{ parameters.ep_label }}'
+  dependsOn: []
   jobs:
-  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_x64, true) }}:
     - template: jobs/core-build-job.yml
       parameters:
         os: 'linux'
         arch: 'x64'
-        ep: 'cpu'
-        build_config: ${{ parameters.build_config }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: 'linux'
-        arch: 'arm64'
-        ep: 'cpu'
-        build_config: ${{ parameters.build_config }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_linux_x64_cuda, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: 'linux'
-        arch: 'x64'
-        ep: 'cuda'
+        ep: ${{ parameters.ep }}
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_linux_arm64_cuda, true) }}:
+  - ${{ if eq(parameters.enable_linux_arm64, true) }}:
     - template: jobs/core-build-job.yml
       parameters:
         os: 'linux'
         arch: 'arm64'
-        ep: 'cuda'
+        ep: ${{ parameters.ep }}
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_x64, true) }}:
     - template: jobs/core-build-job.yml
       parameters:
         os: 'win'
         arch: 'x64'
-        ep: 'cpu'
-        build_config: ${{ parameters.build_config }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: 'win'
-        arch: 'arm64'
-        ep: 'cpu'
-        build_config: ${{ parameters.build_config }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_win_x64_cuda, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: 'win'
-        arch: 'x64'
-        ep: 'cuda'
+        ep: ${{ parameters.ep }}
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_win_arm64_cuda, true) }}:
+  - ${{ if eq(parameters.enable_win_arm64, true) }}:
     - template: jobs/core-build-job.yml
       parameters:
         os: 'win'
         arch: 'arm64'
-        ep: 'cuda'
+        ep: ${{ parameters.ep }}
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_macos_arm64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_macos_arm64, true) }}:
     - template: jobs/core-build-job.yml
       parameters:
         os: 'osx'
         arch: 'arm64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}

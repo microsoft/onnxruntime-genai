@@ -1,40 +1,35 @@
-# Stage 2 (SDK) — NuGet packaging. Incremental: downloads the Stage 1 C/C++ archives
-# (*-capi) for every enabled RID and packs the native + managed NuGet packages. The
-# native core is never rebuilt here. CPU and CUDA only (DML/WinML dropped).
+# Stage 2 — NuGet packaging for a single execution provider (EP).
+# Invoked once per EP (cpu, cuda); depends only on that EP's core stage (plus the
+# mobile stages for the cpu package's Android/iOS RIDs). Incremental: downloads the
+# Stage 1 C/C++ archives (*-capi) for every enabled RID and packs the native +
+# managed NuGet packages. The native core is never rebuilt here.
 parameters:
-- name: enable_linux_x64_cpu
+- name: ep
+  type: string            # 'cpu' | 'cuda'
+- name: ep_label
+  type: string            # display label, e.g. 'CPU' | 'CUDA'
+- name: enable_linux_x64
   type: boolean
-  default: true
-- name: enable_linux_arm64_cpu
+  default: false
+- name: enable_linux_arm64
   type: boolean
-  default: true
-- name: enable_linux_x64_cuda
+  default: false
+- name: enable_win_x64
   type: boolean
-  default: true
-- name: enable_win_x64_cpu
+  default: false
+- name: enable_win_arm64
   type: boolean
-  default: true
-- name: enable_win_arm64_cpu
+  default: false
+- name: enable_macos_arm64
   type: boolean
-  default: true
-- name: enable_win_x64_cuda
-  type: boolean
-  default: true
-- name: enable_win_arm64_cuda
-  type: boolean
-  default: true
-- name: enable_macos_arm64_cpu
-  type: boolean
-  default: true
+  default: false
 - name: enable_android
   type: boolean
-  default: true
+  default: false
 - name: enable_apple_framework
   type: boolean
-  default: true
+  default: false
 - name: ort_version
-  type: string
-- name: ort_cuda_version
   type: string
 - name: build_config
   type: string
@@ -44,37 +39,37 @@ parameters:
   default: 'stable'
 
 stages:
-- stage: nuget_packaging
-  displayName: 'NuGet Packages'
+- stage: nuget_packaging_${{ parameters.ep }}
+  displayName: 'NuGet Packages · ${{ parameters.ep_label }}'
   dependsOn:
-  - core_build
-  - ${{ if eq(parameters.enable_android, true) }}:
+  - core_build_${{ parameters.ep }}
+  # The cpu package also bundles Android/iOS RIDs, so it waits on those stages.
+  - ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_android, true)) }}:
     - Build_Android_AAR
-  - ${{ if eq(parameters.enable_apple_framework, true) }}:
+  - ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_apple_framework, true)) }}:
     - Build_MacOS_iOS_CocoaPods_Archive
   jobs:
-  - ${{ if or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_macos_arm64_cpu, true)) }}:
+  - ${{ if eq(parameters.ep, 'cpu') }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         build_config: ${{ parameters.build_config }}
-        enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
-        enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
-        enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
-        enable_win_arm64: ${{ parameters.enable_win_arm64_cpu }}
-        enable_macos_cpu: ${{ parameters.enable_macos_arm64_cpu }}
+        enable_linux_x64_cpu: ${{ parameters.enable_linux_x64 }}
+        enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64 }}
+        enable_win_x64_cpu: ${{ parameters.enable_win_x64 }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+        enable_macos_cpu: ${{ parameters.enable_macos_arm64 }}
         enable_android: ${{ parameters.enable_android }}
         enable_apple_framework: ${{ parameters.enable_apple_framework }}
         nuget_version_type: ${{ parameters.nuget_version_type }}
-
-  - ${{ if or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true)) }}:
+  - ${{ if eq(parameters.ep, 'cuda') }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_version }}
+        ort_version: ${{ parameters.ort_version }}
         build_config: ${{ parameters.build_config }}
-        enable_linux_cuda: ${{ parameters.enable_linux_x64_cuda }}
-        enable_win_cuda: ${{ parameters.enable_win_x64_cuda }}
-        enable_win_arm64: ${{ parameters.enable_win_arm64_cuda }}
+        enable_linux_cuda: ${{ parameters.enable_linux_x64 }}
+        enable_win_cuda: ${{ parameters.enable_win_x64 }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
         nuget_version_type: ${{ parameters.nuget_version_type }}

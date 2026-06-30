@@ -27,10 +27,9 @@ steps:
 # ---- Windows ----
 - ${{ if eq(parameters.os, 'win') }}:
   - powershell: |
-      $ep = "$(ep)"; $arch = "$(arch)"
-      $packageName = if ($ep -eq "cuda") { if ($arch -eq "arm64") { "Microsoft.ML.OnnxRuntime" } else { "Microsoft.ML.OnnxRuntime.Gpu.Windows" } } else { "Microsoft.ML.OnnxRuntime" }
+      $arch = "$(arch)"
+      $packageName = "Microsoft.ML.OnnxRuntime"
       $version = "${{ parameters.ort_build_version }}"
-      if ($version -eq "default") { $version = "$(ort_version)" }
       $org = "aiinfra"; $proj = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"; $feed = "7982ae20-ed19-4a35-a362-a96ac99897b7"
       if ("${{ parameters.ort_build_source }}" -eq "Ort-Nightly") {
         $url = "https://pkgs.dev.azure.com/$org/$proj/_apis/packaging/feeds/$feed/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
@@ -45,8 +44,7 @@ steps:
       $ortHome = "$(Build.Repository.LocalPath)\ort_build"
       New-Item -ItemType Directory -Force -Path "$ortHome\include" | Out-Null
       New-Item -ItemType Directory -Force -Path "$ortHome\lib" | Out-Null
-      if ($ep -eq "cuda" -and $arch -ne "arm64") { $hsrc = "$ex\buildTransitive\native\include" } else { $hsrc = "$ex\build\native\include" }
-      Copy-Item "$hsrc\*" "$ortHome\include\" -Recurse -Force
+      Copy-Item "$ex\build\native\include\*" "$ortHome\include\" -Recurse -Force
       $platform = if ($arch -eq "arm64") { "win-arm64" } else { "win-x64" }
       Copy-Item "$ex\runtimes\$platform\native\*" "$ortHome\lib\" -Recurse -Force
     displayName: 'Download ORT for wheel (win)'
@@ -75,7 +73,6 @@ steps:
       set -e -x
       package_name="Microsoft.ML.OnnxRuntime"
       version="${{ parameters.ort_build_version }}"
-      [ "$version" = "default" ] && version="$(ort_version)"
       org="aiinfra"; proj="2692857e-05ef-43b4-ba9c-ccf1c22c437c"; feed="7982ae20-ed19-4a35-a362-a96ac99897b7"
       if [ "${{ parameters.ort_build_source }}" = "Ort-Nightly" ]; then
         url="https://pkgs.dev.azure.com/${org}/${proj}/_apis/packaging/feeds/${feed}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"

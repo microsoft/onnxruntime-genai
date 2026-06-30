@@ -48,32 +48,33 @@ steps:
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if ne(parameters.ort_build_version, 'default') }}:
-  - bash: |
-      set -e -x
-      package_name="Microsoft.ML.OnnxRuntime"
-      org_name="aiinfra"
-      feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
-      feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
-      version="${{ parameters.ort_build_version }}"
-      source="${{ parameters.ort_build_source }}"
-      if [ "$source" = "Ort-Nightly" ]; then
-          url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
-      else
-          url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
-      fi
-      download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
-      curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
-      extract_path="$(Agent.TempDirectory)/ort_build_extracted"
-      mkdir -p "$extract_path"; unzip -o "$download_path" -d "$extract_path"
-      ort_home="$(Build.Repository.LocalPath)/ort_build"
-      mkdir -p "$ort_home/include" "$ort_home/lib"
-      cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
-      platform="osx-arm64"; [ "$(arch)" != "arm64" ] && platform="osx-x64"
-      cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
-      echo "##vso[task.setvariable variable=ORT_HOME_ARG]--ort_home $(Build.Repository.LocalPath)/ort_build"
-    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+# Single-source ORT: packaging always builds against the CPU ONNX Runtime package and
+# passes --ort_home, so it never relies on ortlib.cmake's built-in download.
+- bash: |
+    set -e -x
+    package_name="Microsoft.ML.OnnxRuntime"
+    org_name="aiinfra"
+    feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+    feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
+    version="${{ parameters.ort_build_version }}"
+    source="${{ parameters.ort_build_source }}"
+    if [ "$source" = "Ort-Nightly" ]; then
+        url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+    else
+        url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
+    fi
+    download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
+    curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
+    extract_path="$(Agent.TempDirectory)/ort_build_extracted"
+    mkdir -p "$extract_path"; unzip -o "$download_path" -d "$extract_path"
+    ort_home="$(Build.Repository.LocalPath)/ort_build"
+    mkdir -p "$ort_home/include" "$ort_home/lib"
+    cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
+    platform="osx-arm64"; [ "$(arch)" != "arm64" ] && platform="osx-x64"
+    cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
+    echo "##vso[task.setvariable variable=ORT_HOME_ARG]--ort_home $(Build.Repository.LocalPath)/ort_build"
+  displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 # Build the native core with build.py (no presets) and export it.
 - bash: |
@@ -94,7 +95,7 @@ steps:
       --config ${{ parameters.build_config }} \
       --build_dir $(Build.Repository.LocalPath)/build/$(ep) \
       --update --build --parallel \
-      --skip_tests --skip_wheel \
+      --skip_tests --skip_examples --skip_wheel \
       --install_dir $(Build.Repository.LocalPath)/$(coreInstallDir) \
       $extra_defines $(ORT_HOME_ARG)
   displayName: 'Build core (build.py)'

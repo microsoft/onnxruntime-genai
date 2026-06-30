@@ -54,13 +54,9 @@ steps:
 # Single-source ORT for the wheel's pybind extension (headers + import libs).
 - bash: |
     set -e -x
-    ep="$(ep)"; arch="$(arch)"
-    case "$ep" in
-      "cuda") package_name="Microsoft.ML.OnnxRuntime.Gpu.Linux" ;;
-      *) package_name="Microsoft.ML.OnnxRuntime" ;;
-    esac
+    arch="$(arch)"
+    package_name="Microsoft.ML.OnnxRuntime"
     version="${{ parameters.ort_build_version }}"
-    [ "$version" = "default" ] && version="$(ort_version)"
     org_name="aiinfra"
     feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
     feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
@@ -75,11 +71,7 @@ steps:
     mkdir -p "$extract_path"; unzip -o "$download_path" -d "$extract_path"
     ort_home="$(Build.Repository.LocalPath)/ort_build"
     mkdir -p "$ort_home/include" "$ort_home/lib"
-    if [ "$ep" = "cuda" ]; then
-      cp -r "$extract_path/buildTransitive/native/include/"* "$ort_home/include/"
-    else
-      cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
-    fi
+    cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
     platform="linux-x64"; [ "$arch" = "arm64" ] && platform="linux-arm64"
     cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
   displayName: 'Download ORT for wheel'

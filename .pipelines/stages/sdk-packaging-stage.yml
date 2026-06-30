@@ -1,35 +1,28 @@
-# Stage 2 — SDK packaging. Every SDK job consumes the Stage 1 core artifact
-# incrementally (the native core is never rebuilt). Currently wires the Python
-# wheel; NuGet / Java-AAR / Apple-CocoaPods / Foundry are composed from their
-# own stages in packaging.yml.
+# Stage 2 — Python wheel packaging for a single execution provider (EP).
+# Invoked once per EP (cpu, cuda); depends only on that EP's core stage so a CUDA
+# core failure never skips the CPU wheels (and vice versa). Each enabled (platform,
+# arch) builds its wheel(s) from the prebuilt core, then a collector job aggregates
+# every flavor's wheels into a single per-EP artifact (mirrors the NuGet packaging).
 parameters:
-- name: enable_linux_x64_cpu
+- name: ep
+  type: string            # 'cpu' | 'cuda'
+- name: ep_label
+  type: string            # display label, e.g. 'CPU' | 'CUDA'
+- name: enable_linux_x64
   type: boolean
-  default: true
-- name: enable_linux_arm64_cpu
+  default: false
+- name: enable_linux_arm64
   type: boolean
-  default: true
-- name: enable_linux_x64_cuda
+  default: false
+- name: enable_win_x64
   type: boolean
-  default: true
-- name: enable_linux_arm64_cuda
+  default: false
+- name: enable_win_arm64
   type: boolean
-  default: true
-- name: enable_win_x64_cpu
+  default: false
+- name: enable_macos_arm64
   type: boolean
-  default: true
-- name: enable_win_arm64_cpu
-  type: boolean
-  default: true
-- name: enable_win_x64_cuda
-  type: boolean
-  default: true
-- name: enable_win_arm64_cuda
-  type: boolean
-  default: true
-- name: enable_macos_arm64_cpu
-  type: boolean
-  default: true
+  default: false
 - name: cuda_version
   type: string
   default: '13.1'
@@ -37,9 +30,6 @@ parameters:
   type: string
   default: 'RelWithDebInfo'
 - name: ort_version
-  type: string
-  default: ''
-- name: ort_cuda_version
   type: string
   default: ''
 - name: ort_build_version
@@ -50,109 +40,103 @@ parameters:
   default: 'NuGet'
 
 stages:
-- stage: python_wheel
-  displayName: 'Python Wheels'
-  dependsOn: core_build
+- stage: python_wheel_${{ parameters.ep }}
+  displayName: 'Python Wheels · ${{ parameters.ep_label }}'
+  dependsOn: core_build_${{ parameters.ep }}
   jobs:
-  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_x64, true) }}:
     - template: jobs/python-wheel-job.yml
       parameters:
         os: 'linux'
         arch: 'x64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
+        cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_arm64, true) }}:
     - template: jobs/python-wheel-job.yml
       parameters:
         os: 'linux'
         arch: 'arm64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
+        cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_linux_x64_cuda, true) }}:
-    - template: jobs/python-wheel-job.yml
-      parameters:
-        os: 'linux'
-        arch: 'x64'
-        ep: 'cuda'
-        cuda_version: ${{ parameters.cuda_version }}
-        build_config: ${{ parameters.build_config }}
-        ort_version: ${{ parameters.ort_cuda_version }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_linux_arm64_cuda, true) }}:
-    - template: jobs/python-wheel-job.yml
-      parameters:
-        os: 'linux'
-        arch: 'arm64'
-        ep: 'cuda'
-        cuda_version: ${{ parameters.cuda_version }}
-        build_config: ${{ parameters.build_config }}
-        ort_version: ${{ parameters.ort_cuda_version }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_x64, true) }}:
     - template: jobs/python-wheel-job.yml
       parameters:
         os: 'win'
         arch: 'x64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
+        cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_win_arm64, true) }}:
     - template: jobs/python-wheel-job.yml
       parameters:
         os: 'win'
         arch: 'arm64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
+        cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
-  - ${{ if eq(parameters.enable_win_x64_cuda, true) }}:
-    - template: jobs/python-wheel-job.yml
-      parameters:
-        os: 'win'
-        arch: 'x64'
-        ep: 'cuda'
-        cuda_version: ${{ parameters.cuda_version }}
-        build_config: ${{ parameters.build_config }}
-        ort_version: ${{ parameters.ort_cuda_version }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_win_arm64_cuda, true) }}:
-    - template: jobs/python-wheel-job.yml
-      parameters:
-        os: 'win'
-        arch: 'arm64'
-        ep: 'cuda'
-        cuda_version: ${{ parameters.cuda_version }}
-        build_config: ${{ parameters.build_config }}
-        ort_version: ${{ parameters.ort_cuda_version }}
-        ort_build_version: ${{ parameters.ort_build_version }}
-        ort_build_source: ${{ parameters.ort_build_source }}
-
-  - ${{ if eq(parameters.enable_macos_arm64_cpu, true) }}:
+  - ${{ if eq(parameters.enable_macos_arm64, true) }}:
     - template: jobs/python-wheel-job.yml
       parameters:
         os: 'osx'
         arch: 'arm64'
-        ep: 'cpu'
+        ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
+
+  # Aggregate every flavor's per-flavor *-wheel artifacts into one per-EP wheels artifact.
+  - job: collect_wheels_${{ parameters.ep }}
+    displayName: 'Collect wheels'
+    pool:
+      name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+    dependsOn:
+    - ${{ if eq(parameters.enable_linux_x64, true) }}:
+      - wheel_linux_${{ parameters.ep }}_x64
+    - ${{ if eq(parameters.enable_linux_arm64, true) }}:
+      - wheel_linux_${{ parameters.ep }}_arm64
+    - ${{ if eq(parameters.enable_win_x64, true) }}:
+      - wheel_win_${{ parameters.ep }}_x64
+    - ${{ if eq(parameters.enable_win_arm64, true) }}:
+      - wheel_win_${{ parameters.ep }}_arm64
+    - ${{ if eq(parameters.enable_macos_arm64, true) }}:
+      - wheel_osx_${{ parameters.ep }}_arm64
+    steps:
+    - checkout: none
+    - download: none
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download per-flavor wheels'
+      inputs:
+        buildType: 'current'
+        itemPattern: 'onnxruntime-genai-*-${{ parameters.ep }}-*-wheel/**/*.whl'
+        targetPath: '$(Build.ArtifactStagingDirectory)/downloaded'
+    - bash: |
+        set -e -x
+        mkdir -p '$(Build.ArtifactStagingDirectory)/wheels'
+        find '$(Build.ArtifactStagingDirectory)/downloaded' -name '*.whl' -exec cp {} '$(Build.ArtifactStagingDirectory)/wheels/' \;
+        ls -l '$(Build.ArtifactStagingDirectory)/wheels'
+      displayName: 'Flatten wheels'
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish Artifact: ${{ parameters.ep_label }} wheels'
+      inputs:
+        artifactName: 'onnxruntime-genai-${{ parameters.ep }}-wheels'
+        targetPath: '$(Build.ArtifactStagingDirectory)/wheels'

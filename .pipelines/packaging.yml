@@ -2,12 +2,14 @@
 # Unified packaging pipeline (replaces pypl-publishing / nuget-publishing /
 # android-publishing / macos-ios-cocoapods-publishing).
 #
-# Incremental & modular:
-#   Stage 1 (core_build)   builds the native core ONCE per target via `python build.py`
-#                          (no cmake presets) and publishes the C/C++ SDK + an exported
-#                          core artifact.
-#   Stage 2 (SDK packaging) layers every SDK on top of that single prebuilt core
-#                          artifact — never rebuilding the core.
+# Incremental, modular & EP-isolated:
+#   Stage 1 (Core Build · <EP>)   builds the native core ONCE per target via `python build.py`
+#                                 (no cmake presets) and publishes the C/C++ SDK + an exported
+#                                 core artifact. One stage per EP (cpu, cuda).
+#   Stage 2 (SDK packaging · <EP>) layers every SDK on top of that single prebuilt core artifact
+#                                 — never rebuilding the core. Each EP's SDK stages depend only
+#                                 on that EP's core stage, so a failure in one EP (e.g. CUDA)
+#                                 never skips the other EP's (e.g. CPU) wheels / NuGet packages.
 #
 # Support matrix: Linux x64/arm64, Windows x64/arm64, macOS arm64, Android, iOS.
 # Device matrix:  CUDA on Windows/Linux x64+arm64; CPU everywhere.
@@ -30,7 +32,10 @@ parameters:
   - name: enable_linux_arm64_cuda
     displayName: 'Linux arm64 CUDA'
     type: boolean
-    default: true
+    # Disabled: the CUDA manylinux base image (cuda13_x64_almalinux8_gcc14) is x64-only,
+    # so there is no arm64 manifest to build against. Re-enable once an arm64 CUDA base
+    # image is available.
+    default: false
   - name: enable_win_x64_cpu
     displayName: 'Windows x64 CPU'
     type: boolean
@@ -46,7 +51,10 @@ parameters:
   - name: enable_win_arm64_cuda
     displayName: 'Windows arm64 CUDA'
     type: boolean
-    default: true
+    # Disabled: ONNX Runtime does not publish a CUDA/GPU build for Windows arm64 (the ORT
+    # GPU package has no runtimes/win-arm64/native), so there is no onnxruntime.dll to link
+    # against. Re-enable once ORT ships win-arm64 GPU binaries.
+    default: false
   - name: enable_macos_arm64_cpu
     displayName: 'macOS arm64 CPU'
     type: boolean
@@ -92,13 +100,13 @@ parameters:
       - 'Release'
       - 'Debug'
   - name: ort_build_version
-    displayName: 'ONNX Runtime nightly version for build-time compilation. ''default'' uses ortlib.cmake.'
+    displayName: 'ONNX Runtime version to build against (packaging always supplies --ort_home).'
     type: string
-    default: 'default'
+    default: '1.26.0'
   - name: ort_build_source
     displayName: 'Package source for build-time ORT download.'
     type: string
-    default: 'NuGet'
+    default: 'Ort-Nightly'
     values:
       - 'NuGet'
       - 'Ort-Nightly'
@@ -133,72 +141,106 @@ extends:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
-      # ---------- Stage 1: Core native build (build.py) ----------
-      - template: stages/core-build-stage.yml
-        parameters:
-          enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
-          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
-          enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
-          enable_linux_arm64_cuda: ${{ parameters.enable_linux_arm64_cuda }}
-          enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
-          enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
-          enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
-          enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
-          enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
-          cuda_version: ${{ parameters.cuda_version }}
-          build_config: ${{ parameters.build_config }}
-          ort_build_version: ${{ parameters.ort_build_version }}
-          ort_build_source: ${{ parameters.ort_build_source }}
-
-      # ---------- Stage 2: Python wheel (incremental, consumes core) ----------
-      - ${{ if eq(parameters.enable_python, true) }}:
-        - template: stages/sdk-packaging-stage.yml
+      # ============================ Stage 1: Core native build (build.py) ============================
+      # One independent Core Build stage per EP so a failure in one EP never skips the other EP's SDKs.
+      - ${{ if or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_macos_arm64_cpu, true)) }}:
+        - template: stages/core-build-stage.yml
           parameters:
-            enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
-            enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
-            enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
-            enable_linux_arm64_cuda: ${{ parameters.enable_linux_arm64_cuda }}
-            enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
-            enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
-            enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
-            enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
-            enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
-            cuda_version: ${{ parameters.cuda_version }}
+            ep: 'cpu'
+            ep_label: 'CPU'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cpu }}
+            enable_linux_arm64: ${{ parameters.enable_linux_arm64_cpu }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cpu }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cpu }}
+            enable_macos_arm64: ${{ parameters.enable_macos_arm64_cpu }}
             build_config: ${{ parameters.build_config }}
-            ort_version: ${{ parameters.ort_version }}
-            ort_cuda_version: ${{ parameters.ort_cuda_version }}
             ort_build_version: ${{ parameters.ort_build_version }}
             ort_build_source: ${{ parameters.ort_build_source }}
 
-      # ---------- Android AAR (self-contained build scripts) ----------
+      - ${{ if or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_linux_arm64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true)) }}:
+        - template: stages/core-build-stage.yml
+          parameters:
+            ep: 'cuda'
+            ep_label: 'CUDA'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cuda }}
+            enable_linux_arm64: ${{ parameters.enable_linux_arm64_cuda }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cuda }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cuda }}
+            cuda_version: ${{ parameters.cuda_version }}
+            build_config: ${{ parameters.build_config }}
+            ort_build_version: ${{ parameters.ort_build_version }}
+            ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ============================ Stage 2: Python wheels (per EP, consumes core) ============================
+      - ${{ if and(eq(parameters.enable_python, true), or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_macos_arm64_cpu, true))) }}:
+        - template: stages/sdk-packaging-stage.yml
+          parameters:
+            ep: 'cpu'
+            ep_label: 'CPU'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cpu }}
+            enable_linux_arm64: ${{ parameters.enable_linux_arm64_cpu }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cpu }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cpu }}
+            enable_macos_arm64: ${{ parameters.enable_macos_arm64_cpu }}
+            build_config: ${{ parameters.build_config }}
+            ort_version: ${{ parameters.ort_version }}
+            ort_build_version: ${{ parameters.ort_build_version }}
+            ort_build_source: ${{ parameters.ort_build_source }}
+
+      - ${{ if and(eq(parameters.enable_python, true), or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_linux_arm64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true))) }}:
+        - template: stages/sdk-packaging-stage.yml
+          parameters:
+            ep: 'cuda'
+            ep_label: 'CUDA'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cuda }}
+            enable_linux_arm64: ${{ parameters.enable_linux_arm64_cuda }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cuda }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cuda }}
+            cuda_version: ${{ parameters.cuda_version }}
+            build_config: ${{ parameters.build_config }}
+            ort_version: ${{ parameters.ort_cuda_version }}
+            ort_build_version: ${{ parameters.ort_build_version }}
+            ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ============================ Android AAR (self-contained build scripts) ============================
       - ${{ if eq(parameters.enable_android, true) }}:
         - template: stages/android-packaging-stage.yml
           parameters:
             ort_version: ${{ parameters.ort_version }}
             build_config: ${{ parameters.build_config }}
 
-      # ---------- Apple (iOS / macOS) CocoaPods ----------
+      # ============================ Apple (iOS / macOS) CocoaPods ============================
       - ${{ if eq(parameters.enable_apple_framework, true) }}:
         - template: stages/macos-ios-cocoapods-packaging-stage.yml
           parameters:
             ort_version: ${{ parameters.ort_version }}
             build_config: ${{ parameters.build_config }}
 
-      # ---------- Stage 2: NuGet (incremental, consumes core *-capi artifacts) ----------
-      - ${{ if eq(parameters.enable_nuget, true) }}:
+      # ============================ Stage 2: NuGet (per EP, consumes core *-capi artifacts) ============================
+      - ${{ if and(eq(parameters.enable_nuget, true), or(eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true), eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_macos_arm64_cpu, true))) }}:
         - template: stages/nuget-sdk-stage.yml
           parameters:
-            enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
-            enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
-            enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
-            enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
-            enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
-            enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
-            enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
-            enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
+            ep: 'cpu'
+            ep_label: 'CPU'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cpu }}
+            enable_linux_arm64: ${{ parameters.enable_linux_arm64_cpu }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cpu }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cpu }}
+            enable_macos_arm64: ${{ parameters.enable_macos_arm64_cpu }}
             enable_android: ${{ parameters.enable_android }}
             enable_apple_framework: ${{ parameters.enable_apple_framework }}
             ort_version: ${{ parameters.ort_version }}
-            ort_cuda_version: ${{ parameters.ort_cuda_version }}
+            build_config: ${{ parameters.build_config }}
+            nuget_version_type: ${{ parameters.nuget_version_type }}
+
+      - ${{ if and(eq(parameters.enable_nuget, true), or(eq(parameters.enable_linux_x64_cuda, true), eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true))) }}:
+        - template: stages/nuget-sdk-stage.yml
+          parameters:
+            ep: 'cuda'
+            ep_label: 'CUDA'
+            enable_linux_x64: ${{ parameters.enable_linux_x64_cuda }}
+            enable_win_x64: ${{ parameters.enable_win_x64_cuda }}
+            enable_win_arm64: ${{ parameters.enable_win_arm64_cuda }}
+            ort_version: ${{ parameters.ort_cuda_version }}
             build_config: ${{ parameters.build_config }}
             nuget_version_type: ${{ parameters.nuget_version_type }}
