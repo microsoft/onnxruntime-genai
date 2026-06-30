@@ -2125,6 +2125,23 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             for k in keys_to_remove:
                 del algo_config.customized_weight_config[k]
 
+        # Keep the routing-critical projections out of INT4 quantization.
+        # The MoE router selects the top-k experts and the shared-expert gate
+        # scales the always-on expert. Both are tiny matmuls, but 4-bit rounding
+        # of their weights perturbs the routing logits enough to flip top-k
+        # expert selection (measured ~1.4 of 8 experts change per token), which
+        # injects a large error into every MoE layer. Excluding them costs only
+        # a few MB but materially improves quantized-model accuracy.
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.INT8}:
+            nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
+            for i in range(self.num_layers):
+                router_node = f"/model/layers.{i}/moe/router/MatMul"
+                shared_gate_node = f"/model/layers.{i}/shared_expert_gate/MatMul"
+                if router_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(router_node)
+                if shared_gate_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(shared_gate_node)
+
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
         attn_module = layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
@@ -2258,7 +2275,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
                           shape=["batch_size", "sequence_length", 1])
 
-        gated_mul_name = f"{basename}/Mul"
+        gated_mul_name = f"{basename}/gate/Mul"
         self.make_mul(gated_mul_name,
                       [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
                       dtype=self.io_dtype,
