@@ -64,7 +64,8 @@ State::State(const GeneratorParams& params, const Model& model)
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_ = std::to_string(dis(gen));
+    graph_id_value_ = dis(gen);
+    graph_id_ = std::to_string(graph_id_value_);
   }
 }
 
@@ -94,6 +95,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
+    graph_capture_session_ = &session;
     if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
     } else {
@@ -223,6 +225,25 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
 }
 
 State::~State() {
+  // Release captured graph resources in the EP.
+  // Note: the EP contract is to no-op when the id was never captured (e.g., when
+  // graph_capture_this_run was always false for this State). The call is wrapped
+  // in try/catch because destructors must not throw -- a throw during unwinding
+  // would call std::terminate.
+#if ORT_API_VERSION >= 27
+  if (graph_capture_session_ && graph_id_value_ > 0) {
+    try {
+      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
+    } catch (...) {
+      // Best-effort cleanup; swallow to keep the destructor non-throwing.
+      if (g_log.enabled && g_log.ort_lib) {
+        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
+                       << ") failed: unknown exception" << std::endl;
+      }
+    }
+  }
+#endif
+
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {
       adapters_->ReleaseAdapter(adapter_name);
