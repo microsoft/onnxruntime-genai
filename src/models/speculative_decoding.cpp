@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include <algorithm>
 #include "../generators.h"
+#include "../softmax.h"
 #include "../speculative_sampling.h"
 #include "speculative_decoding.h"
 #include "model_type.h"
@@ -174,7 +175,8 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
   const int vocab_size = params_->config.model.vocab_size;
   auto draft_logits = draft_state_->Run(total_length, next_tokens, next_indices);
   auto cpu_draft = draft_logits.CopyDeviceToCpu();
-  draft_pending_probs_ = Softmax({cpu_draft.data(), static_cast<size_t>(vocab_size)});
+  draft_pending_probs_.assign(cpu_draft.data(), cpu_draft.data() + vocab_size);
+  Softmax(draft_pending_probs_, 1.0f);
   draft_pending_valid_ = true;
   return target_state_->Run(total_length, next_tokens, next_indices);
 }

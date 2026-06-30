@@ -257,8 +257,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
             {t_dist.data(), static_cast<size_t>(vocab_size)},
             {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
             {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        final_token = SampleFromDistribution(
-            {correction_buf.data(), static_cast<size_t>(vocab_size)}, rng_);
+        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
+        final_token = dist(rng_);
       }
       corrections_++;
       break;
@@ -271,8 +271,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
           std::max_element(target_dists[K - 1].begin(), target_dists[K - 1].end()) -
           target_dists[K - 1].begin());
     } else {
-      final_token = SampleFromDistribution(
-          {target_dists[K - 1].data(), static_cast<size_t>(vocab_size)}, rng_);
+      std::discrete_distribution<int> dist(target_dists[K - 1].begin(), target_dists[K - 1].end());
+      final_token = dist(rng_);
     }
     bonuses_++;
   }

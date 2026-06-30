@@ -83,48 +83,6 @@ TEST(SpeculativeSamplingTest, CorrectionDistributionFallsBackToTargetWhenIdentic
   EXPECT_FLOAT_EQ(out[2], 0.2f);
 }
 
-// SampleFromDistribution
-
-TEST(SpeculativeSamplingTest, SampleSingleSpikeAlwaysReturnsThatIndex) {
-  // All probability mass on index 2 - any rng must return 2
-  std::array<float, 4> probs{0.0f, 0.0f, 1.0f, 0.0f};
-  std::mt19937 rng(42);
-
-  for (int i = 0; i < 50; ++i) {
-    EXPECT_EQ(SampleFromDistribution(probs, rng), 2);
-  }
-}
-
-TEST(SpeculativeSamplingTest, SampleEmpiricalFrequenciesMatchProbs) {
-  // Draw N times and check empirical frequencies approximate probs
-  std::array<float, 3> probs{0.1f, 0.6f, 0.3f};
-  std::mt19937 rng(123);
-
-  constexpr int N = 50000;
-  std::array<int, 3> counts{};
-  for (int i = 0; i < N; ++i) {
-    counts[SampleFromDistribution(probs, rng)]++;
-  }
-
-  // 1% tolerance
-  EXPECT_NEAR(counts[0] / static_cast<float>(N), 0.1f, 0.01f);
-  EXPECT_NEAR(counts[1] / static_cast<float>(N), 0.6f, 0.01f);
-  EXPECT_NEAR(counts[2] / static_cast<float>(N), 0.3f, 0.01f);
-}
-
-TEST(SpeculativeSamplingTest, SampleNeverOutOfBounds) {
-  // Probs that sum to just under 1.0 (floating-point underflow edge case) 
-  // Should never return out-of-bounds index
-  std::array<float, 3> probs{0.3333f, 0.3333f, 0.3333f};
-  std::mt19937 rng(7);
-
-  for (int i = 0; i < 1000; ++i) {
-    int idx = SampleFromDistribution(probs, rng);
-    EXPECT_GE(idx, 0);
-    EXPECT_LT(idx, 3);
-  }
-}
-
 // ComputeSampledCategorical (shared with standard decode via search.cpp)
 
 namespace {

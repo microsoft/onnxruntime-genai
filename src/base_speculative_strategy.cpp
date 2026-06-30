@@ -7,6 +7,7 @@
 
 #include "generators.h"
 #include "search.h"
+#include "softmax.h"
 #include "speculative_sampling.h"
 #include "models/speculative_decoding.h"
 
@@ -57,8 +58,8 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     proposal.probs[0] = SamplingDistributionFromProbs(
         spec_state_.draft_pending_probs(), search.top_k, search.top_p,
         search.temperature);
-    proposal.tokens[0] = static_cast<int32_t>(
-        SampleFromDistribution({proposal.probs[0].data(), static_cast<size_t>(vocab_size)}, rng_));
+    std::discrete_distribution<int> dist(proposal.probs[0].begin(), proposal.probs[0].end());
+    proposal.tokens[0] = static_cast<int32_t>(dist(rng_));
   }
 
   // d_1..d_{K-1}: feed the previous draft token through the draft model.
@@ -76,8 +77,8 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
       ComputeSampledCategorical(logits, search.top_k, search.top_p,
                                 search.temperature, sampled);
       proposal.probs[i] = ScatterToFullVocab(sampled, vocab_size);
-      proposal.tokens[i] = static_cast<int32_t>(
-          SampleFromDistribution({proposal.probs[i].data(), static_cast<size_t>(vocab_size)}, rng_));
+      std::discrete_distribution<int> dist(proposal.probs[i].begin(), proposal.probs[i].end());
+      proposal.tokens[i] = static_cast<int32_t>(dist(rng_));
     }
   }
 
@@ -120,8 +121,9 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   single_buf.CopyCpuToDevice();
   auto draft_lgt = spec_state_.draft_state().Run(seed_length + n_direct + 1, single_buf, {});
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
-  spec_state_.set_draft_pending_probs(
-      Softmax({cpu_draft.data(), static_cast<size_t>(vocab_size)}));
+  std::vector<float> draft_probs(cpu_draft.data(), cpu_draft.data() + vocab_size);
+  Softmax(draft_probs, 1.0f);
+  spec_state_.set_draft_pending_probs(std::move(draft_probs));
 }
 
 }  // namespace Generators

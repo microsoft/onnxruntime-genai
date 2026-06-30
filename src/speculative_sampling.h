@@ -6,27 +6,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <random>
 #include <vector>
 #include "span.h"
 #include "sampling_distribution.h"
 
 namespace Generators {
-
-// Numerically-stable softmax over a contiguous fp32 row.
-inline std::vector<float> Softmax(std::span<const float> logits) {
-  if (logits.empty()) return {};
-  float mx = *std::max_element(logits.begin(), logits.end());
-  std::vector<float> p(logits.size());
-  float sum = 0.f;
-  for (size_t i = 0; i < logits.size(); i++) {
-    p[i] = std::exp(logits[i] - mx);
-    sum += p[i];
-  }
-  if (sum > 0.f)
-    for (auto& v : p) v /= sum;
-  return p;
-}
 
 // Inputs: probability vector probs (e.g. draft softmax), top_k, top_p, temperature
 // Output: full-vocab sampling distribution with zeros outside the kept set
@@ -81,23 +65,6 @@ inline void BuildCorrectionDistribution(std::span<const float> p_target,
       out[i] = p_target[i];
     }
   }
-}
-
-// Input: distribution probs; rng state
-// Output: index of sampled token
-inline int SampleFromDistribution(std::span<const float> probs, std::mt19937& rng) {
-  // Produce a random float r in [0, 1) and draw one sample
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  float r = dist(rng);
-
-  // Walk the CDF and return first index where running sum exceeds r
-  float cum = 0.0f;
-  for (size_t i = 0; i < probs.size(); ++i) {
-    cum += probs[i];
-    if (r < cum) return static_cast<int>(i);
-  }
-
-  return static_cast<int>(probs.size() - 1);
 }
 
 }  // namespace Generators
