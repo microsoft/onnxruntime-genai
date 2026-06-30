@@ -422,6 +422,10 @@ void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
   }
 }
 
+bool Generator::IsGreedySampling() const {
+  return sampling_method_ == SamplingMethod::kGreedy;
+}
+
 void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   const auto& search = params.search;
   if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {

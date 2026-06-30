@@ -28,7 +28,7 @@ BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{Req
 // Sampling: token i drawn from draft's truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
 // draft_pending_probs_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
 SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
-    Generator& g, int K, int seed_length, const SamplingConfig& sampling) {
+    Generator& g, int K, int seed_length) {
   if (!spec_state_.draft_pending_valid())
     throw std::runtime_error(
         "BaseSpeculativeStrategy::Propose: draft pending probs not initialized. "
@@ -36,10 +36,13 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
 
   const auto& params = *g.search_->params_;
   const int vocab_size = params.config.model.vocab_size;
+  // Read sampling settings from the canonical config/method rather than a parallel struct.
+  const auto& search = params.search;
+  const bool greedy = g.IsGreedySampling();
 
   Proposal proposal;
   proposal.tokens.resize(K);
-  if (!sampling.greedy)
+  if (!greedy)
     // greedy-match leaves probs empty
     proposal.probs.resize(K);  
 
@@ -48,12 +51,12 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   };
 
   // d_0 from the carried-over pending probs.
-  if (sampling.greedy) {
+  if (greedy) {
     proposal.tokens[0] = argmax(spec_state_.draft_pending_probs());
   } else {
     proposal.probs[0] = SamplingDistributionFromProbs(
-        spec_state_.draft_pending_probs(), sampling.top_k, sampling.top_p,
-        sampling.temperature);
+        spec_state_.draft_pending_probs(), search.top_k, search.top_p,
+        search.temperature);
     proposal.tokens[0] = static_cast<int32_t>(
         SampleFromDistribution({proposal.probs[0].data(), static_cast<size_t>(vocab_size)}, rng_));
   }
@@ -67,11 +70,11 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     auto lgt = spec_state_.draft_state().Run(seed_length + i, single_buf, {});
     auto cpu = lgt.CopyDeviceToCpu();
     std::span<const float> logits{cpu.data(), static_cast<size_t>(vocab_size)};
-    if (sampling.greedy) {
+    if (greedy) {
       proposal.tokens[i] = argmax(logits);
     } else {
-      ComputeSampledCategorical(logits, sampling.top_k, sampling.top_p,
-                                sampling.temperature, sampled);
+      ComputeSampledCategorical(logits, search.top_k, search.top_p,
+                                search.temperature, sampled);
       proposal.probs[i] = ScatterToFullVocab(sampled, vocab_size);
       proposal.tokens[i] = static_cast<int32_t>(
           SampleFromDistribution({proposal.probs[i].data(), static_cast<size_t>(vocab_size)}, rng_));

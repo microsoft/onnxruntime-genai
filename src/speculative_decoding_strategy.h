@@ -29,23 +29,17 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     std::vector<std::vector<float>> probs;
   };
 
-  // Sampling settings worked out by the base class and passed to Propose. greedy -> accept by
-  // matching the target's argmax (empty probs); else sample from the top-k / top-p distribution.
-  struct SamplingConfig {
-    bool greedy{true};
-    int top_k{};
-    float top_p{};
-    float temperature{1.0f};
-  };
+  // Sampling settings are read directly from the canonical config (search params) and the
+  // Generator's sampling method inside Propose/RunRound.
 
   void Step(Generator& g) final;
   SpeculativeStats GetStats() const final;
   void Reset() final;
 
  protected:
-  // Produce K candidate tokens. seed_length = sequence length at start.
-  virtual Proposal Propose(Generator& g, int K, int seed_length,
-                           const SamplingConfig& sampling) = 0;
+  // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
+  // read from the canonical config (g.search_->params_->search) and g.IsGreedySampling().
+  virtual Proposal Propose(Generator& g, int K, int seed_length) = 0;
 
   // Update the draft model's own state (its KV cache, n-gram tables, ...) after the base class
   // commits the accepted tokens. n_direct = how many proposed tokens were accepted (excludes the

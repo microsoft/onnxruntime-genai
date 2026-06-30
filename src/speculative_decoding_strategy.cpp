@@ -84,15 +84,13 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     rng_seeded_ = true;
   }
 
-  SamplingConfig cfg{};
-  cfg.greedy = (g.sampling_method_ == Generator::SamplingMethod::kGreedy);
-  cfg.top_k = params.search.top_k;
-  cfg.top_p = params.search.top_p;
-  cfg.temperature = params.search.temperature;
+  // Read sampling settings from the canonical config/method rather than a parallel struct.
+  const auto& search = params.search;
+  const bool greedy = g.IsGreedySampling();
 
   SampledCategorical sampled;
-  auto to_dist = [&cfg, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
-    if (cfg.greedy) {
+  auto to_dist = [&search, greedy, &sampled, vocab_size](std::span<const float> logits) -> std::vector<float> {
+    if (greedy) {
       // Greedy accept/correct/bonus only needs argmax, so avoid exp() over the full vocab.
       std::vector<float> onehot(static_cast<size_t>(vocab_size), 0.0f);
       const int32_t idx = static_cast<int32_t>(
@@ -100,13 +98,13 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       onehot[static_cast<size_t>(idx)] = 1.0f;
       return onehot;
     }
-    ComputeSampledCategorical(logits, cfg.top_k, cfg.top_p, cfg.temperature, sampled);
+    ComputeSampledCategorical(logits, search.top_k, search.top_p, search.temperature, sampled);
     return ScatterToFullVocab(sampled, vocab_size);
   };
 
   // Propose: draft produces K candidate tokens.
   auto t_propose_start = clock::now();
-  Proposal proposal = Propose(g, K, seed_length, cfg);
+  Proposal proposal = Propose(g, K, seed_length);
   auto t_propose_end = clock::now();
 
   if (static_cast<int>(proposal.tokens.size()) != K)

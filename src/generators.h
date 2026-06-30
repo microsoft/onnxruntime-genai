@@ -138,6 +138,10 @@ struct Generator : LeakChecked<Generator> {
   // Returns zero-filled stats when the model is not speculative.
   SpeculativeStats GetSpeculativeStats() const;
 
+  // True when sampling reduces to greedy/argmax selection (do_sample off, top_k == 1, or
+  // temperature == 0). Computed once at construction so callers don't re-derive it.
+  bool IsGreedySampling() const;
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);

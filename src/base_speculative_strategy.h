@@ -15,8 +15,7 @@ struct BaseSpeculativeStrategy final : SpeculativeDecodingStrategy {
   explicit BaseSpeculativeStrategy(Generator& g);
 
  protected:
-  Proposal Propose(Generator& g, int K, int seed_length,
-                   const SamplingConfig& sampling) override;
+  Proposal Propose(Generator& g, int K, int seed_length) override;
   void Advance(Generator& g,
                const Proposal& proposal,
                int n_direct,
