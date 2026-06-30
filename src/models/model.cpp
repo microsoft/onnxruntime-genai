@@ -423,39 +423,21 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const char* provider_name = device_type_names[static_cast<int>(type)];
   Config::ProviderOptions init_session_provider_options{provider_name, {}};
 
-  // Forward only global/singleton WebGPU options to the init session so that the
-  // process-wide WebGpuContext singleton is initialized with the correct settings.
-  // Per-session options (enableGraphCapture, enableInt64, etc.) are excluded
-  // because they are meaningless for the trivial initialization model.
-  if (type == DeviceType::WEBGPU) {
-    constexpr std::array<std::string_view, 7> kWebGpuGlobalOptions = {
-        "deviceId",
-        "webgpuInstance",
-        "webgpuDevice",
-        "dawnBackendType",
-        "powerPreference",
-        "validationMode",
-        "dawnProcTable",
-    };
-    for (const auto& user_po : config.model.decoder.session_options.provider_options) {
-      if (user_po.name == provider_name) {
-        for (const auto& opt : user_po.options) {
-          if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
-            init_session_provider_options.options.emplace_back(opt);
-          }
-        }
-        init_session_provider_options.device_filtering_options = user_po.device_filtering_options;
-        break;
-      }
-    }
-  }
+  // Look up the user-supplied provider options entry for this provider (if any),
+  // then let the EP shape the trivial-model init session options. Most EPs use
+  // the default no-op; WebGPU forwards global/singleton options and QNN injects
+  // the QnnHtpShared allocator gating option.
+  const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
+  const auto user_provider_options_it = std::find_if(
+      user_provider_options_list.begin(), user_provider_options_list.end(),
+      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+  const Config::ProviderOptions* user_provider_options =
+      user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
+  if (user_provider_options)
+    init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
+  device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
-  // QnnHtpShared is a special case. This allocator is only made available when the provider option
-  // 'enable_htp_shared_memory_allocator' is set to 1.
-  if (type == DeviceType::QNN) {
-    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
-  }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
