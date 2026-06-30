@@ -228,7 +228,7 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
         self._quant_attrs = quant_attrs
-        self._load_quant_config(quant_attrs)  # codeql[py/init-calls-subclass]
+        self._load_quant_config(quant_attrs)
 
         lm_head_tensors = {}
         for weight_file in os.listdir(input_path):
@@ -242,8 +242,8 @@ class QuantizedModel:
                         continue
 
                     # Per-layer quantization support
-                    local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
-                    local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
+                    local_bits = self.get_layer_bits(name)
+                    local_group_size = self.get_layer_group_size(name)
 
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
@@ -698,7 +698,7 @@ class QuantizedModel:
         self.set_properties()
 
     # Canonical name mapping for lm_head tensors (transformer.output_layer.* -> lm_head.*)
-    _LM_HEAD_NAME_MAP = {  # noqa: RUF012
+    _LM_HEAD_NAME_MAP = {
         "transformer.output_layer.weight": "lm_head.weight",
         "transformer.output_layer.bias": "lm_head.bias",
         "transformer.output_layer.qweight": "lm_head.qweight",

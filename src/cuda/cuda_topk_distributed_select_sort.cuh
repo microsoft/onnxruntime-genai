@@ -112,8 +112,13 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
 
     if (tid == 0) {
       distributed_scores_out_curr[ite] = top_k_sequence.u;
-      distributed_indices_out_curr[ite] = top_k_sequence.p;
-      scores_in[top_k_sequence.p] = MIN_FLOAT;
+      // Clamp invalid index to 0 for safety (NaN inputs leave p at INT_MAX)
+      distributed_indices_out_curr[ite] = top_k_sequence.p < vocab_size ? top_k_sequence.p : 0;
+      // Guard against NaN inputs: if all scores are NaN, no valid index is found
+      // and p remains INT_MAX (its init value). Writing to that index would be OOB.
+      if (top_k_sequence.p < vocab_size) {
+        scores_in[top_k_sequence.p] = MIN_FLOAT;
+      }
       __threadfence_block();
     }
     __syncthreads();
@@ -181,8 +186,13 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
         int vocab_index = top_k_sequence_reduced.p_indirection;
 
         scores_out[ite] = top_k_sequence_reduced.u;
-        indices_out[ite] = vocab_index;
-        shared_distributed_scores_out[index] = MIN_FLOAT;
+        // Guard against NaN: if no valid element was found, p_indirection stays at -1 (init value).
+        // Clamp to 0 to avoid downstream OOB in embedding lookups.
+        indices_out[ite] = (vocab_index >= 0 && vocab_index < vocab_size) ? vocab_index : 0;
+        // Guard against NaN inputs: if all scores are NaN, p stays at -1 (init value).
+        if (index >= 0 && index < num_top_k_shards * k) {
+          shared_distributed_scores_out[index] = MIN_FLOAT;
+        }
 
         __threadfence_block();
       }

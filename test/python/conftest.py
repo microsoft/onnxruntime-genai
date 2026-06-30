@@ -12,11 +12,13 @@ def pytest_addoption(parser):
         "--test_models",
         help="Path to the current working directory",
         type=str,
-        required=True,
+        default=None,
     )
 
 
 def get_path_for_model(data_path, model_name, precision, device):
+    if not data_path:
+        pytest.skip("--test_models not provided")
     model_path = os.path.join(data_path, model_name, precision, device)
     if not os.path.exists(model_path):
         pytest.skip(f"Model {model_name} not found at {model_path}")

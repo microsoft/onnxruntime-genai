@@ -4,16 +4,19 @@
 // Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "../generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "speculative_decoding.h"
@@ -62,7 +65,8 @@ State::State(const GeneratorParams& params, const Model& model)
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_ = std::to_string(dis(gen));
+    graph_id_value_ = dis(gen);
+    graph_id_ = std::to_string(graph_id_value_);
   }
 }
 
@@ -92,6 +96,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
+    graph_capture_session_ = &session;
     if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
     } else {
@@ -221,6 +226,25 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
 }
 
 State::~State() {
+  // Release captured graph resources in the EP.
+  // Note: the EP contract is to no-op when the id was never captured (e.g., when
+  // graph_capture_this_run was always false for this State). The call is wrapped
+  // in try/catch because destructors must not throw -- a throw during unwinding
+  // would call std::terminate.
+#if ORT_API_VERSION >= 27
+  if (graph_capture_session_ && graph_id_value_ > 0) {
+    try {
+      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
+    } catch (...) {
+      // Best-effort cleanup; swallow to keep the destructor non-throwing.
+      if (g_log.enabled && g_log.ort_lib) {
+        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
+                       << ") failed: unknown exception" << std::endl;
+      }
+    }
+  }
+#endif
+
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {
       adapters_->ReleaseAdapter(adapter_name);
@@ -280,7 +304,9 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
+  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -336,6 +362,15 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
 }
 
 std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  if (strings.empty()) {
+    throw std::runtime_error("EncodeBatch: input strings must not be empty");
+  }
+  for (size_t i = 0; i < strings.size(); i++) {
+    if (strings[i] == nullptr) {
+      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
+    }
+  }
+
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
@@ -407,12 +442,24 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  // QnnHtpShared is a special case. This allocator is only made available when the provider option
-  // 'enable_htp_shared_memory_allocator' is set to 1.
-  if (type == DeviceType::QNN) {
-    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
-  }
+  const char* provider_name = device_type_names[static_cast<int>(type)];
+  Config::ProviderOptions init_session_provider_options{provider_name, {}};
+
+  // Look up the user-supplied provider options entry for this provider (if any),
+  // then let the EP shape the trivial-model init session options. Most EPs use
+  // the default no-op; WebGPU forwards global/singleton options and QNN injects
+  // the QnnHtpShared allocator gating option.
+  const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
+  const auto user_provider_options_it = std::find_if(
+      user_provider_options_list.begin(), user_provider_options_list.end(),
+      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+  const Config::ProviderOptions* user_provider_options =
+      user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
+  if (user_provider_options)
+    init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
+  device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+
+  provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
@@ -779,8 +826,38 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = CreateConfig(ort_env, config_path, /*ep=*/nullptr, config_overlay);
   return CreateModel(ort_env, std::move(config));
+}
+
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, const char* ep,
+                                     std::string_view json_overlay) {
+  const std::string ep_str = (ep != nullptr) ? std::string{ep} : std::string{};
+  const fs::path path{config_path};
+
+  if (IsModelPackage(path)) {
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+    if (!json_overlay.empty()) {
+      throw std::runtime_error(
+          "Loading a model package with runtime settings is not supported.");
+    }
+    auto load = OpenAndSelectVariant(ort_env, path, ep_str);
+    auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
+    config->package_root = load.package_root;
+    return config;
+#else
+    throw std::runtime_error(
+        "Model package support requires building onnxruntime-genai against "
+        "ONNX Runtime with the OrtModelPackageApi experimental functions.");
+#endif
+  }
+
+  if (!ep_str.empty()) {
+    throw std::runtime_error(
+        "An execution provider was specified, but \"" + path.string() +
+        "\" is not a model package. Drop the ep argument to load a flat directory.");
+  }
+  return std::make_unique<Config>(path, json_overlay);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {

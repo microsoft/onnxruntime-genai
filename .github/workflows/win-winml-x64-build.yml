@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
+  AZCOPY_MSI_CLIENT_ID: d712a4c7-a0cf-4e87-af75-31510eba0a8e
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
@@ -65,7 +65,7 @@ jobs:
           # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
           # time and memory usage manageable. The preset's default arch list is for
           # release packaging, not CI validation.
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2091' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='2.1.1' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real
 
       - name: Build with CMake
         run: |

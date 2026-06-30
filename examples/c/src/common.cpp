@@ -195,7 +195,7 @@ bool ParseArgs(
   app.add_option("-p,--top_p", generator_params_args.top_p, "Top p probability to sample with")->group(generator_params);
 
   app.add_option("--response_format", guidance_args.response_format, "Provide response format for the model")->group(guidance);
-  app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json")->group(guidance);
+  app.add_option("--tools_file", guidance_args.tools_file, "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json")->group(guidance);
   app.add_flag("--text_output", guidance_args.text_output, "Produce a text response in the output")->group(guidance);
   app.add_flag("--tool_output", guidance_args.tool_output, "Produce a tool call in the output")->group(guidance);
   app.add_option("--tool_call_start", guidance_args.tool_call_start, "String representation of tool call start (ex: <|tool_call|>). Needs to be marked as special in tokenizer.json for guidance to work.")->group(guidance);
@@ -476,12 +476,17 @@ nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_ima
     content_json = nlohmann::ordered_json(content);
 
   } else {
-    // Gemma-3 style: structured content
+    // Gemma-style structured content (Gemma-3 / Gemma-4)
     content_json = nlohmann::ordered_json::array();
 
     // Add N image blocks
     for (int i = 0; i < num_images; i++) {
       content_json.push_back(nlohmann::ordered_json::object({{"type", "image"}}));
+    }
+
+    // Add N audio blocks (e.g. Gemma-4 audio support)
+    for (int i = 0; i < num_audios; i++) {
+      content_json.push_back(nlohmann::ordered_json::object({{"type", "audio"}}));
     }
 
     // Always add a text block (with the user prompt)

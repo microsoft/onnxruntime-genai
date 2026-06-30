@@ -392,8 +392,20 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
-  if (params.search.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.search.batch_size));
+
+  constexpr int kMaxBatchSize = 32;
+  constexpr int kMaxNumBeams = 32;
+  constexpr int kMaxNumBeamsCuda = 32;
+
+  if (params.search.batch_size < 1 || params.search.batch_size > kMaxBatchSize)
+    throw std::runtime_error("batch_size (" + std::to_string(params.search.batch_size) + ") must be in [1, " + std::to_string(kMaxBatchSize) + "]");
+
+  const int max_num_beams = (params.search.num_beams > 1 &&
+                             (params.p_device->GetType() == DeviceType::CUDA || params.p_device->GetType() == DeviceType::NvTensorRtRtx))
+                                ? kMaxNumBeamsCuda
+                                : kMaxNumBeams;
+  if (params.search.num_beams < 1 || params.search.num_beams > max_num_beams)
+    throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
@@ -437,6 +449,8 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
       throw std::runtime_error("top_p must be between 0.0 and 1.0");
     if (search.top_k < 0)
       throw std::runtime_error("top_k must be 0 or greater");
+    if (search.top_k > params.config.model.vocab_size)
+      throw std::runtime_error("top_k (" + std::to_string(search.top_k) + ") must be less than or equal to vocab_size (" + std::to_string(params.config.model.vocab_size) + ")");
     if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
       sampling_method_ = SamplingMethod::kTopKTopP;
     } else if (search.top_k > 1) {

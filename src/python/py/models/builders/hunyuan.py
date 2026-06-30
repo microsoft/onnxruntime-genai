@@ -29,16 +29,26 @@ class HunyuanDenseV1Model(Model):
         #   base = rope_theta * alpha ^ (head_dim / (head_dim - 2))
         # With alpha=1000, head_dim=128:
         #   effective_theta ≈ 10000 * 1000^(128/126) ≈ 10,359,000
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            alpha = config.rope_scaling.get("alpha", 1.0)
+        # Transformers versions have used both rope_scaling and rope_parameters
+        # for RoPE metadata, so accept either shape before passing config to the base builder.
+        rope_config = getattr(config, "rope_scaling", None) or getattr(config, "rope_parameters", None)
+        if rope_config is not None:
+            base_theta = getattr(config, "rope_theta", None) or rope_config.get("rope_theta")
+            if base_theta is not None:
+                config.rope_theta = base_theta
+
+            alpha = rope_config.get("alpha", 1.0)
             head_dim = getattr(config, "head_dim", None)
             if head_dim is None:
                 head_dim = config.hidden_size // config.num_attention_heads
-            if alpha != 1.0 and head_dim is not None and head_dim > 2:
-                config.rope_theta = config.rope_theta * (alpha ** (head_dim / (head_dim - 2)))
+            if alpha != 1.0 and base_theta is not None and head_dim is not None and head_dim > 2:
+                config.rope_theta = base_theta * (alpha ** (head_dim / (head_dim - 2)))
 
-        # Disable rope_scaling: effective theta is now baked into config.rope_theta above.
+        # Disable generic RoPE scaling: Hunyuan's effective theta is now baked into config.rope_theta above.
+        # Leaving these fields set would let the base builder apply another, non-Hunyuan scaling path.
         config.rope_scaling = None
+        if hasattr(config, "rope_parameters"):
+            config.rope_parameters = None
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -48,10 +58,10 @@ class HunyuanDenseV1Model(Model):
         # Force explicit RotaryEmbedding nodes so QK norms can be placed after them.
         return False
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
     def make_attention_qk_rope_and_norm(self, layer_id, attention, **kwargs):
         """
@@ -63,10 +73,12 @@ class HunyuanDenseV1Model(Model):
         query_layernorm / key_layernorm are aliased to q_norm / k_norm so
         the existing make_qk_norm() infrastructure can be reused.
         """
-        # Alias Hunyuan weight names to what make_qk_norm expects
-        if not hasattr(attention, "q_norm"):
+        # Alias Hunyuan weight names to what make_qk_norm expects.
+        # Some Transformers versions expose q_norm/k_norm as None while the
+        # real modules live under query_layernorm/key_layernorm.
+        if getattr(getattr(attention, "q_norm", None), "weight", None) is None and hasattr(attention, "query_layernorm"):
             attention.q_norm = attention.query_layernorm
-        if not hasattr(attention, "k_norm"):
+        if getattr(getattr(attention, "k_norm", None), "weight", None) is None and hasattr(attention, "key_layernorm"):
             attention.k_norm = attention.key_layernorm
 
         # RoPE first, then QK norm

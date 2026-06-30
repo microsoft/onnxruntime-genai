@@ -17,6 +17,7 @@
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
+#include "models/model_package.h"
 
 namespace Generators {
 
@@ -234,7 +235,20 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
 
 OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaConfig>(std::make_unique<Generators::Config>(fs::path(config_path), std::string_view{}));
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out) {
+  OGA_TRY
+  if (!Generators::IsModelPackage(fs::path{config_path})) {
+    throw std::runtime_error(std::string("\"") + config_path +
+                             "\" is not a model package. Use OgaCreateConfig for a flat model directory.");
+  }
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path, ep);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
   return nullptr;
   OGA_CATCH
 }
@@ -693,6 +707,8 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
 
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
+  if (count > 0 && strings == nullptr)
+    throw std::runtime_error("EncodeBatch: strings pointer must not be null when count > 0");
   auto tensor = tokenizer->EncodeBatch(std::span<const char*>(strings, count));
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;

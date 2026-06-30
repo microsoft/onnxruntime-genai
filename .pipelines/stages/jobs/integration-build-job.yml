@@ -1,0 +1,185 @@
+parameters:
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+  - 'osx'
+- name: arch
+  type: string
+  default: 'x64'
+
+jobs:
+- job: build_${{ parameters.os }}_${{ parameters.arch }}
+  displayName: 'Build wheel (${{ parameters.os }} ${{ parameters.arch }})'
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: AcesShared
+      os: macOS
+      demands:
+        - ImageOverride -equals ACES_VM_SharedPool_Sequoia
+
+  timeoutInMinutes: 180
+  workspace:
+    clean: all
+
+  variables:
+  - name: py_dot_ver
+    value: '3.12'
+  - name: py_no_dot_ver
+    value: '312'
+  - name: artifactName
+    value: 'integration-wheel-${{ parameters.os }}-${{ parameters.arch }}'
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  # UsePythonVersion is only needed on Windows and macOS, where build.py
+  # runs on the host. On Linux the build runs inside the manylinux CUDA
+  # container which supplies its own /opt/python/cp312-cp312/bin/python3.12.
+  - ${{ if eq(parameters.os, 'win') }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: $(py_dot_ver)
+        addToPath: true
+        architecture: 'x64'
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - task: Docker@2
+      displayName: 'Login to Azure container registry'
+      inputs:
+        containerRegistry: 'onnxruntimebuildcache'
+        command: 'login'
+        addPipelineData: false
+
+    - bash: |
+        set -e -x
+        python3 tools/ci_build/get_docker_image.py \
+          --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8 \
+          --context tools/ci_build/github/linux/docker/manylinux \
+          --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+          --container-registry onnxruntimebuildcache \
+          --repository ortgenaicudabuildx64
+      displayName: 'Build manylinux CUDA docker image'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+    - bash: |
+        set -e -x
+        docker run --rm \
+          -v $(Build.Repository.LocalPath):/ort_genai_src \
+          -w /ort_genai_src \
+          ortgenaicudabuildx64 \
+          bash -c "
+            set -e -x
+            /opt/python/cp$(py_no_dot_ver)-cp$(py_no_dot_ver)/bin/python$(py_dot_ver) -m pip install requests
+            /opt/python/cp$(py_no_dot_ver)-cp$(py_no_dot_ver)/bin/python$(py_dot_ver) build.py \
+              --config RelWithDebInfo \
+              --parallel \
+              --use_cuda \
+              --cuda_home /usr/local/cuda \
+              --cmake_extra_defines MANYLINUX=ON \
+              --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=86-real' \
+              --cmake_extra_defines PYTHON_EXECUTABLE=/opt/python/cp$(py_no_dot_ver)-cp$(py_no_dot_ver)/bin/python$(py_dot_ver) \
+              --skip_tests \
+              --skip_examples
+          "
+      displayName: 'Build wheel'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+    - task: CopyFiles@2
+      displayName: 'Stage wheel'
+      inputs:
+        SourceFolder: '$(Build.Repository.LocalPath)/build/Linux/RelWithDebInfo/wheel'
+        Contents: '*manylinux*.whl'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - task: AzureCLI@2
+      displayName: 'Download CUDA 12.8'
+      inputs:
+        azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+        inlineScript: |
+          azcopy login --identity
+          azcopy copy --recursive `
+            "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.8" `
+            "cuda_sdk"
+
+    - task: PythonScript@0
+      displayName: 'Install python build deps'
+      inputs:
+        scriptSource: inline
+        script: |
+          import subprocess
+          subprocess.check_call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'requests'])
+        workingDirectory: '$(Build.BinariesDirectory)'
+
+    - powershell: |
+        python build.py `
+          --config RelWithDebInfo `
+          --parallel `
+          --use_cuda `
+          --cuda_home "$(Build.Repository.LocalPath)\cuda_sdk\v12.8" `
+          --cmake_extra_defines "CMAKE_CUDA_ARCHITECTURES=86-real" `
+          --skip_tests `
+          --skip_examples
+      displayName: 'Build wheel'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+    - task: CopyFiles@2
+      displayName: 'Stage wheel'
+      inputs:
+        SourceFolder: '$(Build.Repository.LocalPath)\build\Windows\RelWithDebInfo\wheel'
+        Contents: '*.whl'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: $(py_dot_ver)
+        addToPath: true
+        architecture: 'arm64'
+
+    - bash: |
+        set -e -x
+        brew update --quiet
+        brew install --quiet cmake
+        cmake --version
+      displayName: 'Install cmake'
+
+    - bash: |
+        set -e -x
+        export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
+        python3 -m venv $(Agent.TempDirectory)/genai-build-venv
+        source $(Agent.TempDirectory)/genai-build-venv/bin/activate
+        python -m pip install --upgrade pip
+        python -m pip install requests wheel
+        python build.py \
+          --config RelWithDebInfo \
+          --parallel \
+          --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64 \
+          --skip_tests \
+          --skip_examples
+      displayName: 'Build wheel'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+    - task: CopyFiles@2
+      displayName: 'Stage wheel'
+      inputs:
+        SourceFolder: '$(Build.Repository.LocalPath)/build/macOS/RelWithDebInfo/wheel'
+        Contents: '*.whl'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish wheel'
+    inputs:
+      artifactName: $(artifactName)
+      targetPath: '$(Build.ArtifactStagingDirectory)/wheel'

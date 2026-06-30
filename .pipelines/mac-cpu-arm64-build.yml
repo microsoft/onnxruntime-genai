@@ -191,12 +191,6 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)'
 
   - bash: |
-      set -e -x
-      rm -rf ort
-    displayName: 'Remove the ort lib and header files'
-    workingDirectory: '$(Build.SourcesDirectory)'
-
-  - bash: |
       ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64
       ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64/wheel
     displayName: 'Verify build artifacts'
@@ -208,7 +202,7 @@ jobs:
       source genai-macos-venv/bin/activate
       export ORTGENAI_LOG_ORT_LIB=1
       python3 -m pip install requests
-      python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+      python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
     displayName: 'Run the Python tests'
     workingDirectory: '$(Build.SourcesDirectory)'
 
@@ -216,7 +210,7 @@ jobs:
       set -e -x
       export ORTGENAI_LOG_ORT_LIB=1
       cd test/csharp
-      dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal
+      dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" /p:OrtLibDir="../../ort/lib" --verbosity normal
     displayName: 'Build the C# API and run the C# tests'
     workingDirectory: '$(Build.SourcesDirectory)'
 
@@ -233,8 +227,8 @@ jobs:
   - bash: |
       set -e -x
       export ORTGENAI_LOG_ORT_LIB=1
-      python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
-      ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+      python3 test/python/special_tokens.py -p test/models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+      ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
     displayName: 'Test the C# LLM example with tool calling'
     workingDirectory: '$(Build.SourcesDirectory)'
 
