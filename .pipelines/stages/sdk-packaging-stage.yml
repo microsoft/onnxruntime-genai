@@ -51,7 +51,7 @@ parameters:
 
 stages:
 - stage: python_wheel
-  displayName: 'Python wheel (incremental)'
+  displayName: 'Python Wheels'
   dependsOn: core_build
   jobs:
   - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:

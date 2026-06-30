@@ -6,6 +6,7 @@ parameters:
 
 jobs:
 - job: macos_ios_cocoapods_packaging
+  displayName: 'Apple · CocoaPods'
   pool:
     name: 'Azure Pipelines'
     image: 'macOS-latest'

@@ -24,7 +24,7 @@ parameters:
 
 jobs:
 - job: core_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}
-  displayName: 'Core ${{ parameters.os }} ${{ parameters.ep }} ${{ parameters.arch }}'
+  displayName: '${{ parameters.os }} ${{ parameters.arch }} · ${{ parameters.ep }}'
   ${{ if eq(parameters.os, 'linux') }}:
     pool:
       ${{ if eq(parameters.arch, 'x64') }}:
@@ -67,9 +67,11 @@ jobs:
     value: ${{ parameters.build_config }}
   - name: artifactName
     value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
-  # Path (relative to the repo root) of the exported core CMake package.
+  # Path (relative to the repo root) of the exported core CMake package. The leaf is
+  # the artifactName so the C/C++ archive's root folder matches the NuGet packer's
+  # extraction contract (it looks for <archive-basename>/lib/<native>).
   - name: coreInstallDir
-    value: 'build/${{ parameters.ep }}/install'
+    value: 'build/${{ parameters.ep }}/onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: ORT_HOME_ARG
     value: ''
   - name: cuda_archs

@@ -8,6 +8,7 @@ parameters:
 
 stages:
 - stage: Build_Android_AAR
+  displayName: 'Android AAR'
   jobs:
   - template: jobs/android-java-api-aar.yml
     parameters:

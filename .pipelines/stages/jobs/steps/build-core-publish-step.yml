@@ -30,16 +30,16 @@ steps:
     archiveType: ${{ parameters.archiveType }}
     ${{ if eq(parameters.archiveType, 'tar') }}:
       tarCompression: 'gz'
-      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName)-capi.tgz'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName).tar.gz'
     ${{ else }}:
-      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName)-capi.zip'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName).zip'
     replaceExistingArchive: true
 
 - ${{ if eq(parameters.macSign, true) }}:
   - template: compliant/mac-esrp-archive-step.yml
     parameters:
       FolderPath: '$(Build.ArtifactStagingDirectory)/capi'
-      Pattern: '*.tgz'
+      Pattern: '*.tar.gz'
 
 - task: 1ES.PublishPipelineArtifact@1
   displayName: 'Publish Artifact: C/C++ SDK'

@@ -153,6 +153,7 @@ steps:
 
 # Build the native core with build.py (no presets) and export it to build\$(ep)\install.
 - powershell: |
+    python -m pip install requests
     $cudaArgs = ""
     if ("$(ep)" -eq "cuda") {
       $cudaArgs = "--use_cuda --cuda_home `"$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)`" --cuda_archs `"$(cuda_archs)`""
@@ -160,7 +161,7 @@ steps:
     $cmd = "python build.py --config ${{ parameters.build_config }} " +
            "--build_dir `"$(Build.Repository.LocalPath)\build\$(ep)`" " +
            "--update --build --parallel --skip_tests --skip_wheel " +
-           "--install_dir `"$(Build.Repository.LocalPath)\build\$(ep)\install`" " +
+           "--install_dir `"$(Build.Repository.LocalPath)\$(coreInstallDir)`" " +
            "$cudaArgs $(ORT_HOME_ARG)"
     Write-Host $cmd
     Invoke-Expression $cmd

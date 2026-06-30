@@ -44,7 +44,7 @@ parameters:
 
 stages:
 - stage: core_build
-  displayName: 'Core native build'
+  displayName: 'Core Build'
   jobs:
   - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
     - template: jobs/core-build-job.yml

@@ -8,6 +8,7 @@ parameters:
 
 stages:
 - stage: Build_MacOS_iOS_CocoaPods_Archive
+  displayName: 'Apple Framework'
   jobs:
   - template: jobs/macos-ios-cocoapods-packaging-job.yml
     parameters:

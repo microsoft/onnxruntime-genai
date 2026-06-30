@@ -32,7 +32,7 @@ parameters:
 
 jobs:
 - job: wheel_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}
-  displayName: 'Wheel ${{ parameters.os }} ${{ parameters.ep }} ${{ parameters.arch }}'
+  displayName: '${{ parameters.os }} ${{ parameters.arch }} · ${{ parameters.ep }}'
   ${{ if eq(parameters.os, 'linux') }}:
     pool:
       ${{ if eq(parameters.arch, 'x64') }}:

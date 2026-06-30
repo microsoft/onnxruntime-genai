@@ -70,6 +70,7 @@ parameters:
 
 jobs:
 - job: nuget_${{ parameters.ep }}_packaging
+  displayName: '${{ parameters.ep }}'
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
@@ -82,11 +83,11 @@ jobs:
     value: 'build/${{ parameters.ep }}'
 
   - name: buildConfig
-    ${{ if eq(parameters.build_config, 'release') }}:
+    ${{ if or(eq(parameters.build_config, 'release'), eq(parameters.build_config, 'Release')) }}:
       value: 'Release'
-    ${{ elseif eq(parameters.build_config, 'relwithdebinfo') }}:
+    ${{ elseif or(eq(parameters.build_config, 'relwithdebinfo'), eq(parameters.build_config, 'RelWithDebInfo')) }}:
       value: 'RelWithDebInfo'
-    ${{ elseif eq(parameters.build_config, 'debug')}}:
+    ${{ elseif or(eq(parameters.build_config, 'debug'), eq(parameters.build_config, 'Debug')) }}:
       value: 'Debug'
     ${{ else }}:
       value: 'MinSizeRel'
@@ -224,6 +225,7 @@ jobs:
       nuget_version_type: ${{ parameters.nuget_version_type }}
 
   - task: NuGetAuthenticate@1
+    displayName: 'NuGet Authenticate'
 
   - powershell: |
       dotnet --info
@@ -341,6 +343,7 @@ jobs:
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - task: UsePythonVersion@0
+    displayName: 'Use Python 3.11'
     inputs:
       versionSpec: 3.11
       addToPath: true

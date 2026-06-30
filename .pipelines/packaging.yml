@@ -16,41 +16,57 @@
 parameters:
   # ---- Support-matrix toggles (single source of truth) ----
   - name: enable_linux_x64_cpu
+    displayName: 'Linux x64 CPU'
     type: boolean
     default: true
   - name: enable_linux_arm64_cpu
+    displayName: 'Linux arm64 CPU'
     type: boolean
     default: true
   - name: enable_linux_x64_cuda
+    displayName: 'Linux x64 CUDA'
     type: boolean
     default: true
   - name: enable_linux_arm64_cuda
+    displayName: 'Linux arm64 CUDA'
     type: boolean
     default: true
   - name: enable_win_x64_cpu
+    displayName: 'Windows x64 CPU'
     type: boolean
     default: true
   - name: enable_win_arm64_cpu
+    displayName: 'Windows arm64 CPU'
     type: boolean
     default: true
   - name: enable_win_x64_cuda
+    displayName: 'Windows x64 CUDA'
     type: boolean
     default: true
   - name: enable_win_arm64_cuda
+    displayName: 'Windows arm64 CUDA'
     type: boolean
     default: true
   - name: enable_macos_arm64_cpu
+    displayName: 'macOS arm64 CPU'
     type: boolean
     default: true
   - name: enable_android
+    displayName: 'Android AAR'
     type: boolean
     default: true
   - name: enable_apple_framework
+    displayName: 'Apple framework (iOS / macOS CocoaPods)'
     type: boolean
     default: true
 
   # ---- SDK toggles ----
   - name: enable_python
+    displayName: 'Build Python wheels'
+    type: boolean
+    default: true
+  - name: enable_nuget
+    displayName: 'Build NuGet packages'
     type: boolean
     default: true
 
@@ -86,6 +102,13 @@ parameters:
     values:
       - 'NuGet'
       - 'Ort-Nightly'
+  - name: nuget_version_type
+    displayName: 'NuGet version type'
+    type: string
+    default: 'stable'
+    values:
+      - 'stable'
+      - 'dev'
 
 resources:
   repositories:
@@ -160,3 +183,22 @@ extends:
           parameters:
             ort_version: ${{ parameters.ort_version }}
             build_config: ${{ parameters.build_config }}
+
+      # ---------- Stage 2: NuGet (incremental, consumes core *-capi artifacts) ----------
+      - ${{ if eq(parameters.enable_nuget, true) }}:
+        - template: stages/nuget-sdk-stage.yml
+          parameters:
+            enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+            enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+            enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
+            enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+            enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+            enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
+            enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
+            enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
+            enable_android: ${{ parameters.enable_android }}
+            enable_apple_framework: ${{ parameters.enable_apple_framework }}
+            ort_version: ${{ parameters.ort_version }}
+            ort_cuda_version: ${{ parameters.ort_cuda_version }}
+            build_config: ${{ parameters.build_config }}
+            nuget_version_type: ${{ parameters.nuget_version_type }}

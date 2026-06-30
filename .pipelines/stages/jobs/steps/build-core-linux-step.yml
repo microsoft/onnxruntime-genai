@@ -126,12 +126,13 @@ steps:
       ortgenai$(ep)build$(arch) \
       bash -c "
         set -e -x
+        python3 -m pip install requests
         python3 build.py \
           --config ${{ parameters.build_config }} \
           --build_dir /ort_genai_src/build/$(ep) \
           --update --build --parallel \
           --skip_tests --skip_wheel \
-          --install_dir /ort_genai_src/build/$(ep)/install \
+          --install_dir /ort_genai_src/$(coreInstallDir) \
           $cuda_args $(ORT_HOME_ARG)"
   displayName: 'Build core (build.py)'
   workingDirectory: '$(Build.Repository.LocalPath)'

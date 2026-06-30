@@ -89,12 +89,13 @@ steps:
       export CXX_aarch64_apple_darwin="$CXX"
       extra_defines="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64 Rust_CARGO_TARGET=aarch64-apple-darwin"
     fi
+    python -m pip install requests
     python build.py \
       --config ${{ parameters.build_config }} \
       --build_dir $(Build.Repository.LocalPath)/build/$(ep) \
       --update --build --parallel \
       --skip_tests --skip_wheel \
-      --install_dir $(Build.Repository.LocalPath)/build/$(ep)/install \
+      --install_dir $(Build.Repository.LocalPath)/$(coreInstallDir) \
       $extra_defines $(ORT_HOME_ARG)
   displayName: 'Build core (build.py)'
   workingDirectory: '$(Build.Repository.LocalPath)'

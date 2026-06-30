@@ -53,7 +53,7 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - powershell: |
-      python -m pip install pybind11 wheel
+      python -m pip install pybind11 wheel requests
       python build.py `
         --config ${{ parameters.build_config }} `
         --build_dir "$(Build.Repository.LocalPath)\build\$(ep)" `
@@ -96,7 +96,7 @@ steps:
   - bash: |
       set -e -x
       export MACOSX_DEPLOYMENT_TARGET=12.0
-      python -m pip install pybind11 wheel
+      python -m pip install pybind11 wheel requests
       extra=""
       [ "$(arch)" = "arm64" ] && extra="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64"
       python build.py \

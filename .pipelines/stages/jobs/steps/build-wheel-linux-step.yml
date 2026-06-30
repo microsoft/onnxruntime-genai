@@ -97,7 +97,7 @@ steps:
         bash -c "
           set -e -x
           export PATH=/opt/python/cp${pynodot}-cp${pynodot}/bin:\$PATH
-          python -m pip install pybind11 wheel
+          python -m pip install pybind11 wheel requests
           python build.py \
             --config ${{ parameters.build_config }} \
             --build_dir /ort_genai_src/build/$(ep)/cp${pynodot} \

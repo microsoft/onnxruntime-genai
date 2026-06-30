@@ -12,6 +12,7 @@ parameters:
 
 jobs:
 - job: Android_AAR_Packaging
+  displayName: 'Android · AAR'
   timeoutInMinutes: 30
   workspace:
     clean: all
