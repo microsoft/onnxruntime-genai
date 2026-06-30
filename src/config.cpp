@@ -1209,6 +1209,8 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
+  // The draft model (speculative decoding) is parsed as a Decoder_Element because only
+  // decoder-only draft models are supported in v0 implementation.
   Decoder_Element draft_{v_.draft};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
