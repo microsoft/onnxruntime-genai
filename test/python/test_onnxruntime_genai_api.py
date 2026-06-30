@@ -987,9 +987,9 @@ def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_pa
     _ = processor(prompts, audios=audios)
 
 
-def test_streaming_asr_create(nemotron_speech_model_path):
-    """Test that Generator + StreamingProcessor can be created from a nemotron_speech model."""
-    model = og.Model(nemotron_speech_model_path)
+def test_streaming_asr_create(asr_speech_model_path):
+    """Test that Generator + StreamingProcessor can be created from a streaming ASR model."""
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     assert processor is not None
     params = og.GeneratorParams(model)
@@ -1026,10 +1026,10 @@ def _decode_inputs(generator, inputs, tokenizer_stream=None):
     return text
 
 
-def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
+def test_streaming_asr_transcribe_silence(asr_speech_model_path):
     """Test transcribing a chunk of silence (all zeros) does not crash."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1042,10 +1042,10 @@ def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     assert isinstance(text, str)
 
 
-def test_streaming_asr_flush(nemotron_speech_model_path):
+def test_streaming_asr_flush(asr_speech_model_path):
     """Test that flush processes remaining buffered audio."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
@@ -1057,10 +1057,10 @@ def test_streaming_asr_flush(nemotron_speech_model_path):
     _decode_inputs(generator, mel)
 
 
-def test_streaming_asr_sine_wave(nemotron_speech_model_path):
+def test_streaming_asr_sine_wave(asr_speech_model_path):
     """Test transcribing a synthetic sine wave (non-trivial mel features)."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1084,15 +1084,24 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     assert isinstance(transcript, str)
 
 
-def test_streaming_asr_config_model_type(nemotron_speech_model_path):
-    """Test that a nemotron_speech model reports the correct type."""
-    model = og.Model(nemotron_speech_model_path)
-    assert model.type == "nemotron_speech"
+# Expected model "type" reported by each ASR streaming model's genai_config.json.
+_ASR_MODEL_TYPES = {
+    "nemotron-speech-streaming": "nemotron_speech",
+    "moonshine-streaming-small-official": "streaming_enc_dec_asr",
+    "moonshine-streaming-tiny-official": "streaming_enc_dec_asr",
+}
 
 
-def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
+def test_streaming_asr_config_model_type(asr_speech_model_path):
+    """Test that a streaming ASR model reports the correct type."""
+    model = og.Model(asr_speech_model_path)
+    expected_type = _ASR_MODEL_TYPES[os.path.basename(asr_speech_model_path)]
+    assert model.type == expected_type
+
+
+def test_streaming_asr_vad_set_get_option(asr_speech_model_path):
     """Test that VAD can be controlled via set_option/get_option on StreamingProcessor."""
-    model = og.Model(nemotron_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
 
     # Default: VAD disabled
@@ -1103,7 +1112,7 @@ def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
     assert processor.get_option("silence_duration_ms") == "1000"
 
     # Enable VAD if silero model is available
-    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    vad_path = os.path.join(asr_speech_model_path, "silero_vad.onnx")
     if os.path.exists(vad_path):
         processor.set_option("use_vad", "true")
         assert processor.get_option("use_vad") == "true"
@@ -1116,14 +1125,14 @@ def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
         assert processor.get_option("use_vad") == "false"
 
 
-def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
+def test_streaming_asr_vad_consecutive_silence(asr_speech_model_path):
     """Test that VAD uses consecutive silence logic — doesn't drop until min_silence_chunks exceeded."""
-    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    vad_path = os.path.join(asr_speech_model_path, "silero_vad.onnx")
     if not os.path.exists(vad_path):
         pytest.skip("silero_vad.onnx not found in model dir")
 
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     processor.set_option("use_vad", "true")
     processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
@@ -1166,7 +1175,15 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
     return d[len(r)][len(h)] / max(len(r), 1)
 
 
-def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
+# Per-model word-error-rate thresholds for the transcription-quality test.
+_ASR_WER_THRESHOLDS = {
+    "nemotron-speech-streaming": 0.15,
+    "moonshine-streaming-small-official": 0.2,
+    "moonshine-streaming-tiny-official": 0.25,
+}
+
+
+def test_streaming_asr_transcription_quality(asr_speech_model_path, test_data_path):
     """Test that transcription of a known audio file has acceptable WER."""
     try:
         import soundfile as sf
@@ -1182,7 +1199,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     audio, sr = sf.read(audio_path, dtype="float32")
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
     if sr != sample_rate:
         try:
             import scipy.signal
@@ -1192,7 +1209,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
     # Transcribe using Generator + StreamingProcessor
-    model = og.Model(nemotron_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1215,8 +1232,9 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     )
 
     wer = _word_error_rate(reference, transcript)
-    assert wer < 0.15, (
-        f"WER too high: {wer:.1%}\n"
+    threshold = _ASR_WER_THRESHOLDS[os.path.basename(asr_speech_model_path)]
+    assert wer < threshold, (
+        f"WER too high: {wer:.1%} (threshold {threshold:.1%})\n"
         f"  Reference:  {reference}\n"
         f"  Hypothesis: {transcript.lower()}"
     )
