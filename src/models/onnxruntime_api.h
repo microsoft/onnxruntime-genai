@@ -73,6 +73,29 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
+// Some Apple/iOS toolchains ship the core ONNX Runtime C API but no experimental header.
+// Probe with __has_include so those builds still compile; consumers of the model-package
+// types gate on ORT_GENAI_HAS_EXPERIMENTAL_C_API below.
+#if defined(__has_include)
+#if __has_include("onnxruntime_experimental_c_api.h")
+#include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#else
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 0
+#endif
+#else
+#include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#endif
+
+// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
+// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#define ORT_GENAI_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_GENAI_HAS_MODEL_PACKAGE 0
+#endif
+
 #include "../span.h"
 #include "../logging.h"
 #include "env_utils.h"
@@ -1456,5 +1479,100 @@ struct OrtLoraAdapter {
   static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
   Ort::Abstract make_abstract;
 };
+
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+
+struct OrtModelPackageComponentContext;
+
+namespace Ort {
+
+/// Typed function-pointer cache for the OrtModelPackageApi experimental entries genai uses.
+/// Each pointer is resolved once by name; null means the loaded ORT build lacks that entry.
+struct ModelPackageApi {
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn
+      CreateModelPackageOptionsFromSessionOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn
+      ReleaseModelPackageOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn
+      CreateModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn
+      ReleaseModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn
+      ModelPackage_GetComponentCount{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn
+      ModelPackage_GetComponentNames{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn
+      ModelPackage_GetVariantCount{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn
+      ModelPackage_GetVariantNames{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
+      ModelPackage_GetVariantEpName{nullptr};
+  OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
+      SelectComponent{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
+      ReleaseModelPackageComponentContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
+      ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
+};
+
+/// Returns the lazily-resolved model package API function pointers. Throws if the loaded
+/// ONNX Runtime build does not expose the experimental functions genai requires.
+const ModelPackageApi& GetModelPackageApi();
+
+}  // namespace Ort
+
+/** \brief Model Package Options
+ *
+ * Captures the EP configuration from an OrtSessionOptions for use during variant selection.
+ * Wraps OrtModelPackageOptions and its associated release entry.
+ */
+struct OrtModelPackageOptions {
+  static std::unique_ptr<OrtModelPackageOptions> Create(const OrtEnv& env, const OrtSessionOptions& session_options);
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageOptions(reinterpret_cast<OrtModelPackageOptions*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Context
+ *
+ * Parses a model package's manifest and per-component metadata and exposes read-only
+ * inspection APIs. Wraps OrtModelPackageContext.
+ */
+struct OrtModelPackageContext {
+  static std::unique_ptr<OrtModelPackageContext> Create(const ORTCHAR_T* package_root);
+
+  std::vector<std::string> GetComponentNames() const;
+  std::vector<std::string> GetVariantNames(const char* component_name) const;
+  /// Returns the EP name declared for a (component, variant) pair, or an empty string when
+  /// the variant does not declare an EP.
+  std::string GetVariantEpName(const char* component_name, const char* variant_name) const;
+
+  std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(
+      const char* component_name, const OrtModelPackageOptions& options) const;
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageContext(reinterpret_cast<OrtModelPackageContext*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Component Context
+ *
+ * Represents a component whose variant has been selected. The only accessor onnxruntime-genai
+ * consumes is the selected variant's folder path.
+ */
+struct OrtModelPackageComponentContext {
+  std::basic_string<ORTCHAR_T> GetSelectedVariantFolderPath() const;
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageComponentContext(
+        reinterpret_cast<OrtModelPackageComponentContext*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE
 
 #include "onnxruntime_inline.h"
