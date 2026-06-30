@@ -29,8 +29,9 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
   // Bans tokens that would complete an already-seen n-gram of size ngram_size.
-  // Default no-op so backends that don't implement it (e.g. CUDA) are unaffected.
-  virtual void ApplyNoRepeatNgram(int /*ngram_size*/) {}
+  // Backends that don't implement it (e.g. CUDA) fall back to the default below,
+  // which warns once if the option is set so the request is not silently ignored.
+  virtual void ApplyNoRepeatNgram(int ngram_size);
 
   // Set user input tokens
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };

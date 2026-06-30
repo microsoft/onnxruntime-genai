@@ -6,6 +6,7 @@
 #include <queue>
 #include <algorithm>
 #include <limits>
+#include <mutex>
 
 namespace Generators {
 
@@ -580,6 +581,20 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   }
 }
 
+void Search::ApplyNoRepeatNgram(int ngram_size) {
+  if (ngram_size <= 0)
+    return;
+
+  // Default for backends that don't implement n-gram blocking (e.g. CUDA, DML).
+  // Warn once so a set option isn't silently ignored.
+  static std::once_flag warn_once;
+  std::call_once(warn_once, [] {
+    Log("warning",
+        "no_repeat_ngram_size is only implemented for CPU search and is ignored "
+        "on this backend.");
+  });
+}
+
 void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
   if (ngram_size <= 0)
     return;
@@ -593,7 +608,7 @@ void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CopyDeviceToCpu();
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
 
     // The prefix we are about to extend: the trailing (ngram_size - 1) tokens.
     std::span<const int32_t> const target_prefix = sequence.subspan(sequence_length - prefix_length, prefix_length);
