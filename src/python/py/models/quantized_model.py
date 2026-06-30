@@ -19,7 +19,6 @@ import re
 
 import torch
 from safetensors.torch import load_file
-from tqdm import tqdm
 
 
 def normalize_vlm_weight_name(name):
