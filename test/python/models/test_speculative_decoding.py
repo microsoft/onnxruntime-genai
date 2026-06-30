@@ -208,6 +208,54 @@ def decoder_only_model_path(test_data_path):
     return path
 
 
+def _find_two_distinct_models(test_data_path: str):
+    """Return (target_dir, draft_dir) for two distinct, vocab-compatible decoder-only models,
+    or None if fewer than two candidates are available."""
+    found = []
+    for parts in _SELF_SPEC_CANDIDATES:
+        candidate = os.path.join(test_data_path, *parts)
+        if os.path.exists(os.path.join(candidate, "genai_config.json")) and \
+                os.path.exists(os.path.join(candidate, "model.onnx")):
+            found.append(candidate)
+    if len(found) < 2:
+        return None
+    # Larger model as target, smaller as draft (order here is arbitrary but distinct).
+    return found[-1], found[0]
+
+
+def _decoder_from(source_dir: str, dest_dir: Path) -> dict:
+    with open(os.path.join(source_dir, "genai_config.json")) as f:
+        src = json.load(f)
+    decoder = copy.deepcopy(src["model"]["decoder"])
+    model_abs = os.path.join(os.path.abspath(source_dir), decoder["filename"])
+    decoder["filename"] = os.path.relpath(model_abs, os.path.abspath(dest_dir))
+    return decoder, src
+
+
+def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_tokens: int = 4) -> str:
+    """Wrap a distinct target + draft model pair as a speculative model."""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    decoder, src = _decoder_from(target_dir, dest_dir)
+    draft, _ = _decoder_from(draft_dir, dest_dir)
+    model = {
+        "type": "speculative",
+        "vocab_size": src["model"]["vocab_size"],
+        "context_length": src["model"].get("context_length", 2048),
+        "bos_token_id": src["model"].get("bos_token_id", 0),
+        "eos_token_id": src["model"].get("eos_token_id", 0),
+        "pad_token_id": src["model"].get("pad_token_id", 0),
+        "decoder": decoder,
+        "draft": draft,
+    }
+    cfg = {
+        "model": model,
+        "search": {"max_length": model["context_length"]},
+        "speculative": {"max_draft_tokens": max_draft_tokens},
+    }
+    return _write_config(dest_dir, cfg)
+
+
 def _greedy(model_path: str, prompt, max_length: int, k: int | None = None):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
@@ -263,6 +311,88 @@ class TestSpeculativeGeneration:
             params.set_speculative_options(max_draft_tokens=0)
 
 
+class TestSpeculativeKVReanchor:
+    """KV cache re-anchor invariants. After each round the target's KV cache must be rewound to
+    the committed prefix and advanced on the committed token, so the next round's target step sees
+    exactly the streamed prefix and no stale draft influence. The decisive end-to-end check is that
+    speculative greedy output equals plain greedy output token-for-token: any cache misalignment
+    would diverge."""
+
+    @pytest.mark.parametrize("k", [2, 4, 8, 16])
+    def test_self_spec_greedy_matches_standalone_greedy(self, decoder_only_model_path, tmp_path, k):
+        """draft == target greedy accepts every proposal, so each round commits an all-accepted
+        window plus a bonus token (the all-accepted + bonus path). Exercises rewind/advance/fold
+        across multi-token rounds for every K; output must match standalone greedy exactly."""
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"reanchor_{k}", k)
+        ref, _ = _greedy(decoder_only_model_path, _PROMPT, max_length)
+        spec, stats = _greedy(spec_path, _PROMPT, max_length, k=k)
+        assert spec == ref
+        # Self-spec greedy never rejects: every round ends on the bonus path, never a correction.
+        assert stats["correction_tokens"] == 0
+        assert stats["bonus_tokens"] == stats["rounds"]
+
+    def test_reanchor_is_stable_across_repeated_runs(self, decoder_only_model_path, tmp_path):
+        """Re-anchoring must be deterministic: the same model + prompt + K produces identical
+        output on every run (no leftover cache state between rounds)."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "reanchor_stable", 4)
+        first, _ = _greedy(spec_path, _PROMPT, max_length, k=4)
+        second, _ = _greedy(spec_path, _PROMPT, max_length, k=4)
+        assert first == second
+
+    @pytest.mark.parametrize("k", [2, 4, 8])
+    def test_draft_neq_target_matches_target_only_greedy(self, test_data_path, tmp_path, k):
+        """With a real draft != target pair, the draft genuinely mispredicts, so rounds reject at
+        various positions (reject-early, reject-late) and re-anchor on a correction token. The
+        target's cache must rewind to the accepted prefix and advance on the correction, with no
+        stale draft influence; speculative greedy must still equal target-only greedy exactly."""
+        pair = _find_two_distinct_models(test_data_path)
+        if pair is None:
+            pytest.skip("Need two distinct decoder-only models under --test_models for reject-path test")
+        target_dir, draft_dir = pair
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_spec(target_dir, draft_dir, tmp_path / f"spec_{k}", k)
+        ref, _ = _greedy(target_dir, _PROMPT, max_length)
+        spec, stats = _greedy(spec_path, _PROMPT, max_length, k=k)
+        assert spec == ref
+        # A genuine draft/target mismatch must reject at least once (correction path exercised).
+        assert stats["correction_tokens"] > 0
+
+
+class TestSpeculativeStatsContract:
+    """Pin the documented stats formulas (see speculative_stats.h) on a deterministic scenario."""
+
+    def test_self_spec_greedy_stats_formulas(self, decoder_only_model_path, tmp_path):
+        k = 4
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "stats_contract", k)
+        _, s = _greedy(spec_path, _PROMPT, max_length, k=k)
+
+        rounds = s["rounds"]
+        proposed = s["draft_tokens_proposed"]
+        accepted = s["draft_tokens_accepted"]
+        corrections = s["correction_tokens"]
+        bonuses = s["bonus_tokens"]
+        assert rounds > 0 and proposed > 0
+
+        # Round contract: each round commits exactly one correction or bonus token.
+        assert corrections + bonuses == rounds
+        # Self-spec greedy accepts everything: no corrections, one bonus per round, all accepted.
+        assert corrections == 0
+        assert bonuses == rounds
+        assert accepted == proposed
+        # acceptance_rate = accepted / proposed.
+        assert s["acceptance_rate"] == pytest.approx(accepted / proposed, abs=1e-6)
+        assert s["acceptance_rate"] == pytest.approx(1.0, abs=1e-6)
+        # mean_accepted_tokens = committed / rounds, committed = accepted + corrections + bonuses.
+        committed = accepted + corrections + bonuses
+        assert s["mean_accepted_tokens"] == pytest.approx(committed / rounds, abs=1e-4)
+        # Timing averages are per proposed token and non-negative.
+        assert s["avg_draft_ms_per_token"] >= 0.0
+        assert s["avg_target_ms_per_token"] >= 0.0
+
+
 class TestSpeculativeStateGuards:
     """Guards that fire when the generator/state is created (model must load first)."""
 
@@ -298,6 +428,36 @@ class TestSpeculativeStateGuards:
         params.set_guidance("regex", r"[0-9]+")
         with pytest.raises(Exception, match="guidance|constrained"):
             og.Generator(model, params)
+
+    @pytest.mark.parametrize("bad", [
+        {"batch_size": 2},
+        {"num_beams": 2},
+        {"repetition_penalty": 1.2},
+        {"min_length": 8},
+    ])
+    def test_unsupported_config_fails_fast_without_corrupting_model(
+            self, decoder_only_model_path, tmp_path, bad):
+        """Each unsupported config must throw at Generator construction (before any token is
+        generated) and must not leave the model in a bad state: a valid generator built on the
+        same model afterward still works and produces output."""
+        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "no_corrupt", 4))
+
+        # The guard fires during Generator construction, before generation proceeds.
+        params = og.GeneratorParams(model)
+        params.set_search_options(max_length=len(_PROMPT) + 8, do_sample=False, **bad)
+        params.set_speculative_options(max_draft_tokens=4)
+        with pytest.raises(Exception):
+            og.Generator(model, params)
+
+        # The model is unharmed: a valid generator still builds and generates normally.
+        good = og.GeneratorParams(model)
+        good.set_search_options(max_length=len(_PROMPT) + 8, do_sample=False)
+        good.set_speculative_options(max_draft_tokens=4)
+        gen = og.Generator(model, good)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        assert len(list(gen.get_sequence(0))) > len(_PROMPT)
 
 
 class TestSpeculativeRewind:
