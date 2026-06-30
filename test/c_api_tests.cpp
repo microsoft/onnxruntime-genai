@@ -133,6 +133,21 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, EncodeBatchEmptyInputThrows) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  // EncodeBatch with zero strings should throw, not crash with SIGFPE
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 0), std::runtime_error);
+
+  // Invalid pointers with count > 0 should also be rejected deterministically.
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 1), std::runtime_error);
+  const char* bad_strings[] = {nullptr};
+  ASSERT_THROW(tokenizer->EncodeBatch(bad_strings, 1), std::runtime_error);
+#endif
+}
+
 TEST(CAPITests, TokenizerUpdateOptions) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
@@ -1491,7 +1506,7 @@ TEST(CAPITests, RewindQwen25CAPI) {
   // Save first-run output
   auto seq_len = generator->GetSequenceCount(0);
   std::vector<int32_t> first_output(seq_len);
-  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+  std::copy(generator->GetSequenceData(0), generator->GetSequenceData(0) + seq_len, first_output.begin());
 
   // RewindTo(0) - full rewind
   generator->RewindTo(0);
@@ -1800,4 +1815,20 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
 
   auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_TEDLIUM);
   EXPECT_FALSE(transcription.empty());
+}
+
+// Regression test for MSRC: malformed audio buffers smaller than the minimum valid
+// audio header size must be rejected with an error, not cause a crash.
+TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
+  const void* data_ptr = nullptr;
+  size_t data_size = 0;
+  OgaAudios* audios = nullptr;
+  OgaResult* result = OgaLoadAudiosFromBuffers(&data_ptr, &data_size, 1, &audios);
+
+  // Should return an error for empty buffers.
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("empty"), std::string::npos);
+  OgaDestroyResult(result);
+  // audios should not have been created
+  EXPECT_EQ(audios, nullptr);
 }

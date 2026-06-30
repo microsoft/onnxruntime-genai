@@ -67,6 +67,7 @@ stages:
         enable_winml: ${{ parameters.enable_winml }}
         ort_version: ${{ parameters.ort_winml_version }}
         build_config: ${{ parameters.build_config }}
+        cuda_version: ${{ parameters.cuda_version }}
 
   - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
@@ -120,6 +121,19 @@ stages:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_version }}
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cuda, true)) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_version }}

@@ -476,12 +476,17 @@ nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_ima
     content_json = nlohmann::ordered_json(content);
 
   } else {
-    // Gemma-3 style: structured content
+    // Gemma-style structured content (Gemma-3 / Gemma-4)
     content_json = nlohmann::ordered_json::array();
 
     // Add N image blocks
     for (int i = 0; i < num_images; i++) {
       content_json.push_back(nlohmann::ordered_json::object({{"type", "image"}}));
+    }
+
+    // Add N audio blocks (e.g. Gemma-4 audio support)
+    for (int i = 0; i < num_audios; i++) {
+      content_json.push_back(nlohmann::ordered_json::object({{"type", "audio"}}));
     }
 
     // Always add a text block (with the user prompt)

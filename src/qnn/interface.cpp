@@ -70,11 +70,40 @@ struct QnnInterfaceBase : DeviceInterface {
 struct HtpInterfaceImpl : QnnInterfaceBase {
   HtpInterfaceImpl() {}
   DeviceType GetType() const override { return DeviceType::QnnHtp; }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    // NOTE: QNN EP currently exposes two allocators (HTP shared memory allocator and DX12 shared memory allocator), with
+    //       the first only being supported with the HTP backend and the second only supported by the GPU backend.
+    //       As a result, note the following:
+    //         1.) We only look to copy over the "enable_htp_shared_memory_allocator" option here, and likewise only look for
+    //             "enable_dx12_shared_memory_allocator" in `GpuInterfaceImpl::ShapeInitSessionProviderOptions`.
+    //         2.) Oga keeps one global allocator for HTP and one for GPU, each of which is created once. Because each device
+    //             only supports once allocator, the fact that each device's chosen allocator is sticky is ok.
+    for (const auto& opt : user_options->options) {
+      if (opt.first == "enable_htp_shared_memory_allocator") {
+        init_options.options.emplace_back(opt);
+      }
+    }
+
+    init_options.device_filtering_options = Generators::DeviceFilteringOptions{OrtHardwareDeviceType_NPU};
+  }
 };
 
 struct GpuInterfaceImpl : QnnInterfaceBase {
   GpuInterfaceImpl() {}
   DeviceType GetType() const override { return DeviceType::QnnGpu; }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    for (const auto& opt : user_options->options) {
+      if (opt.first == "enable_dx12_shared_memory_allocator") {
+        init_options.options.emplace_back(opt);
+      }
+    }
+
+    init_options.device_filtering_options = Generators::DeviceFilteringOptions{OrtHardwareDeviceType_GPU};
+  }
 };
 
 }  // namespace QNN

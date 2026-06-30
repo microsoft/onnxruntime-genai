@@ -254,12 +254,47 @@ struct InterfaceImpl : DeviceInterface {
         input_type,
         output_type,
         element_count,
-        "WebGPU",
+        GetType(),
+        "WebGpuExecutionProvider",
         ort_memory_info_,
         session_config_keys,
         session_config_values);
 
     return true;
+  }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+
+    // Forward only global/singleton WebGPU options to the init session so that the
+    // process-wide WebGpuContext singleton is initialized with the correct settings.
+    // Per-session options (preferredLayout, enableGraphCapture, sessionBufferPoolGenerations,
+    // enableInt64, multiRotaryCacheConcatOffset, forceCpuNodeNames, enablePIXCapture) are
+    // excluded because they are meaningless for the trivial initialization model.
+    // Keep this list in sync with ParseWebGpuContextConfig in
+    // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
+    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+        "deviceId",
+        "webgpuInstance",
+        "webgpuDevice",
+        "dawnProcTable",
+        "dawnBackendType",
+        "powerPreference",
+        "validationMode",
+        "preserveDevice",
+        "maxStorageBufferBindingSize",
+        "maxNumPendingDispatches",
+        "storageBufferCacheMode",
+        "uniformBufferCacheMode",
+        "queryResolveBufferCacheMode",
+        "defaultBufferCacheMode",
+    };
+    for (const auto& opt : user_options->options) {
+      if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
+        init_options.options.emplace_back(opt);
+      }
+    }
   }
 };
 
