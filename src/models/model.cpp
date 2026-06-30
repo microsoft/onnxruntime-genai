@@ -414,7 +414,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -456,6 +456,18 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   if (type == DeviceType::QNN) {
     provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
   }
+  // The AMD GPU umbrella EP selects its backend from a "profile" provider option.
+  // The device-init dummy session has no inline options, so reuse whatever the user
+  // configured for this device in genai_config instead of hardcoding a profile.
+  if (type == DeviceType::AMDGPU) {
+    const std::string_view device_name{device_type_names[static_cast<int>(type)]};
+    for (const auto& po : config.model.decoder.session_options.provider_options) {
+      if (po.name == device_name) {
+        provider_options_list.back().options = po.options;
+        break;
+      }
+    }
+  }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
@@ -463,14 +475,34 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "AMDGPU"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
   try {
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+    std::unique_ptr<OrtMemoryInfo> memory_info;
+    if (type == DeviceType::AMDGPU) {
+      // AMDGPU EP exposes its allocator via the ORT plugin EP V2 API
+      // (CreateMemoryInfo_V2, registered through EpDevice_AddAllocatorInfo).
+      // The legacy OrtMemoryInfo::Create only knows ORT-internal device names
+      // ("Cuda", "DML", ...) and would fail with
+      // "Specified device is not supported. Try CreateMemoryInfo_V2."
+      // Use CreateMemoryInfo_V2 with the same parameters the EP factory used
+      // when registering its OrtMemoryInfo so ORT can match the allocator.
+      OrtMemoryInfo* raw = nullptr;
+      Ort::ThrowOnError(Ort::api->CreateMemoryInfo_V2(name, OrtMemoryInfoDeviceType_GPU,
+                                                      /*vendor*/ 0x1002,  // OrtDevice::VendorIds::AMD
+                                                      /*device_id*/ 0,
+                                                      OrtDeviceMemoryType_DEFAULT,
+                                                      /*alignment*/ 0,
+                                                      OrtAllocatorType::OrtDeviceAllocator,
+                                                      &raw));
+      memory_info.reset(raw);
+    } else {
+      memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
+                                          0, OrtMemType::OrtMemTypeDefault);
+    }
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
     // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
@@ -579,10 +611,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
-  // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
+  // Only CUDA, TRT-RTX, RyzenAI, AMDGPU and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-      p_device_->GetType() == DeviceType::RyzenAI ||
+      p_device_->GetType() == DeviceType::RyzenAI || p_device_->GetType() == DeviceType::AMDGPU ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
