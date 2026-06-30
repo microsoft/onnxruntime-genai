@@ -34,7 +34,7 @@ import torch
 
 # Import Model from the source tree so tests always run against the working copy.
 # The installed onnxruntime_genai package may be out of date during development.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src", "python", "py"))
 
 from models.builders.base import Model
 
