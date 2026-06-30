@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 #include <regex>
+#include <algorithm>
 #include "span.h"
 #include <list>
 
@@ -1533,13 +1534,22 @@ TEST(CAPITests, RewindQwen25CAPI) {
 }
 #endif  // TEST_QWEN_2_5
 
-#ifndef STREAMING_ASR_PATH
-#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
-#endif
+// Streaming ASR models exercised by the StreamingASR* tests below, each paired
+// with its chunk size (samples per Process() call).
+struct StreamingASRModel {
+  const char* subdir;
+  size_t chunk_samples;
+};
 
-#ifndef STREAMING_ASR_CHUNK_SAMPLES
-constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
-#endif
+// Value-parameterized fixture so each StreamingASR test runs once per model.
+// The fixture is named CAPITests so the tests keep the original
+// CAPITests.StreamingASR* naming, e.g.
+// "StreamingASR/CAPITests.StreamingASRCreate/nemotron_speech_streaming".
+class CAPITests : public ::testing::TestWithParam<StreamingASRModel> {
+ protected:
+  std::string ModelPath() const { return std::string(MODEL_PATH) + GetParam().subdir; }
+  size_t ChunkSamples() const { return GetParam().chunk_samples; }
+};
 
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
@@ -1551,11 +1561,12 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   }
 }
 
-// Test creating a Generator + StreamingProcessor from a nemotron_speech model
-TEST(CAPITests, StreamingASRCreate) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+// Test creating a Generator + StreamingProcessor from a streaming ASR model
+TEST_P(CAPITests, StreamingASRCreate) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   ASSERT_NE(processor, nullptr);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1564,15 +1575,16 @@ TEST(CAPITests, StreamingASRCreate) {
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken
-TEST(CAPITests, StreamingASRTranscribeSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(CAPITests, StreamingASRTranscribeSilence) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   auto mel = processor->Process(silence.data(), silence.size());
@@ -1581,15 +1593,16 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
 }
 
 // Test feeding multiple chunks and decoding via GenerateNextToken
-TEST(CAPITests, StreamingASRMultipleChunks) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(CAPITests, StreamingASRMultipleChunks) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   for (int i = 0; i < 5; ++i) {
@@ -1600,15 +1613,16 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
 }
 
 // Test flush processes remaining buffered audio
-TEST(CAPITests, StreamingASRFlush) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(CAPITests, StreamingASRFlush) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
   processor->Process(silence.data(), silence.size());
 
@@ -1618,15 +1632,16 @@ TEST(CAPITests, StreamingASRFlush) {
 }
 
 // Test transcribing a synthetic sine wave via GenerateNextToken
-TEST(CAPITests, StreamingASRSineWave) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(CAPITests, StreamingASRSineWave) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   constexpr float sample_rate = 16000.0f;
   constexpr float frequency = 440.0f;
 
@@ -1647,11 +1662,12 @@ TEST(CAPITests, StreamingASRSineWave) {
 }
 
 // Test raw C API for StreamingProcessor + Generator
-TEST(CAPITests, StreamingASRRawCAPI) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+TEST_P(CAPITests, StreamingASRRawCAPI) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
   OgaModel* model = nullptr;
-  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_EQ(OgaCreateModel(model_path.c_str(), &model), nullptr);
   ASSERT_NE(model, nullptr);
 
   OgaStreamingProcessor* processor = nullptr;
@@ -1664,7 +1680,7 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
   ASSERT_NE(generator, nullptr);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   OgaNamedTensors* inputs = nullptr;
@@ -1683,10 +1699,11 @@ TEST(CAPITests, StreamingASRRawCAPI) {
 }
 
 // Test VAD set_option/get_option on StreamingProcessor
-TEST(CAPITests, StreamingASRVadSetGetOption) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(CAPITests, StreamingASRVadSetGetOption) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
 
   // Default: VAD disabled
@@ -1697,7 +1714,7 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
 
   // Enable VAD if silero_vad.onnx is available
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
   if (std::filesystem::exists(vad_path)) {
     processor->SetOption("use_vad", "true");
     ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
@@ -1713,20 +1730,21 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
 }
 
 // Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
-TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+TEST_P(CAPITests, StreamingASRVadConsecutiveSilence) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
 
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
   if (!std::filesystem::exists(vad_path))
     GTEST_SKIP() << "silero_vad.onnx not found in model dir";
 
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   processor->SetOption("use_vad", "true");
   processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
 
-  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   // First 2 silence chunks should still be processed (not dropped)
@@ -1741,6 +1759,22 @@ TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
   ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
   SUCCEED();
 }
+
+// Run every StreamingASR* test above once per streaming ASR model. The
+// instantiation prefix "StreamingASR" combined with the CAPITests fixture keeps
+// the original CAPITests.StreamingASR* naming, with the model appended as the
+// parameter suffix (e.g. .../nemotron_speech_streaming).
+INSTANTIATE_TEST_SUITE_P(
+    StreamingASR, CAPITests,
+    ::testing::Values(
+        StreamingASRModel{"nemotron-speech-streaming", 8960},
+        StreamingASRModel{"moonshine-streaming-small-official", 8000},
+        StreamingASRModel{"moonshine-streaming-tiny-official", 8000}),
+    [](const ::testing::TestParamInfo<StreamingASRModel>& info) {
+      std::string name = info.param.subdir;
+      std::replace(name.begin(), name.end(), '-', '_');
+      return name;
+    });
 
 #ifndef PARAKEET_TDT_PATH
 #define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
