@@ -84,7 +84,13 @@ struct Config {
     static constexpr std::string_view JoinerLogitsName = "outputs";
   };
 
-  fs::path config_path;  // Path of the config directory
+  fs::path config_path;   // Path of the config directory
+  fs::path package_root;  // Package root if loaded from a model package, otherwise empty.
+
+  // Resolves a path-like string from genai_config.json. Empty -> config_path.
+  // "package:<rel>" -> package_root/<rel> (errors when package_root is empty). Anything
+  // else is joined with config_path.
+  fs::path ResolvePath(std::string_view value) const;
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
@@ -123,6 +129,8 @@ struct Config {
 
   struct Model {
     std::string type;
+
+    std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
 
     int pad_token_id{};             // The id of the padding token.
     std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
@@ -212,6 +220,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
 
@@ -357,6 +366,9 @@ struct Config {
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
 
+        // Gemma4 per-layer inputs (e.g. per-layer embeddings from embedding model)
+        std::string per_layer_inputs;
+
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string targets_length;
       } inputs;
@@ -453,6 +465,8 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+int SafeDoubleToInt(double x, std::string_view name);
+
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 

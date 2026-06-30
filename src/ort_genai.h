@@ -162,6 +162,11 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaCreateConfig(config_path, &p));
     return std::unique_ptr<OgaConfig>(p);
   }
+  static std::unique_ptr<OgaConfig> CreateFromPackageEp(const char* config_path, const char* ep) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfigFromPackageEp(config_path, ep, &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
 
   void ClearProviders() {
     OgaCheckResult(OgaConfigClearProviders(this));
@@ -842,6 +847,18 @@ struct OgaEngine : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
 };
 
+/**
+ * \brief RAII wrapper that calls OgaShutdown() on destruction.
+ *
+ * \warning Without explicit shutdown, GenAI's globals are destroyed at static-destruction time in undefined order,
+ *          which may crash.
+ *
+ * \note Typical usage is to construct an instance early in the program so its destructor runs before process exit.
+ *
+ * \note Only one OgaHandle should be live in the process, and its scope must encompass all GenAI use. GenAI's globals
+ *       are not re-creatable after OgaShutdown(); a second OgaHandle whose lifetime starts after the first one's
+ *       destruction would leave subsequent GenAI calls broken.
+ */
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {

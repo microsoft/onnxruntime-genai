@@ -9,7 +9,7 @@ basic text generation for the text-only variant of Qwen3.5 (model type
 "qwen3_5_text"), which uses 2D position_ids and hybrid KV/recurrent state.
 
 Usage:
-    pytest test_qwen35_text_only.py --test_models=test/test_models
+    pytest test_qwen_3.5_text_only.py --test_models=test/models
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 import onnxruntime_genai as og
 import pytest
 
-MODEL_DIR = "qwen35-text-only"
+MODEL_DIR = "qwen3-5-text-only"
 
 
 def _model_path(test_data_path):
@@ -32,14 +32,14 @@ def _skip_if_missing(test_data_path):
     return path
 
 
-def test_qwen35_text_only_model_loads(test_data_path):
+def test_qwen3_5_text_only_model_loads(test_data_path):
     """Test that a Qwen3.5 text-only model loads successfully."""
     model_path = _skip_if_missing(test_data_path)
     model = og.Model(model_path)
     assert model is not None
 
 
-def test_qwen35_text_only_generator_creates(test_data_path):
+def test_qwen3_5_text_only_generator_creates(test_data_path):
     """Test that a Generator can be created for the text-only model.
     Validates that hybrid state auto-discovery works with qwen3_5_text type."""
     model_path = _skip_if_missing(test_data_path)
@@ -50,7 +50,7 @@ def test_qwen35_text_only_generator_creates(test_data_path):
     assert generator is not None
 
 
-def test_qwen35_text_only_accepts_input_ids(test_data_path):
+def test_qwen3_5_text_only_accepts_input_ids(test_data_path):
     """Test that the text-only model accepts input_ids (not inputs_embeds).
     The dummy model uses Identity pass-through which doesn't support KV cache
     shape changes, so we only validate that the generator constructs and

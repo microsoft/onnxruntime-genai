@@ -878,7 +878,7 @@ namespace CommonUtils
             {
                 Arity = ArgumentArity.ExactlyOne,
                 DefaultValueFactory = (_) => "",
-                Description = "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json"
+                Description = "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json"
             };
             tools_file.Validators.Add(result =>
             {

@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
+  AZCOPY_MSI_CLIENT_ID: d712a4c7-a0cf-4e87-af75-31510eba0a8e
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.DirectML&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.DirectML"
   dml_dir: "Microsoft.AI.DirectML.1.15.2"
@@ -129,7 +129,7 @@ jobs:
 
       - name: Run the Python Tests
         run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
 
       - name: Verify Build Artifacts
         if: always()

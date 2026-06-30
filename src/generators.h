@@ -151,8 +151,14 @@ struct OrtGlobals {
   std::unique_ptr<OrtEnv> env_;
 
   struct Allocator {
-    std::unique_ptr<Ort::Allocator> allocator_;
+    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
+    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
+    // does" -- see
+    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
+    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
+    // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
+    std::unique_ptr<Ort::Allocator> allocator_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
@@ -175,6 +181,13 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Constructs a Config from `config_path`. For a model package, a variant is selected
+// (auto-detected when `ep` is null/empty). For a flat directory `ep` must be null/empty.
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const char* ep = nullptr,
+                                     std::string_view json_overlay = {});
+
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
