@@ -618,7 +618,8 @@ class Model:
                 "do_sample": config.do_sample if hasattr(config, "do_sample") else False,
                 "early_stopping": True,
                 "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
-                "max_length": self.context_length,
+                # Cap max_length at 4096 to limit memory usage for KV cache
+                "max_length": min(4096, self.context_length),
                 "min_length": 0,
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
