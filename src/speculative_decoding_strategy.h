@@ -92,8 +92,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // we tack it onto the front of the next round's verify batch. Saves
   // one full target run per round.
   // pending_anchor_token_ = the token waiting to ride the next verify (empty = none waiting).
-  // is_multi_ = true if the target returns one logits row per token (required for the fold).
-  bool is_multi_{false};
+  // is_multiple_tokens_ = true if the target returns one logits row per token (required for the fold).
+  bool is_multiple_tokens_{false};
   std::optional<int32_t> pending_anchor_token_{};
 
   // Reusable one-hot logit row used to commit a single token.

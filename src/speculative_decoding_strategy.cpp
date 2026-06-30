@@ -166,9 +166,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         "Speculative decoding: target state has no logits output named '" + logits_name + "'.");
 
   auto raw_shape = raw_ort->GetTensorTypeAndShapeInfo()->GetShape();
-  const bool is_multi =
+  const bool is_multiple_tokens =
       (raw_shape.size() >= 2 && raw_shape[1] == static_cast<int64_t>(verify_width));
-  is_multi_ = is_multi;
+  is_multiple_tokens_ = is_multiple_tokens;
 
   // Runtime vocab-size safety net (once per generator lifetime).
   if (!vocab_check_done_) {
@@ -185,7 +185,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   std::vector<std::vector<float>> target_dists(K);
   auto elem_type = raw_ort->GetTensorTypeAndShapeInfo()->GetElementType();
 
-  if (is_multi) {
+  if (is_multiple_tokens) {
     // CPU-only path: the logits live in host memory as fp32, so read them directly. GPU
     // execution providers may hand back a device pointer and fp16 (v1 pending).
     if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
@@ -326,7 +326,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
 // Tidy up after a round and get ready for the next one. Verify ran all the proposed tokens, but
 // we only kept n_direct of them, so first drop the rejected ones from the target's cache. Then
 // handle the one committed token (final_token) in one of two ways:
-//   * fold path (is_multi && K>=2): leave it for the next round's verify batch (see RunRound).
+//   * fold path (is_multiple_tokens && K>=2): leave it for the next round's verify batch (see RunRound).
 //     This skips a whole extra target run each round.
 //   * legacy path (K==1 / pruned target): run it through the target now. This keeps K==1
 //     byte-for-byte identical to plain greedy decoding.
@@ -352,7 +352,7 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   if (rewind_to < target_kv_len)
     spec_state->target_state().RewindTo(rewind_to);
 
-  const bool fold = is_multi_ && saved_K_ >= 2;
+  const bool fold = is_multiple_tokens_ && saved_K_ >= 2;
   if (fold) {
     // Hand the committed token to the next round instead of running it now. Its verify pass
     // will both place it in the cache and give us its prediction - saving a full target run.
