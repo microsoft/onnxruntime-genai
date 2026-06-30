@@ -12,8 +12,16 @@
 
 namespace Generators {
 
-BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g)
-    : spec_state_{*dynamic_cast<SpeculativeDecodingState*>(g.state_.get())} {}
+// Validate the downcast before binding the non-null reference member
+static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
+  auto* spec_state = dynamic_cast<SpeculativeDecodingState*>(g.state_.get());
+  if (!spec_state) {
+    throw std::runtime_error("BaseSpeculativeStrategy requires SpeculativeDecodingState");
+  }
+  return *spec_state;
+}
+
+BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{RequireSpeculativeState(g)} {}
 
 // Propose K draft tokens. 
 // Greedy: argmax, probs empty.
