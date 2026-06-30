@@ -460,6 +460,7 @@ void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
+bool NeedsStaticInputShapes(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
 void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type);
