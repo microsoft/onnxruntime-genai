@@ -10,7 +10,6 @@ struct Model;
 
 DeviceInterface* GetQNNInterface(DeviceType device_type);
 
-bool IsQNNGPUBackend(const Config& config);
 bool IsQNNStatefulModel(const Model& model);
 
 }  // namespace Generators
