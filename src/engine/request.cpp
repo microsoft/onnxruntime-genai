@@ -116,6 +116,7 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
 
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
     search_->SelectTop();

@@ -28,6 +28,10 @@ struct Search : LeakChecked<Search> {
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
+  // Bans tokens that would complete an already-seen n-gram of size ngram_size.
+  // Backends that don't implement it (e.g. CUDA) fall back to the default below,
+  // which warns once if the option is set so the request is not silently ignored.
+  virtual void ApplyNoRepeatNgram(int ngram_size);
 
   // Set user input tokens
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };
@@ -50,6 +54,7 @@ struct Search_Cpu : Search {
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
+  void ApplyNoRepeatNgram(int ngram_size) override;
 
   std::span<float> GetScores(int batch_beam_index);
 
