@@ -150,6 +150,33 @@ def test_tied_embedding_path_selection_matches_current_base_logic(
 
 
 @pytest.mark.parametrize(
+    "onnx_dtype, op_types, nodes_to_exclude",
+    [
+        (ir.DataType.INT4, ("MatMul",), ("/lm_head/MatMul",)),
+        (ir.DataType.UINT4, ("MatMul",), ("/lm_head/MatMul",)),
+        (ir.DataType.INT4, ("MatMul", "Gather"), ("/lm_head/MatMul", "/model/embed_tokens/Gather")),
+        (ir.DataType.UINT4, ("MatMul", "Gather"), ("/lm_head/MatMul", "/model/embed_tokens/Gather")),
+    ],
+)
+def test_tied_unquantized_embeddings_can_be_true_in_int4_mode_when_both_quant_paths_are_disabled(
+    onnx_dtype,
+    op_types,
+    nodes_to_exclude,
+):
+    model = _make_model_for_tied_embeddings(
+        shared_embeddings=True,
+        tie_word_embeddings=False,
+        onnx_dtype=onnx_dtype,
+        op_types=op_types,
+        nodes_to_exclude=nodes_to_exclude,
+        int4_algo_config="rtn",
+    )
+
+    assert model.tied_quantized_embeddings is False
+    assert model.tied_unquantized_embeddings is True
+
+
+@pytest.mark.parametrize(
     "quantized_embeds, quantized_lm_head, int4_algo_config, expected_tied_quantized, expected_tied_unquantized",
     [
         (True, True, "default", True, False),
@@ -224,6 +251,17 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
     assert weight_name == expected_weight
     assert scale_name == expected_scale
     assert zp_name == expected_zp
+
+
+def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
+    model = Model.__new__(Model)
+    model.extra_options = {"int4_algo_config": "unexpected"}
+    model.algo_config_name = "unexpected"
+    model.matmul_block_size = 32
+    model.quant_attrs = {"is_symmetric": True}
+
+    with pytest.raises(AssertionError, match="Unknown quantization algo config name detected"):
+        model.make_tied_quantized_embedding_input_names()
 
 
 def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_symmetric=True, quant_type=None):
@@ -305,6 +343,91 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     else:
         assert "lm_head.MatMul.weight_zp" not in gather_inputs
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
+
+
+def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
+    model = Model.__new__(Model)
+    model.hidden_size = 64
+    model.vocab_size = 32000
+    model.io_dtype = ir.DataType.FLOAT16
+    model.input_names = {"input_ids": "input_ids"}
+    model.embed_attrs = {"scale": 1}
+    model.layernorm_attrs = {
+        "cast": {"use_fp32": False},
+        "root_input": "",
+        "skip_input": "",
+    }
+    model.tied_quantized_embeddings = tied_quantized_embeddings
+    model.tied_unquantized_embeddings = tied_unquantized_embeddings
+
+    model._transpose_calls = []
+    model._initializer_calls = []
+    model._node_calls = []
+    model._value_calls = []
+
+    def _make_transpose(name, root_input, dtype, shape, perm):
+        model._transpose_calls.append((name, root_input, dtype, shape, perm))
+
+    def _make_initializer(tensor, name, to=None):
+        model._initializer_calls.append((tensor, name, to))
+
+    def _make_node(op_type, **kwargs):
+        model._node_calls.append((op_type, kwargs))
+
+    def _make_value(name, dtype, shape):
+        model._value_calls.append((name, dtype, shape))
+
+    model.make_transpose = _make_transpose
+    model.make_initializer = _make_initializer
+    model.make_node = _make_node
+    model.make_value = _make_value
+    return model
+
+
+def test_make_embedding_unquantized_tied_path_emits_transpose_and_gather():
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=False,
+        tied_unquantized_embeddings=True,
+    )
+
+    model.make_embedding(embedding=None)
+
+    assert len(model._transpose_calls) == 1
+    transpose_call = model._transpose_calls[0]
+    assert transpose_call[0] == "/model/embed_tokens/Transpose"
+    assert transpose_call[1] == "lm_head.MatMul.weight"
+
+    gather_calls = [call for call in model._node_calls if call[0] == "Gather"]
+    assert len(gather_calls) == 1
+    gather_inputs = gather_calls[0][1]["inputs"]
+    assert gather_inputs[0] == "/model/embed_tokens/Transpose/output_0"
+    assert gather_inputs[1] == "input_ids"
+
+    assert model._initializer_calls == []
+
+
+def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather():
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=False,
+        tied_unquantized_embeddings=False,
+    )
+    embedding = object()
+
+    model.make_embedding(embedding=embedding)
+
+    assert len(model._initializer_calls) == 1
+    initializer_call = model._initializer_calls[0]
+    assert initializer_call[0] is embedding
+    assert initializer_call[1] == "model.embed_tokens.weight"
+    assert initializer_call[2] == ir.DataType.FLOAT16
+
+    gather_calls = [call for call in model._node_calls if call[0] == "Gather"]
+    assert len(gather_calls) == 1
+    gather_inputs = gather_calls[0][1]["inputs"]
+    assert gather_inputs[0] == "model.embed_tokens.weight"
+    assert gather_inputs[1] == "input_ids"
+
+    assert model._transpose_calls == []
 
 
 def _make_minimal_model_for_int4_matmul():
