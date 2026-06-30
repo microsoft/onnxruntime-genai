@@ -1,0 +1,184 @@
+# Stage 1 (core) — Windows native build via build.py (no cmake presets).
+# Keeps the proven toolchain scaffolding (CUDA SDK via azcopy, Rust 1.86, LLVM 18
+# for arm64, single-source ORT download) and exports the consumable core package.
+parameters:
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
+- name: build_config
+  type: string
+  default: 'RelWithDebInfo'
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
+
+steps:
+- bash: |
+    echo "##[error]Error: ep and arch are not set"
+    exit 1
+  displayName: 'Check if variables arch and ep are set'
+  condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
+
+- checkout: self
+  lfs: true
+  path: onnxruntime-genai
+  clean: true
+  submodules: recursive
+
+- task: onebranch.pipeline.tsaoptions@1
+  displayName: 'OneBranch TSAOptions'
+  inputs:
+    tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
+    appendSourceBranchName: false
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- task: NuGetToolInstaller@1
+  displayName: 'Install NuGet tool'
+
+- script: |
+    echo "arch=$(arch) ep=$(ep) os=$(os) config=${{ parameters.build_config }} cuda_version=$(cuda_version)"
+  displayName: 'Print Parameters'
+
+- powershell: |
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+  displayName: 'Download CUDA $(cuda_version)'
+  condition: and(eq(variables['arch'], 'x64'), eq(variables['ep'], 'cuda'))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    Write-Host "Downloading Azure CLI..."
+    $azCliUrl = "https://aka.ms/installazurecliwindows"
+    $installerPath = "$(Agent.TempDirectory)\AzureCLI.msi"
+    Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
+    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
+    $azCliBin = "C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin"
+    if (!(Test-Path $azCliBin)) { Write-Error "Azure CLI install failed: $azCliBin"; exit 1 }
+    $env:PATH = "$azCliBin;$env:PATH"
+    Write-Host "Downloading AzCopy..."
+    $azcopyZip = "$(Agent.TempDirectory)\azcopy.zip"
+    Invoke-WebRequest -Uri "https://aka.ms/downloadazcopy-v10-windows" -OutFile $azcopyZip
+    $azcopyExtractPath = "$(Agent.TempDirectory)\azcopy"
+    Expand-Archive -Path $azcopyZip -DestinationPath $azcopyExtractPath -Force
+    $azcopyFullPath = Get-ChildItem -Path $azcopyExtractPath -Filter "azcopy.exe" -Recurse | Select-Object -First 1
+    $env:PATH = "$($azcopyFullPath.Directory.FullName);$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    az --version
+    azcopy --version
+  displayName: 'Install Azure CLI and AzCopy'
+  condition: and(eq(variables['arch'], 'arm64'), eq(variables['ep'], 'cuda'))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.ep, 'cuda') }}:
+  - task: AzureCLI@2
+    displayName: 'Download CUDA $(cuda_version) (arm64)'
+    condition: eq(variables['arch'], 'arm64')
+    inputs:
+      azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+      scriptType: batch
+      scriptLocation: inlineScript
+      inlineScript: |
+        set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+        azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v$(cuda_version)" "cuda_sdk"
+
+  - powershell: |
+      if ('$(cuda_version)' -like '13.*') {
+        $cuda_archs = "75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
+      } else {
+        $cuda_archs = "60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120"
+      }
+      Write-Host "##vso[task.setvariable variable=cuda_archs]$cuda_archs"
+    displayName: 'Set cuda_archs'
+
+- powershell: |
+    $exePath = "$env:TEMP\rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.86.0
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+  displayName: 'Install Rust Toolchain'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
+    $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+    Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+    $llvmBin = "C:\Program Files\LLVM\bin"
+    if (!(Test-Path $llvmBin)) { Write-Error "LLVM install failed: $llvmBin"; exit 1 }
+    $env:PATH = "$llvmBin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    clang --version
+  displayName: 'Install LLVM'
+  condition: eq(variables['arch'], 'arm64')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+# Single-source ORT: download the requested nightly once, pass via --ort_home.
+- ${{ if ne(parameters.ort_build_version, 'default') }}:
+  - powershell: |
+      $ep = "$(ep)"; $arch = "$(arch)"
+      $packageName = if ($ep -eq "cuda") { if ($arch -eq "arm64") { "Microsoft.ML.OnnxRuntime" } else { "Microsoft.ML.OnnxRuntime.Gpu.Windows" } } else { "Microsoft.ML.OnnxRuntime" }
+      $orgName = "aiinfra"
+      $feedProject = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+      $feedId = "7982ae20-ed19-4a35-a362-a96ac99897b7"
+      $version = "${{ parameters.ort_build_version }}"
+      if ([string]::IsNullOrWhiteSpace($version)) { Write-Error "ORT build version is empty."; exit 1 }
+      $source = "${{ parameters.ort_build_source }}"
+      if ($source -eq "Ort-Nightly") {
+        $url = "https://pkgs.dev.azure.com/$orgName/$feedProject/_apis/packaging/feeds/$feedId/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
+      } else {
+        $url = "https://www.nuget.org/api/v2/package/$packageName/$version"
+      }
+      $downloadPath = "$(Agent.TempDirectory)\ort_build_pkg.zip"
+      Invoke-WebRequest -Uri $url -OutFile $downloadPath -ErrorAction Stop
+      $extractPath = "$(Agent.TempDirectory)\ort_build_extracted"
+      if (Test-Path $extractPath) { Remove-Item -Path $extractPath -Recurse -Force }
+      Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force -ErrorAction Stop
+      $ortHome = "$(Build.Repository.LocalPath)\ort_build"
+      New-Item -ItemType Directory -Force -Path "$ortHome\include"
+      New-Item -ItemType Directory -Force -Path "$ortHome\lib"
+      if ($ep -eq "cuda" -and $arch -ne "arm64") { $headerSrc = "$extractPath\buildTransitive\native\include" } else { $headerSrc = "$extractPath\build\native\include" }
+      Copy-Item "$headerSrc\*" "$ortHome\include\" -Recurse -Force
+      $platform = if ($arch -eq "arm64") { "win-arm64" } else { "win-x64" }
+      Copy-Item "$extractPath\runtimes\$platform\native\*" "$ortHome\lib\" -Recurse -Force
+      Write-Host "##vso[task.setvariable variable=ORT_HOME_ARG]--ort_home $ortHome"
+    displayName: 'Download ORT build package'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+# Build the native core with build.py (no presets) and export it to build\$(ep)\install.
+- powershell: |
+    $cudaArgs = ""
+    if ("$(ep)" -eq "cuda") {
+      $cudaArgs = "--use_cuda --cuda_home `"$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)`" --cuda_archs `"$(cuda_archs)`""
+    }
+    $cmd = "python build.py --config ${{ parameters.build_config }} " +
+           "--build_dir `"$(Build.Repository.LocalPath)\build\$(ep)`" " +
+           "--update --build --parallel --skip_tests --skip_wheel " +
+           "--install_dir `"$(Build.Repository.LocalPath)\build\$(ep)\install`" " +
+           "$cudaArgs $(ORT_HOME_ARG)"
+    Write-Host $cmd
+    Invoke-Expression $cmd
+  displayName: 'Build core (build.py)'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- template: compliant/win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.Repository.LocalPath)\$(coreInstallDir)'
+    DisplayName: 'ESRP - Sign C++ dlls'
+    Pattern: '*genai*.dll'
+
+- task: BinSkim@4
+  displayName: 'Run BinSkim'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
+  continueOnError: true
+
+- template: build-core-publish-step.yml
+  parameters:
+    archiveType: zip

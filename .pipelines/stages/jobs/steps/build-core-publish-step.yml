@@ -1,0 +1,56 @@
+# Shared Stage 1 publish: turns the exported core (build/$(ep)/install) into the
+# C/C++ SDK archive AND publishes the raw export as the canonical "core" artifact
+# that every Stage 2 SDK job consumes via build.py --prebuilt_genai_home.
+parameters:
+- name: archiveType
+  type: string
+  default: 'tar'        # 'tar' (Linux/macOS) or 'zip' (Windows)
+- name: macSign
+  type: boolean
+  default: false
+
+steps:
+- task: CopyFiles@2
+  displayName: 'Add license/notices to C/C++ SDK'
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)'
+    Contents: |
+      VERSION_INFO
+      LICENSE
+      SECURITY.md
+      README.md
+      ThirdPartyNotices.txt
+    TargetFolder: '$(Build.Repository.LocalPath)/$(coreInstallDir)'
+
+- task: ArchiveFiles@2
+  displayName: 'Archive C/C++ SDK'
+  inputs:
+    rootFolderOrFile: '$(Build.Repository.LocalPath)/$(coreInstallDir)'
+    includeRootFolder: true
+    archiveType: ${{ parameters.archiveType }}
+    ${{ if eq(parameters.archiveType, 'tar') }}:
+      tarCompression: 'gz'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName)-capi.tgz'
+    ${{ else }}:
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName)-capi.zip'
+    replaceExistingArchive: true
+
+- ${{ if eq(parameters.macSign, true) }}:
+  - template: compliant/mac-esrp-archive-step.yml
+    parameters:
+      FolderPath: '$(Build.ArtifactStagingDirectory)/capi'
+      Pattern: '*.tgz'
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Artifact: C/C++ SDK'
+  inputs:
+    artifactName: $(artifactName)-capi
+    targetPath: '$(Build.ArtifactStagingDirectory)/capi'
+
+# The exported CMake package (imported target onnxruntime-genai::onnxruntime-genai)
+# is the single core artifact reused by all SDK jobs — never rebuilt downstream.
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Artifact: core export'
+  inputs:
+    artifactName: $(artifactName)-core
+    targetPath: '$(Build.Repository.LocalPath)/$(coreInstallDir)'

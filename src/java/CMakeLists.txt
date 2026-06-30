@@ -1,6 +1,49 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# This CMakeLists is dual-mode (see src/python/CMakeLists.txt for the same pattern):
+#  - In-tree (monorepo build): pulled in via add_subdirectory from the root
+#    CMakeLists, where the core target and shared variables already exist.
+#  - Standalone (incremental SDK build): configured directly against a prebuilt
+#    core consumed via find_package(onnxruntime-genai), so the JNI/jar/AAR are
+#    built without recompiling the core.
+if(NOT TARGET onnxruntime-genai AND NOT TARGET onnxruntime-genai::onnxruntime-genai)
+  cmake_minimum_required(VERSION 3.26)
+  project(onnxruntime_genai_java LANGUAGES C CXX)
+
+  get_filename_component(SRC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+  get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
+  # Consume the prebuilt core (imports onnxruntime-genai::onnxruntime-genai).
+  find_package(onnxruntime-genai REQUIRED)
+  set(GENAI_STANDALONE_SDK ON)
+
+  # The JNI bindings compile against ONNX Runtime headers and the tests copy ORT
+  # runtime libs; the SDK build resolves ORT from the single managed source.
+  if(NOT ORT_HEADER_DIR)
+    message(FATAL_ERROR "Standalone Java build requires -DORT_HEADER_DIR=<onnxruntime headers>")
+  endif()
+
+  # Reuse the exact architecture normalization the core build uses.
+  include(${REPO_ROOT}/cmake/target_platform.cmake)
+
+  # In-tree the root CMakeLists populates ortgenai_embed_libs with the genai
+  # runtime libraries to bundle; standalone we reconstruct it from the imported
+  # core target(s) (ORT is provided via separate AARs / pip-style dependencies).
+  set(ortgenai_embed_libs "")
+  list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai::onnxruntime-genai>")
+  if(TARGET onnxruntime-genai::onnxruntime-genai-cuda)
+    list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai::onnxruntime-genai-cuda>")
+  endif()
+endif()
+
+# Normalize the core target name across both modes.
+if(TARGET onnxruntime-genai::onnxruntime-genai)
+  set(GENAI_CORE_TARGET onnxruntime-genai::onnxruntime-genai)
+else()
+  set(GENAI_CORE_TARGET onnxruntime-genai)
+endif()
+
 set(JAVA_AWT_LIBRARY NotNeeded)
 set(JAVA_AWT_INCLUDE_PATH NotNeeded)
 include(FindJava)
@@ -17,7 +60,7 @@ set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 # Should we use onnxruntime-genai or onnxruntime-genai-static? Using onnxruntime-genai for now.
 # Add dependency on native target
-set(JAVA_DEPENDS onnxruntime-genai)
+set(JAVA_DEPENDS ${GENAI_CORE_TARGET})
 
 set(GRADLE_EXECUTABLE "${JAVA_SRC_ROOT}/gradlew")
 
@@ -66,9 +109,10 @@ set_property(TARGET onnxruntime-genai-jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai-jni onnxruntime-genai4j)
 # the JNI headers are generated in the genai4j target
 target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
+                                                           ${ORT_HEADER_DIR}
                                                            ${JAVA_SRC_ROOT}/build/headers
                                                            ${JNI_INCLUDE_DIRS})
-target_link_libraries(onnxruntime-genai-jni PUBLIC onnxruntime-genai)
+target_link_libraries(onnxruntime-genai-jni PUBLIC ${GENAI_CORE_TARGET})
 
 set(JAVA_PACKAGE_OUTPUT_DIR ${JAVA_OUTPUT_DIR}/build)
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_OUTPUT_DIR})
@@ -161,8 +205,8 @@ if (ANDROID)
   # Copy onnxruntime-genai.so and onnxruntime-genai-jni.so for building Android AAR package
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                       $<TARGET_FILE:onnxruntime-genai>
-                       ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai>)
+                       $<TARGET_FILE:${GENAI_CORE_TARGET}>
+                       ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:${GENAI_CORE_TARGET}>)
 
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different

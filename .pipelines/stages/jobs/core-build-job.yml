@@ -1,0 +1,126 @@
+# Stage 1 (core) — one job per (os, ep, arch) target. Builds the native core via
+# build.py and publishes the C/C++ SDK archive + the exported core artifact.
+parameters:
+- name: os
+  type: string
+  values: ['linux', 'win', 'osx']
+- name: arch
+  type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: cuda_version
+  type: string
+  default: ''
+- name: build_config
+  type: string
+  default: 'RelWithDebInfo'
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
+
+jobs:
+- job: core_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}
+  displayName: 'Core ${{ parameters.os }} ${{ parameters.ep }} ${{ parameters.arch }}'
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'x64') }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      ${{ elseif eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-linux-ARM64-CPU-2019'
+        hostArchitecture: 'Arm64'
+      ${{ else }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+  ${{ if eq(parameters.os, 'win') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'x64') }}:
+        name: 'onnxruntime-Win-CPU-2022'
+      ${{ elseif eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-genai-windows-vs-2022-arm64'
+        hostArchitecture: 'Arm64'
+        demands:
+          - Agent.Version -equals 4.264.2
+      ${{ else }}:
+        name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: 'Azure Pipelines'
+      image: 'macOS-latest'
+      os: 'macOS'
+
+  timeoutInMinutes: 180
+  variables:
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: os
+    value: ${{ parameters.os }}
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: build_config
+    value: ${{ parameters.build_config }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  # Path (relative to the repo root) of the exported core CMake package.
+  - name: coreInstallDir
+    value: 'build/${{ parameters.ep }}/install'
+  - name: ORT_HOME_ARG
+    value: ''
+  - name: cuda_archs
+    value: ''
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
+
+  workspace:
+    clean: all
+  steps:
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+    displayName: Copy python 3.11.0 to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
+
+  # Skipped on linux-arm64: that self-hosted pool has no arm64 Python in the tools
+  # cache; the Linux build runs in Docker so the host python3 suffices.
+  - task: UsePythonVersion@0
+    displayName: 'Use Python 3.11'
+    condition: not(and(eq(variables['os'], 'linux'), eq(variables['arch'], 'arm64')))
+    inputs:
+      versionSpec: 3.11
+      addToPath: true
+      architecture: $(arch)
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/build-core-linux-step.yml
+      parameters:
+        ep: ${{ parameters.ep }}
+        arch: ${{ parameters.arch }}
+        build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/build-core-win-step.yml
+      parameters:
+        ep: ${{ parameters.ep }}
+        arch: ${{ parameters.arch }}
+        build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/build-core-macos-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        build_config: ${{ parameters.build_config }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
+
+  - template: steps/compliant-and-cleanup-step.yml

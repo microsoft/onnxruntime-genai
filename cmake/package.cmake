@@ -8,6 +8,7 @@ set_target_properties(
 )
 install(TARGETS
   onnxruntime-genai
+  EXPORT onnxruntime-genai-targets
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib
   ARCHIVE DESTINATION lib
@@ -17,11 +18,50 @@ install(TARGETS
 if(USE_CUDA OR USE_TRT_RTX)
   install(TARGETS
     onnxruntime-genai-cuda
+    EXPORT onnxruntime-genai-targets
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION lib
     ARCHIVE DESTINATION lib
   )
 endif()
+
+# Export a CMake package so SDK projects (Python wheel, Java, ...) can consume
+# the prebuilt core via find_package(onnxruntime-genai) and link against it
+# instead of recompiling it. This is the foundation of the incremental build:
+# the core is built once, every SDK layers on top of the exported targets.
+include(CMakePackageConfigHelpers)
+set(ONNXRUNTIME_GENAI_INSTALL_CMAKEDIR lib/cmake/onnxruntime-genai)
+
+# Capture the execution-provider flags the core was built with so SDK builds
+# report capabilities (is_cuda_available, ...) consistent with the prebuilt core.
+foreach(_ep USE_CUDA USE_DML USE_ROCM USE_WEBGPU)
+  if(${_ep})
+    set(ONNXRUNTIME_GENAI_${_ep} 1)
+  else()
+    set(ONNXRUNTIME_GENAI_${_ep} 0)
+  endif()
+endforeach()
+
+install(EXPORT onnxruntime-genai-targets
+  FILE onnxruntime-genai-targets.cmake
+  NAMESPACE onnxruntime-genai::
+  DESTINATION ${ONNXRUNTIME_GENAI_INSTALL_CMAKEDIR}
+)
+configure_package_config_file(
+  ${REPO_ROOT}/cmake/onnxruntime-genaiConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfig.cmake
+  INSTALL_DESTINATION ${ONNXRUNTIME_GENAI_INSTALL_CMAKEDIR}
+)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfigVersion.cmake
+  VERSION ${VERSION_INFO}
+  COMPATIBILITY SameMajorVersion
+)
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfigVersion.cmake
+  DESTINATION ${ONNXRUNTIME_GENAI_INSTALL_CMAKEDIR}
+)
 
 if (WIN32)
   install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo Debug)

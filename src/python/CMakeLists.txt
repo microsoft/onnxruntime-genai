@@ -1,3 +1,41 @@
+# This CMakeLists is dual-mode:
+#  - In-tree (monorepo build): pulled in via add_subdirectory from the root
+#    CMakeLists, where the core target and shared variables already exist.
+#  - Standalone (incremental SDK build): configured directly against a prebuilt
+#    core consumed via find_package(onnxruntime-genai). This lets the wheel be
+#    built without recompiling the core.
+if(NOT TARGET onnxruntime-genai AND NOT TARGET onnxruntime-genai::onnxruntime-genai)
+  cmake_minimum_required(VERSION 3.26)
+  project(onnxruntime_genai_python LANGUAGES C CXX)
+
+  get_filename_component(SRC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+  get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
+  # Consume the prebuilt core (imports onnxruntime-genai::onnxruntime-genai).
+  find_package(onnxruntime-genai REQUIRED)
+  find_package(pybind11 CONFIG REQUIRED)
+  set(GENAI_STANDALONE_SDK ON)
+
+  # The version is single-sourced from the repo-root VERSION_INFO file (the same
+  # file the core build reads), so the wheel version matches the core.
+  file(READ "${REPO_ROOT}/VERSION_INFO" VERSION_INFO)
+  string(STRIP "${VERSION_INFO}" VERSION_INFO)
+
+  # The binding compiles against ONNX Runtime headers (onnxruntime_c_api.h).
+  # The SDK build resolves ORT from the single managed source and passes its
+  # location in; we don't bake ORT paths into the exported core package.
+  if(NOT ORT_HEADER_DIR)
+    message(FATAL_ERROR "Standalone python build requires -DORT_HEADER_DIR=<onnxruntime headers>")
+  endif()
+endif()
+
+# Normalize the core target name across both modes.
+if(TARGET onnxruntime-genai::onnxruntime-genai)
+  set(GENAI_CORE_TARGET onnxruntime-genai::onnxruntime-genai)
+else()
+  set(GENAI_CORE_TARGET onnxruntime-genai)
+endif()
+
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
 file(GLOB python_srcs CONFIGURE_DEPENDS
@@ -8,7 +46,28 @@ find_package(Python COMPONENTS Interpreter Development)
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(python PRIVATE onnxruntime-genai)
+target_link_libraries(python PRIVATE ${GENAI_CORE_TARGET})
+
+# Pin the C++ standard on the target so it holds in both the in-tree build
+# (inherits it from the root scope) and the standalone SDK build (where the
+# directory-scope default would otherwise let pybind11 fall back to C++14).
+set_target_properties(python PROPERTIES CXX_STANDARD ${CMAKE_CXX_STANDARD} CXX_STANDARD_REQUIRED ON)
+
+# In the in-tree build the execution-provider flags come from global compile
+# definitions. In the standalone SDK build they come from the exported core
+# package so the wheel's reported capabilities match the prebuilt core.
+if(GENAI_STANDALONE_SDK)
+  target_compile_definitions(python PRIVATE ${onnxruntime-genai_EP_DEFINITIONS})
+
+  # In-tree the root CMakeLists populates ortgenai_embed_libs with the genai
+  # runtime libraries the wheel must bundle. Standalone we reconstruct it from
+  # the imported core target(s); ORT itself is not bundled (the wheel declares a
+  # pip dependency on onnxruntime/onnxruntime-gpu instead).
+  list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai::onnxruntime-genai>")
+  if(TARGET onnxruntime-genai::onnxruntime-genai-cuda)
+    list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai::onnxruntime-genai-cuda>")
+  endif()
+endif()
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
   target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
@@ -45,8 +104,8 @@ if(BUILD_WHEEL)
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
-  file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
-  file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${REPO_ROOT}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${REPO_ROOT}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
 
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy

@@ -1,0 +1,123 @@
+# Stage 2 (SDK) — Windows/macOS Python wheel against the prebuilt core.
+# The pybind extension links the prebuilt core, so no CUDA toolkit / Rust / LLVM is
+# needed here — only Python, pybind11 and the ONNX Runtime headers/import libs.
+parameters:
+- name: os
+  type: string
+  values: ['win', 'osx']
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
+- name: build_config
+  type: string
+  default: 'RelWithDebInfo'
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
+
+steps:
+- template: utils/set-nightly-build-option-variable.yml
+
+# ---- Windows ----
+- ${{ if eq(parameters.os, 'win') }}:
+  - powershell: |
+      $ep = "$(ep)"; $arch = "$(arch)"
+      $packageName = if ($ep -eq "cuda") { if ($arch -eq "arm64") { "Microsoft.ML.OnnxRuntime" } else { "Microsoft.ML.OnnxRuntime.Gpu.Windows" } } else { "Microsoft.ML.OnnxRuntime" }
+      $version = "${{ parameters.ort_build_version }}"
+      if ($version -eq "default") { $version = "$(ort_version)" }
+      $org = "aiinfra"; $proj = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"; $feed = "7982ae20-ed19-4a35-a362-a96ac99897b7"
+      if ("${{ parameters.ort_build_source }}" -eq "Ort-Nightly") {
+        $url = "https://pkgs.dev.azure.com/$org/$proj/_apis/packaging/feeds/$feed/nuget/packages/$packageName/versions/$version/content?api-version=6.0-preview.1"
+      } else {
+        $url = "https://www.nuget.org/api/v2/package/$packageName/$version"
+      }
+      $dl = "$(Agent.TempDirectory)\ort_pkg.zip"
+      Invoke-WebRequest -Uri $url -OutFile $dl -ErrorAction Stop
+      $ex = "$(Agent.TempDirectory)\ort_extracted"
+      if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }
+      Expand-Archive -Path $dl -DestinationPath $ex -Force
+      $ortHome = "$(Build.Repository.LocalPath)\ort_build"
+      New-Item -ItemType Directory -Force -Path "$ortHome\include" | Out-Null
+      New-Item -ItemType Directory -Force -Path "$ortHome\lib" | Out-Null
+      if ($ep -eq "cuda" -and $arch -ne "arm64") { $hsrc = "$ex\buildTransitive\native\include" } else { $hsrc = "$ex\build\native\include" }
+      Copy-Item "$hsrc\*" "$ortHome\include\" -Recurse -Force
+      $platform = if ($arch -eq "arm64") { "win-arm64" } else { "win-x64" }
+      Copy-Item "$ex\runtimes\$platform\native\*" "$ortHome\lib\" -Recurse -Force
+    displayName: 'Download ORT for wheel (win)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - powershell: |
+      python -m pip install pybind11 wheel
+      python build.py `
+        --config ${{ parameters.build_config }} `
+        --build_dir "$(Build.Repository.LocalPath)\build\$(ep)" `
+        --prebuilt_genai_home "$(Build.Repository.LocalPath)\core" `
+        --ort_home "$(Build.Repository.LocalPath)\ort_build" `
+        --sdk python --update --build --parallel
+    displayName: 'Build wheel (win)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)'
+      DisplayName: 'ESRP - PYD Sign'
+      Pattern: '*.pyd,*.dll'
+
+# ---- macOS ----
+- ${{ if eq(parameters.os, 'osx') }}:
+  - bash: |
+      set -e -x
+      package_name="Microsoft.ML.OnnxRuntime"
+      version="${{ parameters.ort_build_version }}"
+      [ "$version" = "default" ] && version="$(ort_version)"
+      org="aiinfra"; proj="2692857e-05ef-43b4-ba9c-ccf1c22c437c"; feed="7982ae20-ed19-4a35-a362-a96ac99897b7"
+      if [ "${{ parameters.ort_build_source }}" = "Ort-Nightly" ]; then
+        url="https://pkgs.dev.azure.com/${org}/${proj}/_apis/packaging/feeds/${feed}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+      else
+        url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
+      fi
+      dl="$(Agent.TempDirectory)/ort_pkg.zip"
+      curl --fail --retry 5 --retry-all-errors -L -o "$dl" "$url"
+      ex="$(Agent.TempDirectory)/ort_extracted"; mkdir -p "$ex"; unzip -o "$dl" -d "$ex"
+      ort_home="$(Build.Repository.LocalPath)/ort_build"
+      mkdir -p "$ort_home/include" "$ort_home/lib"
+      cp -r "$ex/build/native/include/"* "$ort_home/include/"
+      platform="osx-arm64"; [ "$(arch)" != "arm64" ] && platform="osx-x64"
+      cp -r "$ex/runtimes/$platform/native/"* "$ort_home/lib/"
+    displayName: 'Download ORT for wheel (mac)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - bash: |
+      set -e -x
+      export MACOSX_DEPLOYMENT_TARGET=12.0
+      python -m pip install pybind11 wheel
+      extra=""
+      [ "$(arch)" = "arm64" ] && extra="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64"
+      python build.py \
+        --config ${{ parameters.build_config }} \
+        --build_dir $(Build.Repository.LocalPath)/build/$(ep) \
+        --prebuilt_genai_home $(Build.Repository.LocalPath)/core \
+        --ort_home $(Build.Repository.LocalPath)/ort_build \
+        --sdk python --update --build --parallel $extra
+    displayName: 'Build wheel (mac)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- task: CopyFiles@2
+  displayName: 'Collect wheels'
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)'
+    Contents: '**/*.whl'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+    flattenFolders: true
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Artifact: python wheel'
+  inputs:
+    artifactName: $(artifactName)-wheel
+    targetPath: '$(Build.ArtifactStagingDirectory)/wheel'

@@ -1,0 +1,162 @@
+# =====================================================================================
+# Unified packaging pipeline (replaces pypl-publishing / nuget-publishing /
+# android-publishing / macos-ios-cocoapods-publishing).
+#
+# Incremental & modular:
+#   Stage 1 (core_build)   builds the native core ONCE per target via `python build.py`
+#                          (no cmake presets) and publishes the C/C++ SDK + an exported
+#                          core artifact.
+#   Stage 2 (SDK packaging) layers every SDK on top of that single prebuilt core
+#                          artifact — never rebuilding the core.
+#
+# Support matrix: Linux x64/arm64, Windows x64/arm64, macOS arm64, Android, iOS.
+# Device matrix:  CUDA on Windows/Linux x64+arm64; CPU everywhere.
+# Managed packages are single-sourced from the Lotus feed (see .pipelines/nuget.config).
+# =====================================================================================
+parameters:
+  # ---- Support-matrix toggles (single source of truth) ----
+  - name: enable_linux_x64_cpu
+    type: boolean
+    default: true
+  - name: enable_linux_arm64_cpu
+    type: boolean
+    default: true
+  - name: enable_linux_x64_cuda
+    type: boolean
+    default: true
+  - name: enable_linux_arm64_cuda
+    type: boolean
+    default: true
+  - name: enable_win_x64_cpu
+    type: boolean
+    default: true
+  - name: enable_win_arm64_cpu
+    type: boolean
+    default: true
+  - name: enable_win_x64_cuda
+    type: boolean
+    default: true
+  - name: enable_win_arm64_cuda
+    type: boolean
+    default: true
+  - name: enable_macos_arm64_cpu
+    type: boolean
+    default: true
+  - name: enable_android
+    type: boolean
+    default: true
+  - name: enable_apple_framework
+    type: boolean
+    default: true
+
+  # ---- SDK toggles ----
+  - name: enable_python
+    type: boolean
+    default: true
+
+  # ---- Versions ----
+  - name: cuda_version
+    displayName: 'CUDA version (packaging)'
+    type: string
+    default: '13.1'
+  - name: ort_version
+    displayName: 'ONNX Runtime CPU version'
+    type: string
+    default: '1.23.0'
+  - name: ort_cuda_version
+    displayName: 'ONNX Runtime GPU version'
+    type: string
+    default: '1.23.0'
+  - name: build_config
+    displayName: 'Build configuration'
+    type: string
+    default: 'RelWithDebInfo'
+    values:
+      - 'RelWithDebInfo'
+      - 'Release'
+      - 'Debug'
+  - name: ort_build_version
+    displayName: 'ONNX Runtime nightly version for build-time compilation. ''default'' uses ortlib.cmake.'
+    type: string
+    default: 'default'
+  - name: ort_build_source
+    displayName: 'Package source for build-time ORT download.'
+    type: string
+    default: 'NuGet'
+    values:
+      - 'NuGet'
+      - 'Ort-Nightly'
+
+resources:
+  repositories:
+    - repository: 1esPipelines
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+trigger: none
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
+  parameters:
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+    sdl:
+      policheck:
+        enabled: true
+        break: true
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    stages:
+      # ---------- Stage 1: Core native build (build.py) ----------
+      - template: stages/core-build-stage.yml
+        parameters:
+          enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+          enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
+          enable_linux_arm64_cuda: ${{ parameters.enable_linux_arm64_cuda }}
+          enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+          enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+          enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
+          enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
+          enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
+          cuda_version: ${{ parameters.cuda_version }}
+          build_config: ${{ parameters.build_config }}
+          ort_build_version: ${{ parameters.ort_build_version }}
+          ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ---------- Stage 2: Python wheel (incremental, consumes core) ----------
+      - ${{ if eq(parameters.enable_python, true) }}:
+        - template: stages/sdk-packaging-stage.yml
+          parameters:
+            enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+            enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+            enable_linux_x64_cuda: ${{ parameters.enable_linux_x64_cuda }}
+            enable_linux_arm64_cuda: ${{ parameters.enable_linux_arm64_cuda }}
+            enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+            enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+            enable_win_x64_cuda: ${{ parameters.enable_win_x64_cuda }}
+            enable_win_arm64_cuda: ${{ parameters.enable_win_arm64_cuda }}
+            enable_macos_arm64_cpu: ${{ parameters.enable_macos_arm64_cpu }}
+            cuda_version: ${{ parameters.cuda_version }}
+            build_config: ${{ parameters.build_config }}
+            ort_version: ${{ parameters.ort_version }}
+            ort_cuda_version: ${{ parameters.ort_cuda_version }}
+            ort_build_version: ${{ parameters.ort_build_version }}
+            ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ---------- Android AAR (self-contained build scripts) ----------
+      - ${{ if eq(parameters.enable_android, true) }}:
+        - template: stages/android-packaging-stage.yml
+          parameters:
+            ort_version: ${{ parameters.ort_version }}
+            build_config: ${{ parameters.build_config }}
+
+      # ---------- Apple (iOS / macOS) CocoaPods ----------
+      - ${{ if eq(parameters.enable_apple_framework, true) }}:
+        - template: stages/macos-ios-cocoapods-packaging-stage.yml
+          parameters:
+            ort_version: ${{ parameters.ort_version }}
+            build_config: ${{ parameters.build_config }}

@@ -1,0 +1,105 @@
+# Stage 1 (core) — macOS arm64 native build via build.py (no cmake presets).
+# CPU only. Exports the consumable core package and signs the C/C++ SDK archive.
+parameters:
+- name: arch
+  type: string
+  default: 'arm64'
+- name: build_config
+  type: string
+  default: 'RelWithDebInfo'
+- name: ort_build_version
+  type: string
+  default: 'default'
+- name: ort_build_source
+  type: string
+  default: 'NuGet'
+
+steps:
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- bash: |
+    echo "arch=$(arch) ep=$(ep) os=$(os) config=${{ parameters.build_config }}"
+  displayName: 'Print Parameters'
+
+- bash: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    echo '##vso[task.prependpath]$HOME/.cargo/bin'
+    source "$HOME/.cargo/env"
+    rustup toolchain install 1.86.0
+    rustup override set 1.86.0
+    if [ "$(arch)" = "arm64" ]; then
+      rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    fi
+    rustc --version
+  displayName: 'Install Rust Toolchain'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- bash: |
+    brew update --quiet
+    brew install --quiet llvm@18
+    LLVM_PREFIX="$(brew --prefix llvm@18)"
+    echo "##vso[task.setvariable variable=LLVM_PREFIX]$LLVM_PREFIX"
+    echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
+  displayName: 'Install LLVM'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if ne(parameters.ort_build_version, 'default') }}:
+  - bash: |
+      set -e -x
+      package_name="Microsoft.ML.OnnxRuntime"
+      org_name="aiinfra"
+      feed_project="2692857e-05ef-43b4-ba9c-ccf1c22c437c"
+      feed_id="7982ae20-ed19-4a35-a362-a96ac99897b7"
+      version="${{ parameters.ort_build_version }}"
+      source="${{ parameters.ort_build_source }}"
+      if [ "$source" = "Ort-Nightly" ]; then
+          url="https://pkgs.dev.azure.com/${org_name}/${feed_project}/_apis/packaging/feeds/${feed_id}/nuget/packages/${package_name}/versions/${version}/content?api-version=6.0-preview.1"
+      else
+          url="https://www.nuget.org/api/v2/package/${package_name}/${version}"
+      fi
+      download_path="$(Agent.TempDirectory)/ort_build_pkg.zip"
+      curl --fail --retry 5 --retry-all-errors -L -o "$download_path" "$url"
+      extract_path="$(Agent.TempDirectory)/ort_build_extracted"
+      mkdir -p "$extract_path"; unzip -o "$download_path" -d "$extract_path"
+      ort_home="$(Build.Repository.LocalPath)/ort_build"
+      mkdir -p "$ort_home/include" "$ort_home/lib"
+      cp -r "$extract_path/build/native/include/"* "$ort_home/include/"
+      platform="osx-arm64"; [ "$(arch)" != "arm64" ] && platform="osx-x64"
+      cp -r "$extract_path/runtimes/$platform/native/"* "$ort_home/lib/"
+      echo "##vso[task.setvariable variable=ORT_HOME_ARG]--ort_home $(Build.Repository.LocalPath)/ort_build"
+    displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+# Build the native core with build.py (no presets) and export it.
+- bash: |
+    set -e -x
+    export MACOSX_DEPLOYMENT_TARGET=12.0
+    export CC="$LLVM_PREFIX/bin/clang"
+    export CXX="$LLVM_PREFIX/bin/clang++"
+    extra_defines=""
+    if [ "$(arch)" = "arm64" ]; then
+      export CARGO_BUILD_TARGET=aarch64-apple-darwin
+      export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$CC"
+      export CC_aarch64_apple_darwin="$CC"
+      export CXX_aarch64_apple_darwin="$CXX"
+      extra_defines="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64 Rust_CARGO_TARGET=aarch64-apple-darwin"
+    fi
+    python build.py \
+      --config ${{ parameters.build_config }} \
+      --build_dir $(Build.Repository.LocalPath)/build/$(ep) \
+      --update --build --parallel \
+      --skip_tests --skip_wheel \
+      --install_dir $(Build.Repository.LocalPath)/build/$(ep)/install \
+      $extra_defines $(ORT_HOME_ARG)
+  displayName: 'Build core (build.py)'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- template: build-core-publish-step.yml
+  parameters:
+    archiveType: tar
+    macSign: true
