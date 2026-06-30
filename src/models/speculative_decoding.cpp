@@ -11,32 +11,32 @@ namespace Generators {
 namespace {
 
 std::unique_ptr<Config> CloneConfigForDraft(const Config& source) {
-  auto cfg = std::make_unique<Config>(source);
-  cfg->model.decoder = source.model.draft;
-  return cfg;
+  auto config = std::make_unique<Config>(source);
+  config->model.decoder = source.model.draft;
+  return config;
 }
 
 std::unique_ptr<Config> CloneConfigForTarget(const Config& source) {
   return std::make_unique<Config>(source);
 }
 
-bool ProviderConfigurationMatches(const Config::SessionOptions& a,
-                                  const Config::SessionOptions& b) {
-  if (a.providers != b.providers) return false;
+bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
+                                  const Config::SessionOptions& draft_options) {
+  if (target_options.providers != draft_options.providers) return false;
 
-  if (a.provider_options.size() != b.provider_options.size()) return false;
-  for (size_t i = 0; i < a.provider_options.size(); ++i) {
-    const auto& pa = a.provider_options[i];
-    const auto& pb = b.provider_options[i];
-    if (pa.name != pb.name) return false;
-    if (pa.options != pb.options) return false;
-    if (pa.device_filtering_options.has_value() != pb.device_filtering_options.has_value()) return false;
-    if (pa.device_filtering_options) {
-      const auto& da = *pa.device_filtering_options;
-      const auto& db = *pb.device_filtering_options;
-      if (da.hardware_device_type != db.hardware_device_type ||
-          da.hardware_device_id != db.hardware_device_id ||
-          da.hardware_vendor_id != db.hardware_vendor_id)
+  if (target_options.provider_options.size() != draft_options.provider_options.size()) return false;
+  for (size_t i = 0; i < target_options.provider_options.size(); ++i) {
+    const auto& target_provider = target_options.provider_options[i];
+    const auto& draft_provider = draft_options.provider_options[i];
+    if (target_provider.name != draft_provider.name) return false;
+    if (target_provider.options != draft_provider.options) return false;
+    if (target_provider.device_filtering_options.has_value() != draft_provider.device_filtering_options.has_value()) return false;
+    if (target_provider.device_filtering_options) {
+      const auto& target_device_filter = *target_provider.device_filtering_options;
+      const auto& draft_device_filter = *draft_provider.device_filtering_options;
+      if (target_device_filter.hardware_device_type != draft_device_filter.hardware_device_type ||
+          target_device_filter.hardware_device_id != draft_device_filter.hardware_device_id ||
+          target_device_filter.hardware_vendor_id != draft_device_filter.hardware_vendor_id)
         return false;
     }
   }
@@ -46,21 +46,23 @@ bool ProviderConfigurationMatches(const Config::SessionOptions& a,
 
 void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
                                    const DecoderOnly_Model& draft) {
-  const auto& tn = target.config_->model.decoder.outputs.logits;
-  const auto& dn = draft.config_->model.decoder.outputs.logits;
-  if (!target.session_info_.HasOutput(tn) || !draft.session_info_.HasOutput(dn))
+  const auto& target_logits_name = target.config_->model.decoder.outputs.logits;
+  const auto& draft_logits_name = draft.config_->model.decoder.outputs.logits;
+  if (!target.session_info_.HasOutput(target_logits_name) ||
+      !draft.session_info_.HasOutput(draft_logits_name))
     return;
-  const auto ts = target.session_info_.GetOutputShape(tn);
-  const auto ds = draft.session_info_.GetOutputShape(dn);
-  if (ts.empty() || ds.empty())
+  const auto target_logits_shape = target.session_info_.GetOutputShape(target_logits_name);
+  const auto draft_logits_shape = draft.session_info_.GetOutputShape(draft_logits_name);
+  if (target_logits_shape.empty() || draft_logits_shape.empty())
     return;
-  int64_t tv = ts.back(), dv = ds.back();
-  if (tv <= 0 || dv <= 0)
+  int64_t target_vocab_size = target_logits_shape.back();
+  int64_t draft_vocab_size = draft_logits_shape.back();
+  if (target_vocab_size <= 0 || draft_vocab_size <= 0)
     return;
-  if (tv != dv)
+  if (target_vocab_size != draft_vocab_size)
     throw std::runtime_error(
         "Target and draft logit dimensions don't match. Target vocab: " +
-        std::to_string(tv) + ", Draft vocab: " + std::to_string(dv) +
+        std::to_string(target_vocab_size) + ", Draft vocab: " + std::to_string(draft_vocab_size) +
         ". Target and draft must share the same vocabulary.");
 }
 
