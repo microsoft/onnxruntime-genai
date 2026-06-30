@@ -205,8 +205,21 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         device = session_device;  // Set the device if not already set by a previous provider
       }
     } else {
+      // Not a built-in provider: register it as a plugin EP (V2), falling back to the
+      // legacy append (V1). Neither path returns a genai DeviceInterface, so the
+      // model's inputs and KV cache stay in CPU memory for this session.
       if (!AppendExecutionProviderV2(session_options, provider_options,
                                      DeviceType::CPU, provider_options.name)) {
+        // The name is neither a built-in provider nor a registered plugin EP. The
+        // usual cause is a misspelled built-in name (e.g. an ORT-style name that
+        // NormalizeProviderName does not map). Warn so the CPU fallback is visible
+        // instead of silently degrading performance.
+        if (is_primary_session_options && g_log.enabled && g_log.warning) {
+          Log("warning", "Execution provider '" + provider_options.name +
+                             "' is not a built-in provider or a registered plugin EP; "
+                             "the model will run on CPU, which may be slow. For a built-in "
+                             "provider, use its canonical genai name (e.g. \"webgpu\", \"cuda\", \"dml\").");
+        }
         AppendExecutionProviderV1(session_options, provider_options);
       }
     }

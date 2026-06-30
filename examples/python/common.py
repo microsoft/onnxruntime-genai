@@ -569,6 +569,7 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
         "OpenVINOExecutionProvider",       # Intel IHV EP
         "QNNExecutionProvider",            # Qualcomm IHV EP
         "VitisAIExecutionProvider",        # AMD IHV EP
+        "webgpu",                          # GenAI canonical name for WebGPU EP
         "WebGpuExecutionProvider",         # WebGPU EP
     ]
 
