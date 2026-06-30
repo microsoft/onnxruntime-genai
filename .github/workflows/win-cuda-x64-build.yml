@@ -57,9 +57,6 @@ jobs:
         shell: pwsh
         run: |
           $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          # Hold the CUDA build at ORT 1.26.0 because ORT-GPU 1.27 nupkgs link
-          # the CUDA 13 runtime, while this runner ships CUDA 12.8. Keep this
-          # pin aligned with the USE_CUDA branch in cmake/ortlib.cmake.
           $ORT_NIGHTLY_VERSION = "1.26.0"
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
