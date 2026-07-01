@@ -258,6 +258,12 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
+  int32_t GetTagId(const char* tag_name) const {
+    int32_t id;
+    OgaCheckResult(OgaModelGetTagId(this, tag_name, &id));
+    return id;
+  }
+
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

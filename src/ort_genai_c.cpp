@@ -378,6 +378,13 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaModelGetTagId(const OgaModel* model, const char* tag_name, int32_t* out) {
+  OGA_TRY
+  *out = model->GetTagId(tag_name);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
   auto params = std::make_shared<Generators::GeneratorParams>(*model);

@@ -137,6 +137,12 @@ struct Config {
     int video_token_id{};
     int vision_start_token_id{};
 
+    // Tool-calling and reasoning token IDs (used for efficient token-level detection)
+    int tool_call_start_token_id{-1};
+    int tool_call_end_token_id{-1};
+    int reasoning_start_token_id{-1};
+    int reasoning_end_token_id{-1};
+
     int vocab_size{};
     int context_length{};
 

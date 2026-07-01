@@ -6,11 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <functional>
 #include <random>
 #include <set>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 #include "../generators.h"
 #include "../search.h"
@@ -306,6 +308,11 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+
+  // TODO: Once ORT Extensions supports an "additional_special_tokens" option, pass the generation
+  // tags (tool_calling/reasoning tokens) here so that models which don't already mark them as
+  // special in their tokenizer_config.json will still get correct skip_special_tokens behavior.
+  // This is needed for the FL SDK's dual-stream special token detection in OnnxChatGenerator::Decode().
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -818,6 +825,64 @@ bool Model::IsPruned() const {
     return false;
   const auto logits_shape = session_info_.GetOutputShape(logits_name);
   return logits_shape[1] == 1;
+}
+
+namespace {
+
+// Fallback map for models whose genai_config.json doesn't yet have token IDs in the model section.
+// Keyed by model.type string from genai_config.json.
+// Inner map: tag_name -> token string (used for vocab lookup to get the ID).
+const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
+  static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
+      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
+      {"phi3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
+  };
+  auto type_it = fallback_map.find(model_type);
+  if (type_it == fallback_map.end()) return nullptr;
+  auto tag_it = type_it->second.find(tag_name);
+  if (tag_it == type_it->second.end()) return nullptr;
+  return &tag_it->second;
+}
+
+}  // namespace
+
+void Model::InitTagIdCache() const {
+  auto tokenizer = CreateTokenizer();
+
+  static const char* tag_names[] = {"tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end"};
+
+  auto get_config_id = [&](const std::string& name) -> int32_t {
+    if (name == "tool_call_start") return config_->model.tool_call_start_token_id;
+    if (name == "tool_call_end") return config_->model.tool_call_end_token_id;
+    if (name == "reasoning_start") return config_->model.reasoning_start_token_id;
+    if (name == "reasoning_end") return config_->model.reasoning_end_token_id;
+    return -1;
+  };
+
+  for (const auto* tag_name : tag_names) {
+    int32_t id = get_config_id(tag_name);
+    if (id >= 0) {
+      tag_id_cache_[tag_name] = id;
+      continue;
+    }
+
+    // Fallback: look up the token string in the vocabulary to get its ID.
+    const auto* fallback_str = GetFallbackTag(config_->model.type, tag_name);
+    if (fallback_str && !fallback_str->empty()) {
+      int32_t fallback_id = tokenizer->TokenToTokenId(fallback_str->c_str());
+      if (fallback_id >= 0) {
+        tag_id_cache_[tag_name] = fallback_id;
+      }
+    }
+  }
+}
+
+int32_t Model::GetTagId(const std::string& tag_name) const {
+  std::call_once(tag_id_cache_flag_, [this]() { InitTagIdCache(); });
+  auto it = tag_id_cache_.find(tag_name);
+  return (it != tag_id_cache_.end()) ? it->second : -1;
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
