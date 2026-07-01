@@ -98,6 +98,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Reusable one-hot logit row used to commit a single token.
   DeviceSpan<float> onehot_buf_;
+
+  // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits. 
+  std::unique_ptr<OrtValue> verify_logits_fp32_;
 };
 
 }  // namespace Generators

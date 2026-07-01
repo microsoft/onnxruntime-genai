@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -208,6 +209,61 @@ def decoder_only_model_path(test_data_path):
     return path
 
 
+def _make_fp16_logits_model(source_dir: str, dest_dir: Path) -> str:
+    """Copy a decoder-only model but make its `logits` graph output FLOAT16 while leaving all
+    internal compute in fp32 (one Cast node on the output). Running the result yields fp16 logits,
+    which forces the speculative verify read down its Cast(fp16 -> fp32) branch -- the path GPU/NPU
+    EPs hit but a plain fp32 CPU model never exercises. Returns the dest model dir."""
+    import onnx
+    from onnx import TensorProto, helper
+
+    source_dir = os.path.abspath(source_dir)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    model = onnx.load(os.path.join(source_dir, "model.onnx"))
+    graph = model.graph
+
+    # Rewire whatever node currently produces `logits` to an internal fp32 name, then append a
+    # Cast back to `logits` as FLOAT16 so the model's external output dtype is fp16.
+    rewired = False
+    for node in graph.node:
+        for i, output_name in enumerate(node.output):
+            if output_name == "logits":
+                node.output[i] = "logits_fp32_internal"
+                rewired = True
+    if not rewired:
+        raise RuntimeError("expected a node producing a `logits` output")
+    graph.node.append(
+        helper.make_node("Cast", ["logits_fp32_internal"], ["logits"],
+                         to=TensorProto.FLOAT16, name="logits_to_fp16"))
+    for output in graph.output:
+        if output.name == "logits":
+            output.type.tensor_type.elem_type = TensorProto.FLOAT16
+
+    onnx.save(model, os.path.join(dest_dir, "model.onnx"))
+    shutil.copyfile(os.path.join(source_dir, "genai_config.json"),
+                    os.path.join(dest_dir, "genai_config.json"))
+    return os.fspath(dest_dir)
+
+
+@pytest.fixture(scope="module")
+def fp16_decoder_only_model_path(request, tmp_path_factory):
+    """An fp16-logits-output copy of an available decoder-only model, built once per module.
+    Reads --test_models directly (not the function-scoped test_data_path fixture) so it can be
+    module-scoped and pay the one-time model-rewrite cost only once."""
+    test_data = request.config.getoption("--test_models")
+    source = _find_decoder_only_model(test_data) if test_data else None
+    if source is None:
+        pytest.skip("No decoder-only model available under --test_models for fp16 speculative test")
+    try:
+        import onnx  # noqa: F401
+    except ImportError:
+        pytest.skip("onnx not available to synthesize an fp16-logits model")
+    dest = tmp_path_factory.mktemp("fp16_decoder_only")
+    return _make_fp16_logits_model(source, dest)
+
+
 def _find_two_distinct_models(test_data_path: str):
     """Return (target_dir, draft_dir) for two distinct, vocab-compatible decoder-only models,
     or None if fewer than two candidates are available."""
@@ -309,6 +365,23 @@ class TestSpeculativeGeneration:
         params.set_search_options(do_sample=False, max_length=16)
         with pytest.raises(Exception, match="max_draft_tokens"):
             params.set_speculative_options(max_draft_tokens=0)
+
+
+class TestSpeculativeFp16Verify:
+    """Target models commonly emit fp16/bf16 logits (the norm on GPU/NPU EPs). The device-agnostic
+    verify read casts them to fp32 with the same Cast/WrapTensor path regular decoding uses. Drive
+    that Cast branch with an fp16-logits-output model and require speculative greedy to still match
+    standalone greedy of the same model token-for-token (fp16 rounding is applied identically on
+    both paths, so any mismatch means the cast/read is wrong)."""
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_fp16_self_spec_matches_standalone_greedy(self, fp16_decoder_only_model_path, tmp_path, k):
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(fp16_decoder_only_model_path, tmp_path / f"fp16_selfspec_{k}", k)
+        ref, _ = _greedy(fp16_decoder_only_model_path, _PROMPT, max_length)
+        spec, stats = _greedy(spec_path, _PROMPT, max_length, k=k)
+        assert spec == ref
+        assert stats["draft_tokens_proposed"] > 0
 
 
 class TestSpeculativeKVReanchor:
