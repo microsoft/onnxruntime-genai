@@ -216,9 +216,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         // instead of silently degrading performance.
         if (is_primary_session_options && g_log.enabled && g_log.warning) {
           Log("warning", "Execution provider '" + provider_options.name +
-                             "' is not a built-in provider or a registered plugin EP; "
-                             "the model will run on CPU, which may be slow. For a built-in "
-                             "provider, use its canonical genai name (e.g. \"webgpu\", \"cuda\", \"dml\").");
+                             "' is not a built-in provider or a registered plugin EP; GenAI will keep model inputs and the KV cache in CPU memory, which may be slow. If you intended a built-in "
+                             "provider, use its canonical GenAI name (e.g. \"webgpu\", \"cuda\", \"dml\").");
         }
         AppendExecutionProviderV1(session_options, provider_options);
       }
