@@ -1882,3 +1882,19 @@ TEST(CAPITests, TagId_FromConfig) {
   // Cleanup
   std::filesystem::remove_all(temp_dir);
 }
+
+// Regression test for MSRC: malformed audio buffers smaller than the minimum valid
+// audio header size must be rejected with an error, not cause a crash.
+TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
+  const void* data_ptr = nullptr;
+  size_t data_size = 0;
+  OgaAudios* audios = nullptr;
+  OgaResult* result = OgaLoadAudiosFromBuffers(&data_ptr, &data_size, 1, &audios);
+
+  // Should return an error for empty buffers.
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("empty"), std::string::npos);
+  OgaDestroyResult(result);
+  // audios should not have been created
+  EXPECT_EQ(audios, nullptr);
+}

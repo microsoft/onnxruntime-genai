@@ -29,11 +29,13 @@ _MAX_NEW_TOKENS = 64
 
 # Known (platform, device, model) combinations that don't fit on the
 # agent's GPU memory. TODO: re-enable these once the GPU agents have
-# more VRAM. The current Windows CUDA pool
-# (onnxruntime-Win2022-GPU-A10) only exposes ~4 GB to the job.
+# more VRAM. The Windows CUDA pool (onnxruntime-Win2022-GPU-A10) and the
+# Linux CUDA pool (onnxruntime-Linux-GPU-A10) only expose ~4 GB to the job.
 _VRAM_CONSTRAINED_SKIPS: set[tuple[str, str, str]] = {
     ("win32", "cuda", "ministral-3-3b-Instruct-2512"),
     ("win32", "cuda", "Phi-4-mini-instruct"),
+    ("linux", "cuda", "ministral-3-3b-Instruct-2512"),
+    ("linux", "cuda", "Phi-4-mini-instruct"),
 }
 
 
