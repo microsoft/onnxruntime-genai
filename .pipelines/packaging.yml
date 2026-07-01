@@ -126,6 +126,14 @@ extends:
       name: 'onnxruntime-Win-CPU-2022'
       os: windows
     sdl:
+      # TEMPORARY: CredScan is disabled because the 1ES-injected sarif-pattern-matcher
+      # engine emits a driver-less SARIF for the native core-build job, which crashes the
+      # Guardian Post Analysis importer ("Required property 'driver' not found ... runs[0].tool").
+      # This is a 1ES SDL platform bug (tracked via ICM), not a repo config issue: the same
+      # Guardian 0.280.1 / feed / MicrosoftCanary policy pass cleanly on the managed jobs.
+      # Re-enable once the 1ES fix lands. PoliCheck, TSA and BinSkim remain enabled.
+      credscan:
+        enabled: false
       policheck:
         enabled: true
         break: true
