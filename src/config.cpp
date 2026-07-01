@@ -1657,10 +1657,46 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
   }
 }
 
+namespace {
+
+// Keep a session's providers list in sync with its provider_options. The providers list is what
+// drives EP registration at session creation; it is never set directly from JSON (the parser only
+// accepts provider_options), so it must be derived. Idempotent: an entry already present is not
+// added again, which makes it safe to run after the initial parse and again after a config overlay.
+void DeriveProvidersFromProviderOptions(Config::SessionOptions& session_options) {
+  for (const auto& provider_option : session_options.provider_options) {
+    if (std::find(session_options.providers.begin(), session_options.providers.end(),
+                  provider_option.name) == session_options.providers.end()) {
+      session_options.providers.push_back(provider_option.name);
+    }
+  }
+}
+
+// Apply the derivation to every model sub-session that carries its own session_options.
+void DeriveProvidersForAllSessions(Config& config) {
+  DeriveProvidersFromProviderOptions(config.model.decoder.session_options);
+  DeriveProvidersFromProviderOptions(config.model.draft.session_options);
+  if (config.model.encoder.session_options.has_value())
+    DeriveProvidersFromProviderOptions(*config.model.encoder.session_options);
+  if (config.model.vision.session_options.has_value())
+    DeriveProvidersFromProviderOptions(*config.model.vision.session_options);
+  if (config.model.speech.session_options.has_value())
+    DeriveProvidersFromProviderOptions(*config.model.speech.session_options);
+  if (config.model.embedding.session_options.has_value())
+    DeriveProvidersFromProviderOptions(*config.model.embedding.session_options);
+}
+
+}  // namespace
+
 void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{config};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+
+  // An overlay may introduce provider_options (e.g. a speculative draft block, or an EP added to an
+  // existing session). The providers list drives EP registration, so re-derive it here just as the
+  // constructor does after the initial parse. Idempotent, so pre-existing entries are not duplicated.
+  DeriveProvidersForAllSessions(config);
 }
 
 namespace {
@@ -1701,39 +1737,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     model.eos_token_id.push_back(model.pad_token_id);
   }
 
-  for (const auto& provider_option : model.decoder.session_options.provider_options) {
-    model.decoder.session_options.providers.push_back(provider_option.name);
-  }
-
-  // Speculative decoding: the draft block has its own session_options. Populate its providers list
-  // from provider_options too (mirrors the decoder above).
-  for (const auto& provider_option : model.draft.session_options.provider_options) {
-    model.draft.session_options.providers.push_back(provider_option.name);
-  }
-
-  if (model.encoder.session_options.has_value()) {
-    for (const auto& provider_option : model.encoder.session_options->provider_options) {
-      model.encoder.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.vision.session_options.has_value()) {
-    for (const auto& provider_option : model.vision.session_options->provider_options) {
-      model.vision.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.speech.session_options.has_value()) {
-    for (const auto& provider_option : model.speech.session_options->provider_options) {
-      model.speech.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  if (model.embedding.session_options.has_value()) {
-    for (const auto& provider_option : model.embedding.session_options->provider_options) {
-      model.embedding.session_options->providers.push_back(provider_option.name);
-    }
-  }
+  // Derive each session's providers list from its provider_options (see DeriveProvidersForAllSessions).
+  DeriveProvidersForAllSessions(*this);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
