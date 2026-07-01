@@ -14,6 +14,7 @@
 #include "models/model.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
+#include "decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -357,6 +358,16 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
   }
 }
 
+void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) {
+  Generators::SetSpeculativeNumber(speculative, name, value);
+}
+
+double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
+  if (name == "max_draft_tokens")
+    return static_cast<double>(speculative.max_draft_tokens);
+  throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -373,6 +384,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    strategy_ = MakeDecodingStrategy(*this);
     return;
   }
 
@@ -403,6 +415,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
+  strategy_ = MakeDecodingStrategy(*this);
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
@@ -419,6 +432,10 @@ void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
     else if (model_type == "phi3small")
       phi3_rope_threshold_ = 8193;
   }
+}
+
+bool Generator::IsGreedySampling() const {
+  return sampling_method_ == SamplingMethod::kGreedy;
 }
 
 void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
@@ -641,71 +658,12 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
-
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  strategy_->Step(*this);
+}
 
-  // Transducer models (RNNT, TDT): yield one token per call by stepping
-  // the encoder/decoder/joiner loop directly.
-  if (transducer_state_) {
-    state_->SetExtraInputs(extra_inputs_);
-    extra_inputs_.clear();
-    transducer_state_->StepToken();
-    return;
-  }
-
-  if (search_->GetSequenceLength() == 0 && !computed_logits_)
-    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
-
-  // Phi3 model switches from short factor to long factor at the ROPE threshold token,
-  // needs recomputation of Position IDs and KV Cache via rewind + re-append.
-  if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
-    auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
-    RewindToLength(0);
-    AppendTokens(current_seq);
-  }
-
-  if (!computed_logits_) {
-    auto next_tokens = search_->GetNextTokens();
-    if (last_action_ == Action::rewound)
-      search_->AppendTokens(next_tokens);
-    ComputeLogits(next_tokens);
-  }
-  if (guidance_logits_processor_) {
-    auto logits = GetLogits();
-    guidance_logits_processor_->ProcessLogits(logits);
-  }
-  computed_logits_ = false;
-  auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
-
-  if (g_log.enabled && g_log.generate_next_token) {
-    auto& stream = Log("generate_next_token");
-    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
-           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
-           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
-           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
-           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
-           << std::endl;
-  }
-
-  last_action_ = Action::generated;
-  switch (sampling_method_) {
-    case SamplingMethod::kGreedy:
-      search_->SelectTop();
-      return;
-    case SamplingMethod::kTopKTopP:
-      search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
-      return;
-    case SamplingMethod::kTopK:
-      search_->SampleTopK(search.top_k, search.temperature);
-      return;
-    case SamplingMethod::kTopP:
-      search_->SampleTopP(search.top_p, search.temperature);
-      return;
-    default:
-      throw std::runtime_error("Unknown sampling method");
-  }
+SpeculativeStats Generator::GetSpeculativeStats() const {
+  return strategy_->GetStats();
 }
 
 void Generator::RewindToLength(size_t new_length) {
@@ -723,6 +681,7 @@ void Generator::RewindToLength(size_t new_length) {
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
   }
+  strategy_->Reset();
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }

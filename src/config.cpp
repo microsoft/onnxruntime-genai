@@ -1201,6 +1201,9 @@ struct Model_Element : JSON::Element {
     if (name == "decoder") {
       return decoder_;
     }
+    if (name == "draft") {
+      return draft_;
+    }
     if (name == "vision") {
       return vision_;
     }
@@ -1223,6 +1226,9 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
+  // The draft model (speculative decoding) is parsed as a Decoder_Element because only
+  // decoder-only draft models are supported in v0 implementation.
+  Decoder_Element draft_{v_.draft};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
@@ -1318,6 +1324,30 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+struct Speculative_Element : JSON::Element {
+  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+
+  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  static constexpr int kMinK = 1;
+  static constexpr int kMaxK = 16;
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_draft_tokens") {
+      int k = static_cast<int>(JSON::Get<double>(value));
+      if (k < kMinK || k > kMaxK)
+        throw std::runtime_error(
+            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+      v_.max_draft_tokens = k;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Speculative& v_;
+};
+
 struct DynamicBatching_Element : JSON::Element {
   explicit DynamicBatching_Element(std::optional<Config::Engine::DynamicBatching>& v) : v_{v} {}
 
@@ -1390,6 +1420,14 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   try {
     Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {
     JSON::TranslateException(name);
   }
@@ -1563,6 +1601,7 @@ struct Root_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
+    if (name == "speculative") return speculative_element_;
     if (name == "engine") return engine_element_;
     throw JSON::unknown_value_error{};
   }
@@ -1570,6 +1609,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Speculative_Element speculative_element_{config_.speculative};
   Engine_Element engine_element_{config_.engine};
 };
 
@@ -1663,6 +1703,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  // Speculative decoding: the draft block has its own session_options. Populate its providers list
+  // from provider_options too (mirrors the decoder above).
+  for (const auto& provider_option : model.draft.session_options.provider_options) {
+    model.draft.session_options.providers.push_back(provider_option.name);
   }
 
   if (model.encoder.session_options.has_value()) {

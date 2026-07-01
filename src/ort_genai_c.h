@@ -488,6 +488,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGe
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
+ * \brief Set a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens").
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGeneratorParams* params, const char* name, double value);
+
+/**
+ * \brief Get a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
  * \brief Creates a generator from the given model and generator params.
  * \param[in] model The model to use for generation.
  * \param[in] params The parameters to use for generation.
@@ -647,6 +665,32 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
  *         be used after the OgaGenerator is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
+
+/**
+ * \brief POD struct holding speculative-decoding instrumentation.
+ *        All fields are zero for non-speculative generators.
+ */
+typedef struct OgaSpeculativeStats {
+  size_t rounds;
+  size_t draft_tokens_proposed;
+  size_t draft_tokens_accepted;
+  size_t correction_tokens;
+  size_t bonus_tokens;
+  float avg_draft_ms_per_token;
+  float avg_target_ms_per_token;
+  float acceptance_rate;
+  float mean_accepted_tokens;
+  float effective_speedup;
+} OgaSpeculativeStats;
+
+/**
+ * \brief Fill *out_stats with the accumulated speculative-decoding statistics.
+ *        All fields are zero for non-speculative generators.
+ * \param[in]  generator The generator to query.
+ * \param[out] out_stats Caller-allocated struct to fill.
+ * \return OgaResult containing the error message on failure, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
