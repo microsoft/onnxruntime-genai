@@ -164,7 +164,7 @@ void GreedySearch_Cpu::SelectTop() {
     }
 
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+    auto const token = ArgMax<float>(scores);
     SetNextToken(batch_id, token);
   }
 

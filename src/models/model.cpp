@@ -934,14 +934,16 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
   auto input_info = input.GetTensorTypeAndShapeInfo();
   auto shape = input_info->GetShape();
 
-  if (output && shape != output->GetTensorTypeAndShapeInfo()->GetShape())
-    output = nullptr;
+  if (output) {
+    auto output_info = output->GetTensorTypeAndShapeInfo();
+    if (shape != output_info->GetShape() || output_type != output_info->GetElementType())
+      output = nullptr;
+  }
   if (!output)
     output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
   auto input_type = input_info->GetElementType();
   auto element_count = input_info->GetElementCount();
-
   if (element_count != output->GetTensorTypeAndShapeInfo()->GetElementCount())
     throw std::runtime_error("Cast: input and output element count mismatch");
 

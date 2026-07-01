@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../generators.h"
+#include "../search.h"
 #include "nemo_mel_spectrogram.h"
 #include "nemotron_speech.h"
 
@@ -22,7 +23,47 @@ DeviceInterface& DeviceFor(const OrtValue& v, DeviceInterface& model_device) {
   const bool on_cpu = v.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
   return on_cpu ? *GetDeviceInterface(DeviceType::CPU) : model_device;
 }
+
+template <typename T, typename Convert>
+int NemotronArgMaxImpl(const OrtValue& logits_value, int blank_id, float blank_penalty, Convert convert) {
+  const auto count = logits_value.GetTensorTypeAndShapeInfo()->GetElementCount();
+  auto logits = std::span<const T>(logits_value.GetTensorData<T>(), count);
+  return ArgMax<T>(logits, [blank_id, blank_penalty, convert](T value, size_t index) {
+    return convert(value) - (static_cast<int>(index) == blank_id ? blank_penalty : 0.0f);
+  });
+}
 }  // namespace
+
+int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty) {
+  const auto type = logits.GetTensorTypeAndShapeInfo()->GetElementType();
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    return NemotronArgMaxImpl<float>(logits, blank_id, blank_penalty,
+                                     [](float value) { return value; });
+  }
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    return NemotronArgMaxImpl<Ort::Float16_t>(logits, blank_id, blank_penalty,
+                                              [](Ort::Float16_t value) {
+                                                return ToFloat32(value);
+                                              });
+  }
+  throw std::runtime_error("NemotronArgMax only supports float32 or float16 logits");
+}
+
+ONNXTensorElementDataType ValidateNemotronFloatType(std::span<const ONNXTensorElementDataType> types) {
+  if (types.empty())
+    throw std::runtime_error("Nemotron ASR floating-point type list must not be empty");
+
+  const auto type = types[0];
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+      type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
+    throw std::runtime_error("Nemotron ASR only supports homogeneous float32 or float16 I/O");
+
+  for (auto candidate : types) {
+    if (candidate != type)
+      throw std::runtime_error("Nemotron ASR requires homogeneous floating-point I/O");
+  }
+  return type;
+}
 
 void NemotronConfig::PopulateFromConfig(const Config& config) {
   const auto& enc = config.model.encoder;
@@ -176,6 +217,24 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   session_info_.Add(*session_encoder_);
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_joiner_);
+
+  auto float_types = std::array<ONNXTensorElementDataType, 14>{
+      session_info_.GetInputDataType(nemotron_config_.enc_in_audio),
+      session_info_.GetInputDataType(nemotron_config_.enc_in_cache_channel),
+      session_info_.GetInputDataType(nemotron_config_.enc_in_cache_time),
+      session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded),
+      session_info_.GetOutputDataType(nemotron_config_.enc_out_cache_channel),
+      session_info_.GetOutputDataType(nemotron_config_.enc_out_cache_time),
+      session_info_.GetInputDataType(nemotron_config_.dec_in_lstm_hidden),
+      session_info_.GetInputDataType(nemotron_config_.dec_in_lstm_cell),
+      session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs),
+      session_info_.GetOutputDataType(nemotron_config_.dec_out_lstm_hidden),
+      session_info_.GetOutputDataType(nemotron_config_.dec_out_lstm_cell),
+      session_info_.GetInputDataType(nemotron_config_.join_in_encoder),
+      session_info_.GetInputDataType(nemotron_config_.join_in_decoder),
+      session_info_.GetOutputDataType(nemotron_config_.join_out_logits),
+  };
+  float_type_ = ValidateNemotronFloatType(float_types);
 }
 
 std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
@@ -388,10 +447,8 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
   prediction_state_ = std::make_unique<NemotronPredictionSubState>(model, params);
   joiner_state_ = std::make_unique<NemotronJoinerSubState>(model, params);
 
-  // Pre-allocate encoder frame for joiner input
-  auto enc_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.enc_out_encoded);
   auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
-  encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, enc_out_type);
+  encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, nemotron_model_.float_type_);
 }
 
 NemotronSpeechState::~NemotronSpeechState() = default;
@@ -516,10 +573,12 @@ void NemotronSpeechState::StepToken() {
 
   last_tokens_.clear();
 
-  auto enc_shape = encoded_output_->GetTensorTypeAndShapeInfo()->GetShape();
+  auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
+  auto enc_shape = enc_info->GetShape();
+  auto enc_type = enc_info->GetElementType();
   int64_t time_steps = std::min(enc_shape[1], encoded_len_);
   int64_t hidden_dim = enc_shape[2];
-  size_t frame_bytes = static_cast<size_t>(hidden_dim) * sizeof(float);
+  size_t frame_bytes = static_cast<size_t>(hidden_dim) * Ort::SizeOf(enc_type);
 
   auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
   auto& cpu_alloc_step = cpu_dev.GetAllocator();
@@ -546,13 +605,13 @@ void NemotronSpeechState::StepToken() {
     // (the next prediction Run will overwrite the slot and leak the old buffer otherwise).
     std::unique_ptr<OrtValue> pred_out0_owner{prediction_state_->outputs_[0]};
     prediction_state_->outputs_[0] = nullptr;
-    auto dec_out_shape = pred_out0_owner->GetTensorTypeAndShapeInfo()->GetShape();
+    auto dec_out_info = pred_out0_owner->GetTensorTypeAndShapeInfo();
+    auto dec_out_shape = dec_out_info->GetShape();
+    auto dec_out_type = dec_out_info->GetElementType();
     auto decoder_frame_shape = std::array<int64_t, 3>{1, 1, dec_out_shape[1]};
-    auto dec_out_type = model_.session_info_.GetOutputDataType(nemotron_config_.dec_out_outputs);
     auto decoder_frame = OrtValue::CreateTensor(cpu_alloc_step, decoder_frame_shape, dec_out_type);
     ByteWrapTensor(cpu_dev, *decoder_frame)
         .CopyFrom(ByteWrapTensor(DeviceFor(*pred_out0_owner, *model_.p_device_inputs_), *pred_out0_owner));
-
     // Run joiner
     joiner_state_->SetInputFrames(encoder_frame_.get(), decoder_frame.get());
     joiner_state_->Run(0, dummy_tokens);
@@ -565,20 +624,7 @@ void NemotronSpeechState::StepToken() {
     auto logits_cpu = OrtValue::CreateTensor(cpu_alloc_step, logits_shape, logits_type);
     ByteWrapTensor(cpu_dev, *logits_cpu)
         .CopyFrom(ByteWrapTensor(DeviceFor(*joiner_out0_owner, *model_.p_device_inputs_), *joiner_out0_owner));
-    const float* logits = logits_cpu->GetTensorData<float>();
-    int total_logits = 1;
-    for (auto d : logits_shape) total_logits *= static_cast<int>(d);
-
-    // Apply blank penalty virtually during argmax to avoid mutating ORT output buffer
-    int best_token = 0;
-    float best_score = logits[0] - (nemotron_config_.blank_id == 0 ? nemotron_config_.blank_penalty : 0.0f);
-    for (int i = 1; i < total_logits; ++i) {
-      float score = (i == nemotron_config_.blank_id) ? logits[i] - nemotron_config_.blank_penalty : logits[i];
-      if (score > best_score) {
-        best_score = score;
-        best_token = i;
-      }
-    }
+    int best_token = NemotronArgMax(*logits_cpu, nemotron_config_.blank_id, nemotron_config_.blank_penalty);
 
     if (best_token == nemotron_config_.blank_id) {
       // Discard the prediction-network LSTM outputs from this step; the prior

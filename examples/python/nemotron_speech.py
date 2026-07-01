@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 import onnxruntime_genai as og
-from common import get_config
+from common import get_config, get_ep_args, register_ep
 
 # Maps short language codes / locale tags to (lang_id, human-readable name).
 # Restricted to the languages officially supported by
@@ -134,12 +134,17 @@ def decode_tokens(generator, tokenizer_stream):
     return text
 
 
-def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None, language=None):
+def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None, language=None,
+                        ep_path="", use_winml=False):
     """Stream audio through Generator + StreamingProcessor API."""
     sample_rate, chunk_samples = load_config(model_path)
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
 
+    # Register an external plugin EP (e.g. the NvTensorRtRtx plugin) when --ep_path is given.
+    # --execution_provider must be the ORT-expected name (e.g. "NvTensorRTRTXExecutionProvider");
+    # get_config normalizes it to the genai canonical provider name when selecting it.
+    register_ep(execution_provider, ep_path, use_winml)
     config = get_config(model_path, execution_provider, None)
     selected_lang = None
     if language is not None:
@@ -230,15 +235,7 @@ def main():
         + "\n".join(f"  {code:<7} {name}" for code, (_, name) in sorted(LANG_TO_ID.items()))
     )
     parser.add_argument("--language", "-l", type=str, default=None, help=lang_help)
-    parser.add_argument(
-        "-e",
-        "--execution_provider",
-        type=str,
-        required=False,
-        default="follow_config",
-        choices=["cpu", "cuda", "dml", "follow_config"],
-        help="Execution provider to run with. Defaults to follow_config.",
-    )
+    get_ep_args(parser)
     args = parser.parse_args()
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
@@ -246,9 +243,9 @@ def main():
     use_vad_override = None
     if args.use_vad is not None:
         use_vad_override = args.use_vad == "true"
-    simulate_microphone(
-        args.model_path, args.audio_file, args.execution_provider, use_vad=use_vad_override, language=args.language
-    )
+    simulate_microphone(args.model_path, args.audio_file, args.execution_provider,
+                        use_vad=use_vad_override, language=args.language,
+                        ep_path=args.ep_path, use_winml=args.use_winml)
 
 
 if __name__ == "__main__":
