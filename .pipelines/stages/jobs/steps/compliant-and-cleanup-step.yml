@@ -7,6 +7,21 @@ steps:
   parameters:
     condition: 'succeeded'
 
+# Remove third-party build INPUTS (extracted ORT nupkg + NVIDIA CUDA toolkit) from the
+# sources tree before the 1ES-injected SDL analysis runs. These are downloaded into
+# $(Build.Repository.LocalPath) purely to build against; they are not our published
+# artifacts. Leaving them causes the injected CredScan to scan third-party binaries and
+# emit a malformed (empty tool.driver) SARIF that crashes the Guardian Post Analysis
+# importer. Our own build outputs are left intact so BinSkim still scans them.
+- task: DeleteFiles@1
+  displayName: 'Remove third-party build inputs before SDL scan'
+  condition: always()
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)'
+    Contents: |
+      ort_build
+      cuda_sdk
+
 - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
   displayName: 'Clean Agent Directories'
   condition: always()

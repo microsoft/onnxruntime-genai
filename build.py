@@ -424,6 +424,12 @@ def _validate_args(args: argparse.Namespace):
         if args.sdk != "python":
             args.skip_wheel = True
 
+    # Apple framework / iOS / Catalyst builds disable the Python bindings
+    # (ENABLE_PYTHON=OFF below), so the PyPackageBuild target is never generated.
+    # Force-skip the wheel so build() does not try to build a nonexistent target.
+    if args.build_apple_framework or args.ios or args.macos == "Catalyst":
+        args.skip_wheel = True
+
     # validate args. this updates values in args where applicable (e.g. fully resolve paths).
     args.cmake_path = _resolve_executable_path(args.cmake_path)
     args.ctest_path = _resolve_executable_path(args.ctest_path)
