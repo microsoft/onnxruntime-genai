@@ -103,7 +103,7 @@ steps:
     set -e -x
     cuda_args=""
     if [ "$(ep)" = "cuda" ]; then
-      cuda_args="--use_cuda --cuda_home /usr/local/cuda --cuda_archs ${{ parameters.cuda_archs }}"
+      cuda_args="--use_cuda --cuda_home /usr/local/cuda --cuda_archs '${{ parameters.cuda_archs }}'"
     fi
     docker run \
       --rm \
