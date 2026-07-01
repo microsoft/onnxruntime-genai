@@ -86,11 +86,11 @@ parameters:
   - name: ort_version
     displayName: 'ONNX Runtime CPU version'
     type: string
-    default: '1.23.0'
+    default: '1.27.0'
   - name: ort_cuda_version
     displayName: 'ONNX Runtime GPU version'
     type: string
-    default: '1.23.0'
+    default: '1.27.0'
   - name: build_config
     displayName: 'Build configuration'
     type: string

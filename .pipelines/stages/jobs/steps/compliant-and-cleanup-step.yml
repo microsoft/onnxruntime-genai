@@ -1,18 +1,8 @@
 steps:
-- task: CredScan@3
-  displayName: 'Run CredScan'
-  inputs:
-    debugMode: false
-  continueOnError: true
-  condition: and(ne(variables['os'], 'osx'), ne(variables['os'], 'ios'))  # Not available on macOS. See https://eng.ms/docs/products/credential-risk-exposure-defense/solutions/credscan_client/overview
-
-- task: TSAUpload@2
-  displayName: 'TSA upload'
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['os'], 'osx'), ne(variables['os'], 'ios')) # Not available on macOS.
-  inputs:
-    GdnPublishTsaOnboard: false
-  continueOnError: true
-
+# NOTE: CredScan and TSA upload are auto-injected by the 1ES Official template via the
+# `sdl:` block in packaging.yml (sdl.tsa.enabled). Do NOT add manual CredScan@3 /
+# TSAUpload@2 tasks here — running them alongside the SDL-injected ones causes duplicate
+# CredScan runs and TSA double-publish conflicts.
 - template: compliant/component-governance-component-detection-step.yml
   parameters:
     condition: 'succeeded'
