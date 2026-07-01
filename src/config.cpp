@@ -1705,6 +1705,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     model.decoder.session_options.providers.push_back(provider_option.name);
   }
 
+  // Speculative decoding: the draft block has its own session_options. Populate its providers list
+  // from provider_options too (mirrors the decoder above).
+  for (const auto& provider_option : model.draft.session_options.provider_options) {
+    model.draft.session_options.providers.push_back(provider_option.name);
+  }
+
   if (model.encoder.session_options.has_value()) {
     for (const auto& provider_option : model.encoder.session_options->provider_options) {
       model.encoder.session_options->providers.push_back(provider_option.name);

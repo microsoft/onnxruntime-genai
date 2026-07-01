@@ -183,15 +183,22 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   }
 
   std::vector<std::vector<float>> target_dists(K);
-  auto elem_type = raw_ort->GetTensorTypeAndShapeInfo()->GetElementType();
 
   if (is_multiple_tokens) {
-    // CPU-only path: the logits live in host memory as fp32, so read them directly. GPU
-    // execution providers may hand back a device pointer and fp16 (v1 pending).
-    if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-      throw std::runtime_error(
-          "Speculative decoding: unsupported logits element type (expected fp32).");
-    const float* data = raw_ort->GetTensorData<float>();
+    // Device-agnostic verify read (mirrors Logits::Get()) - cast fp16/bf16 -> fp32 on the target's
+    // device (Cast falls back to CPU when needed), wrap as a DeviceSpan<float>, and copy to host.
+    // No-op on CPU; on GPU/NPU it handles device and fp16/bf16 logits.
+    auto& target_device = *spec_state->spec_model().target_model().p_device_inputs_;
+    const auto elem_type = raw_ort->GetTensorTypeAndShapeInfo()->GetElementType();
+
+    DeviceSpan<float> verify_logits;
+    if (elem_type == Ort::TypeToTensorType<float>) {
+      verify_logits = WrapTensor<float>(target_device, *raw_ort);
+    } else {
+      Cast(*raw_ort, verify_logits_fp32_, target_device, Ort::TypeToTensorType<float>);
+      verify_logits = WrapTensor<float>(target_device, *verify_logits_fp32_);
+    }
+    const float* data = verify_logits.CopyDeviceToCpu().data();
     auto row = [&](int r) {
       return std::span<const float>{data + static_cast<ptrdiff_t>(r) * vocab_size,
                                     static_cast<size_t>(vocab_size)};
