@@ -145,6 +145,12 @@ struct Config {
     int video_token_id{};
     int vision_start_token_id{};
 
+    // Tool-calling and reasoning token IDs (used for efficient token-level detection)
+    int tool_call_start_token_id{-1};
+    int tool_call_end_token_id{-1};
+    int reasoning_start_token_id{-1};
+    int reasoning_end_token_id{-1};
+
     int vocab_size{};
     int context_length{};
 
@@ -451,15 +457,7 @@ struct Config {
     std::optional<StaticBatching> static_batching;  // Static batching settings
   } engine;                                         // Engine settings
 
-  struct ToolCalling {
-    std::string tool_call_start_token;  // e.g., "<tool_call>"
-    std::string tool_call_end_token;    // e.g., "</tool_call>"
-  } tool_calling;
 
-  struct Reasoning {
-    std::string reasoning_start_token;  // e.g., "<think>"
-    std::string reasoning_end_token;    // e.g., "</think>"
-  } reasoning;
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping

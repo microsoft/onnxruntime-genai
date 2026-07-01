@@ -1179,6 +1179,14 @@ struct Model_Element : JSON::Element {
       v_.left_context_samples = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "right_context_samples") {
       v_.right_context_samples = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tool_call_start_token_id") {
+      v_.tool_call_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tool_call_end_token_id") {
+      v_.tool_call_end_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "reasoning_start_token_id") {
+      v_.reasoning_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "reasoning_end_token_id") {
+      v_.reasoning_end_token_id = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1545,34 +1553,6 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
   }
 }
 
-struct ToolCalling_Element : JSON::Element {
-  explicit ToolCalling_Element(Config::ToolCalling& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "tool_call_start_token") {
-      v_.tool_call_start_token = JSON::Get<std::string_view>(value);
-    } else if (name == "tool_call_end_token") {
-      v_.tool_call_end_token = JSON::Get<std::string_view>(value);
-    }
-  }
-
-  Config::ToolCalling& v_;
-};
-
-struct Reasoning_Element : JSON::Element {
-  explicit Reasoning_Element(Config::Reasoning& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "reasoning_start_token") {
-      v_.reasoning_start_token = JSON::Get<std::string_view>(value);
-    } else if (name == "reasoning_end_token") {
-      v_.reasoning_end_token = JSON::Get<std::string_view>(value);
-    }
-  }
-
-  Config::Reasoning& v_;
-};
-
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
@@ -1584,8 +1564,6 @@ struct Root_Element : JSON::Element {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
     if (name == "engine") return engine_element_;
-    if (name == "tool_calling") return tool_calling_element_;
-    if (name == "reasoning") return reasoning_element_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1593,8 +1571,6 @@ struct Root_Element : JSON::Element {
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
   Engine_Element engine_element_{config_.engine};
-  ToolCalling_Element tool_calling_element_{config_.tool_calling};
-  Reasoning_Element reasoning_element_{config_.reasoning};
 };
 
 struct RootObject_Element : JSON::Element {

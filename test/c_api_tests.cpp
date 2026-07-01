@@ -1817,24 +1817,19 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
   EXPECT_FALSE(transcription.empty());
 }
 
-// Test tool_calling and reasoning config parsing and fallback map
-TEST(CAPITests, Tags_Fallback) {
-  // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → empty tags
+// Test that GetTagId returns -1 for unknown model types (not in config, not in fallback map)
+TEST(CAPITests, TagId_Unknown) {
+  // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → -1
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto tool_start = model->GetTag("tool_call_start");
-  auto tool_end = model->GetTag("tool_call_end");
-  auto reasoning_start = model->GetTag("reasoning_start");
-  auto reasoning_end = model->GetTag("reasoning_end");
-
-  EXPECT_STREQ(static_cast<const char*>(tool_start), "");
-  EXPECT_STREQ(static_cast<const char*>(tool_end), "");
-  EXPECT_STREQ(static_cast<const char*>(reasoning_start), "");
-  EXPECT_STREQ(static_cast<const char*>(reasoning_end), "");
+  EXPECT_EQ(model->GetTagId("tool_call_start"), -1);
+  EXPECT_EQ(model->GetTagId("tool_call_end"), -1);
+  EXPECT_EQ(model->GetTagId("reasoning_start"), -1);
+  EXPECT_EQ(model->GetTagId("reasoning_end"), -1);
 }
 
-TEST(CAPITests, Tags_FromConfig) {
-  // Create a temporary model directory with tool_calling and reasoning sections
+TEST(CAPITests, TagId_FromConfig) {
+  // Create a temporary model directory with tool_call/reasoning token IDs in model section
   auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
   std::filesystem::remove_all(temp_dir);  // Clean up any leftover from a previous failed run
   std::filesystem::create_directories(temp_dir);
@@ -1848,7 +1843,7 @@ TEST(CAPITests, Tags_FromConfig) {
     }
   }
 
-  // Write genai_config.json with tool_calling and reasoning sections
+  // Write genai_config.json with token IDs in model section
   {
     std::ofstream f((temp_dir / "genai_config.json").string());
     f << R"({
@@ -1859,6 +1854,10 @@ TEST(CAPITests, Tags_FromConfig) {
     "eos_token_id": 98,
     "vocab_size": 1000,
     "context_length": 512,
+    "tool_call_start_token_id": 151657,
+    "tool_call_end_token_id": 151658,
+    "reasoning_start_token_id": 151659,
+    "reasoning_end_token_id": 151660,
     "decoder": {
       "session_options": { "provider_options": [] },
       "filename": "past.onnx",
@@ -1868,29 +1867,17 @@ TEST(CAPITests, Tags_FromConfig) {
       "inputs": { "past_names": "past_%d" },
       "outputs": { "present_names": "present_%d" }
     }
-  },
-  "tool_calling": {
-    "tool_call_start_token": "<tool_call>",
-    "tool_call_end_token": "</tool_call>"
-  },
-  "reasoning": {
-    "reasoning_start_token": "<think>",
-    "reasoning_end_token": "</think>"
   }
 })";
   }
 
   auto model = OgaModel::Create(temp_dir.string().c_str());
 
-  auto tool_start = model->GetTag("tool_call_start");
-  auto tool_end = model->GetTag("tool_call_end");
-  auto reasoning_start = model->GetTag("reasoning_start");
-  auto reasoning_end = model->GetTag("reasoning_end");
-
-  EXPECT_STREQ(static_cast<const char*>(tool_start), "<tool_call>");
-  EXPECT_STREQ(static_cast<const char*>(tool_end), "</tool_call>");
-  EXPECT_STREQ(static_cast<const char*>(reasoning_start), "<think>");
-  EXPECT_STREQ(static_cast<const char*>(reasoning_end), "</think>");
+  // GetTagId returns configured IDs from model section
+  EXPECT_EQ(model->GetTagId("tool_call_start"), 151657);
+  EXPECT_EQ(model->GetTagId("tool_call_end"), 151658);
+  EXPECT_EQ(model->GetTagId("reasoning_start"), 151659);
+  EXPECT_EQ(model->GetTagId("reasoning_end"), 151660);
 
   // Cleanup
   std::filesystem::remove_all(temp_dir);

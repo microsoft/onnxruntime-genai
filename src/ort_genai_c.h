@@ -407,17 +407,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
 /**
- * \brief Returns a tag value for this model by name.
+ * \brief Returns a tag token ID for this model by name.
  *
+ * Checks the genai_config.json model section first, then falls back to encoding the
+ * model-type-specific fallback token string via the tokenizer vocabulary.
  * Known tag names: "tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end".
- * Returns an empty string if the model doesn't define the requested tag.
+ * Returns -1 if the model doesn't define the requested tag.
  *
  * \param[in] model The model to query.
  * \param[in] tag_name The name of the tag to retrieve.
- * \param[out] out The tag value string. Must be destroyed with OgaDestroyString.
+ * \param[out] out The tag token ID.
  * \return OgaResult containing the error message if the call failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetTag(const OgaModel* model, const char* tag_name, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetTagId(const OgaModel* model, const char* tag_name, int32_t* out);
 
 /**
  * \brief Destroys the given config

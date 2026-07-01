@@ -163,10 +163,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   bool IsPruned() const;
 
-  // Generic tag accessor (reads from config with model-type fallback).
+  // Returns the token ID for the given tag, or -1 if the model doesn't define the tag.
+  // Checks genai_config.json model section first, then encodes the model-type fallback string.
   // Known tag names: "tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end".
-  // Returns the tag value, or an empty string if the model doesn't define the tag.
-  const std::string& GetTag(const std::string& tag_name) const;
+  int32_t GetTagId(const std::string& tag_name) const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -189,8 +189,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
  protected:
   void CreateSessionOptions();
+  void InitTagIdCache() const;
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+
+  // Cached tag token IDs (lazily populated on first GetTagId call).
+  mutable std::unordered_map<std::string, int32_t> tag_id_cache_;
+  mutable std::once_flag tag_id_cache_flag_;
 };
 
 }  // namespace Generators

@@ -826,9 +826,9 @@ bool Model::IsPruned() const {
 
 namespace {
 
-// Fallback map for models whose genai_config.json doesn't yet have tool_calling/reasoning sections.
+// Fallback map for models whose genai_config.json doesn't yet have token IDs in the model section.
 // Keyed by model.type string from genai_config.json.
-// Inner map: tag_name -> value
+// Inner map: tag_name -> token string (used for vocab lookup to get the ID).
 const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
   static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
       {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
@@ -845,28 +845,41 @@ const std::string* GetFallbackTag(const std::string& model_type, const std::stri
 
 }  // namespace
 
-const std::string& Model::GetTag(const std::string& tag_name) const {
-  // Check config first (tool_calling and reasoning sections)
-  static const std::unordered_map<std::string, std::function<const std::string&(const Config&)>> config_accessors = {
-      {"tool_call_start", [](const Config& c) -> const std::string& { return c.tool_calling.tool_call_start_token; }},
-      {"tool_call_end", [](const Config& c) -> const std::string& { return c.tool_calling.tool_call_end_token; }},
-      {"reasoning_start", [](const Config& c) -> const std::string& { return c.reasoning.reasoning_start_token; }},
-      {"reasoning_end", [](const Config& c) -> const std::string& { return c.reasoning.reasoning_end_token; }},
+void Model::InitTagIdCache() const {
+  auto tokenizer = CreateTokenizer();
+
+  static const char* tag_names[] = {"tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end"};
+
+  auto get_config_id = [&](const std::string& name) -> int32_t {
+    if (name == "tool_call_start") return config_->model.tool_call_start_token_id;
+    if (name == "tool_call_end") return config_->model.tool_call_end_token_id;
+    if (name == "reasoning_start") return config_->model.reasoning_start_token_id;
+    if (name == "reasoning_end") return config_->model.reasoning_end_token_id;
+    return -1;
   };
 
-  auto accessor_it = config_accessors.find(tag_name);
-  if (accessor_it != config_accessors.end()) {
-    const std::string& config_val = accessor_it->second(*config_);
-    if (!config_val.empty())
-      return config_val;
+  for (const auto* tag_name : tag_names) {
+    int32_t id = get_config_id(tag_name);
+    if (id >= 0) {
+      tag_id_cache_[tag_name] = id;
+      continue;
+    }
+
+    // Fallback: look up the token string in the vocabulary to get its ID.
+    const auto* fallback_str = GetFallbackTag(config_->model.type, tag_name);
+    if (fallback_str && !fallback_str->empty()) {
+      int32_t fallback_id = tokenizer->TokenToTokenId(fallback_str->c_str());
+      if (fallback_id >= 0) {
+        tag_id_cache_[tag_name] = fallback_id;
+      }
+    }
   }
+}
 
-  // Fallback to model-type-based map
-  const auto* fallback = GetFallbackTag(config_->model.type, tag_name);
-  if (fallback) return *fallback;
-
-  static const std::string empty;
-  return empty;
+int32_t Model::GetTagId(const std::string& tag_name) const {
+  std::call_once(tag_id_cache_flag_, [this]() { InitTagIdCache(); });
+  auto it = tag_id_cache_.find(tag_name);
+  return (it != tag_id_cache_.end()) ? it->second : -1;
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
