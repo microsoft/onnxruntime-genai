@@ -422,9 +422,12 @@ def get_args():
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
-qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
-    Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
-    Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
+                qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
+                    Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
+                    Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
+                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
+                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
+                    Default is -1.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -449,10 +452,6 @@ qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert w
                     Orthogonal to int4_algo_config; can be combined with any base method.
                 int8_linear_attn = Promote linear-attention projections and their MLPs to int8 (for hybrid attention models like Qwen3.5). Default is false.
                     Orthogonal to int4_algo_config; can be combined with any base method.
-                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
-                    Use this option to share weights and reduce model size by eliminating duplicate weights.
-                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized and cannot be used if LM head is excluded.
-                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
@@ -480,7 +479,8 @@ qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert w
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
-                    Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
+                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized and cannot be used if LM head is excluded.
+                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
@@ -493,6 +493,8 @@ qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert w
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
+                fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
+                    Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
