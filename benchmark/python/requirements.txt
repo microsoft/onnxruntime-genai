@@ -1,0 +1,10 @@
+# Runtime dependencies for benchmark_speculative.py.
+#
+# The onnxruntime-genai package itself is installed separately (e.g. the wheel
+# built from the speculative-decoding branch, pulled from the ORT-Nightly feed):
+#   pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-genai
+#
+# WebGPU EP (only for -e webgpu): pip install onnxruntime-ep-webgpu
+# IHV NPU EPs via Windows ML catalog (-e OpenVINO/QNN/VitisAI with --use-winml):
+#   pip install windowsml
+numpy<2
