@@ -50,7 +50,7 @@ def _stub_missing_builder_dependencies():
         # real onnxruntime wheel (which would break other tests in the session) and only
         # supplies the specific submodule the builder needs.
         if _module_available("onnxruntime"):
-            import onnxruntime
+            import onnxruntime  # noqa: PLC0415
         else:
             onnxruntime = sys.modules.setdefault("onnxruntime", types.ModuleType("onnxruntime"))
         quantization = getattr(onnxruntime, "quantization", None)
@@ -107,6 +107,8 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
+gptoss_module = _load_builder_module("gptoss")
+GPTOSSModel = gptoss_module.GPTOSSModel
 
 
 class _FakeMoEModel:
@@ -155,7 +157,40 @@ class _RealMoEModel:
         self.quant_attrs = {"qmoe_block_size": block_size}
 
 
+class _FakeGPTOSSModel:
+    make_qmoe_weight_initializer_shapes = GPTOSSModel.make_qmoe_weight_initializer_shapes
+
+    def __init__(self, ep, weights_prepacked):
+        self.ep = ep
+        self.hidden_size = 96
+        self.intermediate_size = 128
+        self.moe_attrs = {"expert_weight_bits": 4, "num_experts": 2, "weights_prepacked": weights_prepacked}
+
+
 _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
+
+
+@pytest.mark.parametrize(
+    "weights_prepacked,gate_shape,down_shape",
+    [
+        (-1, (96, 128), (128, 48)),
+        (0, (256, 48), (96, 64)),
+        (1, (96, 128), (128, 48)),
+    ],
+)
+def test_gptoss_qmoe_initializer_shapes_match_schema(weights_prepacked, gate_shape, down_shape):
+    model = _FakeGPTOSSModel("cuda", weights_prepacked)
+    gate_up_qweights = [torch.zeros(gate_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
+    down_qweights = [torch.zeros(down_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
+
+    gate_up_initializer_shape, down_initializer_shape = model.make_qmoe_weight_initializer_shapes(
+        gate_up_qweights,
+        down_qweights,
+        has_quark_experts=False,
+    )
+
+    assert tuple(torch.stack(gate_up_qweights, dim=0).view(gate_up_initializer_shape).shape) == (2, 256, 48)
+    assert tuple(torch.stack(down_qweights, dim=0).view(down_initializer_shape).shape) == (2, 96, 64)
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 1])
