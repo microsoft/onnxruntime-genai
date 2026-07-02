@@ -699,17 +699,15 @@ class GPTOSSModel(Model):
         if has_quark_experts:
             hidden_size_packed = self.hidden_size // pack_size
             intermediate_size_packed = self.intermediate_size // pack_size
-        elif self.ep == "cuda" and self.moe_attrs.get("weights_prepacked") != 0:
-            hidden_size_packed = self.hidden_size // pack_size
-            intermediate_size_packed = self.intermediate_size // pack_size
+            return (
+                (self.moe_attrs["num_experts"], -1, hidden_size_packed),
+                (self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_packed),
+            )
         else:
-            hidden_size_packed = gate_up_proj_qweight_list[0].shape[-1]
-            intermediate_size_packed = down_proj_qweight_list[0].shape[-1]
-
-        return (
-            (self.moe_attrs["num_experts"], -1, hidden_size_packed),
-            (self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_packed),
-        )
+            return (
+                (self.moe_attrs["num_experts"], *gate_up_proj_qweight_list[0].shape),
+                (self.moe_attrs["num_experts"], *down_proj_qweight_list[0].shape),
+            )
 
     def has_quark_experts(self, experts):
         return hasattr(experts, "fc1_weights") and hasattr(experts, "fc2_weights")

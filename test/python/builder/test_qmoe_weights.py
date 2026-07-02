@@ -107,6 +107,7 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
+symmetric_per_channel_quantize = sys.modules["models.builders.qmoe_quantizer"].symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
 
@@ -171,14 +172,20 @@ _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
 
 
 @pytest.mark.parametrize(
-    "weights_prepacked,gate_shape,down_shape",
+    "weights_prepacked,gate_shape,down_shape,expected_gate_shape,expected_down_shape",
     [
-        (-1, (96, 128), (128, 48)),
-        (0, (256, 48), (96, 64)),
-        (1, (96, 128), (128, 48)),
+        (-1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
+        (0, (256, 48), (96, 64), (2, 256, 48), (2, 96, 64)),
+        (1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
     ],
 )
-def test_gptoss_qmoe_initializer_shapes_match_schema(weights_prepacked, gate_shape, down_shape):
+def test_gptoss_qmoe_initializer_shapes_match_schema(
+    weights_prepacked,
+    gate_shape,
+    down_shape,
+    expected_gate_shape,
+    expected_down_shape,
+):
     model = _FakeGPTOSSModel("cuda", weights_prepacked)
     gate_up_qweights = [torch.zeros(gate_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
     down_qweights = [torch.zeros(down_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
@@ -189,8 +196,8 @@ def test_gptoss_qmoe_initializer_shapes_match_schema(weights_prepacked, gate_sha
         has_quark_experts=False,
     )
 
-    assert tuple(torch.stack(gate_up_qweights, dim=0).view(gate_up_initializer_shape).shape) == (2, 256, 48)
-    assert tuple(torch.stack(down_qweights, dim=0).view(down_initializer_shape).shape) == (2, 96, 64)
+    assert tuple(torch.stack(gate_up_qweights, dim=0).view(gate_up_initializer_shape).shape) == expected_gate_shape
+    assert tuple(torch.stack(down_qweights, dim=0).view(down_initializer_shape).shape) == expected_down_shape
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 1])
@@ -242,24 +249,46 @@ def test_non_cuda_per_channel_path_for_non_positive_block_size():
     assert "block_size" not in model.moe_attrs
 
 
-def test_per_channel_int4_uses_trtllm_signed_storage():
+def test_per_channel_int4_uses_qmoe_unsigned_offset_storage():
     model = _RealMoEModel("cpu", 0, -1, bits=4)
-    weights = torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32)
+    weights = torch.tensor([[-7.0, -3.0, 0.0, 7.0]], dtype=torch.float32)
 
     qweight, scales = model._symmetric_per_channel_quantize(weights)
 
     assert torch.equal(scales, torch.tensor([1.0]))
-    assert torch.equal(qweight, torch.tensor([[0x98, 0x70]], dtype=torch.uint8))
+    assert torch.equal(qweight, torch.tensor([[0x51, 0xF8]], dtype=torch.uint8))
 
 
-def test_per_channel_int8_uses_trtllm_signed_storage():
+def test_per_channel_int8_uses_qmoe_unsigned_offset_storage():
     model = _RealMoEModel("cpu", 0, -1, bits=8)
-    weights = torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32)
+    weights = torch.tensor([[-127.0, -1.0, 0.0, 127.0]], dtype=torch.float32)
 
     qweight, scales = model._symmetric_per_channel_quantize(weights)
 
     assert torch.equal(scales, torch.tensor([1.0]))
-    assert torch.equal(qweight, torch.tensor([[0x80, 0x81, 0x00, 0x7F]], dtype=torch.uint8))
+    assert torch.equal(qweight, torch.tensor([[0x01, 0x7F, 0x80, 0xFF]], dtype=torch.uint8))
+
+
+@pytest.mark.parametrize(
+    "bits,weights,expected_qweight",
+    [
+        (
+            4,
+            torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32),
+            torch.tensor([[0x98, 0x70]], dtype=torch.uint8),
+        ),
+        (
+            8,
+            torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32),
+            torch.tensor([[0x80, 0x81, 0x00, 0x7F]], dtype=torch.uint8),
+        ),
+    ],
+)
+def test_per_channel_can_emit_trtllm_signed_storage(bits, weights, expected_qweight):
+    qweight, scales = symmetric_per_channel_quantize(weights, bits, trtllm_signed_storage=True)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, expected_qweight)
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
@@ -322,6 +351,36 @@ def test_cuda_per_channel_quantization_shapes(bits, raw_shape, packed_shape):
     assert tuple(prepacked_scales.shape) == (64,)
     assert (prepacked_scales > 0).all()
     assert "block_size" not in prepacked_model.moe_attrs
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_cuda_per_channel_quantization_uses_qmoe_symmetric_storage(bits):
+    torch.manual_seed(0)
+    n = 17
+    k = 16
+    weights = torch.randn(n, k, dtype=torch.float32) * 0.05
+    model = _RealMoEModel("cuda", 0, 0, bits=bits)
+
+    qweight, scales = model.make_qmoe_weights(weights)
+
+    if bits == 4:
+        qmin, qmax, zero_point = -7, 7, 8
+    else:
+        qmin, qmax, zero_point = -127, 127, 128
+
+    expected_scales = torch.clamp(
+        weights.abs().amax(dim=1, keepdim=True) / float(qmax), min=torch.finfo(torch.float32).eps
+    )
+    quantized = torch.clamp(torch.round(weights / expected_scales), qmin, qmax).to(torch.int16)
+    quantized = (quantized + zero_point).to(torch.uint8)
+    if bits == 4:
+        expected_qweight = quantized[:, 0::2] | (quantized[:, 1::2] << 4)
+    else:
+        expected_qweight = quantized
+
+    assert torch.equal(qweight, expected_qweight)
+    assert torch.allclose(scales.float(), expected_scales.squeeze(-1), atol=1e-6, rtol=1e-3)
+    assert quantized.min() > 0
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")

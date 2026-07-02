@@ -33,6 +33,8 @@ from transformers import (
     GenerationConfig,
 )
 
+from .qmoe_quantizer import cuda_per_channel_quantize, symmetric_per_channel_quantize
+
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3529,37 +3531,8 @@ class Model:
         ``[N, K/pack]`` and scales ``[N]``. The QMoE op treats this as
         per-channel quantization when the ``block_size`` attribute is omitted.
         """
-        weights = weights.detach().cpu().to(torch.float32).contiguous()
         bits = int(self.moe_attrs["expert_weight_bits"])
-        n, k = weights.shape
-        pack = 8 // bits
-        if k % pack != 0:
-            raise ValueError(
-                f"K ({k}) must be divisible by {pack} for QMoE per-channel quantization."
-            )
-
-        # Match TensorRT-LLM weight-only quantization: scale by 2^(bits - 1),
-        # clamp to the full signed range, and store the signed values as raw
-        # two's-complement bytes/nibbles. Any required zero-point biasing is
-        # handled by the later prepack path, not by this raw quantizer.
-        if bits == 4:
-            qmin, qmax, scale_divisor = -8, 7, 8
-        elif bits == 8:
-            qmin, qmax, scale_divisor = -128, 127, 128
-        else:
-            raise ValueError(f"QMoE per-channel quantization only supports 4 or 8 bits, got {bits}.")
-
-        scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
-        scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
-        quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
-
-        if bits == 4:
-            qweight = (quantized[:, 0::2] & 0xF) | ((quantized[:, 1::2] & 0xF) << 4)
-            qweight = qweight.to(torch.uint8)
-        else:
-            qweight = quantized.to(torch.uint8)
-
-        return qweight.contiguous(), scales.squeeze(-1).contiguous()
+        return symmetric_per_channel_quantize(weights, bits)
 
     def _cuda_per_channel_quantize(self, weights, prepack):
         """Quantize per-channel QMoE weights and optionally CUTLASS-prepack them.
@@ -3570,19 +3543,8 @@ class Model:
         packed for the SM80 fpA_intB MoE GEMM layout, matching the QMoE op's
         default ``weights_prepacked=-1`` contract.
         """
-        qweight, scales = self._symmetric_per_channel_quantize(weights)
-        if not prepack:
-            return qweight, scales
-
         bits = int(self.moe_attrs["expert_weight_bits"])
-        n, k = weights.shape
-        pack = 8 // bits
-        if n % pack != 0:
-            raise ValueError(f"N ({n}) must be divisible by {pack} for CUDA QMoE prepacked weights.")
-
-        packed = _ortpyb.pack_weights_for_cuda_mixed_gemm(qweight.numpy(), n, k, bits, 80)
-        packed = np.asarray(packed).view(np.uint8).reshape(k, n // pack)
-        return torch.from_numpy(np.ascontiguousarray(packed)), scales
+        return cuda_per_channel_quantize(weights, bits, prepack, _ortpyb.pack_weights_for_cuda_mixed_gemm)
 
     def _cutlass_prepacked_blockwise_quantize(self, weights):
         """Quantize a single expert's weights and CUTLASS-prepack them for the
