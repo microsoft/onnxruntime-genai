@@ -225,6 +225,36 @@ def resolve_model_dir(models_root: str, logical_id: str, device_dir: str | None)
         f"Tried: {', '.join(attempted)}")
 
 
+def resolve_model_arg(models_root: str, value: str, model_prefix: str,
+                      device_dir: str | None) -> str:
+    """Resolve a --target/--draft value to an on-disk genai model directory.
+
+    Accepts either:
+      * a short KEY (e.g. ``8b``), resolved as ``model_prefix + key`` under
+        ``models_root`` via resolve_model_dir (Foundry-Local ``onnx/<device>/v<N>``
+        layout, then flat), or
+      * an explicit model DIRECTORY (absolute or relative). If it already holds a
+        genai_config.json it is used as-is; otherwise the newest ``v<N>`` subdir or
+        the first immediate subdir containing a genai_config.json is used. This is
+        the path ep-cert/CI passes: the Foundry cache dir
+        ``<cache>/Microsoft/<name>-<version>/<subdir>/`` resolved on the agent.
+    """
+    if os.path.isdir(value):
+        if os.path.exists(os.path.join(value, "genai_config.json")):
+            return os.path.abspath(value)
+        cand = _newest_version_dir(value)
+        if cand and os.path.exists(os.path.join(cand, "genai_config.json")):
+            return os.path.abspath(cand)
+        for name in sorted(os.listdir(value)):
+            sub = os.path.join(value, name)
+            if os.path.isdir(sub) and os.path.exists(os.path.join(sub, "genai_config.json")):
+                return os.path.abspath(sub)
+        raise FileNotFoundError(
+            f"model directory {value!r} has no genai_config.json "
+            f"(checked it, newest v<N>, and immediate subdirs)")
+    return resolve_model_dir(models_root, f"{model_prefix}{value}", device_dir)
+
+
 # ---------------------------------------------------------------------------
 # Speculative config composition (target + draft -> one speculative config dir).
 # ---------------------------------------------------------------------------
@@ -607,8 +637,13 @@ def main():
     import collections as _c
     task_counts = _c.Counter(it["task"] for it in prompt_items)
 
-    target_dir = f"{args.model_prefix}{args.target}"
-    draft_dir = f"{args.model_prefix}{args.draft}"
+    # --target/--draft may be a short key (composed with --model-prefix) or an
+    # explicit model directory (ep-cert passes the resolved Foundry cache dir);
+    # use a short leaf label for filenames/prints either way.
+    tgt_label = (os.path.basename(os.path.normpath(args.target))
+                 if os.path.isdir(args.target) else args.target)
+    dft_label = (os.path.basename(os.path.normpath(args.draft))
+                 if os.path.isdir(args.draft) else args.draft)
     # Resolve the execution provider + device filter from the EP args.
     provider = None if args.execution_provider in ("follow_config", "cpu") else args.execution_provider
     device = args.device
@@ -619,7 +654,7 @@ def main():
     ep_folder = (device or ("cpu" if provider is None else provider)).lower()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_prefix = args.output or os.path.join(
-        here, "results", ep_folder, f"spec_{args.target}_{args.draft}_{timestamp}")
+        here, "results", ep_folder, f"spec_{tgt_label}_{dft_label}_{timestamp}")
     os.makedirs(os.path.dirname(os.path.abspath(out_prefix)), exist_ok=True)
     log_path = _setup_run_log(out_prefix)
 
@@ -644,14 +679,14 @@ def main():
     # Resolve target + draft to on-disk dirs (Foundry-Local layout, flat fallback).
     # A missing model here fails fast (naming the tried paths) -- the intended
     # behavior when an EP's model isn't published for this device.
-    target_path = resolve_model_dir(args.models_root, target_dir, device_dir)
-    draft_path = resolve_model_dir(args.models_root, draft_dir, device_dir)
+    target_path = resolve_model_arg(args.models_root, args.target, args.model_prefix, device_dir)
+    draft_path = resolve_model_arg(args.models_root, args.draft, args.model_prefix, device_dir)
     print(f"target={target_path}")
     print(f"draft ={draft_path}")
 
     spec_dir = build_spec_config(target_path, draft_path,
                                  os.path.join(tempfile.gettempdir(),
-                                              f"ogspec_{args.target}_{args.draft}"),
+                                              f"ogspec_{tgt_label}_{dft_label}"),
                                  provider=provider, device=device)
     std_dir = target_path
 
@@ -684,7 +719,7 @@ def main():
     baselines = {}  # (mode, prompt_id) -> dict(dec, e2e, tail)
 
     # ---- Phase 1: standard baseline (target only) ----
-    print(f"[phase 1/2] Loading standard baseline (target={args.target}) ...", flush=True)
+    print(f"[phase 1/2] Loading standard baseline (target={tgt_label}) ...", flush=True)
     t0 = time.time()
     std_model = load_model(og, std_dir, provider, device)
     print(f"  loaded in {time.time()-t0:.1f}s")
@@ -735,7 +770,7 @@ def main():
 
     # ---- Phase 2: speculative (target + draft) ----
     print(f"[phase 2/2] Loading speculative model "
-          f"(target={args.target}, draft={args.draft}) ...", flush=True)
+          f"(target={tgt_label}, draft={dft_label}) ...", flush=True)
     t0 = time.time()
     spec_model = og.Model(spec_dir)
     print(f"  loaded in {time.time()-t0:.1f}s")
