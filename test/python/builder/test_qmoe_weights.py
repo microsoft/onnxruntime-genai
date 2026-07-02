@@ -30,7 +30,7 @@ import torch
 def _module_available(module_name):
     try:
         return importlib.util.find_spec(module_name) is not None
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, ValueError):
         return False
 
 
@@ -240,6 +240,26 @@ def test_non_cuda_per_channel_path_for_non_positive_block_size():
     model.make_qmoe_weights(_W)
     assert model.calls == [("per_channel",)]
     assert "block_size" not in model.moe_attrs
+
+
+def test_per_channel_int4_uses_trtllm_signed_storage():
+    model = _RealMoEModel("cpu", 0, -1, bits=4)
+    weights = torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32)
+
+    qweight, scales = model._symmetric_per_channel_quantize(weights)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, torch.tensor([[0x98, 0x70]], dtype=torch.uint8))
+
+
+def test_per_channel_int8_uses_trtllm_signed_storage():
+    model = _RealMoEModel("cpu", 0, -1, bits=8)
+    weights = torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32)
+
+    qweight, scales = model._symmetric_per_channel_quantize(weights)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, torch.tensor([[0x80, 0x81, 0x00, 0x7F]], dtype=torch.uint8))
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])

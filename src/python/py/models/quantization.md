@@ -69,8 +69,12 @@ For **symmetric** int4 the scale is:
 scale = 2 * max(|w|) / (maxq - minq) = 2 * max(|w|) / 15 = max(|w|) / 7.5
 ```
 
-> ⚠️ **Known accuracy gap vs. `default`.** This formula treats int4 as a *symmetric*
-> range `±7.5` and ignores the `-8` level. The resulting step is `8 / 7.5 ≈ 6.7 %`
+RTN stores uint4 values with zero point 8, so its dequantized integer levels are
+still `q - 8 = [-8, 7]`. The difference from `default` is the scale spacing: RTN
+fits the dynamic range over 15 steps (`±7.5`) instead of using the negative half
+range 8.
+
+> ⚠️ **Known accuracy gap vs. `default`.** The resulting step is `8 / 7.5 ≈ 6.7 %`
 > coarser than `default`, which measurably lowers accuracy. On GPT-OSS-20B (MMLU,
 > 14042 samples) `default` scored **0.7980** and `rtn` scored **0.7762** with all
 > else held equal. A more accurate symmetric formula would be

@@ -266,6 +266,7 @@ class Model:
             "k_norm": False,                                 # LayerNorm after MatMul in K path
             "q_norm_weight": "",                             # Q norm weight input to GroupQueryAttention
             "k_norm_weight": "",                             # K norm weight input to GroupQueryAttention
+            "qk_norm_epsilon": epsilon,                      # Epsilon value for Q/K norm in GroupQueryAttention
             "sinks": False,                                  # Sink values for softmax in attention
             # Attributes for packed Attention op:
             "root_input": "",                                # Root input to attention
@@ -2638,11 +2639,8 @@ class Model:
             "softcap": self.attention_attrs["softcap"],
             "do_rotary": self.attention_attrs["use_rope_in_attn"],
             "rotary_interleaved": self.rope_attrs["interleaved"],
+            "qk_norm_epsilon": kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"]),
         }
-        if q_norm_weight and k_norm_weight:
-            attributes["qk_norm_epsilon"] = kwargs.get(
-                "qk_norm_epsilon", self.layernorm_attrs["epsilon"]
-            )
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -3011,7 +3009,7 @@ class Model:
             sinks=sinks_name,
             q_norm_weight=self.attention_attrs["q_norm_weight"],
             k_norm_weight=self.attention_attrs["k_norm_weight"],
-            qk_norm_epsilon=self.layernorm_attrs["epsilon"],
+            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
             **kwargs,
         )
 
@@ -3540,22 +3538,26 @@ class Model:
                 f"K ({k}) must be divisible by {pack} for QMoE per-channel quantization."
             )
 
+        # Match TensorRT-LLM weight-only quantization: scale by 2^(bits - 1),
+        # clamp to the full signed range, and store the signed values as raw
+        # two's-complement bytes/nibbles. Any required zero-point biasing is
+        # handled by the later prepack path, not by this raw quantizer.
         if bits == 4:
-            qmin, qmax, zero_bias = -8, 7, 8
+            qmin, qmax, scale_divisor = -8, 7, 8
         elif bits == 8:
-            qmin, qmax, zero_bias = -127, 127, 128
+            qmin, qmax, scale_divisor = -128, 127, 128
         else:
             raise ValueError(f"QMoE per-channel quantization only supports 4 or 8 bits, got {bits}.")
 
-        scales = weights.abs().amax(dim=1, keepdim=True) / float(qmax)
+        scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
         scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
-        quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16) + zero_bias
-        quantized = quantized.to(torch.uint8).contiguous()
+        quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
 
         if bits == 4:
-            qweight = quantized[:, 0::2] | (quantized[:, 1::2] << 4)
+            qweight = (quantized[:, 0::2] & 0xF) | ((quantized[:, 1::2] & 0xF) << 4)
+            qweight = qweight.to(torch.uint8)
         else:
-            qweight = quantized
+            qweight = quantized.to(torch.uint8)
 
         return qweight.contiguous(), scales.squeeze(-1).contiguous()
 
