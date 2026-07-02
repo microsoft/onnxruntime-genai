@@ -25,6 +25,14 @@ struct InterfaceImpl : DeviceInterface {
     return GetCpuInterface()->GetAllocator();
   }
 
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    assert(!"GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
+    return OrtMemoryInfo::Create("Cpu",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return GetCpuInterface()->AllocateBase(size);
   }

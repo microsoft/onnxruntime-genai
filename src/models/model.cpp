@@ -456,37 +456,15 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
-  static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-  // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
-  auto name = device_memory_type_names[static_cast<int>(type)];
   try {
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+    auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
-    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
-    // Try the old name before giving up.
-    if (type == DeviceType::WEBGPU) {
-      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      try {
-        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
-      } catch (const Ort::Exception& fallback_e) {
-        throw std::runtime_error(
-            "Failed to create allocator for WebGPU. "
-            "Primary name '" +
-            std::string(name) + "' error: " + std::string(e.what()) +
-            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
-      }
-    } else {
-      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
-    }
+    throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
 }

@@ -57,6 +57,14 @@ struct CpuInterface : DeviceInterface {
     return *ort_allocator_;
   }
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    assert(!"GetMemoryInfo for CPU should not be used.");
+    return OrtMemoryInfo::Create("Cpu",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<CpuMemory>(size);
   }

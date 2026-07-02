@@ -8,6 +8,13 @@ namespace Generators {
 struct RyzenAIInterface : DeviceInterface {
   using ProviderOptions = std::vector<std::pair<std::string, std::string>>;
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Cpu",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
+
   virtual void SetupProvider(OrtSessionOptions&, const ProviderOptions&) = 0;
 
   static void Shutdown();
