@@ -442,15 +442,22 @@ def builtin_prompts(max_prompts=0):
              "text": t} for i, t in enumerate(lst)]
 
 
-def load_dataset_prompts(path, tasks=None, limit_per_task=0):
+def load_dataset_prompts(path, tasks=None, limit_per_task=0,
+                         mt_bench_by_subcategory=False):
     """Load a Spec-Bench-style question.jsonl into prompt items.
 
     Each line is {"question_id", "category", "turns": [...]}. We use turns[0]
     ONLY (single-turn: turn 2 of MT-Bench says "your previous response", which is
     meaningless without first generating turn 1 -- out of scope here). The 8
-    MT-Bench subcategories collapse into one "mt_bench" task. --tasks filters to a
-    subset; --limit-per-task takes the first N of each task so a full 480-prompt
-    run stays tractable on CPU. Returns dicts: {task, question_id, subcategory, text}.
+    MT-Bench subcategories normally collapse into one "mt_bench" task. --tasks
+    filters to a subset; --limit-per-task takes the first N of each task so a full
+    480-prompt run stays tractable on CPU. Returns dicts: {task, question_id,
+    subcategory, text}.
+
+    mt_bench_by_subcategory=True keeps ONLY the 8 MT-Bench subcategories and
+    treats each one as its own task (writing, roleplay, reasoning, math, coding,
+    extraction, stem, humanities), so --limit-per-task N yields N prompts per
+    subcategory and the summary reports each subcategory separately.
     """
     import collections
     buckets = collections.OrderedDict()
@@ -463,13 +470,20 @@ def load_dataset_prompts(path, tasks=None, limit_per_task=0):
             turns = r.get("turns") or []
             if not turns:
                 continue
-            task = _task_of(r.get("category", "unknown"))
+            category = r.get("category", "unknown")
+            if mt_bench_by_subcategory:
+                # MT-Bench only; each subcategory is its own task.
+                if category not in _MT_BENCH_SUBCATS:
+                    continue
+                task = category
+            else:
+                task = _task_of(category)
             if tasks and task not in tasks:
                 continue
             buckets.setdefault(task, []).append({
                 "task": task,
                 "question_id": r.get("question_id"),
-                "subcategory": r.get("category", "unknown"),
+                "subcategory": category,
                 "text": turns[0],
             })
     items = []
@@ -580,6 +594,11 @@ def main():
                          "(default: all present)")
     ap.add_argument("--limit-per-task", type=int, default=0,
                     help="cap prompts per task (0 = all, e.g. 80); subsample for CPU runs")
+    ap.add_argument("--mt-bench-by-subcategory", action="store_true",
+                    help="with --dataset: keep ONLY the 8 MT-Bench subcategories "
+                         "(writing/roleplay/reasoning/math/coding/extraction/stem/"
+                         "humanities), each as its own task, so --limit-per-task N "
+                         "gives N prompts per subcategory (e.g. 5 -> 40 prompts).")
     ap.add_argument("--max-prompts", type=int, default=0,
                     help="cap built-in prompts (0 = all); only used without --dataset")
     ap.add_argument("--reps", type=int, default=2, help="measured repetitions per config")
@@ -621,13 +640,19 @@ def main():
         if not (1 <= k <= 16):
             ap.error(f"K={k} out of range [1,16]")
 
+    if args.mt_bench_by_subcategory and not args.dataset:
+        ap.error("--mt-bench-by-subcategory requires --dataset (the question.jsonl "
+                 "holding the MT-Bench subcategories)")
+
     if args.dataset:
         tasks_filter = (set(t.strip() for t in args.tasks.split(",") if t.strip())
                         if args.tasks else None)
-        prompt_items = load_dataset_prompts(args.dataset, tasks_filter, args.limit_per_task)
+        prompt_items = load_dataset_prompts(args.dataset, tasks_filter,
+                                            args.limit_per_task,
+                                            mt_bench_by_subcategory=args.mt_bench_by_subcategory)
         if not prompt_items:
             ap.error("no prompts loaded from --dataset (check the path / --tasks / "
-                     "--limit-per-task)")
+                     "--limit-per-task / --mt-bench-by-subcategory)")
     else:
         prompt_items = builtin_prompts(args.max_prompts)
     chat = not args.raw
