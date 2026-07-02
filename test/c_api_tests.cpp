@@ -80,7 +80,9 @@ TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
   }
   EXPECT_TRUE(threw);
 
-  std::filesystem::remove_all(tmp_dir);
+  // Best-effort cleanup; ignore errors so cleanup never fails the test.
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(tmp_dir, cleanup_ec);
 }
 
 // Regression test: appending CPU provider should not throw.
