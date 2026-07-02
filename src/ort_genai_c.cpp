@@ -762,6 +762,8 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   for (size_t i = 0; i < shape_dims_count; i++) {
     if (shape_dims[i] < 0)
       throw std::runtime_error("shape dimension must be non-negative");
+    if (static_cast<uint64_t>(shape_dims[i]) > std::numeric_limits<size_t>::max())
+      throw std::runtime_error("shape dimension exceeds size_t range");
     const size_t dim = static_cast<size_t>(shape_dims[i]);
     if (dim != 0 && byte_count > std::numeric_limits<size_t>::max() / dim)
       throw std::runtime_error("tensor byte count overflow");
