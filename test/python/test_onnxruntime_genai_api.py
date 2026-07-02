@@ -184,6 +184,53 @@ def test_greedy_search(test_data_path, relative_model_path):
     assert int(generator.token_count()) == len(generator.get_sequence(0))
 
 
+def test_suppress_tokens(test_data_path):
+    model_path = os.fspath(
+        Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    )
+
+    config = og.Config(model_path)
+    config.overlay('{ "model": { "vocab_size": 5 } }')
+    model = og.Model(config)
+
+    # suppress_tokens are passed as a list through set_search_options.
+    # Token 1 has the highest logit, but tokens 1 and 3 are suppressed at every
+    # step, so greedy selection should fall back to token 2.
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False, max_length=10, batch_size=1, suppress_tokens=[1, 3]
+    )
+
+    generator = og.Generator(model, params)
+    logits = np.array([[0.1, 0.9, 0.5, 0.7, 0.2]], dtype=np.float32)
+    generator.set_logits(logits)
+    generator.generate_next_token()
+    assert generator.get_next_tokens()[0] == 2
+
+
+def test_begin_suppress_tokens(test_data_path):
+    model_path = os.fspath(
+        Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    )
+
+    config = og.Config(model_path)
+    config.overlay('{ "model": { "vocab_size": 5 } }')
+    model = og.Model(config)
+
+    # begin_suppress_tokens are suppressed only at the first generated step.
+    # Token 1 has the highest logit but is suppressed at the begin step, so token 3 is chosen.
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False, max_length=10, batch_size=1, begin_suppress_tokens=[1]
+    )
+
+    generator = og.Generator(model, params)
+    logits = np.array([[0.1, 0.9, 0.5, 0.7, 0.2]], dtype=np.float32)
+    generator.set_logits(logits)
+    generator.generate_next_token()
+    assert generator.get_next_tokens()[0] == 3
+
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (

@@ -531,6 +531,14 @@ class Model:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
             self.shared_embeddings = self.int8_lm_head or self.extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
 
+    def add_suppress_tokens_to_search_config(self, search_config, suppress_tokens, begin_suppress_tokens):
+        # Add suppress tokens for HF generation parity. Only emitted when present and non-empty.
+        # `suppress_tokens` are suppressed at every decoding step; `begin_suppress_tokens` only at the first step.
+        if suppress_tokens:
+            search_config["suppress_tokens"] = list(suppress_tokens)
+        if begin_suppress_tokens:
+            search_config["begin_suppress_tokens"] = list(begin_suppress_tokens)
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -549,6 +557,8 @@ class Model:
                 "temperature": 1.0,
                 "top_k": 50,
                 "top_p": 1.0,
+                "suppress_tokens": None,
+                "begin_suppress_tokens": None,
             }
             for key, default_val in defaults.items():
                 val = getattr(gen_config, key)
@@ -630,6 +640,13 @@ class Model:
                 "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
             },
         }
+
+        # Suppress tokens from generation_config.json (HF generation parity).
+        self.add_suppress_tokens_to_search_config(
+            genai_config["search"],
+            getattr(config, "suppress_tokens", None),
+            getattr(config, "begin_suppress_tokens", None),
+        )
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention

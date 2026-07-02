@@ -580,4 +580,19 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   }
 }
 
+void Search_Cpu::ApplySuppressTokens(const std::vector<int>& suppress_tokens) {
+  if (suppress_tokens.empty())
+    return;
+
+  const int batch_beam_size = params_->BatchBeamSize();
+  const int vocab_size = params_->config.model.vocab_size;
+  for (int i = 0; i < batch_beam_size; i++) {
+    std::span<float> const beam_token_scores = GetScores(i);
+    for (auto token_id : suppress_tokens) {
+      if (token_id >= 0 && token_id < vocab_size)
+        beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
+    }
+  }
+}
+
 }  // namespace Generators

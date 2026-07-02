@@ -471,6 +471,10 @@ class WhisperModel(Model):
         self.pad_token_id = config.pad_token_id
         self.vocab_size = config.vocab_size
 
+        # Suppress tokens for HF generation parity (Whisper suppresses non-speech/special tokens).
+        self.suppress_tokens = config.suppress_tokens if hasattr(config, "suppress_tokens") else None
+        self.begin_suppress_tokens = config.begin_suppress_tokens if hasattr(config, "begin_suppress_tokens") else None
+
         self.hf_token = self.decoder.hf_token
         self.hf_remote = self.decoder.hf_remote
         self.context_length = self.decoder.context_length
@@ -988,6 +992,11 @@ class WhisperModel(Model):
                 "top_p": 1.0,
             },
         }
+
+        # Suppress tokens from the model config (HF generation parity).
+        self.add_suppress_tokens_to_search_config(
+            genai_config["search"], self.suppress_tokens, self.begin_suppress_tokens
+        )
 
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
