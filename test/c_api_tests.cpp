@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -51,9 +52,10 @@ TEST(CAPITests, Config) {
 // Verifies that a config parse failure does not disclose file contents
 // (e.g. JSON key names) in the error message, while still naming the file.
 TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
+  const auto unique_suffix = std::to_string(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
   auto tmp_dir = std::filesystem::temp_directory_path() /
-                 "genai_config_leak_test";
-  std::filesystem::remove_all(tmp_dir);
+                 ("genai_config_leak_test_" + unique_suffix);
   std::filesystem::create_directories(tmp_dir);
 
   const char* secret_key = "SUPER_SECRET_KEY";
@@ -64,10 +66,13 @@ TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
 
   bool threw = false;
   try {
-    auto config = OgaConfig::Create(tmp_dir.string().c_str());
+    OgaConfig::Create(tmp_dir.string().c_str());
   } catch (const std::exception& e) {
     threw = true;
     const std::string message = e.what();
+    // Ensure we actually exercised the parse-error path (not, e.g., a
+    // file-open failure), so the leak assertion below is meaningful.
+    EXPECT_NE(message.find("Error encountered while parsing"), std::string::npos);
     // The failing file is still identified...
     EXPECT_NE(message.find("genai_config.json"), std::string::npos);
     // ...but the file's contents (the key name) are not echoed back.
