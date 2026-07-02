@@ -48,6 +48,36 @@ TEST(CAPITests, Config) {
 #endif
 }
 
+// Verifies that a config parse failure does not disclose file contents
+// (e.g. JSON key names) in the error message, while still naming the file.
+TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
+  auto tmp_dir = std::filesystem::temp_directory_path() /
+                 "genai_config_leak_test";
+  std::filesystem::remove_all(tmp_dir);
+  std::filesystem::create_directories(tmp_dir);
+
+  const char* secret_key = "SUPER_SECRET_KEY";
+  {
+    std::ofstream out(tmp_dir / "genai_config.json", std::ios::binary);
+    out << "{\"model\":{\"" << secret_key << "\":\"value\"}}";
+  }
+
+  bool threw = false;
+  try {
+    auto config = OgaConfig::Create(tmp_dir.string().c_str());
+  } catch (const std::exception& e) {
+    threw = true;
+    const std::string message = e.what();
+    // The failing file is still identified...
+    EXPECT_NE(message.find("genai_config.json"), std::string::npos);
+    // ...but the file's contents (the key name) are not echoed back.
+    EXPECT_EQ(message.find(secret_key), std::string::npos);
+  }
+  EXPECT_TRUE(threw);
+
+  std::filesystem::remove_all(tmp_dir);
+}
+
 // Regression test: appending CPU provider should not throw.
 // See https://github.com/microsoft/onnxruntime-genai/pull/2179
 TEST(CAPITests, AppendCpuProvider) {
