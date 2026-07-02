@@ -13,6 +13,7 @@ Run the model builder to create the desired ONNX model.
 import argparse
 import os
 import textwrap
+import warnings
 from typing import Any
 
 import onnx_ir as ir
@@ -193,7 +194,21 @@ def create_model(
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
-    hf_remote = extra_options.get("hf_remote", True)
+    # Default to False so we never execute arbitrary code shipped inside a
+    # Hugging Face repository unless the user has explicitly opted in. This
+    # matches the safe default that `transformers` itself uses for
+    # `trust_remote_code`.
+    hf_remote = extra_options.get("hf_remote", False)
+    if hf_remote:
+        warnings.warn(
+            "hf_remote=True was passed: trust_remote_code=True will be forwarded "
+            "to every transformers `from_pretrained()` call. This causes Python "
+            f"code shipped inside the Hugging Face repository '{hf_name}' "
+            "(referenced by its `auto_map` field) to be imported and executed "
+            "with the current user's privileges, before any weights are read. "
+            "Only enable this for repositories you fully trust.",
+            stacklevel=2,
+        )
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
@@ -450,7 +465,12 @@ def get_args():
                     If token, you can provide a custom authentication token that differs from the one stored in your environment.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 hf_remote = Use this to manage trusting remote code in Hugging Face repos.
-                    Default behavior is set to true. If false, remote code stored in Hugging Face repos will not be used.
+                    Default behavior is set to false. When false, transformers `from_pretrained()`
+                    calls will refuse to import or execute custom Python code shipped inside
+                    a Hugging Face repository (no `trust_remote_code`).
+                    Set to true to opt in to executing repository-supplied code; only do this
+                    for repositories you fully trust because it is equivalent to running
+                    arbitrary code from that repository as the current user.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
