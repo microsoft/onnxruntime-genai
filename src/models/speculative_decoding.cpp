@@ -148,17 +148,6 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
         "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
         std::to_string(params.search.num_beams) + ".");
 
-  // No support for repetition_penalty and min_length; 
-  // needs cross-position bookkeeping that isn't implemented yet.
-  if (params.search.repetition_penalty != 1.0f)
-    throw std::runtime_error(
-        "Speculative decoding does not support repetition_penalty != 1.0 in this release. Got " +
-        std::to_string(params.search.repetition_penalty) + ".");
-  if (params.search.min_length > 0)
-    throw std::runtime_error(
-        "Speculative decoding does not support min_length > 0 in this release. Got min_length=" +
-        std::to_string(params.search.min_length) + ".");
-
   // No support for guidance in this release; applies a grammar mask and commits tokens one at a time. The speculative
   // loop bypasses Generator::ComputeLogits, so guidance would be silently ignored -> reject it.
   if (!params.guidance_type.empty() && !params.guidance_data.empty())
@@ -175,8 +164,7 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
   const int vocab_size = params_->config.model.vocab_size;
   auto draft_logits = draft_state_->Run(total_length, next_tokens, next_indices);
   auto cpu_draft = draft_logits.CopyDeviceToCpu();
-  draft_pending_probs_.assign(cpu_draft.data(), cpu_draft.data() + vocab_size);
-  Softmax(draft_pending_probs_, 1.0f);
+  draft_pending_logits_.assign(cpu_draft.data(), cpu_draft.data() + vocab_size);
   draft_pending_valid_ = true;
   return target_state_->Run(total_length, next_tokens, next_indices);
 }

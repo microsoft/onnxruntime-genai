@@ -96,9 +96,6 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   bool is_multiple_tokens_{false};
   std::optional<int32_t> pending_anchor_token_{};
 
-  // Reusable one-hot logit row used to commit a single token.
-  DeviceSpan<float> onehot_buf_;
-
   // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits. 
   std::unique_ptr<OrtValue> verify_logits_fp32_;
 };

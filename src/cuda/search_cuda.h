@@ -52,6 +52,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopK(int k, float t) override { SampleTopKTopP(k, 1.0, t); }
   void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
   void SampleTopKTopP(int k, float p, float t) override;
+  void CommitToken(int32_t token) override;
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 

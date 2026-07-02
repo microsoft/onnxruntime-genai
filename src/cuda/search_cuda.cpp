@@ -178,6 +178,26 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   }
 }
 
+void GreedySearch_Cuda::CommitToken(int32_t token) {
+  // Speculative decoding already decided this token - place it in next_tokens_ and reuse the same
+  // EOS-check + append path SampleTopKTopP uses (skipping GetSample). batch_size is always 1 here.
+  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
+
+  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+  if (!*done_cpu_) {
+    cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+  }
+
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (GetLogItems().enabled && GetLogItems().hit_max_length)
+      Log("hit_max_length", "greedy cuda hit");
+    *done_cpu_ = true;
+  }
+}
+
 bool BeamSearch_Cuda::IsDone() const {
   if (beam_scorer_->IsDoneLater())
     return true;

@@ -312,10 +312,53 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
     return _write_config(dest_dir, cfg)
 
 
-def _greedy(model_path: str, prompt, max_length: int, k: int | None = None):
+def _greedy(model_path: str, prompt, max_length: int, k: int | None = None,
+            repetition_penalty: float | None = None, min_length: int | None = None):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=max_length)
+    opts = dict(do_sample=False, max_length=max_length)
+    if repetition_penalty is not None:
+        opts["repetition_penalty"] = repetition_penalty
+    if min_length is not None:
+        opts["min_length"] = min_length
+    params.set_search_options(**opts)
+    if k is not None:
+        params.set_speculative_options(max_draft_tokens=k)
+    gen = og.Generator(model, params)
+    gen.append_tokens(np.array([prompt], dtype=np.int32))
+    while not gen.is_done():
+        gen.generate_next_token()
+    seq = list(int(t) for t in gen.get_sequence(0))
+    stats = gen.get_speculative_stats() if k is not None else None
+    return seq, stats
+
+
+def _eos_ids(model_dir: str) -> set:
+    """The end-of-stream token id(s) declared in a model's genai_config."""
+    with open(os.path.join(model_dir, "genai_config.json")) as f:
+        cfg = json.load(f)
+    eos = cfg["model"].get("eos_token_id", [])
+    if isinstance(eos, int):
+        eos = [eos]
+    return set(int(e) for e in eos)
+
+
+def _vocab_size(model_dir: str) -> int:
+    with open(os.path.join(model_dir, "genai_config.json")) as f:
+        cfg = json.load(f)
+    return int(cfg["model"]["vocab_size"])
+
+
+def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None = None,
+            top_k: int = 0, top_p: float = 0.0, temperature: float = 1.0):
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    opts = dict(do_sample=True, max_length=max_length, random_seed=seed, temperature=temperature)
+    if top_k:
+        opts["top_k"] = top_k
+    if top_p:
+        opts["top_p"] = top_p
+    params.set_search_options(**opts)
     if k is not None:
         params.set_speculative_options(max_draft_tokens=k)
     gen = og.Generator(model, params)
@@ -466,6 +509,151 @@ class TestSpeculativeStatsContract:
         assert s["avg_target_ms_per_token"] >= 0.0
 
 
+class TestSpeculativePenalties:
+    """repetition_penalty and min_length must produce EXACTLY the tokens that standard decoding
+    of the target produces. Both penalties are applied to every target verify row (and, so the
+    draft keeps approximating the *penalized* target, to every draft row) through the same
+    helpers Search_Cpu uses. Oracle: speculative greedy == standalone greedy of the same model."""
+
+    @pytest.mark.parametrize("k", [2, 4, 8])
+    def test_self_spec_repetition_penalty_matches_standalone(self, decoder_only_model_path, tmp_path, k):
+        """repetition_penalty bites at every already-seen token, so this exercises the penalty at
+        many positions. Self-spec (draft == target) penalizes both sides identically, so every
+        proposal is still accepted (correction == 0, bonus == rounds)."""
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"rep_{k}", k)
+        ref, _ = _greedy(decoder_only_model_path, _PROMPT, max_length, repetition_penalty=1.3)
+        spec, stats = _greedy(spec_path, _PROMPT, max_length, k=k, repetition_penalty=1.3)
+        assert spec == ref
+        assert stats["correction_tokens"] == 0
+        assert stats["bonus_tokens"] == stats["rounds"]
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_self_spec_min_length_matches_standalone(self, decoder_only_model_path, tmp_path, k):
+        """min_length masks EOS for several generated positions; output must still match regular."""
+        min_length = len(_PROMPT) + 12
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"minlen_{k}", k)
+        ref, _ = _greedy(decoder_only_model_path, _PROMPT, max_length, min_length=min_length)
+        spec, _ = _greedy(spec_path, _PROMPT, max_length, k=k, min_length=min_length)
+        assert spec == ref
+
+    def test_min_length_blocks_early_eos(self, decoder_only_model_path, tmp_path):
+        """No EOS token may be committed before min_length is reached."""
+        min_length = len(_PROMPT) + 10
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "minlen_block", 4)
+        seq, _ = _greedy(spec_path, _PROMPT, max_length, k=4, min_length=min_length)
+        eos_ids = _eos_ids(decoder_only_model_path)
+        for pos in range(min(min_length, len(seq))):
+            assert seq[pos] not in eos_ids
+
+    def test_combined_penalties_match_standalone(self, decoder_only_model_path, tmp_path):
+        """min_length + repetition_penalty applied together must still equal regular decoding."""
+        min_length = len(_PROMPT) + 8
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "combo", 4)
+        ref, _ = _greedy(decoder_only_model_path, _PROMPT, max_length,
+                         repetition_penalty=1.3, min_length=min_length)
+        spec, _ = _greedy(spec_path, _PROMPT, max_length, k=4,
+                          repetition_penalty=1.3, min_length=min_length)
+        assert spec == ref
+
+    def test_draft_neq_target_repetition_penalty(self, test_data_path, tmp_path):
+        """Real draft != target: proposals get rejected, so the correction path runs under the
+        penalty. Speculative greedy with repetition_penalty must still equal target-only greedy."""
+        pair = _find_two_distinct_models(test_data_path)
+        if pair is None:
+            pytest.skip("Need two distinct decoder-only models under --test_models")
+        target_dir, draft_dir = pair
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_spec(target_dir, draft_dir, tmp_path / "rep_neq", 4)
+        ref, _ = _greedy(target_dir, _PROMPT, max_length, repetition_penalty=1.3)
+        spec, stats = _greedy(spec_path, _PROMPT, max_length, k=4, repetition_penalty=1.3)
+        assert spec == ref
+
+
+class TestSpeculativeCommitToken:
+    """Item #1: committed tokens go straight to the search (Search::CommitToken) instead of a
+    per-token one-hot logits row + argmax. This is behavior-invariant -- the equivalence tests are
+    the real guard -- so these pin CommitToken's own EOS / max-length bookkeeping explicitly."""
+
+    @pytest.mark.parametrize("k", [1, 4, 8])
+    def test_stops_at_or_before_max_length(self, decoder_only_model_path, tmp_path, k):
+        """CommitToken must mark the search done at max_length: the sequence never overruns the
+        cap, and (absent an EOS) lands exactly on it -- even though a round commits several tokens
+        at once and could otherwise sail past the boundary."""
+        max_length = len(_PROMPT) + 7
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"commit_maxlen_{k}", k)
+        seq, _ = _greedy(spec_path, _PROMPT, max_length, k=k)
+        assert len(seq) <= max_length
+        eos_ids = _eos_ids(decoder_only_model_path)
+        if not (set(seq[len(_PROMPT):]) & eos_ids):
+            assert len(seq) == max_length
+
+    def test_commit_matches_standalone_greedy(self, decoder_only_model_path, tmp_path):
+        """Pin item #1 specifically: the tokens CommitToken appends equal plain greedy of the
+        same model, across a multi-token round window."""
+        max_length = len(_PROMPT) + 18
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "commit_eq", 8)
+        ref, _ = _greedy(decoder_only_model_path, _PROMPT, max_length)
+        spec, _ = _greedy(spec_path, _PROMPT, max_length, k=8)
+        assert spec == ref
+
+
+class TestSpeculativeSampling:
+    """Item #2 keeps the sampling path behavior-identical: target rows are stored as truncated
+    categoricals and densified on demand only for the one correction/bonus row, so the RNG draws
+    match the old dense path. These tests exercise that path (greedy tests never do)."""
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_sampling_is_deterministic_with_fixed_seed(self, decoder_only_model_path, tmp_path, k):
+        """Same seed -> identical output: guards against uninitialized/nondeterministic state in
+        the sparse row path."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"samp_det_{k}", k)
+        a, _ = _sample(spec_path, _PROMPT, max_length, seed=1234, k=k, top_k=40, top_p=0.95, temperature=0.8)
+        b, _ = _sample(spec_path, _PROMPT, max_length, seed=1234, k=k, top_k=40, top_p=0.95, temperature=0.8)
+        assert a == b
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_self_spec_sampling_accepts_everything(self, decoder_only_model_path, tmp_path, k):
+        """Self-spec sampling: the target and draft distributions are identical, so the accept
+        probability min(1, p_t/p_d) is exactly 1 and every proposal is accepted (correction == 0,
+        bonus == rounds). This directly validates item #2's sparse target-prob lookup -- a wrong
+        p_t would break p_t == p_d and produce corrections."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"samp_accept_{k}", k)
+        seq, stats = _sample(spec_path, _PROMPT, max_length, seed=1234, k=k, top_k=40, top_p=0.95, temperature=0.8)
+        assert len(seq) > len(_PROMPT)
+        assert stats["correction_tokens"] == 0
+        assert stats["bonus_tokens"] == stats["rounds"]
+
+    def test_sampling_produces_valid_tokens(self, decoder_only_model_path, tmp_path):
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "samp_valid", 4)
+        vocab = _vocab_size(decoder_only_model_path)
+        seq, stats = _sample(spec_path, _PROMPT, max_length, seed=7, k=4, top_k=40, top_p=0.95, temperature=0.8)
+        assert len(seq) > len(_PROMPT)
+        assert all(0 <= t < vocab for t in seq)
+        assert stats["draft_tokens_proposed"] > 0
+
+    def test_sampling_draft_neq_target_exercises_correction(self, test_data_path, tmp_path):
+        """Draft != target under sampling: proposals get rejected, driving the on-demand densify of
+        the correction row. Generation must still run and produce valid output."""
+        pair = _find_two_distinct_models(test_data_path)
+        if pair is None:
+            pytest.skip("Need two distinct decoder-only models under --test_models")
+        target_dir, draft_dir = pair
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_spec(target_dir, draft_dir, tmp_path / "samp_neq", 4)
+        vocab = _vocab_size(target_dir)
+        seq, stats = _sample(spec_path, _PROMPT, max_length, seed=99, k=4, top_k=40, top_p=0.95, temperature=0.8)
+        assert len(seq) > len(_PROMPT)
+        assert all(0 <= t < vocab for t in seq)
+        assert stats["rounds"] > 0
+
+
 class TestSpeculativeStateGuards:
     """Guards that fire when the generator/state is created (model must load first)."""
 
@@ -485,16 +673,6 @@ class TestSpeculativeStateGuards:
         with pytest.raises(Exception, match="num_beams"):
             og.Generator(model, self._params(model, do_sample=False, num_beams=2))
 
-    def test_repetition_penalty(self, decoder_only_model_path, tmp_path):
-        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "g_rep", 4))
-        with pytest.raises(Exception, match="repetition_penalty"):
-            og.Generator(model, self._params(model, do_sample=False, repetition_penalty=1.2))
-
-    def test_min_length(self, decoder_only_model_path, tmp_path):
-        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "g_min", 4))
-        with pytest.raises(Exception, match="min_length"):
-            og.Generator(model, self._params(model, do_sample=False, min_length=8))
-
     def test_guidance(self, decoder_only_model_path, tmp_path):
         model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "g_guid", 4))
         params = self._params(model, do_sample=False)
@@ -502,11 +680,11 @@ class TestSpeculativeStateGuards:
         with pytest.raises(Exception, match="guidance|constrained"):
             og.Generator(model, params)
 
+    # Note: repetition_penalty and min_length are now SUPPORTED (see TestSpeculativePenalties),
+    # so they are intentionally not in the fail-fast list below.
     @pytest.mark.parametrize("bad", [
         {"batch_size": 2},
         {"num_beams": 2},
-        {"repetition_penalty": 1.2},
-        {"min_length": 8},
     ])
     def test_unsupported_config_fails_fast_without_corrupting_model(
             self, decoder_only_model_path, tmp_path, bad):
