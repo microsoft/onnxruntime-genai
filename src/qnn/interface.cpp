@@ -70,6 +70,13 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* /*user_options*/) const override {
+    // QnnHtpShared is a special case. This allocator is only made available when the provider
+    // option 'enable_htp_shared_memory_allocator' is set to 1.
+    init_options.options.emplace_back("enable_htp_shared_memory_allocator", "1");
+  }
 };
 
 }  // namespace QNN

@@ -426,6 +426,9 @@ struct Abstract {
  */
 struct Allocator : OrtAllocator {
   static Allocator& GetWithDefaultOptions();  ///< ::OrtAllocator default instance that is owned by Onnxruntime
+  /// Wraps the internal allocator owned by `session` (forwards to OrtApi::CreateAllocator). The returned Allocator
+  /// becomes invalid when `session` is destroyed -- callers must ensure the Allocator is destroyed before the
+  /// OrtSession.
   static std::unique_ptr<Allocator> Create(const OrtSession& session, const OrtMemoryInfo& memory_info);
 
   void* Alloc(size_t size);
@@ -808,6 +811,10 @@ struct OrtSession {
   void Run(_In_opt_ const OrtRunOptions* run_options, const OrtIoBinding&);  ///< Wraps OrtApi::RunWithBinding
 
   void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
+
+#if ORT_API_VERSION >= 27
+  void ReleaseCapturedGraph(int graph_annotation_id);  ///< Wraps OrtApi::SessionReleaseCapturedGraph (ORT 1.27+)
+#endif
 
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;
