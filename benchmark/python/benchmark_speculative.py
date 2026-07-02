@@ -292,8 +292,20 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     # `speculative` is a sibling of `model`/`search` (placement-sensitive parser).
     # K is overridden per-run via set_speculative_options, so this default is moot.
     cfg["speculative"] = {"max_draft_tokens": 4}
-    # Speculative decoding rewinds the KV cache -> needs a non-shared buffer.
-    cfg["search"]["past_present_share_buffer"] = False
+    # Speculative decoding rewinds the target KV cache on each rejection. On the
+    # fully-dynamic CPU / WebGPU path we disable the shared past/present buffer so
+    # DefaultKeyValueCache::RewindTo resizes the cache. But hardware backends chosen
+    # by an explicit --device (OpenVINO / VitisAI / QNN NPU, TensorRT) COMPILE to
+    # static shapes and REQUIRE the shared buffer: forcing it off leaves the KV
+    # seq_len dim symbolic and the NPU compiler aborts ("Got non broadcastable
+    # dimensions ... to_shape was called on a dynamic shape"). For those we inherit
+    # the stock model's value (the same setting the standard baseline loads, which
+    # compiles + runs on the NPU). This stays correct for speculative decoding:
+    # under a shared buffer RewindTo is a no-op and the target is re-anchored via the
+    # total_length passed to the next Run (the same mechanism CUDA uses), so rejected
+    # KV entries are simply overwritten on the following step.
+    if not device:
+        cfg["search"]["past_present_share_buffer"] = False
 
     # Pin the execution provider on BOTH blocks (target decoder + draft). The
     # engine requires target and draft to use the same EP, and the device filter
@@ -331,11 +343,14 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
 # examples/python/common.py + winml.py).
 # ---------------------------------------------------------------------------
 
-# Plug-in IHV EPs registered through the Windows ML catalog (Intel/AMD/Qualcomm).
+# Plug-in EPs registered through the Windows ML catalog. All ship as MSIX EP
+# packages that the catalog enumerates + registers; requesting any of them sets
+# use_winml=True so register_execution_providers() takes the EpCatalog path.
 _WINML_PLUGIN_EPS = {
-    "OpenVINOExecutionProvider",   # Intel (LNL): gpu=Arc, npu=AI Boost
-    "VitisAIExecutionProvider",    # AMD (STX)
-    "QNNExecutionProvider",        # Qualcomm (QNN)
+    "OpenVINOExecutionProvider",         # Intel (LNL): gpu=Arc, npu=AI Boost
+    "VitisAIExecutionProvider",          # AMD (STX)
+    "QNNExecutionProvider",              # Qualcomm (QNN)
+    "NvTensorRTRTXExecutionProvider",    # NVIDIA (RTX): TensorRT-RTX
 }
 
 
