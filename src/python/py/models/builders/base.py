@@ -17,6 +17,7 @@ import numpy as np
 import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
+from onnxruntime.capi import _pybind_state as _ortpyb
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
@@ -106,7 +107,6 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
-                "enable_skip_layer_norm_strict_mode": "1",
             },
             "dml": {},
             "webgpu": {
@@ -264,6 +264,9 @@ class Model:
             "rope": True,                                    # Use rotary embeddings in attention subgraph
             "q_norm": False,                                 # LayerNorm after MatMul in Q path
             "k_norm": False,                                 # LayerNorm after MatMul in K path
+            "q_norm_weight": "",                             # Q norm weight input to GroupQueryAttention
+            "k_norm_weight": "",                             # K norm weight input to GroupQueryAttention
+            "qk_norm_epsilon": epsilon,                      # Epsilon value for Q/K norm in GroupQueryAttention
             "sinks": False,                                  # Sink values for softmax in attention
             # Attributes for packed Attention op:
             "root_input": "",                                # Root input to attention
@@ -287,6 +290,13 @@ class Model:
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
+        # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
+        # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
+        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
+        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
+        weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
+        if weights_prepacked not in (-1, 0, 1):
+            raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {weights_prepacked}.")
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -299,6 +309,7 @@ class Model:
             "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
+            "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
         }
 
         # LM head-specific variables
@@ -311,17 +322,25 @@ class Model:
         self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
+        # Decouple the int4 quantization *method* (how weights are rounded) from the
+        # int8 bit *placement* (which MatMuls are upgraded to 8 bits). The base method
+        # is one of {"default", "rtn", "k_quant"}; bit placement is controlled by the
+        # orthogonal flags resolved in `resolve_int4_quant_config`. Legacy compound
+        # names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
         self.algo_config_name = extra_options.get("int4_algo_config", "default")
+        self.int4_base_method, self.int4_bit_placement = self.resolve_int4_quant_config(extra_options)
+        self.int4_customized_weight_config = self.make_bit_placement_config(self.int4_bit_placement)
+        algo_config = self.make_algo_config(self.int4_base_method, self.int4_customized_weight_config)
         self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
-        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32))
+        self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
         self.quant_attrs = {
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
-            "qmoe_block_size": int(self.qmoe_block_size),
+            "qmoe_block_size": self.qmoe_block_size,
             "qdq_block_size": int(self.matmul_block_size),
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
             "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
-            "algo_config": self.make_algo_config(),
+            "algo_config": algo_config,
             "use_qdq": extra_options.get("use_qdq", False),
         }
         self.make_quant_init(config)
@@ -332,7 +351,7 @@ class Model:
     def make_ep_expansions_init(self):
         """
         Replace the current class's methods with the appropriate expansion class's methods.
-        
+
         For an EP with specific subgraph requirements, this can be used to extend the current class
         with additional functionality provided by the expansion class.
         """
@@ -457,6 +476,14 @@ class Model:
     def is_fused_rope_supported(self):
         return self.ep not in ["dml"]
 
+    def is_fused_qk_norm_gqa_supported(self):
+        return (
+            self.attention_attrs["op_type"] == "GroupQueryAttention"
+            and self.ep in {"cuda", "webgpu"}
+            and self.extra_options.get("fuse_qk_norm_gqa", True)
+            and (not self.attention_attrs["rope"] or self.attention_attrs["use_rope_in_attn"])
+        )
+
     def make_attention_init(self, config):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
@@ -547,10 +574,14 @@ class Model:
         # where rtn* = rtn, rtn_last
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
-        bits = 8 if self.algo_config_name in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"} else 4
+        base_method, placement = self.resolve_int4_quant_config(getattr(self, "extra_options", {}))
+        base_method = getattr(self, "int4_base_method", base_method)
+        placement = getattr(self, "int4_bit_placement", placement)
+
+        bits = 8 if placement.get("last_matmul_weight_int8", False) else 4
         is_symmetric = self.quant_attrs["is_symmetric"]
 
-        if self.algo_config_name in {"rtn", "rtn_last"}:
+        if base_method == "rtn" or (base_method == "default" and bits == 8):
             return (
                 bits,
                 f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
@@ -558,7 +589,7 @@ class Model:
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
 
-        if self.algo_config_name in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
+        if base_method == "k_quant":
             return (
                 bits,
                 f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
@@ -567,7 +598,7 @@ class Model:
             )
 
         # Fallback to default convention for unknown values.
-        assert self.algo_config_name == "default", "Unknown quantization algo config name detected"
+        assert base_method == "default", "Unknown quantization algo config name detected"
         return (
             bits,
             f"lm_head.MatMul.weight_Q{bits}" if is_symmetric else "lm_head.MatMul.weight",
@@ -617,7 +648,7 @@ class Model:
             inputs["past_value_names"] = "past_key_values.%d.value"
 
         # Create outputs dict
-        outputs = {} 
+        outputs = {}
         if "logits" in self.output_names:
             outputs["logits"] = self.output_names["logits"]
         if "present.key" in self.output_names:
@@ -734,59 +765,150 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def make_algo_config(self):
-        # Create a quantization configuration based on the algorithm name.
+    # Legacy compound `int4_algo_config` names map to a base method plus a set of
+    # int8 bit-placement flags so existing recipes keep producing identical models.
+    LEGACY_INT4_ALGO_ALIASES = {
+        "rtn_last": ("rtn", {"last_matmul_weight_int8": True}),
+        "k_quant_last": ("k_quant", {"last_matmul_weight_int8": True}),
+        "k_quant_mixed": ("k_quant", {"last_matmul_weight_int8": True, "int8_mixed_layers": True}),
+        "k_quant_linear": ("k_quant", {"last_matmul_weight_int8": True, "int8_linear_attn": True}),
+    }
+
+    # Orthogonal int8 bit-placement flags (each can be combined with any base method).
+    INT8_PLACEMENT_FLAGS = ("last_matmul_weight_int8", "int8_mixed_layers", "int8_linear_attn")
+
+    def resolve_int4_quant_config(self, extra_options):
+        """Split `int4_algo_config` into a base method and int8 bit-placement flags.
+
+        Returns ``(base_method, placement)`` where ``base_method`` is one of
+        ``{"default", "rtn", "k_quant"}`` and ``placement`` is a dict of the
+        ``INT8_PLACEMENT_FLAGS`` booleans. Explicit flags in ``extra_options`` take
+        precedence over the defaults implied by a legacy compound name.
+        """
+        algo = extra_options.get("int4_algo_config", "default")
+
+        implied = {}
+        base_method = algo
+        if algo in self.LEGACY_INT4_ALGO_ALIASES:
+            base_method, implied = self.LEGACY_INT4_ALGO_ALIASES[algo]
+
+        placement = {}
+        for flag in self.INT8_PLACEMENT_FLAGS:
+            placement[flag] = bool(extra_options.get(flag, implied.get(flag, False)))
+        return base_method, placement
+
+    def make_bit_placement_config(self, placement):
+        """Build the per-node `customized_weight_config` (int8 upgrades) from bit-placement flags."""
         customized_weight_config = {}
-        algo_config = None
 
-        if self.algo_config_name in {"rtn", "rtn_last"}:
-            if self.algo_config_name == "rtn_last":
-                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-            algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        if placement.get("last_matmul_weight_int8"):
+            customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
-        elif self.algo_config_name in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
-            if self.algo_config_name != "k_quant":
-                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+        if placement.get("int8_mixed_layers"):
+            # Mixed precision from llama.cpp: promote the most quantization-sensitive MatMuls to int8.
+            # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+            layers_to_upgrade = [
+                i
+                for i in range(self.num_layers)
+                if i < self.num_layers / 8
+                or i >= 7 * self.num_layers / 8
+                or (i - (round)(self.num_layers / 8)) % 3 == 2
+            ]
+            for i in layers_to_upgrade:
+                customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
 
-            if self.algo_config_name == "k_quant_mixed":
-                # k_quant_mixed is from llama.cpp.
-                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
-                layers_to_exclude = [
-                    i
-                    for i in range(self.num_layers)
-                    if i < self.num_layers / 8
-                    or i >= 7 * self.num_layers / 8
-                    or (i - (round)(self.num_layers / 8)) % 3 == 2
-                ]
-                for i in layers_to_exclude:
-                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+        if placement.get("int8_linear_attn") and hasattr(self, "layer_types"):
+            # Promote linear attention projections and their MLPs to INT8.
+            # Linear attention recurrence accumulates quantization errors across
+            # the full sequence (no softmax normalization).
+            for i, lt in enumerate(self.layer_types):
+                if lt == "linear_attention":
+                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                        customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                        customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
-            if self.algo_config_name == "k_quant_linear" and hasattr(self, "layer_types"):
-                # Promote linear attention projections and their MLPs to INT8.
-                # Linear attention recurrence accumulates quantization errors across
-                # the full sequence (no softmax normalization).
-                for i, lt in enumerate(self.layer_types):
-                    if lt == "linear_attention":
-                        for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
-                            customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": 8}
-                        for proj in ("gate_proj", "up_proj", "down_proj"):
-                            customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
+        return customized_weight_config
 
-            algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+    def make_algo_config(self, quant_method: str, customized_weight_config=None):
+        """Create the MatMulNBitsQuantizer algo config for a *base* method.
 
-        return algo_config
+        `quant_method` is one of {"default", "rtn", "k_quant"}. Per-node int8 bit
+        placement is supplied via `customized_weight_config`. The "default" method
+        returns ``None`` (MatMulNBitsQuantizer's built-in DEFAULT quantizer), which
+        cannot apply per-node bits in a single pass; `to_int4` performs a second
+        RTN pass to honor any int8 placement for that method.
+        """
+        customized_weight_config = customized_weight_config or {}
+
+        if quant_method == "default":
+            return None
+        if quant_method == "rtn":
+            return RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        if quant_method == "k_quant":
+            return KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+
+        raise ValueError(
+            f"Unsupported int4_algo_config base method '{quant_method}'. "
+            "Expected one of 'default', 'rtn', 'k_quant' (optionally with int8 placement flags), "
+            "or a legacy alias ('rtn_last', 'k_quant_last', 'k_quant_mixed', 'k_quant_linear')."
+        )
 
     def to_int4(self) -> ir.Model:
+        quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
+        nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
+        customized_weight_config = getattr(self, "int4_customized_weight_config", {}) or {}
+        base_method = getattr(self, "int4_base_method", "default")
+
+        # The DEFAULT quantizer applies a single global bit-width per pass and ignores
+        # `customized_weight_config`. To support int8 bit placement (e.g. the int8 last
+        # MatMul) on top of the DEFAULT method, quantize the int4 body first (excluding
+        # the int8-designated nodes), keeping the int4 body byte-identical to a plain
+        # DEFAULT model. Then upgrade just the designated nodes to int8 with a second
+        # pass. NOTE: the DEFAULT (MLAS) symmetric 8-bit format emits signed int8 with
+        # negative scales, which the MatMulNBits runtime kernel does NOT consume
+        # correctly (it expects unsigned uint8 offset-by-128 with positive scales).
+        # The RTN quantizer produces the kernel-compatible int8 format, so the int8
+        # pass uses RTN even when the body method is DEFAULT.
+        if base_method == "default" and customized_weight_config:
+            int8_nodes = list(customized_weight_config.keys())
+
+            quant_int4 = MatMulNBitsQuantizer(
+                model=ir.to_proto(self.model),
+                block_size=self.quant_attrs["qdq_block_size"],
+                is_symmetric=self.quant_attrs["is_symmetric"],
+                accuracy_level=self.quant_attrs["accuracy_level"],
+                nodes_to_exclude=nodes_to_exclude + int8_nodes,
+                quant_format=quant_format,
+                op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
+                algo_config=None,
+            )
+            quant_int4.process()
+
+            int8_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+            quant_int8 = MatMulNBitsQuantizer(
+                model=quant_int4.model.model,
+                block_size=self.quant_attrs["qdq_block_size"],
+                is_symmetric=self.quant_attrs["is_symmetric"],
+                accuracy_level=self.quant_attrs["accuracy_level"],
+                nodes_to_exclude=nodes_to_exclude,
+                nodes_to_include=int8_nodes,
+                quant_format=quant_format,
+                op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
+                algo_config=int8_algo_config,
+            )
+            quant_int8.process()
+            return ir.from_proto(quant_int8.model.model)
+
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
             block_size=self.quant_attrs["qdq_block_size"],
             is_symmetric=self.quant_attrs["is_symmetric"],
             accuracy_level=self.quant_attrs["accuracy_level"],
-            nodes_to_exclude=self.quant_attrs["nodes_to_exclude"],
-            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
+            nodes_to_exclude=nodes_to_exclude,
+            quant_format=quant_format,
             op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
             algo_config=self.quant_attrs["algo_config"],
         )
@@ -938,7 +1060,7 @@ class Model:
                     outputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
             else:
                 outputs.append(self.make_value(name, dtype=dtype, shape=shape))
-    
+
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{num}"
@@ -1387,7 +1509,7 @@ class Model:
 
         matmul = PackedMatMul()
         return matmul
-    
+
     def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
         if not hasattr(q_matmul, "qweight"):
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
@@ -1449,7 +1571,7 @@ class Model:
         return add
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        add = self.make_packed_add_tensor(q_add, k_add, v_add)        
+        add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -2493,22 +2615,39 @@ class Model:
             "",  # attention_bias
             kwargs.get("sinks", ""),
         ]
+        q_norm_weight = kwargs.get("q_norm_weight", "")
+        k_norm_weight = kwargs.get("k_norm_weight", "")
+        if bool(q_norm_weight) != bool(k_norm_weight):
+            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
+        if q_norm_weight:
+            inputs.extend(
+                [
+                    "",  # k_scale
+                    "",  # v_scale
+                    q_norm_weight,
+                    k_norm_weight,
+                ]
+            )
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        attributes = {
+            "num_heads": self.num_attn_heads,
+            "kv_num_heads": self.num_kv_heads,
+            "scale": self.attention_attrs["scale"],
+            "local_window_size": self.window_size,
+            "softcap": self.attention_attrs["softcap"],
+            "do_rotary": self.attention_attrs["use_rope_in_attn"],
+            "rotary_interleaved": self.rope_attrs["interleaved"],
+            "qk_norm_epsilon": kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"]),
+        }
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            local_window_size=self.window_size,
-            softcap=self.attention_attrs["softcap"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rope_attrs["interleaved"],
+            **attributes,
         )
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
@@ -2662,6 +2801,9 @@ class Model:
         #                   O_MatMul
         #                       |
         #                     O_Add
+        self.attention_attrs["q_norm_weight"] = ""
+        self.attention_attrs["k_norm_weight"] = ""
+
         self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
         self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -2783,7 +2925,22 @@ class Model:
     def make_attention_qk_norm(self, layer_id, attention):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
-            self.make_qk_norm(layer_id, attention)
+            if self.is_fused_qk_norm_gqa_supported():
+                self.make_fused_gqa_qk_norm_inputs(layer_id, attention)
+            else:
+                self.make_qk_norm(layer_id, attention)
+
+    def make_fused_gqa_qk_norm_inputs(self, layer_id, attention):
+        q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
+        k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
+        self.make_initializer(
+            attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
+        )
+        self.make_initializer(
+            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
+        )
+        self.attention_attrs["q_norm_weight"] = q_weight_name
+        self.attention_attrs["k_norm_weight"] = k_weight_name
 
     def make_attention_qk_rope(self, layer_id, **kwargs):
         # Make RotaryEmbedding nodes; returns (cos_cache_name, sin_cache_name)
@@ -2850,6 +3007,9 @@ class Model:
             cos_cache=cos_cache_name,
             sin_cache=sin_cache_name,
             sinks=sinks_name,
+            q_norm_weight=self.attention_attrs["q_norm_weight"],
+            k_norm_weight=self.attention_attrs["k_norm_weight"],
+            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
             **kwargs,
         )
 
@@ -3268,6 +3428,20 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
+        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
+        # (see make_qmoe_weights, which produces the matching bytes):
+        #   -1       -> omit the attribute; the op treats weights as already
+        #               CUTLASS-prepacked, which is what the builder ships for CUDA.
+        #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
+        #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
+        #               transforms them at load time.
+        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with
+        # the com.microsoft QMoE PrePack hook, so non-CUDA exports omit it and keep their own blockwise
+        # QMoE layout. Build separate ONNX files when CPU/WebGPU/TRT-RTX and CUDA QMoE exports are needed.
+        weights_prepacked = self.moe_attrs.get("weights_prepacked")
+        if weights_prepacked != -1 and self.ep == "cuda":
+            extra_kwargs["weights_prepacked"] = weights_prepacked
+
         self.make_node(
             "QMoE",
             inputs=inputs,
@@ -3287,52 +3461,215 @@ class Model:
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
     def make_qmoe_weights(self, weights):
-        dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
-        qweight, scales = None, None
+        weights_prepacked = self.moe_attrs.get("weights_prepacked")
+
+        if self.qmoe_block_size <= 0:
+            try:
+                if self.ep == "cuda":
+                    qweight, scales = self._cuda_per_channel_quantize(
+                        weights,
+                        prepack=weights_prepacked != 0,
+                    )
+                else:
+                    qweight, scales = self._symmetric_per_channel_quantize(weights)
+                self.moe_attrs.pop("block_size", None)
+                return qweight, scales.to(torch.float16)
+            except Exception as e:
+                raise RuntimeError(f"Per-channel QMoE quantization failed: {e}") from e
+
+        if self.ep == "cuda" and self.qmoe_block_size > 0:
+            # CUDA QMoE consumes CUTLASS-prepacked expert weights (the kernel's fpA_intB mixed GEMM
+            # layout). For weights_prepacked=-1 (auto) or 1, produce them offline so the QMoE op reads
+            # them directly: quantize with ONNX Runtime's blockwise quantizer, keep the signed scales,
+            # then run pack_weights_for_cuda_mixed_gemm. This is the encoding validated by the
+            # com.microsoft QMoE CUDA parity tests. The builder's own _symmetric_blockwise_quantize uses
+            # a different scale/packing convention the kernel cannot consume.
+            #
+            # weights_prepacked=0 ships raw [N, K/pack] weights with ONNX Runtime's MatMulNBits-compatible
+            # blockwise quantizer. This is the exact encoding the CUDA QMoE PrePack hook expects: raw
+            # bytes + blockwise scales, which it lays out into the CUTLASS fpA_intB format at load time.
+            block_size = self.qmoe_block_size
+            quantize_method = (
+                self._matmulnbits_blockwise_quantize
+                if weights_prepacked == 0
+                else self._cutlass_prepacked_blockwise_quantize
+            )
+            descriptor = "MatMulNBits-compatible" if weights_prepacked == 0 else "CUTLASS-prepacked"
+
+            if block_size not in (32, 64, 128):
+                raise ValueError(f"CUDA QMoE only supports block_size 32, 64, or 128, got {block_size}.")
+            try:
+                qweight, scales = quantize_method(weights)
+                self.moe_attrs["block_size"] = block_size
+                return qweight, scales.to(torch.float16)
+            except Exception as e:
+                raise RuntimeError(f"{descriptor} QMoE quantization failed with block_size={block_size}: {e}") from e
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
-        # CUDA and TRT-RTX default to 128; others default to 32.
         supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
 
         if use_blockwise_quant:
-            block_size = self.quant_attrs["qmoe_block_size"]
+            block_size = self.qmoe_block_size
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
+                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}") from e
 
-        # Use tensor-level quantization (default for QMoE on CPU/WebGPU when not explicitly requested)
-        self.moe_attrs["block_size"] = 0
+        raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)}) "
+                           "for QMoE expert weights quantization. "
+                           f"Got qmoe_block_size={self.qmoe_block_size} and ep={self.ep}.")
 
-        # Existing tensor-level quantization implementation (fallback)
-        unsuccessful = True
-        try:
-            import tensorrt_llm
+    def _symmetric_per_channel_quantize(self, weights):
+        """Quantize a single expert's weights with one scale per output channel.
 
-            _, qweight, scales = torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(
-                weights.detach().cpu().contiguous(), dtype
+        ``weights`` has logical shape ``[N, K]``. Returns raw QMoE storage
+        ``[N, K/pack]`` and scales ``[N]``. The QMoE op treats this as
+        per-channel quantization when the ``block_size`` attribute is omitted.
+        """
+        weights = weights.detach().cpu().to(torch.float32).contiguous()
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        n, k = weights.shape
+        pack = 8 // bits
+        if k % pack != 0:
+            raise ValueError(
+                f"K ({k}) must be divisible by {pack} for QMoE per-channel quantization."
             )
-            unsuccessful = False
-        except ImportError:
-            print(
-                "WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()."
-            )
-        except RuntimeError as r:
-            print(
-                "WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully."
-            )
-            err = str(r)
-            print(err[: err.find("\n1")])  # omit internal traceback inside TensorRT-LLM
-        finally:
-            if unsuccessful:
-                raise RuntimeError(
-                    "Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment."
-                )
 
-        return qweight, scales.to(torch.float16)
+        # Match TensorRT-LLM weight-only quantization: scale by 2^(bits - 1),
+        # clamp to the full signed range, and store the signed values as raw
+        # two's-complement bytes/nibbles. Any required zero-point biasing is
+        # handled by the later prepack path, not by this raw quantizer.
+        if bits == 4:
+            qmin, qmax, scale_divisor = -8, 7, 8
+        elif bits == 8:
+            qmin, qmax, scale_divisor = -128, 127, 128
+        else:
+            raise ValueError(f"QMoE per-channel quantization only supports 4 or 8 bits, got {bits}.")
+
+        scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
+        scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
+        quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
+
+        if bits == 4:
+            qweight = (quantized[:, 0::2] & 0xF) | ((quantized[:, 1::2] & 0xF) << 4)
+            qweight = qweight.to(torch.uint8)
+        else:
+            qweight = quantized.to(torch.uint8)
+
+        return qweight.contiguous(), scales.squeeze(-1).contiguous()
+
+    def _cuda_per_channel_quantize(self, weights, prepack):
+        """Quantize per-channel QMoE weights and optionally CUTLASS-prepack them.
+
+        ``weights_prepacked=0`` uses the raw schema layout from
+        ``_symmetric_per_channel_quantize`` so the CUDA QMoE PrePack hook can do
+        the layout transform. The default CUDA path ships the same weights already
+        packed for the SM80 fpA_intB MoE GEMM layout, matching the QMoE op's
+        default ``weights_prepacked=-1`` contract.
+        """
+        qweight, scales = self._symmetric_per_channel_quantize(weights)
+        if not prepack:
+            return qweight, scales
+
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        n, k = weights.shape
+        pack = 8 // bits
+        if n % pack != 0:
+            raise ValueError(f"N ({n}) must be divisible by {pack} for CUDA QMoE prepacked weights.")
+
+        packed = _ortpyb.pack_weights_for_cuda_mixed_gemm(qweight.numpy(), n, k, bits, 80)
+        packed = np.asarray(packed).view(np.uint8).reshape(k, n // pack)
+        return torch.from_numpy(np.ascontiguousarray(packed)), scales
+
+    def _cutlass_prepacked_blockwise_quantize(self, weights):
+        """Quantize a single expert's weights and CUTLASS-prepack them for the
+        CUDA QMoE fpA_intB mixed-GEMM kernel.
+
+        ``weights`` has logical shape ``[N, K]`` (quantized along ``K``). Returns
+        ``(qweight, scales)`` where ``qweight`` is the prepacked uint8 tensor of
+        shape ``[K, N/pack]`` (``pack`` = 2 for INT4, 1 for INT8) and ``scales``
+        is ``[N, K/block_size]`` SIGNED float scales. The sign is required: the
+        CUDA kernel dequantizes as ``(q - 2^(bits-1)) * scale``, so abs() would
+        corrupt every block whose max-magnitude element is negative. Stacking the
+        per-expert results yields ``fc_weights`` ``[E, K, N/pack]`` and ``scales``
+        ``[E, N, K/block_size]`` — the layout the QMoE op reads when
+        ``weights_prepacked`` is left at its prepacked default.
+        """
+
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        block_size = self.qmoe_block_size
+        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
+        n, k = w.shape
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
+        num_blocks = k // block_size
+        pack = 8 // bits
+        if n % pack != 0:
+            raise ValueError(f"N ({n}) must be divisible by {pack} (2 INT4 elements per byte) for QMoE blockwise quantization.")
+
+        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
+        # (column = output channel), quantizing each column along K.
+        w_t = np.ascontiguousarray(w.T)  # [K, N]
+        qweight = np.zeros((n, num_blocks, block_size // pack), dtype=np.uint8)
+        scales = np.zeros((n, num_blocks), dtype=np.float32)
+        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+
+        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
+        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
+        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
+
+        # quantize_matmul_{4,8}bits returns SIGNED blockwise scales (the scale
+        # carries the sign of the block's max-magnitude element). The CUDA QMoE
+        # kernel dequantizes as (q - 2^(bits-1)) * scale, so the sign MUST be
+        # preserved — taking abs() here corrupts every block whose anchor element
+        # is negative and yields garbage weights.
+
+        # CUTLASS-prepack with force_arch=80: the fpA_intB kernel always expects
+        # the SM80-style interleaved layout for SM >= 80 (validated on SM89/SM90),
+        # so 80 is the correct universal choice regardless of build/runtime GPU.
+        q_reshaped = qweight.reshape(n, -1)  # [N, K/pack]
+        packed = _ortpyb.pack_weights_for_cuda_mixed_gemm(q_reshaped, n, k, bits, 80)
+        out_cols = n // pack
+        packed = np.asarray(packed).view(np.uint8).reshape(k, out_cols)  # [K, N/pack]
+
+        return torch.from_numpy(np.ascontiguousarray(packed)), torch.from_numpy(scales)
+
+    def _matmulnbits_blockwise_quantize(self, weights):
+        """Quantize per-expert weights with ONNX Runtime's MatMulNBits blockwise
+        quantizer, matching the encoding the QMoE PrePack hook expects.
+
+        ``weights`` is a single expert's weight of logical shape ``[N, K]``
+        (quantized along the last/``K`` axis). Returns ``(qweight, scales)`` where
+        ``qweight`` is ``[N, K/pack]`` uint8 (2 INT4 elements per byte; INT8 is
+        one element per byte) and ``scales`` is ``[N, K/block_size]`` positive
+        float scales — the same layout produced by ``quantize_matmul_{4,8}bits``.
+        """
+        bits = int(self.moe_attrs["expert_weight_bits"])
+        block_size = self.qmoe_block_size
+        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
+        n, k = w.shape
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
+        num_blocks = k // block_size
+        pack = 8 // bits
+
+        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
+        # (column = output channel), quantizing each column along K.
+        w_t = np.ascontiguousarray(w.T)  # [K, N]
+        qweight = np.zeros((n, k // pack), dtype=np.uint8)
+        scales = np.zeros((n, num_blocks), dtype=np.float32)
+        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+
+        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
+        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
+        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
+
+        # The kernel applies (q - 2^(bits-1)) * scale, so scales must be positive.
+        scales = np.abs(scales)
+        return torch.from_numpy(qweight), torch.from_numpy(scales)
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
         # Ensure weights are on CPU for quantization

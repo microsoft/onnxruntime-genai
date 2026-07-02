@@ -582,17 +582,17 @@ class GPTOSSModel(Model):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
         down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
-        # Apply transpose depending on EP/op requirements and Quark expert presence
-        # For quantized QMoE on CUDA, kernels expect scales along the hidden_size axis,
-        # so we keep original orientation (last axis = hidden_size) when quantizing.
-        # For non-quantized MoE or non-CUDA EPs, transpose to align MatMul layout.
+        # HF GptOssExperts stores the expert weights input-major:
+        #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
+        # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
+        # make_qmoe_weights) expects output-major [E, N, K] with the contraction
+        # axis (K) last: gate_up = [E, 2*inter, hidden], down = [E, hidden, inter].
+        # Transpose for all EPs/ops; the CUDA QMoE path is no exception (keeping
+        # the original orientation swaps N and K, which silently corrupts the
+        # quantized weights/scales and yields garbage output).
         if not has_quark_experts:
-            if op_type == "QMoE" and self.ep == "cuda":
-                gate_up_proj_layout = mlp.experts.gate_up_proj
-                down_proj_layout = mlp.experts.down_proj
-            else:
-                gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
-                down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
+            gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
+            down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
         if op_type == "MoE" and not has_quark_experts:
             # Save non-quantized MoE weights as initializers
@@ -641,24 +641,19 @@ class GPTOSSModel(Model):
                 down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
                 down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
-            # Determine shape based on Quark vs non-Quark
-            pack_size = 8 // self.moe_attrs["expert_weight_bits"]
-            if has_quark_experts:
-                hidden_size_padded = self.hidden_size
-                intermediate_size_padded = self.intermediate_size
-            else:
-                hidden_size_padded = gate_up_proj_qweight_list[0].shape[-1] * pack_size
-                intermediate_size_padded = down_proj_qweight_list[0].shape[-1] * pack_size
+            gate_up_proj_qweight_shape, down_proj_qweight_shape = self.make_qmoe_weight_initializer_shapes(
+                gate_up_proj_qweight_list if not has_quark_experts else None,
+                down_proj_qweight_list if not has_quark_experts else None,
+                has_quark_experts,
+            )
 
             # Save qweight tensors
             self.make_initializer(
-                gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, hidden_size_padded // pack_size),
+                gate_up_proj_qweight_tensor.view(gate_up_proj_qweight_shape),
                 gate_up_proj_weight,
             )
             self.make_initializer(
-                down_proj_qweight_tensor.view(
-                    self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_padded // pack_size
-                ),
+                down_proj_qweight_tensor.view(down_proj_qweight_shape),
                 down_proj_weight,
             )
 
@@ -698,6 +693,23 @@ class GPTOSSModel(Model):
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
+
+    def make_qmoe_weight_initializer_shapes(self, gate_up_proj_qweight_list, down_proj_qweight_list, has_quark_experts):
+        pack_size = 8 // self.moe_attrs["expert_weight_bits"]
+        if has_quark_experts:
+            hidden_size_packed = self.hidden_size // pack_size
+            intermediate_size_packed = self.intermediate_size // pack_size
+        elif self.ep == "cuda" and self.moe_attrs.get("weights_prepacked") != 0:
+            hidden_size_packed = self.hidden_size // pack_size
+            intermediate_size_packed = self.intermediate_size // pack_size
+        else:
+            hidden_size_packed = gate_up_proj_qweight_list[0].shape[-1]
+            intermediate_size_packed = down_proj_qweight_list[0].shape[-1]
+
+        return (
+            (self.moe_attrs["num_experts"], -1, hidden_size_packed),
+            (self.moe_attrs["num_experts"], self.hidden_size, intermediate_size_packed),
+        )
 
     def has_quark_experts(self, experts):
         return hasattr(experts, "fc1_weights") and hasattr(experts, "fc2_weights")

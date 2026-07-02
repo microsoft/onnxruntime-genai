@@ -75,7 +75,11 @@ def check_extra_options(kv_pairs, execution_provider):
         "shared_embeddings",
         "hf_remote",
         "disable_qkv_fusion",
+        "fuse_qk_norm_gqa",
         "prune_lm_head",
+        "last_matmul_weight_int8",
+        "int8_mixed_layers",
+        "int8_linear_attn",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -418,8 +422,13 @@ def get_args():
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
                     Default value is 32.
-                qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
-                    Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
+                qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
+                    Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
+                    CUDA block-wise QMoE supports 32/64/128 only.
+                    Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
+                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
+                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
+                    Default is -1.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -428,15 +437,22 @@ def get_args():
                 int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
-                int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
+                int4_algo_config = Base method for int4 quantization. Default is 'default'.
+                    Currently supported base methods are: 'default', 'rtn', 'k_quant'.
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
                     rtn = RTN algorithm for int4 quantization.
-                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                     k_quant = k_quant algorithm for int4 quantization.
-                    k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
-                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                    k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
+                    The following legacy compound values are still accepted as aliases (base method + int8 placement flags):
+                    rtn_last = rtn + last_matmul_weight_int8=true.
+                    k_quant_last = k_quant + last_matmul_weight_int8=true.
+                    k_quant_mixed = k_quant + last_matmul_weight_int8=true + int8_mixed_layers=true.
+                    k_quant_linear = k_quant + last_matmul_weight_int8=true + int8_linear_attn=true.
+                last_matmul_weight_int8 = Quantize the last MatMul (e.g. /lm_head/MatMul) as int8 instead of int4. Default is false.
+                    Orthogonal to int4_algo_config; can be combined with any base method ('default', 'rtn', 'k_quant').
+                int8_mixed_layers = Promote the most quantization-sensitive MatMuls (llama.cpp mixed strategy: first/last eighth of layers plus every third layer's qkv_proj/v_proj/down_proj) to int8. Default is false.
+                    Orthogonal to int4_algo_config; can be combined with any base method.
+                int8_linear_attn = Promote linear-attention projections and their MLPs to int8 (for hybrid attention models like Qwen3.5). Default is false.
+                    Orthogonal to int4_algo_config; can be combined with any base method.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
@@ -464,7 +480,8 @@ def get_args():
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
-                    Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
+                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized and cannot be used if LM head is excluded.
+                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
@@ -477,6 +494,8 @@ def get_args():
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
+                fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
+                    Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
