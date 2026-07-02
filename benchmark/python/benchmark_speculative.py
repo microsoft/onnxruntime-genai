@@ -307,17 +307,39 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     if not device:
         cfg["search"]["past_present_share_buffer"] = False
 
-    # Pin the execution provider on BOTH blocks (target decoder + draft). The
-    # engine requires target and draft to use the same EP, and the device filter
-    # (hardware_device_type) selects GPU/NPU instead of OpenVINO's AUTO default.
+    # Pin the execution provider on BOTH blocks (target decoder + draft). The engine
+    # requires target and draft to use the same EP. CRITICAL: preserve each block's
+    # STOCK provider_options and only MERGE the device filter in -- do NOT replace them.
+    # OpenVINO NPU (and other compiled backends) carry stock options such as device_type
+    # / cache_dir / load_config that point at a PRECOMPILED static-shape blob; dropping
+    # them forces a fresh compile of the raw ONNX, whose seq/batch dims are dynamic, and
+    # the NPU compiler aborts ("to_shape was called on a dynamic shape"). This mirrors
+    # the standalone baseline path (clear_providers clears only the provider *list*, not
+    # provider_options), which compiles + runs on the NPU.
     if provider:
-        opts: dict = {}
-        if device:
-            opts["device_filtering_options"] = {"hardware_device_type": device.upper()}
-        prov_opts = [{provider: opts}]
-        for block in ("decoder", "draft"):
-            cfg["model"][block].setdefault("session_options", {})["provider_options"] = \
-                copy.deepcopy(prov_opts)
+        def _merge_provider_options(block_name: str) -> None:
+            session_options = cfg["model"][block_name].setdefault("session_options", {})
+            po_list = session_options.setdefault("provider_options", [])
+            norm = lambda n: n.replace("ExecutionProvider", "")
+            entry = None
+            for item in po_list:
+                if item and norm(next(iter(item))) == norm(provider):
+                    entry = item[next(iter(item))]
+                    break
+            if entry is None:
+                entry = {}
+                po_list.append({provider: entry})
+            if device:
+                entry["device_filtering_options"] = {"hardware_device_type": device.upper()}
+        _merge_provider_options("decoder")
+        _merge_provider_options("draft")
+        # Diagnostic: show the composed EP config for both blocks so a mismatch
+        # (e.g. per-model cache_dir differing between target and draft, which the
+        # engine's identical-provider-options check rejects) is visible in the log.
+        print("decoder provider_options:",
+              json.dumps(cfg["model"]["decoder"]["session_options"]["provider_options"]))
+        print("draft provider_options:  ",
+              json.dumps(cfg["model"]["draft"]["session_options"]["provider_options"]))
 
     # Recreate the output dir from scratch so support files (tokenizer, chat
     # template, etc.) always match the current target. Reusing a stale dir from a
