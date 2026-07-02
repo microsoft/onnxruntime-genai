@@ -51,6 +51,15 @@ namespace {
 
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
+constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+// Session-option config keys whose values are file/folder path references. When a model is loaded
+// from a package these may be sha256: shared-asset URIs or relative paths, so their values are
+// resolved against the model root (Config::ResolvePath) before reaching ORT.
+bool IsPathValuedSessionOption(std::string_view key) {
+  return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
+         key == kOrtSessionOptionEpContextFilePath;
+}
 
 }  // namespace
 
@@ -670,7 +679,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
   for (auto& config_entry : config_session_options.config_entries) {
-    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
+      const std::string resolved = config_->ResolvePath(config_entry.second).string();
+      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
+    } else {
+      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    }
   }
 
   // Register custom ops libraries only if explicitly configured
@@ -789,11 +803,15 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // For models loaded from memory that reference external data files, tell ORT where to find them
-    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
-    const fs::path external_initializers_path = fs::absolute(config_->config_path);
-    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
-                                    external_initializers_path.string().c_str());
+    // For models loaded from memory that reference external data files, ORT has no model
+    // directory to resolve them against. Default the external-initializers folder to the config
+    // directory, but only when the config did not already set it (a genai_config session option,
+    // resolved in CreateSessionOptionsFromConfig, takes precedence).
+    if (!session_options->HasConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath)) {
+      const fs::path external_initializers_path = fs::absolute(config_->config_path);
+      session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                      external_initializers_path.string().c_str());
+    }
     return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 

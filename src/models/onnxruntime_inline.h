@@ -680,6 +680,12 @@ inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_k
   return *this;
 }
 
+inline bool OrtSessionOptions::HasConfigEntry(const char* config_key) const {
+  int out = 0;
+  Ort::ThrowOnError(Ort::api->HasSessionConfigEntry(this, config_key, &out));
+  return out != 0;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::AddInitializer(const char* name, const OrtValue& ort_val) {
   Ort::ThrowOnError(Ort::api->AddInitializer(this, name, &ort_val));
   return *this;

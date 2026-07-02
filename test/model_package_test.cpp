@@ -14,6 +14,8 @@
 // Included only for the compile-time ORT_GENAI_HAS_MODEL_PACKAGE gate; the tests below
 // drive the feature exclusively through the public C++ API (ort_genai.h).
 #include "models/model_package.h"
+// For Generators::GetOrtEnv(), used by the external-data test setup helper.
+#include "generators.h"
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
 
@@ -96,6 +98,28 @@ std::string CaptureThrowMessage(Fn&& fn) {
     return e.what();
   }
   return {};
+}
+
+// Produces an ONNX model whose initializers live in a sidecar external-data file, by loading
+// `src_onnx` with optimizations disabled and exporting an optimized copy with external
+// initializers. Writes <out_dir>/model.onnx plus <out_dir>/model.onnx.data and returns the
+// model path. Used to exercise the external-initializers folder session option.
+fs_std::path ExportModelWithExternalData(const fs_std::path& src_onnx, const fs_std::path& out_dir) {
+  // The low-level ORT wrappers below run in this test binary, which has its own copy of the
+  // Ort::api pointer (the genai .so initializes its own). Initialize ours before using them.
+  Ort::InitApi();
+  fs_std::create_directories(out_dir);
+  const auto model_path = out_dir / "model.onnx";
+  auto session_options = OrtSessionOptions::Create();
+  session_options->SetGraphOptimizationLevel(ORT_DISABLE_ALL);
+  session_options->SetOptimizedModelFilePath(model_path.c_str());
+  session_options->AddConfigEntry("session.optimized_model_external_initializers_file_name",
+                                  "model.onnx.data");
+  session_options->AddConfigEntry("session.optimized_model_external_initializers_min_size_in_bytes",
+                                  "0");
+  // Creating the session writes the optimized model + external data as a side effect.
+  auto session = OrtSession::Create(Generators::GetOrtEnv(), src_onnx.c_str(), session_options.get());
+  return model_path;
 }
 
 }  // namespace
@@ -208,6 +232,104 @@ TEST(ModelPackage, TokenizerResolvesThroughSharedAsset) {
   tokenizer->Encode("Hello model package", *sequences);
   EXPECT_EQ(sequences->Count(), 1u);
   EXPECT_GT(sequences->SequenceCount(0), 0u);
+}
+
+TEST(ModelPackage, ExternalInitializersFolderResolvesThroughSharedAsset) {
+  // A variant's model keeps its weights in a sidecar external-data file that lives in a
+  // content-addressed shared asset, referenced from the genai_config session options via
+  // "session.model_external_initializers_file_folder_path": "sha256:<hex>". The model loads only
+  // if genai resolves that folder through the package (relative/sha256: -> absolute) and hands it
+  // to ORT; otherwise ORT looks beside the model file and the weights are missing.
+  const fs_std::path src_model = fs_std::path(MODEL_PATH) / "hf-internal-testing" /
+                                 "tiny-random-gpt2-fp32";
+
+  const auto root = MakeTempDir("e2e_extdata");
+  const auto variant_dir = root / "cpu";
+  const std::string digest(64, 'b');
+  const auto asset_dir = root / "shared_assets" / ("sha256-" + digest);
+  fs_std::create_directories(variant_dir);
+  fs_std::create_directories(asset_dir);
+
+  WriteFile(root / "manifest.json",
+            "{ \"schema_version\": \"1.0\", \"components\": { \"model\": { \"variants\":"
+            " { \"cpu\": { \"ep\": \"CPUExecutionProvider\" } } } } }");
+
+  // Build an external-data model in the variant dir, then move only its weights blob into the
+  // shared asset so it can be found solely through the resolved folder option.
+  ExportModelWithExternalData(src_model / "past.onnx", variant_dir);
+  std::error_code ec;
+  fs_std::rename(variant_dir / "model.onnx.data", asset_dir / "model.onnx.data", ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  // Tokenizer files sit beside the model so the genai model directory is complete.
+  for (const auto& entry : fs_std::directory_iterator(src_model)) {
+    const auto name = entry.path().filename().string();
+    if (name == "past.onnx" || name == "genai_config.json") continue;
+    fs_std::copy_file(entry.path(), variant_dir / name,
+                      fs_std::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(ec) << ec.message();
+  }
+
+  // Author a config pointing the decoder at the external-data model, optionally referencing the
+  // shared-asset weights folder by sha256: URI.
+  auto write_config = [&](bool with_folder_option) {
+    std::string config = ReadFile(src_model / "genai_config.json");
+    const auto file_pos = config.find("past.onnx");
+    ASSERT_NE(file_pos, std::string::npos);
+    config.replace(file_pos, std::string("past.onnx").size(), "model.onnx");
+    if (with_folder_option) {
+      const std::string anchor = "\"session_options\": {";
+      const auto pos = config.find(anchor);
+      ASSERT_NE(pos, std::string::npos);
+      config.insert(pos + anchor.size(),
+                    "\n        \"session.model_external_initializers_file_folder_path\": \"sha256:" +
+                        digest + "\",");
+    }
+    WriteFile(variant_dir / "genai_config.json", config);
+  };
+
+  // With the folder option, the weights resolve through the shared asset and the model loads.
+  write_config(/*with_folder_option=*/true);
+  EXPECT_NO_THROW({
+    auto oga_config = OgaConfig::CreateFromPackageEp(root.string().c_str(), "cpu");
+    auto model = OgaModel::Create(*oga_config);
+  });
+
+  // Without it, ORT looks beside model.onnx, the weights blob is absent, and loading fails.
+  write_config(/*with_folder_option=*/false);
+  const std::string message = CaptureThrowMessage([&] {
+    auto oga_config = OgaConfig::CreateFromPackageEp(root.string().c_str(), "cpu");
+    auto model = OgaModel::Create(*oga_config);
+  });
+  EXPECT_FALSE(message.empty());
+}
+
+TEST(ModelPackage, FlatDirectoryRejectsSha256Reference) {
+  // sha256: references only resolve inside a package. In a plain directory, resolving one must
+  // fail with a clear error instead of silently producing a bogus "<dir>/sha256:<hex>" path.
+  const fs_std::path src_model = fs_std::path(MODEL_PATH) / "hf-internal-testing" /
+                                 "tiny-random-gpt2-fp32";
+  const auto dir = MakeTempDir("flat_sha256");
+  std::error_code ec;
+  for (const auto& entry : fs_std::directory_iterator(src_model)) {
+    fs_std::copy_file(entry.path(), dir / entry.path().filename().string(),
+                      fs_std::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(ec) << ec.message();
+  }
+
+  std::string config = ReadFile(src_model / "genai_config.json");
+  const std::string anchor = "\"type\": \"gpt2\",";
+  const auto pos = config.find(anchor);
+  ASSERT_NE(pos, std::string::npos);
+  config.insert(pos + anchor.size(),
+                "\n    \"tokenizer_dir\": \"sha256:" + std::string(64, 'a') + "\",");
+  WriteFile(dir / "genai_config.json", config);
+
+  const std::string message = CaptureThrowMessage([&] {
+    auto model = OgaModel::Create(dir.string().c_str());
+    auto tokenizer = OgaTokenizer::Create(*model);
+  });
+  EXPECT_NE(message.find("sha256:"), std::string::npos) << message;
 }
 
 #endif  // ORT_GENAI_HAS_MODEL_PACKAGE

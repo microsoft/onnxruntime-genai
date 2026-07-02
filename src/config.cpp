@@ -1624,6 +1624,14 @@ fs::path Config::ResolvePath(std::string_view value) const {
     // assets with manifest overrides, relative paths, confinement).
     return package_resolver(config_path, value);
   }
+  // Flat directory: sha256: shared-asset references are only meaningful inside a model package.
+  constexpr std::string_view kSharedAssetPrefix = "sha256:";
+  if (value.substr(0, kSharedAssetPrefix.size()) == kSharedAssetPrefix) {
+    throw std::runtime_error(
+        "\"" + std::string{value} +
+        "\" is a sha256: shared-asset reference, which is only valid when loading from a model "
+        "package; this model was loaded from a plain directory.");
+  }
   return config_path / std::string{value};
 }
 
