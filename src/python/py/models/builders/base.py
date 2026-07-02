@@ -17,6 +17,7 @@ import numpy as np
 import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
+from onnxruntime.capi import _pybind_state as _ortpyb
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
@@ -31,21 +32,6 @@ from transformers import (
     AutoTokenizer,
     GenerationConfig,
 )
-
-
-def onnxruntime_version_at_least(major, minor):
-    """Return True if the installed onnxruntime is at least the given major.minor version.
-
-    Robust to pre-release/dev suffixes (e.g. "1.28.0.dev20260612004"). Returns False if
-    the version string cannot be parsed.
-    """
-    import onnxruntime
-
-    try:
-        installed_major, installed_minor = (int(part) for part in onnxruntime.__version__.split(".")[:2])
-    except (AttributeError, ValueError):
-        return False
-    return (installed_major, installed_minor) >= (major, minor)
 
 
 def parse_hf_token(hf_token):
@@ -138,11 +124,6 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
-                # Since ORT 1.27.0, SkipLayerNorm uses FP32 accumulation by default, so the strict-mode
-                # workaround is unnecessary (and disabling it is faster). For older ORT versions that the
-                # package still supports (onnxruntime-gpu>=1.20.1), keep strict mode enabled to avoid an
-                # accuracy regression.
-                "enable_skip_layer_norm_strict_mode": "0" if onnxruntime_version_at_least(1, 27) else "1",
             },
             "dml": {},
             "webgpu": {
@@ -514,7 +495,7 @@ class Model:
         return (
             self.attention_attrs["op_type"] == "GroupQueryAttention"
             and self.ep in {"cuda", "webgpu"}
-            and self.extra_options.get("fuse_qk_norm_gqa", False)
+            and self.extra_options.get("fuse_qk_norm_gqa", True)
             and (not self.attention_attrs["rope"] or self.attention_attrs["use_rope_in_attn"])
         )
 
@@ -3535,9 +3516,6 @@ class Model:
         packed for the SM80 fpA_intB MoE GEMM layout, matching the QMoE op's
         default ``weights_prepacked=-1`` contract.
         """
-        import numpy as np
-        from onnxruntime.capi import _pybind_state as _ortpyb
-
         qweight, scales = self._symmetric_per_channel_quantize(weights)
         if not prepack:
             return qweight, scales
@@ -3566,8 +3544,6 @@ class Model:
         ``[E, N, K/block_size]`` — the layout the QMoE op reads when
         ``weights_prepacked`` is left at its prepacked default.
         """
-        import numpy as np
-        from onnxruntime.capi import _pybind_state as _ortpyb
 
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
@@ -3617,9 +3593,6 @@ class Model:
         one element per byte) and ``scales`` is ``[N, K/block_size]`` positive
         float scales — the same layout produced by ``quantize_matmul_{4,8}bits``.
         """
-        import numpy as np
-        from onnxruntime.capi import _pybind_state as _ortpyb
-
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
