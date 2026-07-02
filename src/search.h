@@ -21,6 +21,10 @@ struct Search : LeakChecked<Search> {
   virtual bool IsDone() const = 0;
 
   virtual void SelectTop() = 0;
+  // Commit an already-decided token id straight to the sequence, with the usual EOS / max-length
+  // bookkeeping. Used by speculative decoding, which chooses the token itself (there is no logits
+  // row to sample). Default asserts: only the greedy searches implement it.
+  virtual void CommitToken(int32_t /*token*/) { assert(false); }
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) { assert(false); }
@@ -75,6 +79,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
   void SelectTop() override;
+  void CommitToken(int32_t token) override;
   void SampleTopK(int k, float temperature) override;
   void SampleTopP(float p, float temperature) override;
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;

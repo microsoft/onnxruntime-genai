@@ -169,6 +169,15 @@ void GreedySearch_Cpu::SelectTop() {
     AppendNextTokensToSequences();
 }
 
+void GreedySearch_Cpu::CommitToken(int32_t token) {
+  // Speculative decoding already decided this token, so commit it exactly like SelectTop's tail
+  // (SetNextToken handles EOS/done accounting, AppendNextTokensToSequences appends + checks
+  // max_length) but skip the argmax since the id is known. batch_size is always 1 here.
+  SetNextToken(0, token);
+  if (!done_)
+    AppendNextTokensToSequences();
+}
+
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
@@ -384,8 +393,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    for (auto token_id : params_->config.model.eos_token_id)
-      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
+    ApplyMinLengthToLogits(beam_token_scores, sequences_.GetSequenceLength(), min_length,
+                           params_->config.model.eos_token_id);
   }
 }
 
@@ -397,23 +406,7 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
     std::span<const int32_t> const sequence = sequences_.GetSequence(i).CopyDeviceToCpu();
-
-    if (repetition_penalty_visited_.empty())
-      repetition_penalty_visited_.resize(params_->config.model.vocab_size, false);
-
-    for (const auto& word_id : sequence) {
-      if (word_id >= 0 && word_id < params_->config.model.vocab_size && !repetition_penalty_visited_[word_id]) {
-        repetition_penalty_visited_[word_id] = true;
-        float const score = beam_token_scores[word_id];
-        beam_token_scores[word_id] = (score < 0 ? score * penalty : score / penalty);
-      }
-    }
-
-    // Reset visited flags for tokens we touched (O(seq_len), not O(vocab_size))
-    for (const auto& word_id : sequence) {
-      if (word_id >= 0 && word_id < params_->config.model.vocab_size)
-        repetition_penalty_visited_[word_id] = false;
-    }
+    ApplyRepetitionPenaltyToLogits(beam_token_scores, sequence, penalty, repetition_penalty_visited_);
   }
 }
 

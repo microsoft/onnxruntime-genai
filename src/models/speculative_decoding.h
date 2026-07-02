@@ -44,9 +44,9 @@ struct SpeculativeDecodingState : State {
   State& target_state() { return *target_state_; }
   State& draft_state() { return *draft_state_; }
 
-  const std::vector<float>& draft_pending_probs() const { return draft_pending_probs_; }
-  void set_draft_pending_probs(std::vector<float> probs) {
-    draft_pending_probs_ = std::move(probs);
+  const std::vector<float>& draft_pending_logits() const { return draft_pending_logits_; }
+  void set_draft_pending_logits(std::vector<float> logits) {
+    draft_pending_logits_ = std::move(logits);
     draft_pending_valid_ = true;
   }
   bool draft_pending_valid() const { return draft_pending_valid_; }
@@ -56,9 +56,10 @@ struct SpeculativeDecodingState : State {
   std::unique_ptr<State> target_state_;
   std::unique_ptr<State> draft_state_;
 
-  // Draft's softmax distribution for the next token position.
+  // Draft's raw logits for the next token position (unsoftmaxed, so the strategy can apply the
+  // same min-length / repetition penalties the target rows receive before sampling).
   // Set by Run() and refreshed at the end of each strategy round.
-  std::vector<float> draft_pending_probs_;
+  std::vector<float> draft_pending_logits_;
   bool draft_pending_valid_{false};
 };
 
