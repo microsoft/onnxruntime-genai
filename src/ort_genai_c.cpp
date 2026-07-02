@@ -756,6 +756,8 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
+  if (shape_dims_count > 0 && shape_dims == nullptr)
+    throw std::runtime_error("shape_dims must not be null when shape_dims_count is non-zero");
   auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
   for (size_t i = 0; i < shape_dims_count; i++) {
     if (shape_dims[i] < 0)
