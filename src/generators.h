@@ -13,6 +13,7 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -39,6 +40,7 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 namespace Generators {
 struct Model;
 struct State;
+struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
@@ -74,6 +76,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
+  // Query the params to get the value set for a param
+  double GetSearchNumber(std::string_view name) const;
+  bool GetSearchBool(std::string_view name) const;
+
   int max_batch_size{0};
   bool use_graph_capture{};
   bool use_multi_profile{};
@@ -95,6 +101,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone();
+  size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
@@ -124,6 +131,18 @@ struct Generator : LeakChecked<Generator> {
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength
   Action last_action_{standard};
+
+  // Pre-computed per-token decisions: avoid repeated checks each token
+  // Non-null when the model is a transducer (RNNT, TDT); points into state_.
+  TransducerState* transducer_state_{nullptr};
+  int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
+  enum class SamplingMethod { kGreedy,
+                              kTopK,
+                              kTopP,
+                              kTopKTopP };
+  SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  void InitializeSamplingMethod(const GeneratorParams& params);
+  void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
 struct OrtGlobals {
@@ -132,10 +151,24 @@ struct OrtGlobals {
   std::unique_ptr<OrtEnv> env_;
 
   struct Allocator {
-    std::unique_ptr<Ort::Allocator> allocator_;
+    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
+    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
+    // does" -- see
+    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
+    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
+    // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
+    std::unique_ptr<Ort::Allocator> allocator_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
+
+  // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
+  // Destroyed before env_ to ensure proper cleanup order
+  struct SessionCache {
+    std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
+    std::mutex mutex_;
+  };
+  SessionCache graph_session_cache_;
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;
@@ -148,6 +181,13 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Constructs a Config from `config_path`. For a model package, a variant is selected
+// (auto-detected when `ep` is null/empty). For a flat directory `ep` must be null/empty.
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const char* ep = nullptr,
+                                     std::string_view json_overlay = {});
+
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

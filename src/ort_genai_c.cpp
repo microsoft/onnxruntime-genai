@@ -13,6 +13,11 @@
 #include "search.h"
 #include "smartptrs.h"
 #include "engine/engine.h"
+#include "models/streaming_processor.h"
+#include "models/nemotron_speech.h"
+#include "models/parakeet.h"
+#include "models/silero_vad.h"
+#include "models/model_package.h"
 
 namespace Generators {
 
@@ -60,6 +65,7 @@ struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
+struct OgaStreamingProcessor : Generators::StreamingProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -229,7 +235,20 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
 
 OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaConfig>(std::make_unique<Generators::Config>(fs::path(config_path), std::string_view{}));
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out) {
+  OGA_TRY
+  if (!Generators::IsModelPackage(fs::path{config_path})) {
+    throw std::runtime_error(std::string("\"") + config_path +
+                             "\" is not a model package. Use OgaCreateConfig for a flat model directory.");
+  }
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path, ep);
+  *out = ReturnUnique<OgaConfig>(std::move(config));
   return nullptr;
   OGA_CATCH
 }
@@ -388,16 +407,23 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* para
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
   OGA_TRY
-  printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
+  params->SetGuidance(type, data, enable_ff_tokens);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value) {
   OGA_TRY
-  params->SetGuidance(type, data, enable_ff_tokens);
+  *value = params->GetSearchNumber(name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value) {
+  OGA_TRY
+  *value = params->GetSearchBool(name);
   return nullptr;
   OGA_CATCH
 }
@@ -457,6 +483,10 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const
   OGA_CATCH
 }
 
+size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator) {
+  return generator->TokenCount();
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
   OGA_TRY
   generator->GenerateNextToken();
@@ -466,6 +496,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
   OGA_TRY
+  // Transducer models (RNNT, TDT) bypass the standard search; return tokens
+  // emitted by the most recent StepToken() call.
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    auto tokens = transducer->GetStepTokens();
+    *out = tokens.data();
+    *out_count = tokens.size();
+    return nullptr;
+  }
   auto tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
   *out = tokens.data();
   *out_count = tokens.size();
@@ -566,10 +604,18 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* generator, OgaTenso
 }
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* generator, size_t index) {
+  // Transducer models (RNNT, TDT) bypass the standard search; the orchestrator
+  // state owns the accumulated transcript directly.
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    return transducer->GetAllTokens().size();
+  }
   return generator->GetSequence(static_cast<int>(index)).size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index) {
+  if (auto* transducer = dynamic_cast<Generators::TransducerState*>(generator->state_.get())) {
+    return transducer->GetAllTokens().data();
+  }
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
 }
 
@@ -630,6 +676,8 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
 
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
+  if (count > 0 && strings == nullptr)
+    throw std::runtime_error("EncodeBatch: strings pointer must not be null when count > 0");
   auto tensor = tokenizer->EncodeBatch(std::span<const char*>(strings, count));
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;
@@ -1047,7 +1095,7 @@ OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data
 
 void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) { delete string_array; }
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete p; }
-void OGA_API_CALL OgaDestroyString(const char* p) { delete p; }
+void OGA_API_CALL OgaDestroyString(const char* p) { delete[] p; }
 void OGA_API_CALL OgaDestroySequences(OgaSequences* p) { delete p; }
 void OGA_API_CALL OgaDestroyConfig(OgaConfig* p) { delete p; }
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) { p->ExternalRelease(); }
@@ -1071,6 +1119,55 @@ void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_n
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+}
+
+OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out) {
+  OGA_TRY
+  auto processor = Generators::CreateStreamingProcessor(*model);
+  *out = ReturnUnique<OgaStreamingProcessor>(std::move(processor));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out) {
+  OGA_TRY
+  auto result = processor->Process(audio_data, num_samples);
+  if (result) {
+    *out = ReturnUnique<OgaNamedTensors>(std::move(result));
+  } else {
+    *out = nullptr;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out) {
+  OGA_TRY
+  auto result = processor->Flush();
+  if (result) {
+    *out = ReturnUnique<OgaNamedTensors>(std::move(result));
+  } else {
+    *out = nullptr;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value) {
+  OGA_TRY
+  processor->SetOption(key, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value) {
+  OGA_TRY
+  auto result = processor->GetOption(key);
+  *value = AllocOgaString(result);
+  return nullptr;
+  OGA_CATCH
 }
 
 }  // extern "C"

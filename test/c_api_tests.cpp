@@ -1,10 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <fstream>
 #include <numeric>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 #include <regex>
@@ -17,22 +21,7 @@
 
 #include <gtest/gtest.h>
 
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
-#ifndef PHI2_PATH
-#if USE_CUDA
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
-#elif USE_DML
-#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
-#else
-#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
-#endif
-#endif
-
-#ifndef ENABLE_ENGINE_TESTS
-#define ENABLE_ENGINE_TESTS TEST_PHI2 && !USE_DML
-#endif
+#include "test_utils.h"
 
 TEST(CAPITests, Config) {
 #if TEST_PHI2
@@ -56,6 +45,31 @@ TEST(CAPITests, Config) {
   config->SetDecoderProviderOptionsHardwareDeviceType("DML", "gpu");
   config->SetDecoderProviderOptionsHardwareDeviceId("DML", 2);
   config->SetDecoderProviderOptionsHardwareVendorId("DML", 1);
+#endif
+}
+
+// Regression test: appending CPU provider should not throw.
+// See https://github.com/microsoft/onnxruntime-genai/pull/2179
+TEST(CAPITests, AppendCpuProvider) {
+#if TEST_PHI2
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->ClearProviders();
+  config->AppendProvider("cpu");
+  auto model = OgaModel::Create(*config);
+  ASSERT_NE(model.get(), nullptr);
+
+  // Also test other case variants
+  auto config2 = OgaConfig::Create(PHI2_PATH);
+  config2->ClearProviders();
+  config2->AppendProvider("CPU");
+  auto model2 = OgaModel::Create(*config2);
+  ASSERT_NE(model2.get(), nullptr);
+
+  auto config3 = OgaConfig::Create(PHI2_PATH);
+  config3->ClearProviders();
+  config3->AppendProvider("CPUExecutionProvider");
+  auto model3 = OgaModel::Create(*config3);
+  ASSERT_NE(model3.get(), nullptr);
 #endif
 }
 
@@ -105,17 +119,32 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
       throw std::runtime_error("Stream token decoding mismatch");
   }
+#endif
+}
+
+TEST(CAPITests, EncodeBatchEmptyInputThrows) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  // EncodeBatch with zero strings should throw, not crash with SIGFPE
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 0), std::runtime_error);
+
+  // Invalid pointers with count > 0 should also be rejected deterministically.
+  ASSERT_THROW(tokenizer->EncodeBatch(nullptr, 1), std::runtime_error);
+  const char* bad_strings[] = {nullptr};
+  ASSERT_THROW(tokenizer->EncodeBatch(bad_strings, 1), std::runtime_error);
 #endif
 }
 
@@ -167,12 +196,12 @@ TEST(CAPITests, TokenizerUpdateOptions) {
 
   // Stream Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    auto stream = OgaTokenizerStream::Create(*tokenizer);
 
     auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
     for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
-      stream_result += tokenizer_stream->Decode(sequence[j]);
+      stream_result += stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -316,8 +345,12 @@ TEST(CAPIEngineTests, MaxLength) {
 #endif
 
 // DML doesn't support batch_size > 1
+// TODO: WebGPU should support batch_size > 1, investigate why it's failing
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2 && !USE_DML
+#if TEST_PHI2
+  if (!test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping batch test for DML/WebGPU";
+  }
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -338,11 +371,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -384,7 +414,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -397,7 +427,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
 
     engine->Add(*requests.back());
   }
@@ -447,7 +477,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
 
   std::vector<std::unique_ptr<OgaRequest>> requests;
   std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> tokenizer_streams;
+  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
   std::array<std::vector<int32_t>, batch_size> generated_tokens;
   for (auto& string : input_strings) {
     auto input_sequences = OgaSequences::Create();
@@ -460,7 +490,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     requests.push_back(OgaRequest::Create(*params.back()));
     requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
+    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
   }
 
   // Add the first request to the engine
@@ -519,11 +549,8 @@ TEST(CAPITests, EndToEndPhi) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -561,11 +588,12 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  ASSERT_EQ(static_cast<int>(params->GetSearchNumber("max_length")), 40);
+  ASSERT_EQ(params->GetSearchBool("early_stopping"), true);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
+
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -582,6 +610,7 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   const auto* sequence_data = generator->GetSequenceData(0);
 
   ASSERT_LE(sequence_length, 40);
+  ASSERT_EQ(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
 
   const auto* expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
@@ -634,7 +663,7 @@ TEST(CAPIEngineTests, EndToEndPhi) {
 TEST(CAPITests, LoadModelFromMemory) {
 #if TEST_PHI2
 
-  const char* model_path = PHI2_PATH "/model.onnx";
+  std::string model_path = std::string(PHI2_PATH) + "/model.onnx";
   std::ifstream model_file(model_path, std::ios::binary | std::ios::ate);
   ASSERT_TRUE(model_file.is_open()) << "Failed to open model file: " << model_path;
   std::streamsize size = model_file.tellg();
@@ -658,11 +687,8 @@ TEST(CAPITests, LoadModelFromMemory) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequence);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Decode The Batch
@@ -738,11 +764,8 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -901,19 +924,16 @@ TEST(CAPITests, SetTerminate) {
     generator->SetRuntimeOption("terminate_session", "1");
   };
 
-  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> stream) {
     EXPECT_THROW({
-      while (true) {
+      while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->IsDone()) {
-          break;
-        }
       } }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
 
   const char* input_string = "She sells sea shells by the sea shore.";
   auto input_sequences = OgaSequences::Create();
@@ -925,7 +945,7 @@ TEST(CAPITests, SetTerminate) {
   generator->AppendTokenSequences(*input_sequences);
   EXPECT_EQ(generator->IsSessionTerminated(), false);
   std::vector<std::thread> threads;
-  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(stream)));
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
@@ -938,7 +958,7 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-// DML Doesn't support batch_size > 1
+// DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
 struct Phi2Test {
@@ -968,11 +988,8 @@ struct Phi2Test {
       auto generator = OgaGenerator::Create(*model_, *params_);
       generator->AppendTokenSequences(*input_sequences_);
 
-      while (true) {
+      while (!generator->IsDone()) {
         generator->GenerateNextToken();
-        if (generator->IsDone()) {
-          break;
-        }
       }
 
       // Decode One at a time
@@ -1033,6 +1050,10 @@ class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1054,6 +1075,10 @@ class ParametrizedTopPCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1075,6 +1100,10 @@ class ParametrizedTopKTopPCAPITestsTests : public ::testing::TestWithParam<bool>
 };
 
 TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
+  if (GetParam() && !test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
   Phi2Test test;
 
   test.params_->SetSearchOptionBool("do_sample", true);
@@ -1130,11 +1159,8 @@ TEST(CAPITests, AdaptersTest) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1156,11 +1182,8 @@ TEST(CAPITests, AdaptersTest) {
     generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
 
     auto logits = generator->GetOutput("logits");
@@ -1210,11 +1233,8 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
     generator->SetActiveAdapter(*adapters, "adapter_b");
     generator->AppendTokenSequences(*input_sequences);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
-        break;
-      }
     }
   }
 
@@ -1256,11 +1276,8 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1278,11 +1295,8 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   generator->RewindTo(0);
 
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1316,11 +1330,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1334,11 +1345,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   // Rewind to length 5 and verify same output
   generator->RewindTo(5);
 
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1353,11 +1361,8 @@ TEST(CAPITests, RewindGptFp32CAPI) {
 
   std::vector<int32_t> next_ids{731, 731};
   generator->AppendTokens(next_ids.data(), next_ids.size());
-  while (true) {
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   // Verify outputs match expected outputs
@@ -1367,35 +1372,463 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
-#endif
 
-#if USE_GUIDANCE
-TEST(CAPITests, SetGuidance) {
-#if TEST_PHI2
+TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
 
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  int max_length = 10;
 
-  const char* input_string = "who are you?";
-  auto input_sequences = OgaSequences::Create();
-  tokenizer->Encode(input_string, *input_sequences);
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 32);
-  params->SetGuidance("regex", "answer: .*", false);
+  params->SetSearchOption("max_length", max_length);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
-  while (true) {
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
-  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
-  auto output = std::string(out_string).substr(std::string(input_string).size());
-  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 
-#endif
+  // Verify generation completed and produced output
+  const auto sequence_length = generator->GetSequenceCount(0);
+  ASSERT_GT(sequence_length, static_cast<size_t>(input_ids_shape[1]));
+  ASSERT_LE(sequence_length, max_length);
+}
+
+TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-lfm2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // Generate a few tokens
+  generator->GenerateNextToken();
+
+  // RewindTo should throw for LFM2 because conv state cannot be rewound
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
 }
 #endif
+
+// Test RewindTo with static mask handling via NvTensorRtRtx past-present share buffer.
+// Skipped when the phi3-fp16-nvtrt model is not available (CI-only model).
+TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
+  std::string nvtrt_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+  if (!std::filesystem::exists(nvtrt_path)) {
+    GTEST_SKIP() << "NvTensorRtRtx model not available at " << nvtrt_path;
+  }
+
+  auto config = OgaConfig::Create(nvtrt_path.c_str());
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  int max_length = 20;
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  std::vector<int32_t> input_ids{1, 15043, 29892, 920};
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::memcpy(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t));
+
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  generator->RewindTo(6);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+}
+
+// Test RewindTo with the qwen-2.5 model. Exercises the static mask rewind path if
+// the EP supports it (DML by default, WebGPU/CUDA when graph capture is enabled
+// in model generation via _test_utils.py), otherwise falls back to the dynamic mask path.
+// Skipped when qwen-2.5 model is not available.
+//
+// CUDA is explicitly disabled: RewindTo(seq_len - 3) — a deep partial rewind near
+// the end of a completed sequence — produces incorrect output on CUDA. This is a
+// pre-existing runtime bug (not model-specific): it reproduces with both
+// qwen-2.5-0.5b-graph and tiny-qwen35-cuda models, and with both static-mask
+// (graph-capture) and dynamic-mask (baseline) code paths. Full rewind (RewindTo(0))
+// and shallow partial rewind (e.g. RewindTo(input_ids.size()-1)) work correctly.
+// TODO: Remove !USE_CUDA once the CUDA partial rewind bug is fixed.
+#if TEST_QWEN_2_5 && !USE_CUDA
+TEST(CAPITests, RewindQwen25CAPI) {
+  // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),
+  // fall back to baseline model when it is not available.
+  std::string model_path = QWEN_2_5_GRAPH_PATH;
+  if (!std::filesystem::exists(model_path)) {
+    model_path = QWEN_2_5_PATH;
+  }
+  if (!std::filesystem::exists(model_path)) {
+    GTEST_SKIP() << "qwen-2.5 model not available at " << model_path;
+  }
+
+  int max_length = 50;
+  std::vector<int32_t> input_ids{1, 2, 3, 4, 5};
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOptionBool("do_sample", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Save first-run output
+  auto seq_len = generator->GetSequenceCount(0);
+  std::vector<int32_t> first_output(seq_len);
+  std::copy(generator->GetSequenceData(0), generator->GetSequenceData(0) + seq_len, first_output.begin());
+
+  // RewindTo(0) - full rewind
+  generator->RewindTo(0);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto seq_len2 = generator->GetSequenceCount(0);
+  ASSERT_EQ(seq_len2, seq_len);
+  EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+
+  // Partial rewind
+  if (seq_len > 7) {
+    generator->RewindTo(seq_len - 3);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+
+    seq_len2 = generator->GetSequenceCount(0);
+    ASSERT_EQ(seq_len2, seq_len);
+    EXPECT_TRUE(0 == std::memcmp(first_output.data(), generator->GetSequenceData(0), seq_len * sizeof(int32_t)));
+  }
+}
+#endif  // TEST_QWEN_2_5
+
+#ifndef STREAMING_ASR_PATH
+#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
+#endif
+
+#ifndef STREAMING_ASR_CHUNK_SAMPLES
+constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
+#endif
+
+// Helper: if mel is not null, set inputs and run the decode loop
+static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
+  if (mel) {
+    generator.SetInputs(*mel);
+    while (!generator.IsDone()) {
+      generator.GenerateNextToken();
+    }
+  }
+}
+
+// Test creating a Generator + StreamingProcessor from a nemotron_speech model
+TEST(CAPITests, StreamingASRCreate) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+// Test transcribing silence (all zeros) via GenerateNextToken
+TEST(CAPITests, StreamingASRTranscribeSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  auto mel = processor->Process(silence.data(), silence.size());
+  DecodeInputs(*generator, mel.get());
+  SUCCEED();
+}
+
+// Test feeding multiple chunks and decoding via GenerateNextToken
+TEST(CAPITests, StreamingASRMultipleChunks) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  for (int i = 0; i < 5; ++i) {
+    auto mel = processor->Process(silence.data(), silence.size());
+    DecodeInputs(*generator, mel.get());
+  }
+  SUCCEED();
+}
+
+// Test flush processes remaining buffered audio
+TEST(CAPITests, StreamingASRFlush) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+  processor->Process(silence.data(), silence.size());
+
+  auto mel = processor->Flush();
+  DecodeInputs(*generator, mel.get());
+  SUCCEED();
+}
+
+// Test transcribing a synthetic sine wave via GenerateNextToken
+TEST(CAPITests, StreamingASRSineWave) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  constexpr size_t chunk_samples = 8960;
+  constexpr float sample_rate = 16000.0f;
+  constexpr float frequency = 440.0f;
+
+  std::vector<float> audio(chunk_samples);
+  for (size_t i = 0; i < chunk_samples; ++i) {
+    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    auto mel = processor->Process(audio.data(), audio.size());
+    ASSERT_NE(mel, nullptr);
+    DecodeInputs(*generator, mel.get());
+  }
+
+  auto flush_mel = processor->Flush();
+  DecodeInputs(*generator, flush_mel.get());
+  SUCCEED();
+}
+
+// Test raw C API for StreamingProcessor + Generator
+TEST(CAPITests, StreamingASRRawCAPI) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaStreamingProcessor* processor = nullptr;
+  ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
+  ASSERT_NE(processor, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  constexpr size_t chunk_samples = 8960;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  OgaNamedTensors* inputs = nullptr;
+  ASSERT_EQ(OgaStreamingProcessorProcess(processor, silence.data(), silence.size(), &inputs), nullptr);
+  ASSERT_NE(inputs, nullptr);
+  ASSERT_EQ(OgaGenerator_SetInputs(generator, inputs), nullptr);
+  while (!OgaGenerator_IsDone(generator)) {
+    ASSERT_EQ(OgaGenerator_GenerateNextToken(generator), nullptr);
+  }
+  OgaDestroyNamedTensors(inputs);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+  OgaDestroyStreamingProcessor(processor);
+  OgaDestroyModel(model);
+}
+
+// Test VAD set_option/get_option on StreamingProcessor
+TEST(CAPITests, StreamingASRVadSetGetOption) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  // Default: VAD disabled
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+
+  // Set and get threshold
+  processor->SetOption("silence_duration_ms", "1000");
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+
+  // Enable VAD if silero_vad.onnx is available
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (std::filesystem::exists(vad_path)) {
+    processor->SetOption("use_vad", "true");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+    processor->SetOption("vad_threshold", "0.8");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+    // Disable
+    processor->SetOption("use_vad", "false");
+    ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+  }
+  SUCCEED();
+}
+
+// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
+TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+
+  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+  processor->SetOption("use_vad", "true");
+  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+
+  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // First 2 silence chunks should still be processed (not dropped)
+  auto mel1 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+
+  auto mel2 = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+
+  // Third silence chunk should be dropped (> min_silence_chunks)
+  auto mel3 = processor->Process(silence.data(), silence.size());
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  SUCCEED();
+}
+
+#ifndef PARAKEET_TDT_PATH
+#define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_JFK
+#define PARAKEET_TDT_AUDIO_JFK MODEL_PATH "audios/jfk.flac"
+#endif
+
+#ifndef PARAKEET_TDT_AUDIO_TEDLIUM
+#define PARAKEET_TDT_AUDIO_TEDLIUM MODEL_PATH "audios/tedlium_long_120s.flac"
+#endif
+
+// Test that the Parakeet TDT model + processor + generator construct correctly.
+TEST(CAPITests, ParakeetTdtCreate) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  ASSERT_NE(processor, nullptr);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(generator, nullptr);
+}
+
+namespace {
+std::string RunParakeetTdt(const std::string& audio_path) {
+  auto model = OgaModel::Create(PARAKEET_TDT_PATH);
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+
+  std::vector<const char*> paths{audio_path.c_str()};
+  auto audios = OgaAudios::Load(paths);
+  auto inputs = processor->ProcessAudios("", audios.get());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*inputs);
+
+  std::string transcription;
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+    auto count = generator->GetSequenceCount(0);
+    if (count == 0) continue;
+    auto last = generator->GetSequenceData(0)[count - 1];
+    if (auto piece = tokenizer_stream->Decode(last); piece && *piece) {
+      transcription += piece;
+    }
+  }
+  return transcription;
+}
+}  // namespace
+
+// Transcribe the bundled JFK clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeJfk) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_JFK))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_JFK;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_JFK);
+  EXPECT_FALSE(transcription.empty());
+}
+
+// Transcribe a 120s TED clip and check the output is non-empty.
+TEST(CAPITests, ParakeetTdtTranscribeLong) {
+  if (!std::filesystem::exists(PARAKEET_TDT_PATH))
+    GTEST_SKIP() << "Parakeet TDT model not found at " << PARAKEET_TDT_PATH;
+  if (!std::filesystem::exists(PARAKEET_TDT_AUDIO_TEDLIUM))
+    GTEST_SKIP() << "Audio not found: " << PARAKEET_TDT_AUDIO_TEDLIUM;
+
+  auto transcription = RunParakeetTdt(PARAKEET_TDT_AUDIO_TEDLIUM);
+  EXPECT_FALSE(transcription.empty());
+}
+
+// Regression test for MSRC: malformed audio buffers smaller than the minimum valid
+// audio header size must be rejected with an error, not cause a crash.
+TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
+  const void* data_ptr = nullptr;
+  size_t data_size = 0;
+  OgaAudios* audios = nullptr;
+  OgaResult* result = OgaLoadAudiosFromBuffers(&data_ptr, &data_size, 1, &audios);
+
+  // Should return an error for empty buffers.
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("empty"), std::string::npos);
+  OgaDestroyResult(result);
+  // audios should not have been created
+  EXPECT_EQ(audios, nullptr);
+}

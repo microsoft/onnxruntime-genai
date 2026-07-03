@@ -1,11 +1,16 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
+#include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
 #include <memory>
+#include <type_traits>  // for std::remove_const_t
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
+#include "provider_options.h"        // for ProviderOptions
 namespace Ort {
 struct Allocator;
 }
@@ -89,7 +94,8 @@ enum struct DeviceType {
   CUDA,
   DML,
   WEBGPU,
-  QNN,
+  QnnHtp,
+  QnnGpu,
   OpenVINO,
   NvTensorRtRtx,
   RyzenAI,
@@ -130,6 +136,14 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
+
+  // Allow each EP to shape the trivial init-session ProviderOptions used by EnsureDeviceOrtInit.
+  // The default does nothing; EPs that need global singletons configured (e.g. WebGPU) or
+  // allocator gating options (e.g. QNN) override this. `user_options` is the user-supplied entry
+  // for this provider from config.model.decoder.session_options.provider_options, or nullptr if
+  // the user did not provide one.
+  virtual void ShapeInitSessionProviderOptions(ProviderOptions& /*init_options*/,
+                                               const ProviderOptions* /*user_options*/) const {}
 
   virtual void* GetCudaStream() {
     assert(false);

@@ -19,7 +19,7 @@ steps:
     displayName: "Log in to container registry"
 
   - powershell: |
-      $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+      $env:AZCOPY_MSI_CLIENT_ID = "f07143e5-63f7-4a7a-af08-c0418cc3f7fe";
       azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
     displayName: 'Download CUDA $(cuda_version)'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -34,7 +34,7 @@ steps:
       Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination ${{ parameters.CsprojFolder }}
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive
+      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non_interactive
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Windows'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: eq(variables['os'], 'win')
@@ -49,7 +49,7 @@ steps:
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
       dotnet build ./${{ parameters.CsprojName }}.csproj -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --no-restore --self-contained --verbosity normal
-      ls -l ./bin/${{ parameters.CsprojConfiguration }}/net6.0/$(os)-$(arch)/
+      ls -l ./bin/${{ parameters.CsprojConfiguration }}/net8.0/$(os)-$(arch)/
     displayName: 'Perform dotnet restore & build'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx'))
@@ -65,13 +65,12 @@ steps:
         --rm \
         --volume $(Build.Repository.LocalPath):/ort_genai_src \
         --volume $(Build.BinariesDirectory):/ort_genai_binary \
-        -e HF_TOKEN=$HF_TOKEN \
         -w /ort_genai_src/ $(cuda_docker_image) \
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
-            chmod +x ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} && \
-            ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive"
+            chmod +x ./bin/Release_Cuda/net8.0/linux-x64/${{ parameters.CsprojName }} && \
+            ./bin/Release_Cuda/net8.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non_interactive"
 
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -80,7 +79,7 @@ steps:
   - bash: |
       export ORTGENAI_LOG_ORT_LIB=1
       cd ${{ parameters.CsprojFolder }}
-      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive
+      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non_interactive
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux/macOS CPU'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))

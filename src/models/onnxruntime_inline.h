@@ -356,6 +356,31 @@ inline std::string OrtEpDevice::Vendor() const {
   return std::string(vendor);
 }
 
+inline const OrtHardwareDevice* OrtEpDevice::Device() const {
+  return Ort::api->EpDevice_Device(this);
+}
+
+inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
+  return Ort::api->HardwareDevice_Type(this);
+}
+
+inline uint32_t OrtHardwareDevice::VendorId() const {
+  return Ort::api->HardwareDevice_VendorId(this);
+}
+
+inline uint32_t OrtHardwareDevice::DeviceId() const {
+  return Ort::api->HardwareDevice_DeviceId(this);
+}
+
+inline std::string OrtHardwareDevice::Vendor() const {
+  const char* vendor = Ort::api->HardwareDevice_Vendor(this);
+  return std::string(vendor);
+}
+
+inline const OrtKeyValuePairs* OrtHardwareDevice::Metadata() const {
+  return Ort::api->HardwareDevice_Metadata(this);
+}
+
 inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid) {
   if (strcmp(logid, "onnxruntime-node") == 0) {
     Ort::ThrowOnError(Ort::api->SetLanguageProjection(&v, OrtLanguageProjection::ORT_PROJECTION_NODEJS));
@@ -531,6 +556,18 @@ inline OrtRunOptions& OrtRunOptions::AddActiveLoraAdapter(const OrtLoraAdapter& 
   Ort::ThrowOnError(Ort::api->RunOptionsAddActiveLoraAdapter(this, &adapter));
   return *this;
 }
+
+#if ORT_API_VERSION >= 25
+inline OrtRunOptions& OrtRunOptions::EnableProfiling(const ORTCHAR_T* profile_file_prefix) {
+  Ort::ThrowOnError(Ort::api->RunOptionsEnableProfiling(this, profile_file_prefix));
+  return *this;
+}
+
+inline OrtRunOptions& OrtRunOptions::DisableProfiling() {
+  Ort::ThrowOnError(Ort::api->RunOptionsDisableProfiling(this));
+  return *this;
+}
+#endif
 
 inline std::unique_ptr<OrtCUDAProviderOptionsV2> OrtCUDAProviderOptionsV2::Create() {
   OrtCUDAProviderOptionsV2* p;
@@ -897,6 +934,12 @@ inline void OrtSession::Run(const OrtRunOptions* run_options, const OrtIoBinding
 inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char* const* values, size_t kv_len) {
   Ort::ThrowOnError(Ort::api->SetEpDynamicOptions(this, keys, values, kv_len));
 }
+
+#if ORT_API_VERSION >= 27
+inline void OrtSession::ReleaseCapturedGraph(int graph_annotation_id) {
+  Ort::ThrowOnError(Ort::api->SessionReleaseCapturedGraph(this, graph_annotation_id));
+}
+#endif
 
 inline std::string OrtModelMetadata::GetProducerName() const {
   Ort::StringAllocator string_allocator;
@@ -1338,6 +1381,76 @@ inline std::unique_ptr<OrtOpAttr> OrtOpAttr::Create(const char* name, const void
   return std::unique_ptr<OrtOpAttr>{p};
 }
 
+inline std::unique_ptr<OrtGraph> OrtGraph::Create() {
+  OrtGraph* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateGraph(&p));
+  return std::unique_ptr<OrtGraph>{p};
+}
+
+inline void OrtGraph::SetInputs(OrtValueInfo** inputs, size_t input_count) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().SetGraphInputs(this, inputs, input_count));
+}
+
+inline void OrtGraph::SetOutputs(OrtValueInfo** outputs, size_t output_count) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().SetGraphOutputs(this, outputs, output_count));
+}
+
+inline void OrtGraph::AddNode(OrtNode* node) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().AddNodeToGraph(this, node));
+}
+
+inline std::unique_ptr<OrtModel> OrtModel::Create(const char** domain_names, const int* opset_versions, size_t num_domains) {
+  OrtModel* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateModel(domain_names, opset_versions, num_domains, &p));
+  return std::unique_ptr<OrtModel>{p};
+}
+
+inline void OrtModel::AddGraph(OrtGraph* graph) {
+  Ort::ThrowOnError(Ort::GetModelEditorApi().AddGraphToModel(this, graph));
+}
+
+inline std::unique_ptr<OrtValueInfo> OrtValueInfo::Create(const char* name, const OrtTensorTypeAndShapeInfo* tensor_info) {
+  const auto& model_editor_api = Ort::GetModelEditorApi();
+
+  OrtTypeInfo* type_info;
+  Ort::ThrowOnError(model_editor_api.CreateTensorTypeInfo(tensor_info, &type_info));
+
+  OrtValueInfo* p;
+  auto status = model_editor_api.CreateValueInfo(name, type_info, &p);
+  Ort::api->ReleaseTypeInfo(type_info);
+  Ort::ThrowOnError(status);
+
+  return std::unique_ptr<OrtValueInfo>{p};
+}
+
+inline std::unique_ptr<OrtNode> OrtNode::Create(const char* op_type, const char* domain, const char* name,
+                                                const char** input_names, size_t num_inputs,
+                                                const char** output_names, size_t num_outputs,
+                                                OrtOpAttr** attributes, size_t num_attributes) {
+  OrtNode* p;
+  Ort::ThrowOnError(Ort::GetModelEditorApi().CreateNode(
+      op_type, domain, name,
+      input_names, num_inputs,
+      output_names, num_outputs,
+      attributes, num_attributes,
+      &p));
+  return std::unique_ptr<OrtNode>{p};
+}
+
+inline std::unique_ptr<OrtTensorTypeAndShapeInfo> OrtTensorTypeAndShapeInfo::Create() {
+  OrtTensorTypeAndShapeInfo* p;
+  Ort::ThrowOnError(Ort::api->CreateTensorTypeAndShapeInfo(&p));
+  return std::unique_ptr<OrtTensorTypeAndShapeInfo>{p};
+}
+
+inline void OrtTensorTypeAndShapeInfo::SetElementType(ONNXTensorElementDataType type) {
+  Ort::ThrowOnError(Ort::api->SetTensorElementType(this, type));
+}
+
+inline void OrtTensorTypeAndShapeInfo::SetDimensions(const int64_t* dim_values, size_t dim_count) {
+  Ort::ThrowOnError(Ort::api->SetDimensions(this, dim_values, dim_count));
+}
+
 inline std::unique_ptr<OrtKernelInfo> OrtKernelInfo::Clone() const {
   OrtKernelInfo* p;
   Ort::ThrowOnError(Ort::api->CopyKernelInfo(this, &p));
@@ -1417,3 +1530,108 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
+
+#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+
+namespace Ort {
+
+inline const ModelPackageApi& GetModelPackageApi() {
+  static const ModelPackageApi fns = []() {
+    ModelPackageApi f;
+    if (api == nullptr) {
+      return f;
+    }
+    f.CreateModelPackageOptionsFromSessionOptions =
+        Experimental::Get_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn(api);
+    f.ReleaseModelPackageOptions =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn(api);
+    f.CreateModelPackageContext =
+        Experimental::Get_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn(api);
+    f.ReleaseModelPackageContext =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn(api);
+    f.ModelPackage_GetComponentCount =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn(api);
+    f.ModelPackage_GetComponentNames =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantCount =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantNames =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
+    f.ModelPackage_GetVariantEpName =
+        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
+    f.SelectComponent =
+        Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
+    f.ReleaseModelPackageComponentContext =
+        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn(api);
+    f.ModelPackageComponent_GetSelectedVariantFolderPath =
+        Experimental::Get_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn(api);
+    return f;
+  }();
+  if (fns.CreateModelPackageContext == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build. "
+        "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
+  }
+  return fns;
+}
+
+}  // namespace Ort
+
+inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
+                                                                              const OrtSessionOptions& session_options) {
+  OrtModelPackageOptions* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageOptionsFromSessionOptions(&env, &session_options, &p));
+  return std::unique_ptr<OrtModelPackageOptions>{p};
+}
+
+inline std::unique_ptr<OrtModelPackageContext> OrtModelPackageContext::Create(const ORTCHAR_T* package_root) {
+  OrtModelPackageContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageContext(package_root, &p));
+  return std::unique_ptr<OrtModelPackageContext>{p};
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetComponentNames() const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetComponentNames(this, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const char* component_name) const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantNames(this, component_name, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::string OrtModelPackageContext::GetVariantEpName(const char* component_name,
+                                                            const char* variant_name) const {
+  const char* ep = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(this, component_name, variant_name, &ep));
+  return (ep == nullptr) ? std::string{} : std::string{ep};
+}
+
+inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(
+    const char* component_name, const OrtModelPackageOptions& options) const {
+  OrtModelPackageComponentContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().SelectComponent(this, component_name, &options, &p));
+  return std::unique_ptr<OrtModelPackageComponentContext>{p};
+}
+
+inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelectedVariantFolderPath() const {
+  const ORTCHAR_T* path = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFolderPath(this, &path));
+  return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
+}
+
+#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API

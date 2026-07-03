@@ -15,12 +15,19 @@
 #define ENABLE_INTSAFE_SIGNED_FUNCTIONS  // Only unsigned intsafe math/casts available without this def
 #include <intsafe.h>
 #include <tchar.h>
+#include <direct.h>
 #endif  // _WIN32
 
 #include <sys/stat.h>
 
-#include <string>
 #include <fstream>
+#include <stdexcept>
+#include <string>
+
+#ifndef _WIN32
+#include <limits.h>
+#include <unistd.h>
+#endif
 
 namespace fs {
 
@@ -32,6 +39,11 @@ class path {
     wpath_ = to_wstring();
 #endif
   };
+
+#ifdef _WIN32
+  // Construct from a wide (UTF-16) path, e.g. an ORTCHAR_T path from ONNX Runtime.
+  path(const std::wstring& wpath) : path_(to_utf8(wpath)), wpath_(wpath) {};
+#endif
 
   static constexpr char separator =
 #ifdef _WIN32
@@ -170,12 +182,56 @@ class path {
     // Return as a string
     return out;
   }
+
+  // Convert a wide (UTF-16) path to UTF-8, the inverse of to_wstring().
+  static std::string to_utf8(const std::wstring& wpath) {
+    if (wpath.empty()) {
+      return {};
+    }
+
+    int iSource;  // convert to int because Wc2Mb requires it.
+    SizeTToInt(wpath.size(), &iSource);
+
+    // Ask how much space we will need.
+    SetLastError(0);
+    const auto iTarget =
+        WideCharToMultiByte(CP_UTF8, 0, wpath.data(), iSource, nullptr, 0, nullptr, nullptr);
+
+    size_t cchNeeded;
+    IntToSizeT(iTarget, &cchNeeded);
+
+    // Allocate ourselves some space and convert for real.
+    std::string out;
+    out.resize(cchNeeded);
+    WideCharToMultiByte(CP_UTF8, 0, wpath.data(), iSource, out.data(), iTarget, nullptr, nullptr);
+
+    return out;
+  }
 #endif  // _WIN32
 };
 
 // Namespace-level functions
 inline bool exists(const path& p) {
   return p.exists();
+}
+
+inline path absolute(const path& p) {
+  if (!p.is_relative()) {
+    return p;
+  }
+
+#ifdef _WIN32
+  char cwd_buffer[_MAX_PATH];
+  if (!_getcwd(cwd_buffer, sizeof(cwd_buffer))) {
+#else
+  char cwd_buffer[PATH_MAX];
+  if (!getcwd(cwd_buffer, sizeof(cwd_buffer))) {
+#endif
+    throw std::runtime_error("Failed to get current working directory");
+  }
+
+  path cwd_path{cwd_buffer};
+  return cwd_path / p;
 }
 
 }  // namespace fs

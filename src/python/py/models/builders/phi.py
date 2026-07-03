@@ -27,10 +27,12 @@ class PhiModel(Model):
             location="input",
         )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+
+        old_skip_input = self.layernorm_attrs["skip_input"]
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
-        residual_add_inputs = [self.layernorm_attrs["skip_input"], self.mlp_attrs["output_0"]]
+        residual_add_inputs = [old_skip_input, self.layernorm_attrs["skip_input"]]
         self.make_add(
             residual_add_name,
             residual_add_inputs,
@@ -61,12 +63,31 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         if "position_ids" in self.input_names:
             position_ids_result = self.make_position_ids_reformatting()
             self.position_ids_name = (
-                f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+                f"{position_ids_result}/output_0" if position_ids_result != self.input_names["position_ids"] else self.input_names["position_ids"]
             )
         else:
             # When position_ids is not an input (use_rope_in_attn is True),
             # position_ids won't be used since rotary embeddings are handled in GQA
             self.position_ids_name = None
+
+    def make_rope_init(self, config):
+        if "short_factor" in config.rope_scaling:
+            # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
+            self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
+            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+
+            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
+            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+            short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+            long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+
+            self.rope_attrs["multi_cache"] = {
+                "short_factor": short_factor,  # Short factor when calculating `inv_freq` in rotary embeddings
+                "long_factor": long_factor,    # Long factor when calculating `inv_freq` in rotary embeddings
+                "short_mscale": short_mscale,  # Magnitude scaling for short factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+                "long_mscale": long_mscale,    # Magnitude scaling for long factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+            }
 
     def make_position_ids_reformatting(self):
         if self.ep not in self.eps_without_if_support:
@@ -103,7 +124,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         compute_str_dtype = self.to_str_dtype(compute_dtype)
 
         # Cast position_ids to int32 for WebGPU
-        input_tensor = "position_ids"
+        input_tensor = self.input_names["position_ids"]
         if is_webgpu:
             cast_input_name = f"{basename}/Cast_input"
             self.make_cast(
@@ -164,6 +185,74 @@ class Phi3SmallModel(Model):
             self.attention_attrs["scale"] = config.mup_attn_multiplier / self.head_size
 
         self.clamp_limit = config.gegelu_limit
+
+    def make_attention_init(self, config):
+        # Block-sparse attention-specific variables
+        sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
+        kernel_block_size = config.blocksparse_triton_kernel_block_size if hasattr(config, "blocksparse_triton_kernel_block_size") else 0
+        local_blocks = config.blocksparse_num_local_blocks if hasattr(config, "blocksparse_num_local_blocks") else 0
+        vert_block_stride = config.blocksparse_vert_stride if hasattr(config, "blocksparse_vert_stride") else 0
+        homo_head = config.blocksparse_homo_head_pattern if hasattr(config, "blocksparse_homo_head_pattern") else False
+
+        self.attention_attrs["block_sparse"] = {
+            "sparse_block_size": sparse_block_size,      # Sparse block size for SparseAttention op
+            "kernel_block_size": kernel_block_size,      # Kernel block size for sparse attention
+            "local_blocks": local_blocks,                # Number of local blocks for sparse attention
+            "vert_stride": vert_block_stride,            # Vertical stride to use for sparse attention
+            "homo_head": homo_head,                      # Use homo head pattern for sparse attention
+        }
+
+        super().make_attention_init(config)
+
+    def make_lm_head_init(self, config):
+        if hasattr(config, "dummy_token_indices"):
+            # Create LM head mask for tokens in the vocabulary
+            dummy_tokens_mask = torch.zeros(self.vocab_size).bool()
+            dummy_tokens_mask[config.dummy_token_indices] = True
+            self.lm_head_attrs["mask"] = dummy_tokens_mask
+
+    def make_attention_mask_reformatting(self):
+        super().make_attention_mask_reformatting()
+        if self.attention_attrs["block_sparse"]["sparse_block_size"] != 0:
+            self.make_attention_mask_reformatting_for_sparse_attn()
+
+    def make_attention_mask_reformatting_for_sparse_attn(self):
+        # Make nodes for the attention mask subgraph that calculates
+        # attributes about the 2D attention mask to use in SparseAttention
+        #
+        #                attention_mask
+        #               /              \
+        #          ReduceSum          Shape
+        #         (keepdims=0)          |
+        #              |                |
+        #        Cast to int32        Gather
+        #              |                |
+        #      key_total_seq_lens  Cast to int32
+        #            (1D)               |
+        #                          total_seq_len
+        #                             (int)
+
+        basename = "/model/attn_mask_reformat"
+        attn_mask_basename = f"{basename}/attn_mask_subgraph"
+
+        # Left path
+        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+        reduce_sum_inputs = [self.input_names["attention_mask"], "/model/constants/INT64/[1]"]
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
+        cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
+        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size"])
+
+        # Right path
+        shape_name = f"{attn_mask_basename}/Shape"
+        self.make_shape(shape_name, self.input_names["attention_mask"], shape=[2])
+        gather_name = f"{attn_mask_basename}/Gather"
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
+        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
+        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
+        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
+
+        self.mask_attrs["key_total_seq_lens"] = cast_1_name
+        self.mask_attrs["total_seq_len"] = cast_2_name
 
     def calculate_cdiv(self, a, b):
         return -(a // -b)

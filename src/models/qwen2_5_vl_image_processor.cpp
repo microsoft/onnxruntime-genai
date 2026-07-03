@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include <limits>
 #include <numeric>
 #include <regex>
 
@@ -167,7 +168,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
-      spatial_merge_size_{config.model.vision.spatial_merge_size} {
+      spatial_merge_size_{config.model.vision.spatial_merge_size},
+      patch_size_{config.model.vision.patch_size} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -199,12 +201,16 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject that the caller owns.
+  // Wrap in OrtxObjectPtr so it's disposed on scope exit (avoids TensorObject leak).
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
-  OrtxTensor* image_grid_thw = nullptr;
+  ort_extensions::OrtxObjectPtr<OrtxTensor> image_grid_thw_owner;
   // Try to get image_grid_thw from processor (second output)
-  auto status = OrtxTensorResultGetAt(result.get(), 1, &image_grid_thw);
+  auto status = OrtxTensorResultGetAt(result.get(), 1, image_grid_thw_owner.ToBeAssigned());
+  OrtxTensor* image_grid_thw = image_grid_thw_owner.get();
 
   // Get pixel_values data and shape
   const float* pixel_values_data{};
@@ -221,7 +227,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
-    constexpr int64_t kPatchSize = 14;
+    const int64_t kPatchSize = patch_size_;  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
     constexpr int64_t kTemporalPatchSize = 2;
 
     int64_t height = pixel_values_shape[1];  // HWC: [batch, height, width, channels]
@@ -230,56 +236,99 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
     int64_t height_patches = height / kPatchSize;
     int64_t width_patches = width / kPatchSize;
-    int64_t total_patches = height_patches * width_patches;
-    int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
 
-    // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
-    // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
-    patched_pixel_values = OrtValue::CreateTensor<float>(
-        allocator, std::vector<int64_t>{1, total_patches, patch_dim});
-    auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
+    if (channels <= 0) {
+      throw std::runtime_error("Invalid channel count for image patching: channels=" +
+                               std::to_string(channels));
+    }
 
-    // Extract patches from single image in HWC format
-    // Each spatial patch is replicated kTemporalPatchSize times
-    int64_t patch_idx = 0;
-    for (int64_t ph = 0; ph < height_patches; ++ph) {
-      for (int64_t pw = 0; pw < width_patches; ++pw) {
-        int64_t h_start = ph * kPatchSize;
-        int64_t w_start = pw * kPatchSize;
+    // Image too small to form any patches — skip patching entirely.
+    // patched_pixel_values remains null, so the non-patched pixel_values path handles it.
+    if (height_patches > 0 && width_patches > 0) {
+      // Check overflow for total_patches = height_patches * width_patches
+      if (height_patches > std::numeric_limits<int64_t>::max() / width_patches) {
+        throw std::runtime_error("Integer overflow computing total_patches: height_patches=" +
+                                 std::to_string(height_patches) + " * width_patches=" +
+                                 std::to_string(width_patches));
+      }
+      int64_t total_patches = height_patches * width_patches;
 
-        int64_t write_idx = patch_idx * patch_dim;
+      // Check overflow for patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize
+      int64_t patch_dim = channels;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kTemporalPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: channels=" +
+                                 std::to_string(channels) + " * kTemporalPatchSize=" +
+                                 std::to_string(kTemporalPatchSize));
+      }
+      patch_dim *= kTemporalPatchSize;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: " +
+                                 std::to_string(patch_dim) + " * kPatchSize=" +
+                                 std::to_string(kPatchSize) + " (first kPatchSize multiply)");
+      }
+      patch_dim *= kPatchSize;
+      if (patch_dim > std::numeric_limits<int64_t>::max() / kPatchSize) {
+        throw std::runtime_error("Integer overflow computing patch_dim: " +
+                                 std::to_string(patch_dim) + " * kPatchSize=" +
+                                 std::to_string(kPatchSize) + " (second kPatchSize multiply)");
+      }
+      patch_dim *= kPatchSize;
 
-        // Repeat the same spatial patch kTemporalPatchSize times
-        // Output: [temporal, channels, patch_h, patch_w]
-        for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
-          for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t h = 0; h < kPatchSize; ++h) {
-              for (int64_t w = 0; w < kPatchSize; ++w) {
-                // HWC format: pixel_values[height][width][channels]
-                int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
-                patched_data[write_idx++] = pixel_values_data[src_idx];
+      // Check overflow for total buffer size = total_patches * patch_dim
+      if (total_patches > std::numeric_limits<int64_t>::max() / patch_dim) {
+        throw std::runtime_error("Integer overflow computing patched buffer size: total_patches=" +
+                                 std::to_string(total_patches) + " * patch_dim=" +
+                                 std::to_string(patch_dim));
+      }
+
+      // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
+      // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
+      patched_pixel_values = OrtValue::CreateTensor<float>(
+          allocator, std::vector<int64_t>{1, total_patches, patch_dim});
+      auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
+
+      // Extract patches from single image in HWC format
+      // Each spatial patch is replicated kTemporalPatchSize times
+      int64_t patch_idx = 0;
+      for (int64_t ph = 0; ph < height_patches; ++ph) {
+        for (int64_t pw = 0; pw < width_patches; ++pw) {
+          int64_t h_start = ph * kPatchSize;
+          int64_t w_start = pw * kPatchSize;
+
+          int64_t write_idx = patch_idx * patch_dim;
+
+          // Repeat the same spatial patch kTemporalPatchSize times
+          // Output: [temporal, channels, patch_h, patch_w]
+          for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
+            for (int64_t c = 0; c < channels; ++c) {
+              for (int64_t h = 0; h < kPatchSize; ++h) {
+                for (int64_t w = 0; w < kPatchSize; ++w) {
+                  // HWC format: pixel_values[height][width][channels]
+                  int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
+                  patched_data[write_idx++] = pixel_values_data[src_idx];
+                }
               }
             }
           }
+          patch_idx++;
         }
-        patch_idx++;
       }
-    }
 
-    // Create image_grid_thw: [1, 3] for single image
-    if (status != kOrtxOK || !image_grid_thw) {
-      computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
-          allocator, std::vector<int64_t>{1, 3});
-      auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
+      // Create image_grid_thw: [1, 3] for single image
+      if (status != kOrtxOK || !image_grid_thw) {
+        computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
+            allocator, std::vector<int64_t>{1, 3});
+        auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
 
-      // For a single image: T=1 (one frame), H=height_patches, W=width_patches
-      // The kTemporalPatchSize is embedded in the patch dimension
-      grid_data[0] = 1;  // Single temporal frame for images
-      grid_data[1] = height_patches;
-      grid_data[2] = width_patches;
+        // For a single image: T=1 (one frame), H=height_patches, W=width_patches
+        // The kTemporalPatchSize is embedded in the patch dimension
+        grid_data[0] = 1;  // Single temporal frame for images
+        grid_data[1] = height_patches;
+        grid_data[2] = width_patches;
 
-      computed_grid_data = grid_data;
-      computed_grid_num_images = 1;
+        computed_grid_data = grid_data;
+        computed_grid_num_images = 1;
+      }
     }
   }
 
@@ -293,25 +342,32 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
-    // For non-patched pixel_values, we need to handle potential batch dimension from PatchImage extension
-    // Model expects [num_patches, 1176] but extension might return [batch, num_patches, 1176]
+    // For non-patched pixel_values, PatchImage may return various layouts depending on
+    // the number of images and the extension version:
+    //   [num_patches, patch_dim]        – already 2D (single image, some versions)
+    //   [1, num_patches, patch_dim]     – single batch wrapper
+    //   [N, patches_per_image, patch_dim] – N images stacked along dim 0
+    //
+    // vision.onnx is exported for exactly ONE image (with a symbolic 'num_patches'
+    // dim) and is called repeatedly by VisionState::Run via a C++ per-image loop.
+    // It therefore always expects a 2D input [patches, patch_dim].  Flatten
+    // unconditionally so the processor output is layout-agnostic.
     const void* pixel_data{};
     const int64_t* pixel_shape{};
     size_t pixel_num_dims;
     CheckResult(OrtxGetTensorData(pixel_values, &pixel_data, &pixel_shape, &pixel_num_dims));
 
-    // Squeeze out leading dimension of size 1 if present
-    std::vector<int64_t> pixel_target_shape;
-    size_t squeeze_offset = 0;
-    if (pixel_num_dims >= 3 && pixel_shape[0] == 1) {
-      // Skip the batch dimension
-      squeeze_offset = 1;
-    }
-    for (size_t i = squeeze_offset; i < pixel_num_dims; ++i) {
-      pixel_target_shape.push_back(pixel_shape[i]);
-    }
+    int64_t pixel_patch_dim = pixel_shape[pixel_num_dims - 1];  // last dim is always patch_dim (e.g. 1536)
+    int64_t total_pixel_elements = 1;
+    for (size_t i = 0; i < pixel_num_dims; ++i) total_pixel_elements *= pixel_shape[i];
+    if (pixel_patch_dim <= 0 || total_pixel_elements % pixel_patch_dim != 0)
+      throw std::runtime_error("pixel_values total elements (" + std::to_string(total_pixel_elements) +
+                               ") is not divisible by patch_dim (" + std::to_string(pixel_patch_dim) +
+                               "). Unexpected layout from ort-extensions.");
+    int64_t total_pixel_patches = total_pixel_elements / pixel_patch_dim;
+    std::vector<int64_t> pixel_target_shape = {total_pixel_patches, pixel_patch_dim};
 
-    int64_t num_pixel_elements = std::accumulate(pixel_target_shape.begin(), pixel_target_shape.end(), 1LL, std::multiplies<int64_t>());
+    int64_t num_pixel_elements = total_pixel_elements;
 
     // Create temporary float tensor from processor output
     auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
@@ -334,17 +390,23 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_data),
                                   &grid_shape, &grid_num_dims));
 
-    // The vision model expects shape [num_images, 3], but PatchImage might return [batch, num_images, 3]
-    // Squeeze out leading dimension of size 1
-    std::vector<int64_t> grid_target_shape;
-    size_t grid_squeeze_offset = 0;
-    if (grid_num_dims >= 3 && grid_shape[0] == 1) {
-      // Skip the batch dimension
-      grid_squeeze_offset = 1;
-    }
-    for (size_t i = grid_squeeze_offset; i < grid_num_dims; ++i) {
-      grid_target_shape.push_back(grid_shape[i]);
-    }
+    // PatchImage may return image_grid_thw in several layouts depending on the
+    // number of images and the extension version:
+    //   [3]        – single image, flat (rank 1)
+    //   [1, 3]     – single image, already [num_images, 3]
+    //   [N, 3]     – N images, already correct
+    //   [1, N, 3]  – single batch wrapper around N images
+    //   [N, 1, 3]  – per-image wrapper (one [1,3] per image stacked)
+    //
+    // Rather than trying to squeeze specific dimensions (which depends on
+    // knowing the exact layout), we compute num_images = total_elements / 3
+    // because the last logical dimension is always 3 (T, H, W per image).
+    // This is safe as long as the extension never inserts extra trailing dims,
+    // which holds for all current versions of ort-extensions PatchImage.
+    int64_t total_grid_elements = 1;
+    for (size_t i = 0; i < grid_num_dims; ++i) total_grid_elements *= grid_shape[i];
+    int64_t num_grid_images = total_grid_elements / 3;
+    std::vector<int64_t> grid_target_shape = {num_grid_images, 3LL};
 
     // Ensure we have rank 2 [num_images, 3]
     if (grid_target_shape.size() != 2 || grid_target_shape[1] != 3) {

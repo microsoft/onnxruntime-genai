@@ -104,7 +104,8 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 }
 
 WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
-  if (model_.p_device_inputs_->GetType() != DeviceType::QNN &&
+  if (model_.p_device_inputs_->GetType() != DeviceType::QnnHtp &&
+      model_.p_device_inputs_->GetType() != DeviceType::QnnGpu &&
       model_.p_device_inputs_->GetType() != DeviceType::CPU) {
     throw std::runtime_error("Sliding a window over input_ids only works with either the QNN or the CPU provider.");
   }
@@ -214,10 +215,10 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
       if (past_sequence_length_)
         *past_sequence_length_->GetTensorMutableData<int32_t>() = historical_num_tokens_;
     } else {
-      if (past_sequence_length_)
+      if (past_sequence_length_) {
         *past_sequence_length_->GetTensorMutableData<int32_t>() += 1;
-
-      historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
+        historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
+      }
     }
 
     value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];

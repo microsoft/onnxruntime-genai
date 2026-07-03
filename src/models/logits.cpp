@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
@@ -15,8 +17,9 @@ Logits::Logits(State& state)
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
-  if (IsOpenVINOStatefulModel(state.model_) || state_.model_.p_device_->GetType() == DeviceType::RyzenAI) {
-    // In the case of OpenVINO stateful models or RyzenAI models, they are patched in a way so that they only return the
+  if (IsOpenVINOStatefulModel(state.model_) || state.model_.IsPruned()) {
+    // In the case of OpenVINO stateful models, or any model whose ONNX graph
+    // has been patched to only output last-token logits (logits dim[1]==1), they only return the
     // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
     // logits of the shape:  [1,43,<vocab_size>]
     // they will have shape: [1, 1,<vocab_size>].
@@ -41,7 +44,7 @@ DeviceSpan<float> Logits::Get() {
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_last, type_);
 
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>)
       logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
 
     logits_of_last_token = output_last_tokens_.get();
@@ -66,8 +69,8 @@ DeviceSpan<float> Logits::Get() {
     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
   }
 
-  // Convert from float16 to float32 if necessary
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
+  // Convert from float16/bfloat16 to float32 if necessary
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
     Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_of_last_token = logits_of_last_token_fp32_.get();
   }

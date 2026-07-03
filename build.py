@@ -106,6 +106,7 @@ def _parse_args():
             "NMake Makefiles",
             "Unix Makefiles",
             "Visual Studio 17 2022",
+            "Visual Studio 18 2026",
             "Xcode",
         ],
         default=("Visual Studio 17 2022" if util.is_windows() else "Unix Makefiles"),
@@ -133,9 +134,18 @@ def _parse_args():
         "--use_trt_rtx", action="store_true", help="Whether to use TensorRT-RTX. Default is to not use TensorRT-RTX."
     )
 
-    parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
-
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
+
+    parser.add_argument(
+        "--use_winml", action="store_true", help="Whether to use WinML. Default is to not use WinML."
+    )
+    parser.add_argument(
+        "--winml_sdk_version",
+        type=str,
+        default="2.1.1",
+        help="Version of the Microsoft.Windows.AI.MachineLearning NuGet package to use. "
+        "Only used when --use_winml is specified. Default is 2.1.1.",
+    )
 
     parser.add_argument(
         "--use_guidance", action="store_true", help="Whether to add guidance support. Default is False."
@@ -292,6 +302,17 @@ def _validate_trt_rtx_args(args: argparse.Namespace):
         args.cuda_home = cuda_home.resolve(strict=True)
 
 
+def _validate_winml_args(args: argparse.Namespace):
+    if args.use_winml:
+        if not util.is_windows():
+            raise RuntimeError("--use_winml is only supported on Windows.")
+
+        if not args.winml_sdk_version:
+            # Fall back to the default so the CMake FATAL_ERROR for a missing
+            # WINML_SDK_VERSION is never hit through the normal build.py flow.
+            args.winml_sdk_version = "2.1.1"
+
+
 def _validate_android_args(args: argparse.Namespace):
     if args.android:
         if not args.android_home:
@@ -368,6 +389,7 @@ def _validate_args(args: argparse.Namespace):
     _validate_build_dir(args)
     _validate_cuda_args(args)
     _validate_trt_rtx_args(args)
+    _validate_winml_args(args)
     _validate_android_args(args)
     _validate_ios_args(args)
     _validate_cmake_args(args)
@@ -393,7 +415,7 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path | None = None):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
@@ -402,9 +424,12 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     native_lib_path = (
         f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
     )
-    ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path, ort_lib_path]
+    if ort_lib_dir:
+        ort_lib_path = f"/p:OrtLibDir={str(ort_lib_dir)}"
+        props = [configuration, platform, native_lib_path, ort_lib_path]
+    else:
+        props = [configuration, platform, native_lib_path]
 
     return props
 
@@ -534,8 +559,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_TRT_RTX={'ON' if args.use_trt_rtx else 'OFF'}",
-        f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
+        f"-DUSE_WINML={'ON' if args.use_winml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
@@ -544,6 +569,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]
+
+    if args.use_winml:
+        command += [f"-DWINML_SDK_VERSION={args.winml_sdk_version}"]
 
     if args.use_cuda or args.use_trt_rtx:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
@@ -646,6 +674,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             command += ["-A", "ARM64"]
         elif args.arm64ec:
             command += ["-A", "ARM64EC"]
+        elif args.use_winml:
+            # WinML resolves its ONNX Runtime artifacts based on the generator
+            # platform (see cmake/ortlib.cmake). For a default x64 build the
+            # platform is otherwise left unset, so set it explicitly.
+            command += ["-A", "x64"]
 
     if args.arm64 or args.arm64ec:
         if args.test:
@@ -682,7 +715,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -695,7 +728,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
             "build",
             ".",
         ]
-        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
+        csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -729,7 +762,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -775,16 +808,18 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     samples_to_build = [
         "-DMODEL_QA=ON",
         "-DMODEL_CHAT=ON",
-        "-DMODEL_VISION=ON",
-        "-DPHI4-MM=ON",
+        "-DMODEL_MM=ON",
         "-DWHISPER=ON",
+        "-DNEMOTRON_SPEECH=ON"
     ]
 
-    include_dir = REPO_ROOT / "src"
-    lib_dir = args.build_dir
+    ort_include_dir = REPO_ROOT / "ort" / "include"
+    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    oga_include_dir = REPO_ROOT / "src"
+    oga_lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
-        lib_dir = lib_dir / args.config
+        oga_lib_dir = oga_lib_dir / args.config
 
     cmake_command = (
         [
@@ -798,8 +833,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ]
         + samples_to_build
         + [
-            "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
-            "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
+            "-DORT_LIB_DIR=" + str(ort_lib_dir),
+            "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
+            "-DOGA_LIB_DIR=" + str(oga_lib_dir),
         ]
     )
 

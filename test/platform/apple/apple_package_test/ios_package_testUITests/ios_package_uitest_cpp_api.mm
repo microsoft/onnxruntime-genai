@@ -54,16 +54,18 @@
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*sequences);
 
-  while (true) {
+  XCTAssertEqual(static_cast<int>(params->GetSearchNumber("max_length")), 100);
+  XCTAssertEqual(params->GetSearchBool("early_stopping"), true);
+  XCTAssertEqual(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
+
+  while (!generator->IsDone()) {
     generator->GenerateNextToken();
-    if (generator->IsDone()) {
-      break;
-    }
   }
 
   const auto output_sequence_length = generator->GetSequenceCount(0);
   const auto* output_sequence_data = generator->GetSequenceData(0);
   auto out_string = tokenizer->Decode(output_sequence_data, output_sequence_length);
+  XCTAssertEqual(static_cast<int>(generator->TokenCount()), static_cast<int>(generator->GetSequenceCount(0)));
 }
 
 @end

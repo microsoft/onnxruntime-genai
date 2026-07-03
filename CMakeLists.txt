@@ -7,6 +7,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 else()
   cmake_minimum_required(VERSION 3.26)
 endif()
+
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -25,11 +26,6 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # DLL initialization errors due to old conda msvcp140.dll dll are a result of the new MSVC compiler
-  # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
-  # Remove this definition once the conda msvcp140.dll dll is updated.
-  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-
   # Add compiler options for security standards
   # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
 
@@ -84,6 +80,10 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
 
+    # Suppress warning C4996: use of deprecated function or variable
+    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
+
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
     "$<$<COMPILE_LANGUAGE:C>:/W4>"
@@ -133,6 +133,19 @@ if(ENABLE_TESTS)
   else()
     add_compile_definitions(TEST_PHI2=0)
   endif()
+
+  if (TEST_QWEN_2_5)
+    add_compile_definitions(TEST_QWEN_2_5=1)
+  else()
+    add_compile_definitions(TEST_QWEN_2_5=0)
+  endif()
+
+  if (USE_WEBGPU)
+    add_compile_definitions(USE_WEBGPU=1)
+  else()
+    add_compile_definitions(USE_WEBGPU=0)
+  endif()
+
 endif()
 
 if(ENABLE_TRACING)
@@ -189,9 +202,27 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
     $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4996>
   )
+
+  # nvcc compiles CUDA code with cl.exe, so we need to pass the /Zc:preprocessor option to avoid compilation errors
+  if(WIN32 AND MSVC AND MSVC_VERSION GREATER_EQUAL 1925)
+    add_compile_options(
+      $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/Zc:preprocessor>
+    )
+  endif()
   
-  add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+  if(WIN32)
+    add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_MINOR=${VERSION_MINOR})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_PATCH=${VERSION_PATCH})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE FILE_NAME=\"onnxruntime-genai-cuda.dll\")
+  else()
+    add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+  endif()
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
@@ -204,7 +235,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   elseif(UNIX)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${GENERATORS_ROOT}/cuda/version_script.lds -Xlinker --gc-sections")
   elseif(WIN32)
-    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:\"${GENERATORS_ROOT}/cuda/symbols.def\"")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
@@ -218,6 +249,31 @@ if(USE_GUIDANCE)
     # bcrypt is needed for the rust std lib
     target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
   endif()
+  if(MSVC)
+    # The Rust llguidance static library is always compiled against the release MSVC CRT
+    # (Rust has no debug CRT concept). The .lib embeds /DEFAULTLIB directives for the release
+    # CRT and /NODEFAULTLIB directives that suppress the debug CRT (msvcrtd, ucrtd, vcruntimed).
+    # In Debug builds, C++ code (e.g. onnxruntime-extensions) is compiled with /MDd and references
+    # debug-only CRT functions like _CrtDbgReport (in ucrtd.lib). Because the Rust .lib suppresses
+    # ucrtd.lib via its embedded /NODEFAULTLIB, _CrtDbgReport becomes unresolved.
+    #
+    # Fix: explicitly add the debug CRT import libraries in Debug builds. Explicitly specified
+    # libraries are not affected by /NODEFAULTLIB directives (those only suppress /DEFAULTLIB
+    # auto-linking). Also suppress the conflicting release CRT to avoid LNK4098 warnings.
+    target_link_libraries(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:msvcrtd.lib>
+      $<$<CONFIG:Debug>:ucrtd.lib>
+      $<$<CONFIG:Debug>:vcruntimed.lib>
+    )
+    target_link_options(onnxruntime-genai PRIVATE
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:ucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:vcruntime.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libucrt.lib>
+      $<$<CONFIG:Debug>:/NODEFAULTLIB:libvcruntime.lib>
+    )
+  endif()
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
@@ -226,7 +282,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
+  target_link_libraries(onnxruntime-genai PUBLIC dl)  # For dlopen & co
 endif()
 
 if(USE_DML)
@@ -269,6 +325,11 @@ if(ANDROID)
   # strip the binary if it's not a build with debug info
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
+
+  # Build shared libraries with support for 16 KB page size on Android
+  # https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 endif()
 
 if(ENABLE_TESTS)

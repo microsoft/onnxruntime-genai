@@ -120,13 +120,13 @@ jobs:
 
       - task: UsePythonVersion@0
         inputs:
-          versionSpec: 3.10
+          versionSpec: 3.11
           addToPath: true
 
       - powershell: |
           # Package dependencies
 
-          $ort_nuget_package_name = "Microsoft.WindowsAppSDK.ML"
+          $ort_nuget_package_name = "Microsoft.Windows.AI.MachineLearning"
           $ort_nuget_winml_package_reference_version = "${{ parameters.ort_winml_version }}"
 
           Write-Host "ort_nuget_package_name: $ort_nuget_package_name"

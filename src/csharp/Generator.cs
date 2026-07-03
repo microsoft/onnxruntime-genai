@@ -46,6 +46,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
         }
 
+        /// <summary>
+        /// Gets the number of tokens in the generator
+        /// </summary>
+        /// <returns>The token count</returns>
+        public ulong TokenCount()
+        {
+            return NativeMethods.OgaGenerator_TokenCount(_generatorHandle).ToUInt64();
+        }
+
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
@@ -119,6 +128,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaSetActiveAdapter(_generatorHandle,
                                                                    adapters.Handle,
                                                                    StringUtils.ToUtf8(adapterName)));
+        }
+
+        /// <summary>
+        /// Sets a runtime option on the generator (e.g., "lang_id" for multilingual Nemotron ASR).
+        /// </summary>
+        /// <param name="key">The runtime option name.</param>
+        /// <param name="value">The runtime option value.</param>
+        public void SetRuntimeOption(string key, string value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetRuntimeOption(_generatorHandle,
+                                                                             StringUtils.ToUtf8(key),
+                                                                             StringUtils.ToUtf8(value)));
         }
 
         ~Generator()

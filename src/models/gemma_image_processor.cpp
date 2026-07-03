@@ -102,23 +102,16 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  OrtxTensor* pixel_values = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+  // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, pixel_values_owner.ToBeAssigned()));
+  OrtxTensor* pixel_values = pixel_values_owner.get();
 
   auto [input_ids, token_type_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, allocator);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
-  if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
-  } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
-  } else {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
-  }
+  EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
 
   named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 

@@ -1,0 +1,130 @@
+name: "Windows WebGPU x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: d712a4c7-a0cf-4e87-af75-31510eba0a8e
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_FEED: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  binaryDir: 'build/cpu/win-x64'
+  WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
+  WEBGPU_EP_PACKAGE_VERSION: '0.2.0-dev.20260610+50c95100'
+  # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
+  ORT_TEST_VERSION: '1.28.0-dev-20260610-0510-50c9510000'
+
+jobs:
+  windows-webgpu-x64-build:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10"]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.x'
+          architecture: 'x64'
+
+      - name: Setup VCPKG
+        uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+        with:
+          vcpkg-version: '2025.03.19'
+          vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
+          cmake-version: '3.31.6'
+          cmake-hash: '0f1584e8666cf4a65ec514bd02afe281caabf1d45d2c963f3151c41484f457386aa03273ab25776a670be02725354ce0b46f3a5121857416da37366342a833a0'
+          add-cmake-to-path: 'true'
+          disable-terrapin: 'false'
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download test-time ONNX Runtime and execution provider plugins
+        shell: pwsh
+        run: |
+          # ort/lib holds the ONNX Runtime runtime (onnxruntime.dll) used at test time; ort/ep holds
+          # the execution provider plugin libraries (and their native dependencies) that the test
+          # harnesses enumerate and register. GenAI itself is built against the cmake-default ORT.
+          # Both packages come from the ORT-Nightly ADO feed.
+          mkdir ort/lib
+          mkdir ort/ep
+          Write-Host "Downloading $env:ORT_PACKAGE_NAME version: $env:ORT_TEST_VERSION"
+          nuget install $env:ORT_PACKAGE_NAME -version $env:ORT_TEST_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+          Copy-Item "$env:ORT_PACKAGE_NAME/runtimes/win-x64/native/*" ort/lib/ -Force
+          Write-Host "Downloading $env:WEBGPU_EP_PACKAGE_NAME version: $env:WEBGPU_EP_PACKAGE_VERSION"
+          nuget install $env:WEBGPU_EP_PACKAGE_NAME -version $env:WEBGPU_EP_PACKAGE_VERSION -Source $env:ORT_NIGHTLY_FEED -x -NonInteractive -ExcludeVersion -DependencyVersion Ignore
+          Copy-Item "$env:WEBGPU_EP_PACKAGE_NAME/runtimes/win-x64/native/*" ort/ep/ -Force
+          Write-Host "=== ort/lib ==="; Get-ChildItem ort/lib
+          Write-Host "=== ort/ep ==="; Get-ChildItem ort/ep
+
+      - name: Install Rust Toolchain
+        run: |
+          $exePath = "$env:TEMP\rustup-init.exe"
+          (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+          & $exePath -y --default-toolchain=1.86.0
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
+      - name: Configure CMake
+        run: |
+          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DTEST_QWEN_2_5=True
+
+      - name: Build with CMake
+        run: |
+          cmake --build --preset windows_x64_cpu_release --parallel
+          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+
+      - name: Build the C Examples
+        run: |
+          cmake -S examples\c -B examples\c\build `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-x64\native" `
+            "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
+            "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+          cmake --build examples\c\build --config Release
+
+      - name: Install Python dependencies and Wheel
+        run: |
+          python -m pip install -r test\python\requirements.txt
+          python -m pip install -r test\python\webgpu\torch\requirements.txt
+          python -m pip install -r test\python\webgpu\ort\requirements.txt
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Run the Java tests
+        run: |
+          ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
+
+      - name: Run the Python Tests
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
+
+      - name: Run the C# Tests
+        run: |
+          # ONNX Runtime comes from the ORT-Nightly ADO feed. Passing EPDir is the single switch that
+          # turns on the EP-plugin registration code path; the tests enumerate and register every EP
+          # plugin in that directory (the one the pipeline downloaded them to).
+          cd test\csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
+
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+      - name: Run C++ Unit Tests
+        run: |-
+          copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+          & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep

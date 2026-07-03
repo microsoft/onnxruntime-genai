@@ -51,6 +51,11 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     "${GENERATORS_ROOT}/cuda/*.cuh"
   )
 
+  # session_options.{h,cpp} are plain C++ (no CUDA kernels) and belong in the
+  # main onnxruntime-genai library (added via global_variables.cmake).  Remove
+  # them from the CUDA library sources to avoid duplicate compilation.
+  list(FILTER generator_cudalib_srcs EXCLUDE REGEX ".*/cuda/session_options\\.(cpp|h)$")
+
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)

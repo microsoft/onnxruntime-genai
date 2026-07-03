@@ -12,11 +12,13 @@ def pytest_addoption(parser):
         "--test_models",
         help="Path to the current working directory",
         type=str,
-        required=True,
+        default=None,
     )
 
 
 def get_path_for_model(data_path, model_name, precision, device):
+    if not data_path:
+        pytest.skip("--test_models not provided")
     model_path = os.path.join(data_path, model_name, precision, device)
     if not os.path.exists(model_path):
         pytest.skip(f"Model {model_name} not found at {model_path}")
@@ -39,6 +41,16 @@ def phi3_for(request):
         get_path_for_model,
         request.config.getoption("--test_models"),
         "phi-3-mini",
+        "int4",
+    )
+
+
+@pytest.fixture
+def phi4_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "phi-4-mini",
         "int4",
     )
 
@@ -68,7 +80,7 @@ def qwen_for(request):
     return functools.partial(
         get_path_for_model,
         request.config.getoption("--test_models"),
-        "qwen-2.5",
+        "qwen-2.5-0.5b",
         "int4",
     )
 
@@ -76,6 +88,26 @@ def qwen_for(request):
 @pytest.fixture
 def path_for_model(request):
     return functools.partial(get_path_for_model, request.config.getoption("--test_models"))
+
+
+@pytest.fixture
+def nemotron_speech_model_path(request):
+    """Return the path to a nemotron_speech model directory, or skip if not available."""
+    test_data = request.config.getoption("--test_models")
+    model_path = os.path.join(test_data, "nemotron-speech-streaming")
+    if not os.path.exists(model_path):
+        pytest.skip(f"Nemotron speech model not found at {model_path}")
+    return model_path
+
+
+@pytest.fixture
+def parakeet_tdt_model_path(request):
+    """Return the path to a parakeet-tdt model directory, or skip if not available."""
+    test_data = request.config.getoption("--test_models")
+    model_path = os.path.join(test_data, "parakeet-tdt")
+    if not os.path.exists(os.path.join(model_path, "genai_config.json")):
+        pytest.skip(f"Parakeet TDT model not found at {model_path}")
+    return model_path
 
 
 @pytest.fixture

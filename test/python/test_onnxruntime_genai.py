@@ -6,10 +6,9 @@ import logging
 import os
 import pathlib
 import sys
-import sysconfig
 
 import onnxruntime_genai as og
-from _test_utils import download_models, run_subprocess
+from _test_utils import download_models, is_webgpu_ep_available, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -20,7 +19,7 @@ def run_onnxruntime_genai_api_tests(
     log: logging.Logger,
     test_models: str | bytes | os.PathLike,
 ):
-    log.debug("Running: ONNX Runtime GenAI API Tests")
+    log.debug("Running: ONNX Runtime GenAI API, builder, and model tests")
 
     command = [
         sys.executable,
@@ -28,6 +27,8 @@ def run_onnxruntime_genai_api_tests(
         "pytest",
         "-sv",
         "test_onnxruntime_genai_api.py",
+        "builder",
+        "models",
         "--test_models",
         test_models,
     ]
@@ -59,13 +60,20 @@ def parse_arguments():
     )
     parser.add_argument(
         "--test_models",
-        help="Path to the test_models directory",
-        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "test_models",
+        help="Path to the 'models' directory",
+        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "models",
     )
     parser.add_argument(
         "--e2e",
         help="Whether to run e2e tests. If not specified e2e tests will not run.",
         action="store_true",
+    )
+    parser.add_argument(
+        "--eps",
+        nargs="+",
+        choices=["cpu", "cuda", "dml", "webgpu"],
+        default=[],
+        help="List of execution providers to build models for. If not specified, auto-detects available EPs.",
     )
     return parser.parse_args()
 
@@ -75,17 +83,31 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    # Get INT4 ONNX models
-    output_paths = []
-    if not (sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8):
-        output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu", log)
+    # Determine which EPs to build models for
+    if args.eps:
+        # User explicitly specified EPs
+        eps_to_build = args.eps
+        log.info(f"Building models for explicitly specified EPs: {eps_to_build}")
+    else:
+        # Auto-detect available EPs
+        eps_to_build = ["cpu"]  # CPU is always available
         if og.is_cuda_available():
-            output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda", log)
+            eps_to_build.append("cuda")
         if og.is_dml_available():
-            output_paths += download_models(os.path.abspath(args.test_models), "int4", "dml", log)
+            eps_to_build.append("dml")
+        # Only build WebGPU models if the WebGPU EP plugin package is installed
+        if is_webgpu_ep_available():
+            eps_to_build.append("webgpu")
+        log.info(f"Auto-detected available EPs: {eps_to_build}")
+
+    # Get INT4 ONNX models for specified/detected EPs
+    output_paths = []
+    for ep in eps_to_build:
+        output_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log)
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)
 

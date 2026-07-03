@@ -1,62 +1,102 @@
 # ONNX Runtime GenAI Python Examples
 
+> 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries built from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library. If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
+
 ## Install ONNX Runtime GenAI
 
-Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
+Install the Python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
 
-## Get the model
+## Download a Model
 
-You can generate the model using the model builder with this library, download the model from huggingface ([example](https://github.com/microsoft/onnxruntime-genai?tab=readme-ov-file#sample-code-for-phi-3-in-python)), or bring your own model.
+There are many places to obtain a model. Please read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/DownloadModels.md).
 
-If you bring your own model, you need to provide the configuration. See the [config reference](https://onnxruntime.ai/docs/genai/reference/config).
+## Run an Example
 
-To generate the model with model builder:
-
-1. Install the model builder's dependencies
-
-   ```bash
-   pip install numpy transformers torch onnx onnxruntime
-   ```
-
-2. Choose a model. Examples of supported ones are listed on the repo's main [README](../../README.md).
-
-3. Run the model builder to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
-
-   ```bash
-   cd examples/python
-   python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-   ```
-
-## Run the example model script
-
-See accompanying qa-e2e-example.sh and generate-e2e-example.sh scripts for end-to-end examples of workflow.
-
-The `model-generate` script generates the output sequence all on one function call.
-
-The `model-qa` script streams the output text token by token.
-
-To run the python examples...
 ```bash
-python model-generate.py -m {path to model folder} -e {execution provider} -pr {input prompt}
+# The `model-chat` script allows for multi-turn conversations.
+python model-chat.py -m {path to model folder} -e {execution provider}
+```
+
+```bash
+# The `model-generate` script generates the entire output sequence in one function call.
+python model-generate.py -m {path to model folder} -e {execution provider}
+```
+
+```bash
+# The `model-qa` script streams the output text token by token.
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
 
-## Use Constrained Decoding for the model output
-
-Constrained Decoding is useful when using function/tool calling as it helps in ensuring the output is in the correct format.
-
-We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for constrained decoding. There are three types of constrained decoding enabled right now:
-1. Lark Grammar (Recommended): This option allows you to have an option for a regular output as well as function/tool output in JSON format.
-2. JSON Schema: Output will be JSON schema and it will be one of the function/tools provided.
-3. Regex: If a particular regular expression is desired.
-
-To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> token so you should set the `special` attribute for <|tool_call|> as `true` inside `tokenizer.json`.
-
-To run the Python examples with function/tool calling:
+```bash
+# The `model-mm` script works for multi-modal models and streams the output text token by token.
+python model-mm.py -m {path to model folder} -e {execution provider}
 ```
-# Using Lark Grammar with 1 function/tool call
-python model-qa.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}}]'
 
-# With 2 function/tool calls in chat mode
-python model-chat.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}},{"name": "get_population", "description": "Get population of a city.", "parameters": {"city": {"description": "The city for which population information is requested", "type": "string", "default": "Dallas"}}}]'
+```bash
+# Pass one or more images via --image_paths (space-separated). Supported by Qwen2.5-VL, Qwen3-VL, Phi-3-vision, etc.
+# In non-interactive mode the default prompt is "What color is the sky?" (override with --user_prompt).
+python model-mm.py -m {path to model folder} -e {execution provider} --image_paths image1.jpg image2.jpg --non_interactive
 ```
+
+## Execution Providers
+
+The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
+
+- `CPUExecutionProvider`
+- `CUDAExecutionProvider`
+- `NvTensorRTRTXExecutionProvider`
+- `OpenVINOExecutionProvider`
+- `QNNExecutionProvider`
+- `VitisAIExecutionProvider`
+- `WebGpuExecutionProvider`
+
+To use an EP with the example scripts, make sure it is available to ONNX Runtime using one of the three approaches below. Some scenarios require explicit registration arguments, while provider-bridge EPs do not. Pick the one that matches your scenario:
+
+### 1. Register a custom / locally-built EP (`--ep_path`)
+
+Use this when you are developing an EP locally and want to test it with ONNX Runtime GenAI.
+
+- Pass the EP name with `-e` and the path to the EP shared library with `--ep_path`.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder} -e {execution provider} --ep_path {path to onnxruntime_providers_ep.dll}
+  ```
+
+### 2. Use a provider-bridge EP
+
+Use this when the EP you want is already built into the underlying `onnxruntime` Python package as a provider-bridge EP. No registration arguments are required.
+
+- By default, the EP listed in the model's `genai_config.json` is used.
+- Optionally pass `-e` to override the default EP at runtime.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder}
+  ```
+
+### 3. Register EPs via Windows ML (`--use_winml`) — Windows only
+
+Use this when you want Windows ML to acquire, install, and register the EP for you (useful for testing model changes against existing EP libraries).
+
+- Requires the [`windowsml`](https://pypi.org/project/windowsml/) Python module to be installed.
+- `--use_winml` fetches the EP from Windows Update, installs it, and registers it with ONNX Runtime GenAI.
+- Example:
+  ```bash
+  python model-qa.py -m {path to model folder} --use_winml
+  ```
+
+
+## Tool Calling
+
+Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.
+
+Here are some examples of how you can run the Python examples with function/tool calling.
+
+```bash
+# Using JSON Schema with only tool call output
+python model-qa.py -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+
+# Using Lark Grammar with only tool call output
+python model-mm.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+
+# Using Lark Grammar with text or tool call output
+python model-chat.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"

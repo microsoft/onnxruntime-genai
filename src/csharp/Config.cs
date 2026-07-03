@@ -46,6 +46,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigRemoveModelData(_configHandle, StringUtils.ToUtf8(modelFilename)));
         }
 
+        public void Overlay(string json)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigOverlay(_configHandle, StringUtils.ToUtf8(json)));
+        }
+
         public void SetDecoderProviderOptionsHardwareDeviceType(string provider, string hardware_device_type)
         {
             Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareDeviceType(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(hardware_device_type)));

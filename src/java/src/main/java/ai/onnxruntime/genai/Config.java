@@ -55,6 +55,18 @@ public final class Config implements AutoCloseable {
     setProviderOption(nativeHandle, providerName, optionKey, optionValue);
   }
 
+  /**
+   * Overlay JSON on top of the config file
+   *
+   * @param json The JSON string to overlay
+   */
+  public void overlay(String json) {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+    overlay(nativeHandle, json);
+  }
+
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -85,4 +97,6 @@ public final class Config implements AutoCloseable {
 
   private native void setProviderOption(
       long configHandle, String providerName, String optionKey, String optionValue);
+
+  private native void overlay(long configHandle, String json);
 }

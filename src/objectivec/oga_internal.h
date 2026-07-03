@@ -7,6 +7,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@interface OGAConfig ()
+
+- (OgaConfig&)CXXAPIOgaConfig;
+
+@end
+
 @interface OGAModel ()
 
 - (const OgaModel&)CXXAPIOgaModel;

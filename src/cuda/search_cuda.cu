@@ -27,6 +27,7 @@ void Launch_ExpandInputSequences(const std::span<int32_t> input_sequences, std::
   const int total_elements = static_cast<int>(input_sequences.size());
   const int new_length = total_elements / batch_size;
   ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), sequences.data(), batch_size, beam_size, new_length, max_length);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void AppendNextTokensToSequences(const int32_t* next_tokens, int32_t* sequences, int batch_beam_size, int past_length, int new_length, int max_length) {
@@ -45,6 +46,7 @@ void Launch_AppendNextTokensToSequences(std::span<const int32_t> next_tokens, st
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
   const int new_length = total_elements / batch_beam_size;
   AppendNextTokensToSequences<<<gridSize, blockSize, 0, stream>>>(next_tokens.data(), sequences.data(), batch_beam_size, past_length, new_length, max_length);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int batch_beam_size, int sequence_length, int max_length) {
@@ -59,6 +61,7 @@ void Launch_GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int ba
   const int blockSize = std::min(batch_beam_size, 256);
   const int gridSize = (batch_beam_size + blockSize - 1) / blockSize;
   GetLastTokens<<<gridSize, blockSize, 0, stream>>>(next_tokens, sequences, batch_beam_size, sequence_length, max_length);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void ArgMax(cub::KeyValuePair<int, float>* argmaxen, int32_t* next_tokens, int batch_size) {
@@ -110,6 +113,7 @@ __global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, b
 
 void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
   CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_seen, eos_token_ids, eos_token_count, pad_token_id, done_cpu);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void AddProbsKernel(float* log_probs,
@@ -133,6 +137,7 @@ void LaunchAddProbsKernel(float* log_probs,
   constexpr int blockSize = 256;
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
   AddProbsKernel<<<gridSize, blockSize, 0, stream>>>(log_probs, cum_log_probs, vocab_size, total_elements);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void SetScoreProcessor(float* next_token_scores, int batch_beam_size, int vocab_size, int token, float score) {
@@ -149,6 +154,7 @@ void LaunchSetScoreProcessor(float* next_token_scores, int batch_beam_size, int 
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
 
   SetScoreProcessor<<<gridSize, blockSize, 0, stream>>>(next_token_scores, batch_beam_size, vocab_size, token, score);
+  CUDA_CHECK_LAUNCH();
 }
 
 __global__ void RepetitionPenaltyProcessor(const int32_t* sequences, float* next_token_scores, int max_sequence_length, int vocab_size, int total_elements, int current_sequence_length, float repetition_penalty) {
@@ -179,6 +185,7 @@ void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, float* next_toke
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
 
   RepetitionPenaltyProcessor<<<gridSize, blockSize, 0, stream>>>(sequences, next_token_scores, max_sequence_length, vocab_size, total_elements, current_sequence_length, repetition_penalty);
+  CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace cuda

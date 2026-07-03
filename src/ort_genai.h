@@ -108,13 +108,13 @@ struct OgaString {
 };
 
 struct OgaStringArray {
-  std::unique_ptr<OgaStringArray> Create() {
+  static std::unique_ptr<OgaStringArray> Create() {
     OgaStringArray* p;
     OgaCheckResult(OgaCreateStringArray(&p));
     return std::unique_ptr<OgaStringArray>(p);
   }
 
-  std::unique_ptr<OgaStringArray> Create(const char** strings, size_t count) {
+  static std::unique_ptr<OgaStringArray> Create(const char* const* strings, size_t count) {
     OgaStringArray* p;
     OgaCheckResult(OgaCreateStringArrayFromStrings(strings, count, &p));
     return std::unique_ptr<OgaStringArray>(p);
@@ -160,6 +160,11 @@ struct OgaConfig : OgaAbstract {
   static std::unique_ptr<OgaConfig> Create(const char* config_path) {
     OgaConfig* p;
     OgaCheckResult(OgaCreateConfig(config_path, &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
+  static std::unique_ptr<OgaConfig> CreateFromPackageEp(const char* config_path, const char* ep) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfigFromPackageEp(config_path, ep, &p));
     return std::unique_ptr<OgaConfig>(p);
   }
 
@@ -324,12 +329,10 @@ struct OgaTokenizer : OgaAbstract {
   }
 #else
   std::vector<int32_t> GetEosTokenIds() const {
-    std::vector<int32_t> eos_ids;
     const int32_t* eos_ids_ptr;
     size_t count;
     OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids_ptr, &count));
-    eos_ids.assign(eos_ids_ptr, eos_ids_ptr + count);
-    return eos_ids;
+    return std::vector<int32_t>(eos_ids_ptr, eos_ids_ptr + count);
   }
 #endif
 
@@ -426,12 +429,20 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void TryGraphCaptureWithMaxBatchSize(int /*max_batch_size*/) {
-    printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
-  }
-
   void SetGuidance(const char* type, const char* data, bool enable_ff_tokens = false) {
     OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
+  }
+
+  double GetSearchNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaGeneratorParamsGetSearchNumber(this, name, &value));
+    return value;
+  }
+
+  bool GetSearchBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSearchBool(this, name, &value));
+    return value;
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
@@ -446,6 +457,10 @@ struct OgaGenerator : OgaAbstract {
 
   bool IsDone() {
     return OgaGenerator_IsDone(this);
+  }
+
+  bool IsSessionTerminated() const {
+    return OgaGenerator_IsSessionTerminated(this);
   }
 
   void SetModelInput(const char* name, OgaTensor& tensor) {
@@ -470,8 +485,8 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
-  bool IsSessionTerminated() const {
-    return OgaGenerator_IsSessionTerminated(this);
+  size_t TokenCount() const {
+    return OgaGenerator_TokenCount(this);
   }
 
   void GenerateNextToken() {
@@ -484,6 +499,13 @@ struct OgaGenerator : OgaAbstract {
     size_t out_count;
     OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
     return {out, out_count};
+  }
+#else
+  std::vector<int32_t> GetNextTokens() {
+    const int32_t* out;
+    size_t out_count;
+    OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
+    return std::vector<int32_t>(out, out + out_count);
   }
 #endif
 
@@ -586,20 +608,16 @@ struct OgaTensor : OgaAbstract {
 struct OgaImages : OgaAbstract {
   static std::unique_ptr<OgaImages> Load(const std::vector<const char*>& image_paths) {
     OgaImages* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
-    OgaCheckResult(OgaLoadImages(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(image_paths.data(), image_paths.size());
+    OgaCheckResult(OgaLoadImages(strs.get(), &p));
     return std::unique_ptr<OgaImages>(p);
   }
 
 #if OGA_USE_SPAN
   static std::unique_ptr<OgaImages> Load(std::span<const char* const> image_paths) {
     OgaImages* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
-    OgaCheckResult(OgaLoadImages(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(image_paths.data(), image_paths.size());
+    OgaCheckResult(OgaLoadImages(strs.get(), &p));
     return std::unique_ptr<OgaImages>(p);
   }
 #endif
@@ -616,20 +634,16 @@ struct OgaImages : OgaAbstract {
 struct OgaAudios : OgaAbstract {
   static std::unique_ptr<OgaAudios> Load(const std::vector<const char*>& audio_paths) {
     OgaAudios* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
-    OgaCheckResult(OgaLoadAudios(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(audio_paths.data(), audio_paths.size());
+    OgaCheckResult(OgaLoadAudios(strs.get(), &p));
     return std::unique_ptr<OgaAudios>(p);
   }
 
 #if OGA_USE_SPAN
   static std::unique_ptr<OgaAudios> Load(std::span<const char* const> audio_paths) {
     OgaAudios* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
-    OgaCheckResult(OgaLoadAudios(strs, &p));
-    OgaDestroyStringArray(strs);
+    auto strs = OgaStringArray::Create(audio_paths.data(), audio_paths.size());
+    OgaCheckResult(OgaLoadAudios(strs.get(), &p));
     return std::unique_ptr<OgaAudios>(p);
   }
 #endif
@@ -694,9 +708,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessImages(const std::vector<const char*>& prompts, const OgaImages* images = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs, images, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs.get(), images, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -708,9 +721,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessAudios(const std::vector<const char*>& prompts, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs, audios, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs.get(), audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -722,9 +734,8 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
   std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const std::vector<const char*>& prompts, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaStringArray* strs;
-    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
-    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs, images, audios, &p));
+    auto strs = OgaStringArray::Create(prompts.data(), prompts.size());
+    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs.get(), images, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -836,6 +847,18 @@ struct OgaEngine : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
 };
 
+/**
+ * \brief RAII wrapper that calls OgaShutdown() on destruction.
+ *
+ * \warning Without explicit shutdown, GenAI's globals are destroyed at static-destruction time in undefined order,
+ *          which may crash.
+ *
+ * \note Typical usage is to construct an instance early in the program so its destructor runs before process exit.
+ *
+ * \note Only one OgaHandle should be live in the process, and its scope must encompass all GenAI use. GenAI's globals
+ *       are not re-creatable after OgaShutdown(); a second OgaHandle whose lifetime starts after the first one's
+ *       destruction would leave subsequent GenAI calls broken.
+ */
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {
@@ -869,3 +892,35 @@ inline int GetCurrentGpuDeviceId() {
 }
 
 }  // namespace Oga
+
+struct OgaStreamingProcessor : OgaAbstract {
+  static std::unique_ptr<OgaStreamingProcessor> Create(OgaModel& model) {
+    OgaStreamingProcessor* p;
+    OgaCheckResult(OgaCreateStreamingProcessor(&model, &p));
+    return std::unique_ptr<OgaStreamingProcessor>(p);
+  }
+
+  std::unique_ptr<OgaNamedTensors> Process(const float* audio_data, size_t num_samples) {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaStreamingProcessorProcess(this, audio_data, num_samples, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);  // May be nullptr if not enough audio
+  }
+
+  std::unique_ptr<OgaNamedTensors> Flush() {
+    OgaNamedTensors* out;
+    OgaCheckResult(OgaStreamingProcessorFlush(this, &out));
+    return std::unique_ptr<OgaNamedTensors>(out);
+  }
+
+  void SetOption(const char* key, const char* value) {
+    OgaCheckResult(OgaStreamingProcessorSetOption(this, key, value));
+  }
+
+  OgaString GetOption(const char* key) const {
+    const char* value;
+    OgaCheckResult(OgaStreamingProcessorGetOption(this, key, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) { OgaDestroyStreamingProcessor(reinterpret_cast<OgaStreamingProcessor*>(p)); }
+};

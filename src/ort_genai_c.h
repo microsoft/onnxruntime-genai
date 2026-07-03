@@ -79,6 +79,7 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 //! @}
 
@@ -87,7 +88,16 @@ typedef struct OgaRequest OgaRequest;
  */
 
 /**
- * \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ * \brief Shuts down the GenAI library and releases all GenAI-owned ONNX Runtime globals.
+ *
+ * \warning Callers SHOULD invoke OgaShutdown() before process exit. If it is not called, GenAI's globals are destroyed
+ *          at static-destruction time in undefined order, which may crash.
+ *
+ * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
+ *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
+ *
+ * \note Must be the last GenAI call in the process. Any OgaModel / OgaGenerator / OgaTokenizer / etc. handles owned
+ *       by the caller must be released first.
  */
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
@@ -238,6 +248,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
 /**
+ * \brief Creates an OgaConfig from a model package directory, using the supplied execution
+ *        provider to select a variant.
+ *
+ * `config_path` must refer to a model package; passing a flat directory returns an error.
+ * When the package declares exactly one execution provider across its variants, `ep` may
+ * be null or empty (the EP is auto-detected). Otherwise `ep` selects which variant is
+ * loaded.
+ *
+ * To load a model with an explicit EP, pass the resulting OgaConfig to
+ * OgaCreateModelFromConfig. OgaCreateModel does not accept an ep argument because the
+ * config carries everything needed.
+ *
+ * \param[in] config_path Path to the model package, encoded in UTF-8.
+ * \param[in] ep Execution provider name, or null/empty for auto-detection.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out);
+
+/**
  * \brief Clear the list of providers in the given config
  * \param[in] config The config to clear the providers from.
  * \return OgaResult containing the error message if the clearing of the providers failed.
@@ -245,8 +275,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
 
 /**
- * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
- * if it already exists, does nothing.
+ * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist.
+ * If it already exists, do nothing.
  * \param[in] config The config to set the provider on.
  * \param[in] provider The provider to set on the config.
  * \return OgaResult containing the error message if the setting of the provider failed.
@@ -411,19 +441,51 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* params);
 
+/**
+ * \brief Set a numerical value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[in] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value);
+
+/**
+ * \brief Set a boolean value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[in] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size);
 
 /**
  * \brief Sets the guidance type and data for the Generator params
  * \param[in] params The generator params to set the guidance on
- * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
- * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar.
+ * \param[in] data The input string, which is the guidance data.
  * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
+
+/**
+ * \brief Get a numerical value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[out] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
+ * \brief Get a boolean value for a search parameter
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[out] value The value of the search parameter.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -446,6 +508,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
+
+/**
+ * \brief Returns true if the session has been terminated.
+ * \param[in] generator The generator to add the inputs to.
+ * \return True if the session has been terminated, false otherwise.
+ */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
@@ -482,6 +550,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
+ * \brief Returns the number of tokens in the generator
+ * \param[in] generator The generator containing the appended tokens.
+ * \return The number of tokens that have been added.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaGenerator_TokenCount(const OgaGenerator* generator);
+
+/**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
  * \param[in] generator The generator to compute the logits for.
  * \return OgaResult containing the error message if the computation of the logits failed.
@@ -497,6 +572,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
+/**
+ * \brief Set a runtime option's name and value.
+ * \param[in] generator The generator to rewind to the given length.
+ * \param[in] key The runtime option's name
+ * \param[in] value The runtime option's value
+ * \return OgaResult containing the error message if setting the runtime option failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /**
@@ -611,17 +693,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     size_t num_options);
 
 /**
- * Return the int representation of the BOS token
+ * \brief Return the int representation of the BOS token
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOS token id
+ * \return OgaResult containing the error message if returning the BOS token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * Return an array containing the int representations of the EOS tokens. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ * \brief Return an array containing the int representations of the EOS token ids. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] eos_token_ids The array of EOS token ids
+ * \param[out] token_count The length of the array
+ * \return OgaResult containing the error message if returning the EOS token ids fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
 
 /**
- * Return the int representation of the BOS token
+ * \brief Return the int representation of the PAD token
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The PAD token id
+ * \return OgaResult containing the error message if returning the PAD token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
@@ -1083,6 +1175,58 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
  *
  */
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
+/**
+ * \brief Creates a StreamingProcessor for mel spectrogram extraction from raw audio.
+ * \param[in] model The model to create the processor for (must be nemotron_speech type).
+ * \param[out] out Pointer to store the created StreamingProcessor instance.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStreamingProcessor(OgaModel* model, OgaStreamingProcessor** out);
+
+/**
+ * \brief Process a chunk of raw PCM audio and return a NamedTensors if a full chunk is ready.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] audio_data Pointer to float32 PCM audio samples (mono, model sample rate).
+ * \param[in] num_samples Number of audio samples.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if not enough audio yet.
+ *                  Caller must free with OgaDestroyNamedTensors.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorProcess(OgaStreamingProcessor* processor, const float* audio_data, size_t num_samples, OgaNamedTensors** out);
+
+/**
+ * \brief Flush remaining buffered audio (pads with silence).
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[out] out Pointer to store the NamedTensors. Set to nullptr if buffer was empty.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* processor, OgaNamedTensors** out);
+
+/**
+ * \brief Destroy a StreamingProcessor instance.
+ * \param[in] processor The StreamingProcessor instance to destroy.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* processor);
+
+/**
+ * \brief Set a processor option as a key-value pair.
+ *        Supported keys: "use_vad", "vad_threshold", "silence_duration_ms", "prefix_padding_ms".
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[in] value Option value as string.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value);
+
+/**
+ * \brief Get a processor option value by key.
+ * \param[in] processor The StreamingProcessor instance.
+ * \param[in] key Option name.
+ * \param[out] value Pointer to store the value string. Caller must free with OgaDestroyString.
+ * \return OgaResult on error, nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStreamingProcessorGetOption(const OgaStreamingProcessor* processor, const char* key, const char** value);
 
 #ifdef __cplusplus
 }

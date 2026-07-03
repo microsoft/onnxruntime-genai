@@ -75,8 +75,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
     // Populate workspace buffers with the current batch item's scores and indices.
     FillInput<<<blocks_per_batch, block_size, 0, stream>>>(current_scores_in, workspace_scores, workspace_indices, vocab_size);
+    CUDA_CHECK_LAUNCH();
     // Launch the CUB radix sort. It sorts from the workspace directly into the final output buffers.
-    cub::DeviceRadixSort::SortPairsDescending(temp_storage, temp_storage_bytes, workspace_scores, final_scores_out, workspace_indices, final_indices_out, vocab_size, 0, sizeof(float) * 8, stream);
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(temp_storage, temp_storage_bytes, workspace_scores, final_scores_out, workspace_indices, final_indices_out, vocab_size, 0, sizeof(float) * 8, stream));
   }
 
   data->topk_scores = final_scores_buffer;

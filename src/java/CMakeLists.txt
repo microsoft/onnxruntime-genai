@@ -106,11 +106,15 @@ file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 set(ORT_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/native/${JAVA_OS_ARCH})
 file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
 
-# Add the native genai library to the native-lib dir
-add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+# Add the native genai libraries to the native-lib dir
+# Instead of hard-coding the .dll/.so name, we iterate over the list 
+# of libraries the build system has identified as dependencies.
+foreach(LIB_FILE ${ortgenai_embed_libs})
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                      $<TARGET_FILE:onnxruntime-genai>
-                      ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
+                    ${LIB_FILE}
+                    ${JAVA_PACKAGE_LIB_DIR}/)
+endforeach()
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
@@ -192,7 +196,7 @@ if (ANDROID)
   # Copy the test model to the assets folder in the test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
-                       ${REPO_ROOT}/test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
+                       ${REPO_ROOT}/test/models/hf-internal-testing/tiny-random-gpt2-fp32
                        ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR}/model)
 
   # Copy the Android AAR package we built to the libs folder of our test app

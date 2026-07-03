@@ -19,7 +19,10 @@ struct Options {
   size_t batch_size{1};
   size_t num_iterations{5};
   size_t num_warmup_iterations{1};
+  int64_t max_length{0};
   bool verbose{};
+  bool reuse_generator{};
+  bool use_random_tokens{};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);
