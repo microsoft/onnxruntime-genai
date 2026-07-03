@@ -228,10 +228,32 @@ steps:
             --use_guidance \
             --package \
             --skip_wheel \
+            --install_dir /ort_genai_src/build/$(ep)/coreexport/prefix \
             --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
             --build_dir /ort_genai_src/build/$(ep) \
             $ORT_ARGS $EP_ARGS
-          echo "cfg=$CFG" > /ort_genai_src/build/$(ep)/.cfg'
+          echo "cfg=$CFG" > /ort_genai_src/build/$(ep)/.cfg
+
+          # Assemble an ORT home (headers + runtime libs) next to the exported core
+          # so the incremental Python/Java SDK builds can compile the binding against
+          # the same ONNX Runtime this core was built with (single ORT source).
+          ort_out=/ort_genai_src/build/$(ep)/coreexport/ort
+          mkdir -p "$ort_out/include" "$ort_out/lib"
+          if [ -d /ort_genai_src/ort_build/lib ]; then
+            cp -a /ort_genai_src/ort_build/include/. "$ort_out/include/"
+            cp -a /ort_genai_src/ort_build/lib/. "$ort_out/lib/"
+          else
+            ortsrc=/ort_genai_src/build/$(ep)/"$CFG"/_deps/ortlib-src
+            if [ -d "$ortsrc/build/native/include" ]; then
+              cp -a "$ortsrc"/build/native/include/. "$ort_out/include/"
+            else
+              cp -a "$ortsrc"/buildTransitive/native/include/. "$ort_out/include/"
+            fi
+            rid=linux-x64
+            [ "$(arch)" = "arm64" ] && rid=linux-arm64
+            cp -a "$ortsrc"/runtimes/"$rid"/native/. "$ort_out/lib/"
+          fi
+          ls -la "$ort_out/include" "$ort_out/lib"'
     displayName: 'Build GenAI core (build.py)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -258,50 +280,58 @@ steps:
       artifactName: $(artifactName)-capi
       targetPath: '$(capiPackageDir)'
 
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime GenAI core export'
+    inputs:
+      artifactName: $(artifactName)-core
+      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/coreexport'
+
 - ${{ if eq(parameters.target, 'python') }}:
-  - bash: |
-      set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ \
-      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
-      ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF \
-            -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) \
-            $(CMAKE_EXTRA_ARGS) $(ORT_HOME_CMAKE_ARG) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target python"
-    displayName: 'Build Python $(PyNoDotVer)'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download prebuilt core (incremental)'
+    inputs:
+      artifact: $(artifactName)-core
+      targetPath: '$(Build.Repository.LocalPath)/coreexport'
 
   - bash: |
       set -e -x
+      case "$(build_config)" in
+        release)        cfg="Release" ;;
+        relwithdebinfo) cfg="RelWithDebInfo" ;;
+        debug)          cfg="Debug" ;;
+        *)              cfg="Release" ;;
+      esac
+      # Incremental wheel: compile only the pybind extension against the prebuilt
+      # core downloaded as the '-core' artifact (coreexport/{prefix,ort}); the core
+      # shared library is not rebuilt. auditwheel (MANYLINUX=ON) repairs + bundles it.
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ \
-      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+      -e CFG="$cfg" \
       ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF \
-            -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target PyPackageBuild"
-    displayName: 'PyPackageBuild $(PyNoDotVer)'
+      bash -c '
+          set -e -x
+          PY=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer)
+          "$PY" -m pip install --quiet requests pybind11 wheel build auditwheel
+          "$PY" build.py \
+            --config "$CFG" \
+            --parallel \
+            --sdk python \
+            --prebuilt_genai_home /ort_genai_src/coreexport/prefix \
+            --ort_home /ort_genai_src/coreexport/ort \
+            --build_dir /ort_genai_src/build/$(ep) \
+            --cmake_extra_defines MANYLINUX=ON'
+    displayName: 'Build Python wheel $(PyNoDotVer) (prebuilt core)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/wheel'
-      Contents: '*manylinux*.whl'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)'
+      Contents: '**/wheel/*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+      flattenFolders: true
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
