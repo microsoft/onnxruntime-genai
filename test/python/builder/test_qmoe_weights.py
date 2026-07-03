@@ -151,11 +151,12 @@ class _RealMoEModel:
     _symmetric_per_channel_quantize = Model._symmetric_per_channel_quantize
     _cuda_per_channel_quantize = Model._cuda_per_channel_quantize
 
-    def __init__(self, ep, block_size, weights_prepacked, bits=4):
+    def __init__(self, ep, block_size, weights_prepacked, bits=4, extra_options=None):
         self.ep = ep
         self.qmoe_block_size = block_size
         self.moe_attrs = {"expert_weight_bits": bits, "weights_prepacked": weights_prepacked}
         self.quant_attrs = {"qmoe_block_size": block_size}
+        self.extra_options = extra_options or {}
 
 
 class _FakeGPTOSSModel:
@@ -249,7 +250,50 @@ def test_non_cuda_per_channel_path_for_non_positive_block_size():
     assert "block_size" not in model.moe_attrs
 
 
-def test_per_channel_int4_uses_qmoe_unsigned_offset_storage():
+def test_per_channel_int4_uses_qmoe_full_range_unsigned_offset_storage_by_default():
+    model = _RealMoEModel("cpu", 0, -1, bits=4)
+    weights = torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32)
+
+    qweight, scales = model._symmetric_per_channel_quantize(weights)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, torch.tensor([[0x10, 0xF8]], dtype=torch.uint8))
+
+
+def test_per_channel_int8_uses_qmoe_full_range_unsigned_offset_storage_by_default():
+    model = _RealMoEModel("cpu", 0, -1, bits=8)
+    weights = torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32)
+
+    qweight, scales = model._symmetric_per_channel_quantize(weights)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, torch.tensor([[0x00, 0x01, 0x80, 0xFF]], dtype=torch.uint8))
+
+
+@pytest.mark.parametrize(
+    "bits,weights,expected_qweight",
+    [
+        (
+            4,
+            torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32),
+            torch.tensor([[0x10, 0xF8]], dtype=torch.uint8),
+        ),
+        (
+            8,
+            torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32),
+            torch.tensor([[0x00, 0x01, 0x80, 0xFF]], dtype=torch.uint8),
+        ),
+    ],
+)
+def test_per_channel_can_emit_full_range_unsigned_offset_storage(bits, weights, expected_qweight):
+    qweight, scales = symmetric_per_channel_quantize(weights, bits)
+
+    assert torch.equal(scales, torch.tensor([1.0]))
+    assert torch.equal(qweight, expected_qweight)
+
+
+def test_per_channel_env_var_can_use_legacy_15_bucket_unsigned_offset_storage(monkeypatch):
+    monkeypatch.setenv("GENAI_QMOE_UNSIGNED_FULL_RANGE", "0")
     model = _RealMoEModel("cpu", 0, -1, bits=4)
     weights = torch.tensor([[-7.0, -3.0, 0.0, 7.0]], dtype=torch.float32)
 
@@ -259,33 +303,23 @@ def test_per_channel_int4_uses_qmoe_unsigned_offset_storage():
     assert torch.equal(qweight, torch.tensor([[0x51, 0xF8]], dtype=torch.uint8))
 
 
-def test_per_channel_int8_uses_qmoe_unsigned_offset_storage():
-    model = _RealMoEModel("cpu", 0, -1, bits=8)
-    weights = torch.tensor([[-127.0, -1.0, 0.0, 127.0]], dtype=torch.float32)
-
-    qweight, scales = model._symmetric_per_channel_quantize(weights)
-
-    assert torch.equal(scales, torch.tensor([1.0]))
-    assert torch.equal(qweight, torch.tensor([[0x01, 0x7F, 0x80, 0xFF]], dtype=torch.uint8))
-
-
 @pytest.mark.parametrize(
     "bits,weights,expected_qweight",
     [
         (
             4,
-            torch.tensor([[-8.0, -7.0, 0.0, 7.0]], dtype=torch.float32),
-            torch.tensor([[0x98, 0x70]], dtype=torch.uint8),
+            torch.tensor([[-7.0, -3.0, 0.0, 7.0]], dtype=torch.float32),
+            torch.tensor([[0x51, 0xF8]], dtype=torch.uint8),
         ),
         (
             8,
-            torch.tensor([[-128.0, -127.0, 0.0, 127.0]], dtype=torch.float32),
-            torch.tensor([[0x80, 0x81, 0x00, 0x7F]], dtype=torch.uint8),
+            torch.tensor([[-127.0, -1.0, 0.0, 127.0]], dtype=torch.float32),
+            torch.tensor([[0x01, 0x7F, 0x80, 0xFF]], dtype=torch.uint8),
         ),
     ],
 )
-def test_per_channel_can_emit_trtllm_signed_storage(bits, weights, expected_qweight):
-    qweight, scales = symmetric_per_channel_quantize(weights, bits, trtllm_signed_storage=True)
+def test_per_channel_can_emit_legacy_15_bucket_unsigned_offset_storage(bits, weights, expected_qweight):
+    qweight, scales = symmetric_per_channel_quantize(weights, bits, unsigned_full_range=False)
 
     assert torch.equal(scales, torch.tensor([1.0]))
     assert torch.equal(qweight, expected_qweight)
@@ -364,12 +398,12 @@ def test_cuda_per_channel_quantization_uses_qmoe_symmetric_storage(bits):
     qweight, scales = model.make_qmoe_weights(weights)
 
     if bits == 4:
-        qmin, qmax, zero_point = -7, 7, 8
+        qmin, qmax, scale_divisor, zero_point = -8, 7, 8, 8
     else:
-        qmin, qmax, zero_point = -127, 127, 128
+        qmin, qmax, scale_divisor, zero_point = -128, 127, 128, 128
 
     expected_scales = torch.clamp(
-        weights.abs().amax(dim=1, keepdim=True) / float(qmax), min=torch.finfo(torch.float32).eps
+        weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor), min=torch.finfo(torch.float32).eps
     )
     quantized = torch.clamp(torch.round(weights / expected_scales), qmin, qmax).to(torch.int16)
     quantized = (quantized + zero_point).to(torch.uint8)
@@ -380,7 +414,8 @@ def test_cuda_per_channel_quantization_uses_qmoe_symmetric_storage(bits):
 
     assert torch.equal(qweight, expected_qweight)
     assert torch.allclose(scales.float(), expected_scales.squeeze(-1), atol=1e-6, rtol=1e-3)
-    assert quantized.min() > 0
+    assert quantized.min() == 0
+    assert quantized.max() == (15 if bits == 4 else 255)
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")

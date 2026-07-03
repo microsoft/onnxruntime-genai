@@ -36,6 +36,13 @@ from transformers import (
 from .qmoe_quantizer import cuda_per_channel_quantize, symmetric_per_channel_quantize
 
 
+def _qmoe_unsigned_full_range(model):
+    raw = os.environ.get("GENAI_QMOE_UNSIGNED_FULL_RANGE", "1")
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
@@ -3532,7 +3539,11 @@ class Model:
         per-channel quantization when the ``block_size`` attribute is omitted.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return symmetric_per_channel_quantize(weights, bits)
+        return symmetric_per_channel_quantize(
+            weights,
+            bits,
+            unsigned_full_range=_qmoe_unsigned_full_range(self),
+        )
 
     def _cuda_per_channel_quantize(self, weights, prepack):
         """Quantize per-channel QMoE weights and optionally CUTLASS-prepack them.
@@ -3544,7 +3555,13 @@ class Model:
         default ``weights_prepacked=-1`` contract.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return cuda_per_channel_quantize(weights, bits, prepack, _ortpyb.pack_weights_for_cuda_mixed_gemm)
+        return cuda_per_channel_quantize(
+            weights,
+            bits,
+            prepack,
+            _ortpyb.pack_weights_for_cuda_mixed_gemm,
+            unsigned_full_range=_qmoe_unsigned_full_range(self),
+        )
 
     def _cutlass_prepacked_blockwise_quantize(self, weights):
         """Quantize a single expert's weights and CUTLASS-prepack them for the

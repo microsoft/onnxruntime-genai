@@ -85,6 +85,38 @@ Uses `KQuantWeightOnlyQuantConfig` → Neural Compressor's k-quant (a more elabo
 per-block scaling derived from llama.cpp's K-quants). Honors per-node
 `customized_weight_config`, so int8 bit placement works in a single pass.
 
+## QMoE expert-weight quantization
+
+MoE expert weights that are exported as `com.microsoft::QMoE` are quantized by a
+separate QMoE path instead of the `MatMulNBits` quantizer above. When
+`qmoe_block_size <= 0`, the builder uses per-channel quantization: each expert
+matrix has logical shape `[N, K]`, one scale per output channel (`[N]`), and raw
+storage shape `[N, K / pack]` before any CUDA prepacking.
+
+For CUDA QMoE `quant_type="int"`, the runtime consumes unsigned int4/int8 storage
+with an implicit zero-point offset. The numeric quantization is still symmetric,
+but the stored bytes/nibbles are `q + zero_point`. The default export uses the
+full integer range while keeping unsigned-offset storage:
+
+| Bits | Numeric range | Scale | Stored value |
+| --- | --- | --- | --- |
+| 4 | `[-8, 7]` | `max(abs(w)) / 8` | `q + 8` |
+| 8 | `[-128, 127]` | `max(abs(w)) / 128` | `q + 128` |
+
+The default QMoE export uses the unsigned-offset contract above because ORT CUDA
+QMoE prepack decodes raw int4 as `nibble - 8` and raw int8 as `byte - 128` before
+laying weights out for the CUTLASS MoE GEMM.
+
+For testing, set environment variable `GENAI_QMOE_UNSIGNED_FULL_RANGE=0` to use the
+previous narrower unsigned-offset range: int4 `[-7, 7]` with scale
+`max(abs(w)) / 7`, and int8 `[-127, 127]` with scale `max(abs(w)) / 127`. This is
+not exposed as a model-builder `extra_options` flag.
+
+For now, the QMoE quantizer helper is carried in onnxruntime-genai and mirrored by
+ORT-side QMoE tests. Keep the two copies in sync. Longer term, this helper should
+move into ONNX Runtime quantization tooling so genai can import the shared
+implementation directly.
+
 ## Int8 bit-placement flags
 
 ### `last_matmul_weight_int8` (legacy `_last`)

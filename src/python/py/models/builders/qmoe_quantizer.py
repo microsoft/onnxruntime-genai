@@ -11,7 +11,7 @@ def symmetric_per_channel_quantize(
     weights: torch.Tensor,
     bits: int,
     *,
-    trtllm_signed_storage: bool = False,
+    unsigned_full_range: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize one QMoE expert with symmetric per-channel storage.
 
@@ -19,9 +19,9 @@ def symmetric_per_channel_quantize(
     ``[N, K/pack]`` and scales ``[N]``. By default, this emits the ORT CUDA
     QMoE storage contract: unsigned bytes/nibbles with an implicit zero-point
     offset, so each stored value is ``q + zero_point`` even though the numeric
-    quantization is symmetric. Set ``trtllm_signed_storage=True`` for the
-    TRT-LLM-style signed two's-complement storage using ``[-8, 7]`` / ``[-128,
-    127]``.
+    quantization is symmetric. By default it uses the full ``[-8, 7]`` /
+    ``[-128, 127]`` range. Set ``unsigned_full_range=False`` to use the legacy
+    ``[-7, 7]`` / ``[-127, 127]`` range.
     """
     weights = weights.detach().cpu().to(torch.float32).contiguous()
     bits = int(bits)
@@ -31,13 +31,13 @@ def symmetric_per_channel_quantize(
         raise ValueError(f"K ({k}) must be divisible by {pack} for QMoE per-channel quantization.")
 
     if bits == 4:
-        if trtllm_signed_storage:
-            qmin, qmax, scale_divisor, zero_point = -8, 7, 8, None
+        if unsigned_full_range:
+            qmin, qmax, scale_divisor, zero_point = -8, 7, 8, 8
         else:
             qmin, qmax, scale_divisor, zero_point = -7, 7, 7, 8
     elif bits == 8:
-        if trtllm_signed_storage:
-            qmin, qmax, scale_divisor, zero_point = -128, 127, 128, None
+        if unsigned_full_range:
+            qmin, qmax, scale_divisor, zero_point = -128, 127, 128, 128
         else:
             qmin, qmax, scale_divisor, zero_point = -127, 127, 127, 128
     else:
@@ -46,10 +46,7 @@ def symmetric_per_channel_quantize(
     scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
     scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
     quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
-    if zero_point is None:
-        quantized = quantized.to(torch.uint8)
-    else:
-        quantized = (quantized + zero_point).to(torch.uint8)
+    quantized = (quantized + zero_point).to(torch.uint8)
 
     if bits == 4:
         qweight = (quantized[:, 0::2] & 0xF) | ((quantized[:, 1::2] & 0xF) << 4)
@@ -66,9 +63,15 @@ def cuda_per_channel_quantize(
     prepack: bool,
     pack_weights_for_cuda_mixed_gemm,
     force_arch: int = 80,
+    *,
+    unsigned_full_range: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize per-channel QMoE weights and optionally CUTLASS-prepack them."""
-    qweight, scales = symmetric_per_channel_quantize(weights, bits)
+    qweight, scales = symmetric_per_channel_quantize(
+        weights,
+        bits,
+        unsigned_full_range=unsigned_full_range,
+    )
     if not prepack:
         return qweight, scales
 
