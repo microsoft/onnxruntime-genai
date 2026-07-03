@@ -111,78 +111,115 @@ steps:
     displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    $env:CC="$env:LLVM_PREFIX\bin\clang"
-    $env:CXX="$env:LLVM_PREFIX\bin\clang++"
-    if ("$(arch)" -eq "arm64") {
-      $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
-      $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
-      $env:CC_aarch64_apple_darwin = $env:CC
-      $env:CXX_aarch64_apple_darwin = $env:CXX
-      Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
-      Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
-      cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin $(ORT_HOME_CMAKE_ARG)
-    } else {
-      cmake --preset macos_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
-    }
-  displayName: 'Configure CMake C API'
-  workingDirectory: '$(Build.Repository.LocalPath)'
+- ${{ if eq(parameters.target, 'python') }}:
+  - powershell: |
+      $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
+      $env:CC="$env:LLVM_PREFIX\bin\clang"
+      $env:CXX="$env:LLVM_PREFIX\bin\clang++"
+      if ("$(arch)" -eq "arm64") {
+        $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
+        $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+        $env:CC_aarch64_apple_darwin = $env:CC
+        $env:CXX_aarch64_apple_darwin = $env:CXX
+        Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
+        Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
+        cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin $(ORT_HOME_CMAKE_ARG)
+      } else {
+        cmake --preset macos_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
+      }
+    displayName: 'Configure CMake C API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
-  displayName: 'Build C API'
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    displayName: 'Build C API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - powershell: |
-      python -m pip install wheel
-    displayName: 'Install wheel'
+      $ErrorActionPreference = "Stop"
+      # Map the pipeline's lowercase build config to build.py's capitalized --config.
+      # build.py appends the config to --build_dir, so CPack writes the C/C++ API
+      # archive under build/<ep>/<Config>/package.
+      $cfg = switch ("$(build_config)") {
+        "release"        { "Release" }
+        "relwithdebinfo" { "RelWithDebInfo" }
+        "debug"          { "Debug" }
+        default          { "Release" }
+      }
 
-  - powershell: |
-      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
-      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --target package
-    displayName: 'Package C/C++ API'
+      $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
+      $env:CC = "$env:LLVM_PREFIX/bin/clang"
+      $env:CXX = "$env:LLVM_PREFIX/bin/clang++"
+      # llguidance's rust staticlib is linked with dynamic_lookup so undefined
+      # symbols resolve against the host at load time (matches the old preset path).
+      $env:RUSTFLAGS = "-C link-arg=-undefined -C link-arg=dynamic_lookup"
+
+      $extraDefines = @("ENABLE_PYTHON=OFF", "ENABLE_TESTS=OFF", "CMAKE_OSX_ARCHITECTURES=$(arch)")
+      if ("$(arch)" -eq "arm64") {
+        $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
+        $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+        $env:CC_aarch64_apple_darwin = $env:CC
+        $env:CXX_aarch64_apple_darwin = $env:CXX
+        $extraDefines += "Rust_CARGO_TARGET=aarch64-apple-darwin"
+      }
+
+      $buildArgs = @(
+        "--config", $cfg,
+        "--parallel",
+        "--skip_tests",
+        "--skip_examples",
+        "--skip_wheel",
+        "--use_guidance",
+        "--package",
+        "--build_dir", "$(Build.Repository.LocalPath)/build/$(ep)"
+      )
+      # Reuse the ORT_HOME the download step resolved (empty for the fetch-from-source path).
+      $ortArg = "$(ORT_HOME_CMAKE_ARG)"
+      if ($ortArg -match '^-DORT_HOME=(.*)$') { $buildArgs += @("--ort_home", $Matches[1]) }
+      $buildArgs += @("--cmake_extra_defines") + $extraDefines
+
+      python -m pip install --quiet requests
+      Write-Host "python build.py $buildArgs"
+      python build.py @buildArgs
+
+      $pkgDir = "$(Build.Repository.LocalPath)/build/$(ep)/$cfg/package"
+      Write-Host "##vso[task.setvariable variable=capiPackageDir;]$pkgDir"
+    displayName: 'Build GenAI core (build.py)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - bash: |
       set -e -x
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      ls -al "$(capiPackageDir)"
       tar -xvzf onnxruntime-genai-*.tar.gz -C .
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       find . -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec zip -FSr --symlinks {}.zip {} \;
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.tar.gz
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      rm -rf "$(capiPackageDir)"/onnxruntime-genai-*.tar.gz
+      find "$(capiPackageDir)" -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
+      ls -al "$(capiPackageDir)"
     displayName: 'Convert from .tar.gz to .zip'
-    workingDirectory: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+    workingDirectory: '$(capiPackageDir)'
 
   - template: compliant/mac-esrp-archive-step.yml
     parameters:
-      FolderPath: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+      FolderPath: '$(capiPackageDir)'
       Pattern: '*.zip'
 
   - bash: |
       set -e -x
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      ls -al "$(capiPackageDir)"
       find . -name 'onnxruntime-genai-*.zip' -exec unzip {} \;
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       find . -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec tar -czvf {}.tar.gz {} \;
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.zip
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
-      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      rm -rf "$(capiPackageDir)"/onnxruntime-genai-*.zip
+      find "$(capiPackageDir)" -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
+      ls -al "$(capiPackageDir)"
     displayName: 'Convert from .zip to .tar.gz'
-    workingDirectory: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+    workingDirectory: '$(capiPackageDir)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       artifactName: $(artifactName)-capi
-      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+      targetPath: '$(capiPackageDir)'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - powershell: |
