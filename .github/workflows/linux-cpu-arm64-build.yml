@@ -73,7 +73,7 @@ jobs:
       - name: Download Docker Image
         run: |
           set -e -x
-          az login --identity --object-id b44538a9-6545-4353-907e-da46df88a2ab
+          az login --identity --object-id 161bbca8-9899-4f61-950c-4d556fbcf830
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
