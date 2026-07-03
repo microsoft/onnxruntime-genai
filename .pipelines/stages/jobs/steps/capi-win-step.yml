@@ -226,40 +226,79 @@ steps:
     condition: ne(variables['ep'], 'winml')
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
-  displayName: 'Configure CMake C API with WinML (arm64, WITH CUDA) - $(ort_version)'
-  condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
-  workingDirectory: '$(Build.Repository.LocalPath)'
+# The Python wheel target keeps building the core via CMake presets. The
+# onnxruntime-genai (core C/C++ API) target builds via build.py so the native
+# core is produced the same incremental way across every platform.
+- ${{ if eq(parameters.target, 'python') }}:
+  - powershell: |
+      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+    displayName: 'Configure CMake C API with WinML (arm64, WITH CUDA) - $(ort_version)'
+    condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
-  displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
-  condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+    displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
+    condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG)
-  displayName: 'Configure CMake C API with CUDA'
-  condition: eq(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG)
+    displayName: 'Configure CMake C API with CUDA'
+    condition: eq(variables['ep'], 'cuda')
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
-  displayName: 'Configure CMake C API without CUDA'
-  condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
+    displayName: 'Configure CMake C API without CUDA'
+    condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel
-  displayName: 'Build C API'
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel
+    displayName: 'Build C API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
-- powershell: |
-    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-  displayName: 'List all files in the repo for debugging'
-  
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - powershell: |
+      $ErrorActionPreference = "Stop"
+      # Map the pipeline's lowercase build config to build.py's capitalized --config
+      # and publish it for the later packaging/symbol steps (build.py appends the
+      # config to --build_dir, so artifacts live under build\<ep>\<Config>).
+      $cfg = switch ("$(build_config)") {
+        "release"        { "Release" }
+        "relwithdebinfo" { "RelWithDebInfo" }
+        "debug"          { "Debug" }
+        default          { "Release" }
+      }
+      Write-Host "##vso[task.setvariable variable=cmakeBuildType;]$cfg"
+
+      $buildArgs = @(
+        "--config", $cfg,
+        "--parallel",
+        "--skip_tests",
+        "--skip_examples",
+        "--skip_wheel",
+        "--use_guidance",
+        "--build_dir", "$(Build.Repository.LocalPath)\build\$(ep)",
+        "--cmake_extra_defines", "ENABLE_PYTHON=OFF", "ENABLE_TESTS=OFF"
+      )
+      if ("$(arch)" -eq "arm64") { $buildArgs += "--arm64" }
+      $cudaHome = "$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)"
+      switch ("$(ep)") {
+        "cuda"     { $buildArgs += @("--use_cuda", "--cuda_home", $cudaHome, "--cuda_archs", "$(cuda_archs)") }
+        "directml" { $buildArgs += @("--use_dml") }
+        "winml"    { $buildArgs += @("--use_winml", "--winml_sdk_version", "$(ort_version)", "--use_cuda", "--cuda_home", $cudaHome, "--cuda_archs", "$(cuda_archs)") }
+      }
+      # Reuse the ORT_HOME the download step resolved (empty for the fetch-from-source path).
+      $ortArg = "$(ORT_HOME_CMAKE_ARG)"
+      if ($ortArg -match '^-DORT_HOME=(.*)$') { $buildArgs += @("--ort_home", $Matches[1]) }
+
+      Write-Host "python build.py $buildArgs"
+      python build.py @buildArgs
+    displayName: 'Build GenAI core (build.py)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
   - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
@@ -277,22 +316,24 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cd $(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)
-      cpack -C $(build_config)
+      # Run CPack against the (now signed) build tree to produce
+      # onnxruntime-genai-<ver>-win-<arch>[-<ep>].zip with the top-level layout the
+      # NuGet packer consumes. Packaging after signing keeps the signed DLLs.
+      cmake --build "$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)" --config $(cmakeBuildType) --target package --parallel
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    displayName: 'Publish Artifact: ONNXRuntime GenAI capi'
     inputs:
       artifactName: $(artifactName)-capi
-      targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
+      targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)\package'
 
   - task: PublishSymbols@2
     displayName: 'Publish Build Symbols'
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\RelWithDebInfo\'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)'
       SearchPattern: 'onnxruntime-genai*.pdb'
       SymbolServerType: teamServices
       SymbolExpirationInDays: 365

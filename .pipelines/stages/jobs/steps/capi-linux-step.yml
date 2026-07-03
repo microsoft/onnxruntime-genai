@@ -185,6 +185,11 @@ steps:
         ort_args="--ort_home /ort_genai_src/ort_build"
       fi
 
+      # Build the native core and produce the CPack C/C++ API archive in one pass.
+      # --package runs CPack, which yields onnxruntime-genai-<ver>-<rid>[-<ep>].tar.gz
+      # with a top-level <name>/ folder containing lib/ + include/ — the exact
+      # naming/layout the downstream NuGet packer keys off (RID token in the file
+      # name, top-level dir == file base name).
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
@@ -201,10 +206,12 @@ steps:
             --skip_tests \
             --skip_examples \
             --use_guidance \
+            --package \
+            --skip_wheel \
             --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
             --build_dir /ort_genai_src/build/$(ep) \
-            --install_dir /ort_genai_src/build/$(ep)/install/$(artifactName) \
-            $ORT_ARGS $EP_ARGS'
+            $ORT_ARGS $EP_ARGS
+          echo "cfg=$CFG" > /ort_genai_src/build/$(ep)/.cfg'
     displayName: 'Build GenAI core (build.py)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -216,25 +223,20 @@ steps:
 
   - bash: |
       set -e -x
-      prefix="$(Build.Repository.LocalPath)/build/$(ep)/install/$(artifactName)"
-      # The core export installs lib/, include/ and the license/notice files. The
-      # NuGet packer additionally expects VERSION_INFO alongside them, so stage it in.
-      cp "$(Build.Repository.LocalPath)/VERSION_INFO" "$prefix/"
-      mkdir -p "$(Build.ArtifactStagingDirectory)/capi"
-      # Archive with the root folder == artifactName so the archive contains
-      # <artifactName>/lib/<native libs>, matching the packer's extraction contract.
-      tar -C "$(Build.Repository.LocalPath)/build/$(ep)/install" \
-        -czf "$(Build.ArtifactStagingDirectory)/capi/$(artifactName).tar.gz" \
-        "$(artifactName)"
-      ls -la "$(Build.ArtifactStagingDirectory)/capi"
-    displayName: 'Assemble C/C++ API archive'
+      # build.py appends the (capitalized) config to --build_dir, so CPack writes
+      # to build/<ep>/<Config>/package.
+      source "$(Build.Repository.LocalPath)/build/$(ep)/.cfg"
+      pkg_dir="$(Build.Repository.LocalPath)/build/$(ep)/$cfg/package"
+      echo "##vso[task.setvariable variable=capiPackageDir;]$pkg_dir"
+      ls -la "$pkg_dir"
+    displayName: 'Locate C/C++ API package'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime GenAI capi'
     inputs:
       artifactName: $(artifactName)-capi
-      targetPath: '$(Build.ArtifactStagingDirectory)/capi'
+      targetPath: '$(capiPackageDir)'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |

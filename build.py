@@ -703,8 +703,13 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += [f"-DWINML_SDK_VERSION={args.winml_sdk_version}"]
 
     if args.use_cuda or args.use_trt_rtx:
-        cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
-        command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
+        # The Visual Studio generator selects the CUDA compiler via the
+        # '-T cuda=<home>' toolset (set above); it does not support (and errors on)
+        # an explicit CMAKE_CUDA_COMPILER. Single-config generators (Ninja / Unix
+        # Makefiles) do need it, so only set it off the VS generator.
+        if not args.cmake_generator.startswith("Visual Studio"):
+            cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
+            command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
         if args.cuda_archs:
             command += [f"-DCMAKE_CUDA_ARCHITECTURES={args.cuda_archs}"]
 
