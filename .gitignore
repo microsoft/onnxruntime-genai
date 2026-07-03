@@ -8,6 +8,8 @@
 *obj/
 src/csharp/AssemblyInfo.cs
 /ort
+/ort_build
+/cuda_sdk
 /build
 /build_*
 /test/models/*

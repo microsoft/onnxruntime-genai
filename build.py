@@ -9,6 +9,7 @@ import os
 import platform
 import shlex
 import shutil
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -122,12 +123,44 @@ def _parse_args():
 
     parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
 
+    # Incremental SDK builds: the core is built once and exported as a CMake
+    # package; each SDK is then built standalone against that prebuilt core
+    # instead of recompiling it.
+    parser.add_argument(
+        "--install_dir",
+        default=None,
+        type=Path,
+        help="When set, install/export the built core to this prefix as a consumable "
+        "CMake package (find_package(onnxruntime-genai)). This is the single core "
+        "artifact every SDK build layers on top of.",
+    )
+    parser.add_argument(
+        "--prebuilt_genai_home",
+        default=None,
+        type=Path,
+        help="Path to a prebuilt, exported onnxruntime-genai core (produced by --install_dir). "
+        "When set, build.py configures the standalone SDK project selected by --sdk against "
+        "this core via find_package instead of recompiling the core.",
+    )
+    parser.add_argument(
+        "--sdk",
+        default="python",
+        choices=["python", "java"],
+        help="Which standalone SDK project to build when --prebuilt_genai_home is set.",
+    )
+
     parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
     parser.add_argument(
         "--cuda_home",
         type=Path,
         help="Path to CUDA home. Read from CUDA_HOME or CUDA_PATH environment variable if not specified."
         "Used when --use_cuda is specified.",
+    )
+    parser.add_argument(
+        "--cuda_archs",
+        default=None,
+        help="CUDA architectures to build for, passed to CMAKE_CUDA_ARCHITECTURES "
+        "(e.g. '75;80;90'). Used when --use_cuda is specified.",
     )
 
     parser.add_argument(
@@ -382,6 +415,21 @@ def _validate_args(args: argparse.Namespace):
         args.build = True
         args.test = True
 
+    # A standalone SDK build only configures and builds the SDK against a prebuilt
+    # core; there are no core unit tests in that build tree.
+    if args.prebuilt_genai_home:
+        args.test = False
+        args.skip_tests = True
+        # The PyPackageBuild target only exists for the Python SDK.
+        if args.sdk != "python":
+            args.skip_wheel = True
+
+    # Apple framework / iOS / Catalyst builds disable the Python bindings
+    # (ENABLE_PYTHON=OFF below), so the PyPackageBuild target is never generated.
+    # Force-skip the wheel so build() does not try to build a nonexistent target.
+    if args.build_apple_framework or args.ios or args.macos == "Catalyst":
+        args.skip_wheel = True
+
     # validate args. this updates values in args where applicable (e.g. fully resolve paths).
     args.cmake_path = _resolve_executable_path(args.cmake_path)
     args.ctest_path = _resolve_executable_path(args.ctest_path)
@@ -519,10 +567,73 @@ def _get_windows_build_args(args: argparse.Namespace):
     return win_args
 
 
+def _update_standalone_sdk(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Configure a standalone SDK project (e.g. the Python wheel or the Java bindings)
+    against a prebuilt, exported onnxruntime-genai core. The core is consumed via
+    find_package instead of being recompiled, which is what makes the SDK builds
+    incremental.
+    """
+    if args.sdk == "python":
+        sdk_source_dir = REPO_ROOT / "src" / "python"
+    elif args.sdk == "java":
+        sdk_source_dir = REPO_ROOT / "src" / "java"
+    else:
+        raise Exception(f"Standalone build is not supported for SDK '{args.sdk}'.")
+
+    if not args.ort_home:
+        raise Exception("--prebuilt_genai_home requires --ort_home (for the ONNX Runtime headers/libs).")
+
+    # The exported core lives under <prefix>/lib/cmake/onnxruntime-genai; add the
+    # prefix to CMAKE_PREFIX_PATH so find_package can locate it.
+    prefix_paths = [str(args.prebuilt_genai_home)]
+
+    command = [
+        str(args.cmake_path),
+        "-G",
+        args.cmake_generator,
+        "-S",
+        str(sdk_source_dir),
+        "-B",
+        str(args.build_dir),
+        f"-DCMAKE_BUILD_TYPE={args.config}",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        f"-DORT_HEADER_DIR={args.ort_home / 'include'}",
+        f"-DORT_LIB_DIR={args.ort_home / 'lib'}",
+    ]
+
+    if args.sdk == "python":
+        # pybind11's CMake package is resolved from the single pip source.
+        try:
+            pybind11_cmakedir = subprocess.check_output(
+                [sys.executable, "-m", "pybind11", "--cmakedir"], text=True
+            ).strip()
+            if pybind11_cmakedir:
+                prefix_paths.append(pybind11_cmakedir)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            log.warning("Could not resolve pybind11 CMake dir via 'python -m pybind11 --cmakedir'.")
+        command += ["-DBUILD_WHEEL=ON"]
+    elif args.sdk == "java":
+        command += [
+            f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
+        ]
+
+    command += ["-DCMAKE_PREFIX_PATH=" + ";".join(prefix_paths)]
+
+    if args.cmake_extra_defines != []:
+        command += args.cmake_extra_defines
+
+    util.run(command, env=env)
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
     """
+
+    if args.prebuilt_genai_home:
+        _update_standalone_sdk(args, env)
+        return
 
     # build the cmake command to create/update the build files
     command = [str(args.cmake_path)]
@@ -576,6 +687,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.use_cuda or args.use_trt_rtx:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
+        if args.cuda_archs:
+            command += [f"-DCMAKE_CUDA_ARCHITECTURES={args.cuda_archs}"]
 
     if args.package and util.is_windows():
         command += _get_windows_build_args(args)
@@ -732,6 +845,27 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
+    if args.install_dir and not args.prebuilt_genai_home:
+        install_core(args, env)
+
+
+def install_core(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Install/export the built core to --install_dir as a consumable CMake package.
+    This is the single core artifact that every standalone SDK build layers on top
+    of (consumed via find_package(onnxruntime-genai)).
+    """
+    install_command = [
+        str(args.cmake_path),
+        "--install",
+        str(args.build_dir),
+        "--config",
+        args.config,
+        "--prefix",
+        str(args.install_dir),
+    ]
+    util.run(install_command, env=env)
+
 
 def package(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -877,5 +1011,5 @@ if __name__ == "__main__":
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
 
-    if not (arguments.skip_examples or arguments.android or arguments.ios):
+    if not (arguments.skip_examples or arguments.android or arguments.ios or arguments.prebuilt_genai_home):
         build_examples(arguments, environment)

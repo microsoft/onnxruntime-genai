@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+# CMake package config for the prebuilt onnxruntime-genai core.
+#
+# Consuming this package (via find_package(onnxruntime-genai)) imports the
+# prebuilt core library target so SDK projects (Python wheel, Java, etc.) can
+# link against it instead of recompiling the core.
+#
+# Imported targets:
+#   onnxruntime-genai::onnxruntime-genai        - the core shared library
+#   onnxruntime-genai::onnxruntime-genai-cuda   - the CUDA companion library (only when built with CUDA)
+
+include("${CMAKE_CURRENT_LIST_DIR}/onnxruntime-genai-targets.cmake")
+
+# Execution-provider compile definitions the core was built with. SDK builds
+# (e.g. the Python wheel) apply these so reported capabilities match the core.
+set(onnxruntime-genai_EP_DEFINITIONS
+  "USE_CUDA=@ONNXRUNTIME_GENAI_USE_CUDA@"
+  "USE_DML=@ONNXRUNTIME_GENAI_USE_DML@"
+  "USE_ROCM=@ONNXRUNTIME_GENAI_USE_ROCM@"
+  "USE_WEBGPU=@ONNXRUNTIME_GENAI_USE_WEBGPU@"
+)
+
+check_required_components(onnxruntime-genai)
