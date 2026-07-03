@@ -85,6 +85,7 @@ steps:
 - bash: |
     set -e -x
     cmake_extra_args=""
+    cuda_archs=""
     if [ "$(ep)" = "cuda" ]; then
       if [[ "$(cuda_version)" == 13.* ]]; then
         cuda_archs="75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
@@ -94,6 +95,7 @@ steps:
       cmake_extra_args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=\\\"${cuda_archs}\\\""
     fi
     echo "##vso[task.setvariable variable=CMAKE_EXTRA_ARGS;]$cmake_extra_args"
+    echo "##vso[task.setvariable variable=CUDA_ARCHS;]$cuda_archs"
   displayName: 'Set CMake Extra Args'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -165,29 +167,45 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
-      docker_env_args=()
+      # Map the pipeline's lowercase build config to build.py's capitalized --config.
+      case "$(build_config)" in
+        release)        cfg="Release" ;;
+        relwithdebinfo) cfg="RelWithDebInfo" ;;
+        debug)          cfg="Debug" ;;
+        *)              cfg="Release" ;;
+      esac
+
+      ep_args=""
       if [ "$(ep)" = "cuda" ]; then
-        docker_env_args=(-e CMAKE_EXTRA_ARGS="$(CMAKE_EXTRA_ARGS)")
+        ep_args="--use_cuda --cuda_home /usr/local/cuda --cuda_archs $(CUDA_ARCHS)"
       fi
+
+      ort_args=""
+      if [ "${{ parameters.ort_build_version }}" != "default" ]; then
+        ort_args="--ort_home /ort_genai_src/ort_build"
+      fi
+
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ \
-      "${docker_env_args[@]}" \
+      -e CFG="$cfg" \
+      -e EP_ARGS="$ep_args" \
+      -e ORT_ARGS="$ort_args" \
       ortgenai$(ep)build$(arch) \
       bash -c '
           set -e -x
-          cmake_args=(-DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF)
-          if [ -n "$CMAKE_EXTRA_ARGS" ]; then
-            eval "cmake_args+=($CMAKE_EXTRA_ARGS)"
-          fi
-          if [ "${{ parameters.ort_build_version }}" != "default" ]; then
-            cmake_args+=("-DORT_HOME=/ort_genai_src/ort_build")
-          fi
-          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) "${cmake_args[@]}"
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target onnxruntime-genai'
-    displayName: 'Build GenAi'
+          python3 build.py \
+            --config "$CFG" \
+            --parallel \
+            --skip_tests \
+            --skip_examples \
+            --use_guidance \
+            --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
+            --build_dir /ort_genai_src/build/$(ep) \
+            --install_dir /ort_genai_src/build/$(ep)/install/$(artifactName) \
+            $ORT_ARGS $EP_ARGS'
+    displayName: 'Build GenAI core (build.py)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: BinSkim@4
@@ -195,25 +213,28 @@ steps:
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*genai.so'
     continueOnError: true
-  - template: utils/capi-archive.yml
-    parameters:
-      archiveType: tar
-  - script: |
+
+  - bash: |
       set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) --target package"
-    displayName: 'Package C/C++ API'
+      prefix="$(Build.Repository.LocalPath)/build/$(ep)/install/$(artifactName)"
+      # The core export installs lib/, include/ and the license/notice files. The
+      # NuGet packer additionally expects VERSION_INFO alongside them, so stage it in.
+      cp "$(Build.Repository.LocalPath)/VERSION_INFO" "$prefix/"
+      mkdir -p "$(Build.ArtifactStagingDirectory)/capi"
+      # Archive with the root folder == artifactName so the archive contains
+      # <artifactName>/lib/<native libs>, matching the packer's extraction contract.
+      tar -C "$(Build.Repository.LocalPath)/build/$(ep)/install" \
+        -czf "$(Build.ArtifactStagingDirectory)/capi/$(artifactName).tar.gz" \
+        "$(artifactName)"
+      ls -la "$(Build.ArtifactStagingDirectory)/capi"
+    displayName: 'Assemble C/C++ API archive'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    displayName: 'Publish Artifact: ONNXRuntime GenAI capi'
     inputs:
       artifactName: $(artifactName)-capi
-      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/package'
+      targetPath: '$(Build.ArtifactStagingDirectory)/capi'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
