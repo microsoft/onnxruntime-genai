@@ -200,6 +200,7 @@ steps:
       ortgenai$(ep)build$(arch) \
       bash -c '
           set -e -x
+          python3 -m pip install --quiet requests
           python3 build.py \
             --config "$CFG" \
             --parallel \

@@ -295,6 +295,7 @@ steps:
       if ($ortArg -match '^-DORT_HOME=(.*)$') { $buildArgs += @("--ort_home", $Matches[1]) }
 
       Write-Host "python build.py $buildArgs"
+      python -m pip install --quiet requests
       python build.py @buildArgs
     displayName: 'Build GenAI core (build.py)'
     workingDirectory: '$(Build.Repository.LocalPath)'

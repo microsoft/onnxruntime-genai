@@ -9,8 +9,6 @@ from os import PathLike, listdir
 from os.path import isfile
 from pathlib import Path
 
-import requests
-
 from .logger import get_logger
 from .platform_helpers import is_linux, is_windows, is_windows_arm
 
@@ -18,6 +16,8 @@ _log = get_logger("util.dependency_resolver")
 
 
 def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
+    import requests
+
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
         mach = None
@@ -77,6 +77,8 @@ def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
 
 
 def _download_dml(destination_dir: PathLike):
+    import requests
+
     def _lib_path():
         mach = None
         if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
@@ -107,6 +109,8 @@ def _download_dml(destination_dir: PathLike):
 
 
 def _download_d3d12(destination_dir: PathLike):
+    import requests
+
     def _lib_path():
         mach = None
         if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
