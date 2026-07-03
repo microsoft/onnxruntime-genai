@@ -567,6 +567,24 @@ def _get_windows_build_args(args: argparse.Namespace):
     return win_args
 
 
+def _get_linux_build_args(args: argparse.Namespace):
+    """
+    Security-hardening compile/link flags for shippable Linux builds. These mirror
+    the flags the CI CMake presets used to inject so build.py-produced binaries stay
+    BinSkim/compliance equivalent (full RELRO, fortify source, glibcxx assertions,
+    stack protector). Applied as *_INIT so CMake still appends the per-config
+    optimization flags (-O3 -DNDEBUG for Release) on top.
+    """
+    hardening_cflags = "-Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -pipe"
+    return [
+        "-DCMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now",
+        "-DCMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now",
+        "-DCMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now",
+        "-DCMAKE_C_FLAGS_INIT=" + hardening_cflags,
+        "-DCMAKE_CXX_FLAGS_INIT=" + hardening_cflags,
+    ]
+
+
 def _update_standalone_sdk(args: argparse.Namespace, env: dict[str, str]):
     """
     Configure a standalone SDK project (e.g. the Python wheel or the Java bindings)
@@ -692,6 +710,12 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if args.package and util.is_windows():
         command += _get_windows_build_args(args)
+
+    # Apply Linux security-hardening flags to shippable builds (packaged and/or
+    # exported via --install_dir) so build.py-produced binaries stay compliance
+    # equivalent to the previous preset-based CI builds.
+    if (args.package or args.install_dir) and util.is_linux():
+        command += _get_linux_build_args(args)
 
     if args.android:
         command += [

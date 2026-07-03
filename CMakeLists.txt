@@ -243,7 +243,11 @@ endif()
 
 
 if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  # Wrap in BUILD_INTERFACE so the llguidance source path (in the build tree) is
+  # only propagated to in-tree consumers and is NOT written into the exported
+  # package's INTERFACE_INCLUDE_DIRECTORIES (install(EXPORT) rejects build-tree
+  # paths). Standalone SDKs link the prebuilt core and don't need llguidance headers.
+  target_include_directories(onnxruntime-genai PUBLIC $<BUILD_INTERFACE:${llguidance_SOURCE_DIR}/parser/>)
   target_link_libraries(onnxruntime-genai PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
