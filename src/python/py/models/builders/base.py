@@ -2648,8 +2648,9 @@ class Model:
             "softcap": self.attention_attrs["softcap"],
             "do_rotary": self.attention_attrs["use_rope_in_attn"],
             "rotary_interleaved": self.rope_attrs["interleaved"],
-            "qk_norm_epsilon": kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"]),
         }
+        if q_norm_weight:
+            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -3559,7 +3560,7 @@ class Model:
             weights,
             bits,
             prepack,
-            _ortpyb.pack_weights_for_cuda_mixed_gemm,
+            _ortpyb.pack_weights_for_cuda_mixed_gemm if prepack and hasattr(_ortpyb, "pack_weights_for_cuda_mixed_gemm") else None,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
         )
 

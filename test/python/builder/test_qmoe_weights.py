@@ -418,6 +418,21 @@ def test_cuda_per_channel_quantization_uses_qmoe_symmetric_storage(bits):
     assert quantized.max() == (15 if bits == 4 else 255)
 
 
+def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(monkeypatch):
+    torch.manual_seed(0)
+    weights = torch.randn(17, 16, dtype=torch.float32) * 0.05
+    model = _RealMoEModel("cuda", 0, 0, bits=4)
+
+    monkeypatch.setattr(base_module, "_ortpyb", types.SimpleNamespace())
+
+    qweight, scales = model.make_qmoe_weights(weights)
+
+    assert qweight.dtype == torch.uint8
+    assert tuple(qweight.shape) == (17, 8)
+    assert tuple(scales.shape) == (17,)
+    assert "block_size" not in model.moe_attrs
+
+
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")
 def test_cutlass_prepacked_scales_are_signed():
     """Regression guard for the abs(scales) bug: blockwise scales must keep their
