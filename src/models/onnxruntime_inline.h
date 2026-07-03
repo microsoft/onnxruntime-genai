@@ -1538,10 +1538,10 @@ inline const ModelPackageApi& GetModelPackageApi() {
     // Local resolver for experimental function pointers. Kept inline here so we don't have
     // to include onnxruntime_experimental_cxx_api.h (which transitively includes
     // onnxruntime_cxx_api.h and conflicts with genai's vendored Ort wrappers).
-#define GENAI_MP_V28_FN(NAME)                                                       \
-    reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>(      \
-        api->GetExperimentalFunction(                                               \
-            kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
+#define GENAI_MP_V28_FN(NAME)                                                \
+  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
+      api->GetExperimentalFunction(                                          \
+          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
 
     f.CreateModelPackageOptionsFromSessionOptions = GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
     f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
