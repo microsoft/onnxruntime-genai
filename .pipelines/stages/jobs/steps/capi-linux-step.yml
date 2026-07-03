@@ -200,8 +200,27 @@ steps:
       ortgenai$(ep)build$(arch) \
       bash -c '
           set -e -x
-          python3 -m pip install --quiet requests
-          python3 build.py \
+          # /usr/bin/python3 in these images may lack pip. Pick an interpreter that
+          # has pip (system pythons first, then the manylinux /opt/python ones) and
+          # use it for BOTH installing requests and running build.py, so the module
+          # lands in the interpreter that actually executes the build.
+          PYTHON=""
+          for c in python3.11 python3.12 python3.13 python3.10 python3 \
+                   /opt/python/cp311-cp311/bin/python3.11 \
+                   /opt/python/cp312-cp312/bin/python3.12 \
+                   /opt/python/cp313-cp313/bin/python3.13; do
+            if command -v "$c" >/dev/null 2>&1 && "$c" -m pip --version >/dev/null 2>&1; then
+              PYTHON=$("$c" -c "import sys; print(sys.executable)")
+              break
+            fi
+          done
+          if [ -z "$PYTHON" ]; then
+            PYTHON=$(command -v python3)
+            "$PYTHON" -m ensurepip --default-pip
+          fi
+          echo "Using interpreter: $PYTHON"
+          "$PYTHON" -m pip install --quiet requests
+          "$PYTHON" build.py \
             --config "$CFG" \
             --parallel \
             --skip_tests \
