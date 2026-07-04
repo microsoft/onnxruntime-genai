@@ -114,6 +114,12 @@ struct DeviceInterface {
   // device<->CPU copies).
   virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
 
+  // §6: Returns the OrtEpDevice entries for this interface's EP on the given env.
+  // Non-empty => plugin mode (shared allocator fetched on demand).
+  // Empty => legacy mode (EnsureDeviceOrtInit bootstrap).
+  // Default returns empty (most EPs have no plugin path yet).
+  virtual std::vector<const OrtEpDevice*> FindMyEpDevices(OrtEnv& /*env*/) const { return {}; }
+
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
   virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) = 0;

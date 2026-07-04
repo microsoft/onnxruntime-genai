@@ -483,8 +483,24 @@ Tests: shutdown → re-init cycle (CPU first; each EP added as it migrates).
   (§8, subject to the usage-finished rule); document the §8 ordering rules and
   copy the §5 lifetime contract into the public C API header.
 
-**Stage 2 — WebGPU.** Fetch-on-demand shared allocator; `Model::Model`
-branches on the §6 check so WebGPU skips `EnsureDeviceOrtInit` (§12.1).
+**Stage 2 — WebGPU.** Dual-path support: `FindMyEpDevices` virtual added to `DeviceInterface`
+(default: empty); `InterfaceImpl` overrides it. `Model::Model` gates on `FindMyEpDevices` —
+plugin mode skips `EnsureDeviceOrtInit`; legacy mode calls it (and then `InitOrt` sets
+`ort_allocator_` so `EnsureAllocator()` is a no-op for that path). `EnsureAllocator()` fetches
+the env's shared allocator on first use in plugin mode. `InitOrt` restored for the legacy V1
+path (sets `ort_allocator_` / `ort_memory_info_` from the trivial-session allocator). The WebGPU
+fallback allocator name (`"WebGPU_Buffer"`) is retained in `EnsureDeviceOrtInit` for old ORT.
+`WebGPUMemory` constructors take `Ort::Allocator&` / `const OrtMemoryInfo&` (references, not
+pointers) to make the non-null contract explicit.
+
+**Internal-vs-plugin discriminator for WebGPU:** the internal WebGPU EP (built into ORT)
+registers itself in `GetEpDevices` as a fake plugin EP but does **not** call
+`EpDevice_AddAllocatorInfo` — so its `OrtEpDevice` has no memory-info entries and
+`GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT)` returns `nullptr`. The real plugin
+WebGPU EP (from `onnxruntime/core/providers/webgpu/ep/factory.cc`) calls
+`EpDevice_AddAllocatorInfo` with `{WEBGPU_BUFFER, OrtMemoryInfoDeviceType_GPU,
+OrtDeviceMemoryType_DEFAULT}`. `FindMyEpDevices` filters on this: only devices with a
+non-null `DEFAULT` memory info are considered plugin-mode devices.
 
 **Stage 3 — CUDA / NvTensorRtRtx.** Remove the static allocator, add the
 host-accessible allocator path, keep the provider-bridge path; add-on library

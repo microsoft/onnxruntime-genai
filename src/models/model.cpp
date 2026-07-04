@@ -422,6 +422,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
+  // CPU uses the process-global allocator (no trivial session needed, §9).
+  // OpenVINO delegates to the CPU allocator.
   if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
@@ -580,7 +582,10 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, *config_);
+  // §6/§10: Use the plugin-EP shared allocator if the EP is registered as a plugin; otherwise
+  // fall back to the legacy trivial-session bootstrap (EnsureDeviceOrtInit).
+  if (p_device_->FindMyEpDevices(GetOrtEnv()).empty())
+    EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
