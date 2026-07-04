@@ -41,6 +41,12 @@ parameters:
 - name: core_dependency
   type: string
   default: ''
+# Whether to build the wheel incrementally against a prebuilt '-core' artifact.
+# Independent of core_dependency: in the unified pipeline the core is produced by a
+# separate stage (no intra-stage dependsOn) but is still consumed incrementally.
+- name: prebuilt_core
+  type: boolean
+  default: false
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
@@ -192,7 +198,7 @@ jobs:
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
-        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
+        prebuilt_core: ${{ parameters.prebuilt_core }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
@@ -205,7 +211,7 @@ jobs:
         enable_winml: ${{ parameters.enable_winml }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
-        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
+        prebuilt_core: ${{ parameters.prebuilt_core }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
@@ -216,7 +222,7 @@ jobs:
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
-        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
+        prebuilt_core: ${{ parameters.prebuilt_core }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

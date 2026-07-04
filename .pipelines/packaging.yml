@@ -1,0 +1,266 @@
+# Unified ONNX Runtime GenAI packaging pipeline.
+#
+# Modular & incremental: the native core is built ONCE per (platform, EP, arch) in the
+# Core Build stage, then every SDK (C/C++ archive, NuGet, Python wheel, Android AAR,
+# Apple CocoaPods) is layered on top of that single prebuilt core artifact. This replaces
+# the four legacy entry pipelines (nuget-publishing, pypl-publishing, android-publishing,
+# macos-ios-cocoapods-publishing) with one trigger and one shared '-core' artifact.
+#
+# Stages run in their listed order (implicit sequential dependency) so downstream SDK
+# stages always see the core artifacts published by the Core Build stage.
+
+parameters:
+  # ---- SDK selection ------------------------------------------------------------------
+  - name: enable_nuget
+    displayName: 'Build managed NuGet packages'
+    type: boolean
+    default: true
+
+  - name: enable_python
+    displayName: 'Build Python wheels'
+    type: boolean
+    default: true
+
+  - name: enable_maven_publishing
+    displayName: 'Build Android AAR for Maven publishing'
+    type: boolean
+    default: true
+
+  - name: enable_cocoapods_publishing
+    displayName: 'Build Apple CocoaPods (macOS/iOS)'
+    type: boolean
+    default: true
+
+  # ---- Platform / device matrix -------------------------------------------------------
+  - name: enable_win_x64_cpu
+    displayName: 'Whether Windows x64 CPU package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_win_cuda
+    displayName: 'Whether Windows CUDA package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_win_dml
+    displayName: 'Whether Windows DirectML package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_win_arm64
+    displayName: 'Whether Windows ARM64 package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_linux_x64_cpu
+    displayName: 'Whether Linux x64 CPU package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_linux_arm64_cpu
+    displayName: 'Whether Linux ARM64 CPU package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_linux_cuda
+    displayName: 'Whether Linux CUDA package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_macos_cpu
+    displayName: 'Whether MacOS CPU package is built.'
+    type: boolean
+    default: true
+
+  - name: enable_android
+    displayName: 'Whether Android AAR (for NuGet mobile RIDs) is built.'
+    type: boolean
+    default: true
+
+  - name: enable_apple_framework
+    displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+    type: boolean
+    default: true
+
+  - name: enable_winml
+    displayName: 'Whether Windows WinML package is built.'
+    type: boolean
+    default: true
+
+  # ---- Versions -----------------------------------------------------------------------
+  - name: ort_version
+    displayName: 'OnnxRuntime version'
+    type: string
+    default: '1.23.0'
+
+  - name: ort_winml_version
+    displayName: 'Microsoft.Windows.AI.MachineLearning Version (should match CMakeList.txt)'
+    type: string
+    default: '2.1.1'
+
+  - name: ort_cuda_version
+    displayName: 'OnnxRuntime GPU version'
+    type: string
+    default: '1.23.0'
+
+  - name: ort_dml_version
+    displayName: 'OnnxRuntime DML version'
+    type: string
+    default: '1.23.0'
+
+  - name: cuda_version
+    displayName: 'CUDA version'
+    type: string
+    values:
+      - '12.8'
+      - '13.1'
+    default: '12.8'
+
+  - name: build_config
+    displayName: 'Build Configuration (core / NuGet / Python)'
+    type: string
+    default: 'relwithdebinfo'
+    values:
+      - 'release'
+      - 'relwithdebinfo'
+      - 'debug'
+
+  - name: nuget_version_type
+    displayName: 'Nuget version - stable uses VERSION_INFO, dev appends date, build_id and commit-ish'
+    type: string
+    default: dev
+    values:
+      - dev
+      - stable
+
+  - name: ort_build_version
+    displayName: 'OnnxRuntime nightly version for build-time compilation. Leave as ''default'' to use ortlib.cmake.'
+    type: string
+    default: 'default'
+
+  - name: ort_build_source
+    displayName: 'Package source for build-time ORT download. NuGet uses nuget.org, Ort-Nightly uses the ADO nightly feed.'
+    type: string
+    default: 'NuGet'
+    values:
+      - 'NuGet'
+      - 'Ort-Nightly'
+
+  - name: custom_ort_package_versioned_name
+    displayName: 'Versioned name of the Foundry ORT nuget package. Keep None to disable the custom NuGet package.'
+    type: string
+    default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250617-0934-76952334d2.nupkg'
+
+resources:
+  repositories:
+    - repository: 1esPipelines
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+trigger: none
+extends:
+  # The pipeline extends the 1ES PT which will inject different SDL and compliance tasks.
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
+  parameters:
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+    sdl:
+      policheck:
+        enabled: true
+        break: true # always break the build on policheck issues. You can disable it by setting to 'false'
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    stages:
+      # ---- Stage 1: native core (single source for every SDK) --------------------------
+      - template: stages/capi-packaging-stage.yml
+        parameters:
+          enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+          enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
+          enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_android: ${{ parameters.enable_android }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
+          ort_version: ${{ parameters.ort_version }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
+          ort_dml_version: ${{ parameters.ort_dml_version }}
+          cuda_version: ${{ parameters.cuda_version }}
+          build_config: ${{ parameters.build_config }}
+          enable_winml: ${{ parameters.enable_winml }}
+          ort_winml_version: ${{ parameters.ort_winml_version }}
+          ort_build_version: ${{ parameters.ort_build_version }}
+          ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ---- Stage 2a: NuGet (consumes core '-capi' archives) ----------------------------
+      - ${{ if eq(parameters.enable_nuget, true) }}:
+          - template: stages/nuget-packaging-stage.yml
+            parameters:
+              enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+              enable_win_cuda: ${{ parameters.enable_win_cuda }}
+              enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+              enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+              enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+              enable_win_dml: ${{ parameters.enable_win_dml }}
+              enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+              enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+              enable_android: ${{ parameters.enable_android }}
+              enable_apple_framework: ${{ parameters.enable_apple_framework }}
+              ort_version: ${{ parameters.ort_version }}
+              ort_cuda_version: ${{ parameters.ort_cuda_version }}
+              ort_dml_version: ${{ parameters.ort_dml_version }}
+              build_config: ${{ parameters.build_config }}
+              nuget_version_type: ${{ parameters.nuget_version_type }}
+              enable_winml: ${{ parameters.enable_winml }}
+              ort_winml_version: ${{ parameters.ort_winml_version }}
+
+      # ---- Stage 2b: Python wheels (consumes core '-core' export incrementally) ---------
+      - ${{ if eq(parameters.enable_python, true) }}:
+          - template: stages/py-packaging-stage.yml
+            parameters:
+              build_core: false # cores are produced by the Core Build stage above
+              enable_linux_x64_cpu: ${{ parameters.enable_linux_x64_cpu }}
+              enable_linux_arm64_cpu: ${{ parameters.enable_linux_arm64_cpu }}
+              enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+              enable_win_x64_cpu: ${{ parameters.enable_win_x64_cpu }}
+              enable_win_cuda: ${{ parameters.enable_win_cuda }}
+              enable_win_dml: ${{ parameters.enable_win_dml }}
+              enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+              enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+              cuda_versions: ${{ parameters.cuda_version }}
+              build_config: ${{ parameters.build_config }}
+              enable_winml: ${{ parameters.enable_winml }}
+              ort_cuda_version: ${{ parameters.ort_cuda_version }}
+              ${{ if eq(parameters.enable_winml, true) }}:
+                ort_version: ${{ parameters.ort_winml_version }}
+              ${{ else }}:
+                ort_version: '' # Not used for non winml builds.
+              ort_build_version: ${{ parameters.ort_build_version }}
+              ort_build_source: ${{ parameters.ort_build_source }}
+
+      # ---- Stage 2c: Android AAR (standalone Maven publishing) -------------------------
+      - ${{ if eq(parameters.enable_maven_publishing, true) }}:
+          - template: stages/android-packaging-stage.yml
+            parameters:
+              ort_version: ${{ parameters.ort_version }}
+              build_config: 'Release'
+
+      # ---- Stage 2d: Apple CocoaPods (macOS/iOS) ---------------------------------------
+      - ${{ if eq(parameters.enable_cocoapods_publishing, true) }}:
+          - template: stages/macos-ios-cocoapods-packaging-stage.yml
+            parameters:
+              ort_version: ${{ parameters.ort_version }}
+              build_config: 'Release'
+
+      # ---- Stage 3: Foundry custom NuGet package (conditional) -------------------------
+      - ${{ if and(and(and(eq(parameters.enable_nuget, true), ne(parameters.custom_ort_package_versioned_name, 'None')), and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cuda, true))), eq(parameters.enable_macos_cpu, true)) }}:
+          - template: stages/custom-nuget-packaging-stage.yml
+            parameters:
+              custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+              nuget_version_type: ${{ parameters.nuget_version_type }}
