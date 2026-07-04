@@ -20,6 +20,11 @@ parameters:
 - name: ort_build_source
   type: string
   default: 'NuGet'
+# When true, build the wheel incrementally against the prebuilt '-core' artifact.
+# When false, build the core and the pybind extension together in one build.py pass.
+- name: prebuilt_core
+  type: boolean
+  default: false
 
 steps:
 - bash: |
@@ -226,38 +231,83 @@ steps:
     condition: ne(variables['ep'], 'winml')
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-# The Python wheel target keeps building the core via CMake presets. The
-# onnxruntime-genai (core C/C++ API) target builds via build.py so the native
-# core is produced the same incremental way across every platform.
+# Build the pybind extension (and, for EPs without a dedicated core producer, the
+# native core) via build.py. The wheel zip is deferred (BUILD_WHEEL=ON but
+# PyPackageBuild is not run yet) so the .pyd can be ESRP-signed before packaging.
 - ${{ if eq(parameters.target, 'python') }}:
-  - powershell: |
-      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
-    displayName: 'Configure CMake C API with WinML (arm64, WITH CUDA) - $(ort_version)'
-    condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  - ${{ if eq(parameters.prebuilt_core, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download prebuilt core (incremental)'
+      inputs:
+        artifact: $(artifactName)-core
+        targetPath: '$(Build.Repository.LocalPath)\coreexport'
 
-  - powershell: |
-      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
-    displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
-    condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
-    workingDirectory: '$(Build.Repository.LocalPath)'
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+        $cfg = switch ("$(build_config)") {
+          "release"        { "Release" }
+          "relwithdebinfo" { "RelWithDebInfo" }
+          "debug"          { "Debug" }
+          default          { "Release" }
+        }
+        Write-Host "##vso[task.setvariable variable=cmakeBuildType;]$cfg"
+        python -m pip install --quiet requests pybind11 wheel build
+        # Incremental: compile only the pybind extension against the prebuilt core.
+        # --skip_wheel keeps BUILD_WHEEL=ON (from the standalone SDK config) but defers
+        # the pip-wheel zip so the .pyd can be signed first.
+        $buildArgs = @(
+          "--config", $cfg,
+          "--parallel",
+          "--sdk", "python",
+          "--prebuilt_genai_home", "$(Build.Repository.LocalPath)\coreexport\prefix",
+          "--ort_home", "$(Build.Repository.LocalPath)\coreexport\ort",
+          "--skip_wheel",
+          "--build_dir", "$(Build.Repository.LocalPath)\build\$(ep)"
+        )
+        if ("$(arch)" -eq "arm64") { $buildArgs += "--arm64" }
+        Write-Host "python build.py $buildArgs"
+        python build.py @buildArgs
+      displayName: 'Build Python extension $(PyNoDotVer) (prebuilt core)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - powershell: |
-      cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG)
-    displayName: 'Configure CMake C API with CUDA'
-    condition: eq(variables['ep'], 'cuda')
-    workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - powershell: |
-      cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
-    displayName: 'Configure CMake C API without CUDA'
-    condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
-    workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel
-    displayName: 'Build C API'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  - ${{ if ne(parameters.prebuilt_core, true) }}:
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+        $cfg = switch ("$(build_config)") {
+          "release"        { "Release" }
+          "relwithdebinfo" { "RelWithDebInfo" }
+          "debug"          { "Debug" }
+          default          { "Release" }
+        }
+        Write-Host "##vso[task.setvariable variable=cmakeBuildType;]$cfg"
+        python -m pip install --quiet requests pybind11 wheel build
+        # Self-contained: build the native core and the pybind extension together.
+        # --skip_wheel + BUILD_WHEEL=ON defers only the pip-wheel zip so the .pyd can
+        # be signed before packaging.
+        $buildArgs = @(
+          "--config", $cfg,
+          "--parallel",
+          "--skip_tests",
+          "--skip_examples",
+          "--skip_wheel",
+          "--use_guidance",
+          "--build_dir", "$(Build.Repository.LocalPath)\build\$(ep)"
+        )
+        if ("$(arch)" -eq "arm64") { $buildArgs += "--arm64" }
+        $cudaHome = "$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)"
+        $extraDefines = @("ENABLE_TESTS=OFF", "BUILD_WHEEL=ON")
+        switch ("$(ep)") {
+          "cuda"     { $buildArgs += @("--use_cuda", "--cuda_home", $cudaHome, "--cuda_archs", "$(cuda_archs)") }
+          "directml" { $buildArgs += @("--use_dml") }
+          "winml"    { $buildArgs += @("--use_winml", "--winml_sdk_version", "$(ort_version)", "--use_cuda", "--cuda_home", $cudaHome, "--cuda_archs", "$(cuda_archs)") }
+        }
+        $ortArg = "$(ORT_HOME_CMAKE_ARG)"
+        if ($ortArg -match '^-DORT_HOME=(.*)$') { $buildArgs += @("--ort_home", $Matches[1]) }
+        $buildArgs += @("--cmake_extra_defines") + $extraDefines
+        Write-Host "python build.py $buildArgs"
+        python build.py @buildArgs
+      displayName: 'Build Python extension $(PyNoDotVer) (full build)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - powershell: |
@@ -280,6 +330,7 @@ steps:
         "--skip_examples",
         "--skip_wheel",
         "--use_guidance",
+        "--install_dir", "$(Build.Repository.LocalPath)\build\$(ep)\coreexport\prefix",
         "--build_dir", "$(Build.Repository.LocalPath)\build\$(ep)",
         "--cmake_extra_defines", "ENABLE_PYTHON=OFF", "ENABLE_TESTS=OFF"
       )
@@ -330,6 +381,37 @@ steps:
       artifactName: $(artifactName)-capi
       targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)\package'
 
+  - powershell: |
+      $ErrorActionPreference = "Stop"
+      # Assemble an ONNX Runtime home (headers + libs/dlls) next to the exported core
+      # so the incremental Python/Java SDK builds compile the binding against the same
+      # ONNX Runtime this core was built with (single ORT source).
+      $base = "$(Build.Repository.LocalPath)\build\$(ep)"
+      $ortOut = "$base\coreexport\ort"
+      New-Item -ItemType Directory -Force -Path "$ortOut\include", "$ortOut\lib" | Out-Null
+      if (Test-Path "$(Build.Repository.LocalPath)\ort_build\lib") {
+        Copy-Item "$(Build.Repository.LocalPath)\ort_build\include\*" "$ortOut\include\" -Recurse -Force
+        Copy-Item "$(Build.Repository.LocalPath)\ort_build\lib\*" "$ortOut\lib\" -Recurse -Force
+      } else {
+        $ortsrc = "$base\$(cmakeBuildType)\_deps\ortlib-src"
+        if (Test-Path "$ortsrc\build\native\include") {
+          Copy-Item "$ortsrc\build\native\include\*" "$ortOut\include\" -Recurse -Force
+        } else {
+          Copy-Item "$ortsrc\buildTransitive\native\include\*" "$ortOut\include\" -Recurse -Force
+        }
+        $rid = if ("$(arch)" -eq "arm64") { "win-arm64" } else { "win-x64" }
+        Copy-Item "$ortsrc\runtimes\$rid\native\*" "$ortOut\lib\" -Recurse -Force
+      }
+      Get-ChildItem "$ortOut\include", "$ortOut\lib"
+    displayName: 'Assemble core export (ORT home)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime GenAI core export'
+    inputs:
+      artifactName: $(artifactName)-core
+      targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\coreexport'
+
   - task: PublishSymbols@2
     displayName: 'Publish Build Symbols'
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
@@ -346,31 +428,29 @@ steps:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
     continueOnError: true
 
+  # Sign the staged extension before the wheel is zipped (the .pyd cannot be signed
+  # once it is inside the .whl archive). build.py stages it under
+  # build\<ep>\<Config>\wheel\onnxruntime_genai via the BUILD_WHEEL POST_BUILD copy.
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
 
   - powershell: |
-      python -m pip install wheel
-    displayName: 'Install wheel'
-
-  - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target PyPackageBuild
-    displayName: 'Build Python Wheel'
-
-  - powershell: |
-      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-    displayName: 'List all files in the repo for debugging'
+      # Zip the signed extension into the wheel (deferred PyPackageBuild target).
+      cmake --build "$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)" --config $(cmakeBuildType) --parallel --target PyPackageBuild
+    displayName: 'Package Python Wheel'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel'
-      Contents: '*.whl'
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)'
+      Contents: '**\wheel\*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+      flattenFolders: true
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
@@ -382,7 +462,7 @@ steps:
     displayName: 'Publish Build Symbols'
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(cmakeBuildType)'
       SearchPattern: 'onnxruntime_genai.pdb'
       SymbolServerType: teamServices
       SymbolExpirationInDays: 365

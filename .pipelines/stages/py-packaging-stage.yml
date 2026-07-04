@@ -75,22 +75,44 @@ stages:
         ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        os: 'win'
+        enable_winml: false
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
         os: 'win'
+        core_dependency: 'capi_win_cpu_x64_packaging'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_win_arm64, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        os: 'win'
+        enable_winml: false
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'arm64'
         ep: 'cpu'
         os: 'win'
+        core_dependency: 'capi_win_cpu_arm64_packaging'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}
@@ -230,11 +252,22 @@ stages:
         ort_build_source: ${{ parameters.ort_build_source }}
 
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        os: 'osx'
+        enable_winml: false
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_build_version: ${{ parameters.ort_build_version }}
+        ort_build_source: ${{ parameters.ort_build_source }}
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'arm64'
         ep: 'cpu'
         os: 'osx'
+        core_dependency: 'capi_osx_cpu_arm64_packaging'
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         ort_build_version: ${{ parameters.ort_build_version }}

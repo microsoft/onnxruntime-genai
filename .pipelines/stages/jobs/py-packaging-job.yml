@@ -205,6 +205,7 @@ jobs:
         enable_winml: ${{ parameters.enable_winml }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
+        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
@@ -215,6 +216,7 @@ jobs:
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
+        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

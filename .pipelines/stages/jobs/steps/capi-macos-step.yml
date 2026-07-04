@@ -16,6 +16,11 @@ parameters:
 - name: ort_build_source
   type: string
   default: 'NuGet'
+# When true, build the wheel incrementally against the prebuilt '-core' artifact.
+# When false, build the core and the pybind extension together in one build.py pass.
+- name: prebuilt_core
+  type: boolean
+  default: false
 
 steps:
 
@@ -111,30 +116,6 @@ steps:
     displayName: 'Download ORT build package ${{ parameters.ort_build_version }}'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if eq(parameters.target, 'python') }}:
-  - powershell: |
-      $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-      $env:CC="$env:LLVM_PREFIX\bin\clang"
-      $env:CXX="$env:LLVM_PREFIX\bin\clang++"
-      if ("$(arch)" -eq "arm64") {
-        $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
-        $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
-        $env:CC_aarch64_apple_darwin = $env:CC
-        $env:CXX_aarch64_apple_darwin = $env:CXX
-        Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
-        Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
-        cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin $(ORT_HOME_CMAKE_ARG)
-      } else {
-        cmake --preset macos_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
-      }
-    displayName: 'Configure CMake C API'
-    workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - powershell: |
-      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
-    displayName: 'Build C API'
-    workingDirectory: '$(Build.Repository.LocalPath)'
-
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - powershell: |
       $ErrorActionPreference = "Stop"
@@ -172,6 +153,7 @@ steps:
         "--skip_wheel",
         "--use_guidance",
         "--package",
+        "--install_dir", "$(Build.Repository.LocalPath)/build/$(ep)/coreexport/prefix",
         "--build_dir", "$(Build.Repository.LocalPath)/build/$(ep)"
       )
       # Reuse the ORT_HOME the download step resolved (empty for the fetch-from-source path).
@@ -221,37 +203,137 @@ steps:
       artifactName: $(artifactName)-capi
       targetPath: '$(capiPackageDir)'
 
+  - bash: |
+      set -e -x
+      # Assemble an ONNX Runtime home (headers + dylibs) next to the exported core so
+      # the incremental Python/Java SDK builds compile the binding against the same
+      # ONNX Runtime this core was built with (single ORT source).
+      cfg=$(echo "$(build_config)" | sed -E 's/^release$/Release/;s/^relwithdebinfo$/RelWithDebInfo/;s/^debug$/Debug/')
+      base="$(Build.Repository.LocalPath)/build/$(ep)"
+      ort_out="$base/coreexport/ort"
+      mkdir -p "$ort_out/include" "$ort_out/lib"
+      if [ -d "$(Build.Repository.LocalPath)/ort_build/lib" ]; then
+        cp -a "$(Build.Repository.LocalPath)/ort_build/include/." "$ort_out/include/"
+        cp -a "$(Build.Repository.LocalPath)/ort_build/lib/." "$ort_out/lib/"
+      else
+        ortsrc="$base/$cfg/_deps/ortlib-src"
+        if [ -d "$ortsrc/build/native/include" ]; then
+          cp -a "$ortsrc"/build/native/include/. "$ort_out/include/"
+        else
+          cp -a "$ortsrc"/buildTransitive/native/include/. "$ort_out/include/"
+        fi
+        rid=osx-arm64
+        [ "$(arch)" = "x64" ] && rid=osx-x64
+        cp -a "$ortsrc"/runtimes/"$rid"/native/. "$ort_out/lib/"
+      fi
+      ls -la "$ort_out/include" "$ort_out/lib"
+    displayName: 'Assemble core export (ORT home)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime GenAI core export'
+    inputs:
+      artifactName: $(artifactName)-core
+      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/coreexport'
+
 - ${{ if eq(parameters.target, 'python') }}:
-  - powershell: |
-      python -m pip install wheel
-    displayName: 'Install wheel'
+  - ${{ if eq(parameters.prebuilt_core, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download prebuilt core (incremental)'
+      inputs:
+        artifact: $(artifactName)-core
+        targetPath: '$(Build.Repository.LocalPath)/coreexport'
 
   - powershell: |
-      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
-      # From: https://github.com/pypa/cibuildwheel/blob/93542c397cfe940bcbb8f1eff5c37d345ea16653/cibuildwheel/macos.py#L247-L260
-      if ("$(arch)" -eq "arm64") {
-          $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
-          $env:ARCHFLAGS = "-arch arm64"
-      }
-      else {
-          $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-x86_64"
-          $env:ARCHFLAGS = "-arch x86_64"
-      }
-      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target PyPackageBuild
-    displayName: 'Build Python Wheel'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+      python -m pip install --quiet requests pybind11 wheel build
+    displayName: 'Install wheel build tools'
 
-  - powershell: |
-      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-    displayName: 'List all files in the repo for debugging'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  - ${{ if eq(parameters.prebuilt_core, true) }}:
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+        $cfg = switch ("$(build_config)") {
+          "release"        { "Release" }
+          "relwithdebinfo" { "RelWithDebInfo" }
+          "debug"          { "Debug" }
+          default          { "Release" }
+        }
+        $env:MACOSX_DEPLOYMENT_TARGET = "12.0"
+        $env:CC = "$env:LLVM_PREFIX/bin/clang"
+        $env:CXX = "$env:LLVM_PREFIX/bin/clang++"
+        if ("$(arch)" -eq "arm64") {
+            $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
+            $env:ARCHFLAGS = "-arch arm64"
+        } else {
+            $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-x86_64"
+            $env:ARCHFLAGS = "-arch x86_64"
+        }
+        # Incremental wheel: compile only the pybind extension against the prebuilt
+        # core (coreexport/{prefix,ort}); the core dylib is bundled, not rebuilt.
+        $buildArgs = @(
+          "--config", $cfg,
+          "--parallel",
+          "--sdk", "python",
+          "--prebuilt_genai_home", "$(Build.Repository.LocalPath)/coreexport/prefix",
+          "--ort_home", "$(Build.Repository.LocalPath)/coreexport/ort",
+          "--build_dir", "$(Build.Repository.LocalPath)/build/$(ep)",
+          "--cmake_extra_defines", "CMAKE_OSX_ARCHITECTURES=$(arch)"
+        )
+        Write-Host "python build.py $buildArgs"
+        python build.py @buildArgs
+      displayName: 'Build Python wheel $(PyNoDotVer) (prebuilt core)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - ${{ if ne(parameters.prebuilt_core, true) }}:
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+        $cfg = switch ("$(build_config)") {
+          "release"        { "Release" }
+          "relwithdebinfo" { "RelWithDebInfo" }
+          "debug"          { "Debug" }
+          default          { "Release" }
+        }
+        $env:MACOSX_DEPLOYMENT_TARGET = "12.0"
+        $env:CC = "$env:LLVM_PREFIX/bin/clang"
+        $env:CXX = "$env:LLVM_PREFIX/bin/clang++"
+        $env:RUSTFLAGS = "-C link-arg=-undefined -C link-arg=dynamic_lookup"
+        $extraDefines = @("ENABLE_TESTS=OFF", "CMAKE_OSX_ARCHITECTURES=$(arch)")
+        if ("$(arch)" -eq "arm64") {
+            $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
+            $env:ARCHFLAGS = "-arch arm64"
+            $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
+            $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+            $env:CC_aarch64_apple_darwin = $env:CC
+            $env:CXX_aarch64_apple_darwin = $env:CXX
+            $extraDefines += "Rust_CARGO_TARGET=aarch64-apple-darwin"
+        } else {
+            $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-x86_64"
+            $env:ARCHFLAGS = "-arch x86_64"
+        }
+        # Self-contained wheel: build the native core and the pybind extension in one
+        # build.py pass (used for EPs without a dedicated core producer).
+        $buildArgs = @(
+          "--config", $cfg,
+          "--parallel",
+          "--skip_tests",
+          "--skip_examples",
+          "--use_guidance",
+          "--build_dir", "$(Build.Repository.LocalPath)/build/$(ep)"
+        )
+        $ortArg = "$(ORT_HOME_CMAKE_ARG)"
+        if ($ortArg -match '^-DORT_HOME=(.*)$') { $buildArgs += @("--ort_home", $Matches[1]) }
+        $buildArgs += @("--cmake_extra_defines") + $extraDefines
+        Write-Host "python build.py $buildArgs"
+        python build.py @buildArgs
+      displayName: 'Build Python wheel $(PyNoDotVer) (full build)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/wheel'
-      Contents: '*.whl'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)'
+      Contents: '**/wheel/*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+      flattenFolders: true
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'

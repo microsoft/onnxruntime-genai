@@ -620,6 +620,15 @@ def _update_standalone_sdk(args: argparse.Namespace, env: dict[str, str]):
         f"-DORT_LIB_DIR={args.ort_home / 'lib'}",
     ]
 
+    # Match the in-tree build's generator platform so the standalone SDK (e.g. the
+    # Windows arm64 wheel) is compiled for the requested architecture rather than
+    # the host default.
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            command += ["-A", "ARM64"]
+        elif args.arm64ec:
+            command += ["-A", "ARM64EC"]
+
     if args.sdk == "python":
         # pybind11's CMake package is resolved from the single pip source.
         try:
