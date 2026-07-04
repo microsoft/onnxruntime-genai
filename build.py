@@ -630,7 +630,16 @@ def _update_standalone_sdk(args: argparse.Namespace, env: dict[str, str]):
                 prefix_paths.append(pybind11_cmakedir)
         except (subprocess.CalledProcessError, FileNotFoundError):
             log.warning("Could not resolve pybind11 CMake dir via 'python -m pybind11 --cmakedir'.")
-        command += ["-DBUILD_WHEEL=ON"]
+        # Pin find_package(Python) to the interpreter that is running build.py so
+        # the extension is compiled and linked against the matching Python headers
+        # (Python.h) and library. Without this hint CMake may pick up a different
+        # interpreter on PATH that lacks development headers.
+        command += [
+            "-DBUILD_WHEEL=ON",
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython3_EXECUTABLE={sys.executable}",
+            f"-DPYTHON_EXECUTABLE={sys.executable}",
+        ]
     elif args.sdk == "java":
         command += [
             f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
