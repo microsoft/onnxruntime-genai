@@ -94,6 +94,19 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/WX>"
     "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
   )
+
+  # MSVC 19.50+ (VS 2026) introduced C4875: non-string literal argument to [[gsl::suppress]] is
+  # deprecated. The GSL version used by onnxruntime_extensions (and other deps) hasn't adopted
+  # string-literal syntax yet. Suppress globally so third-party headers build cleanly.
+  # Also silence the STL1011 static assertion for <experimental/coroutine> being deprecated
+  # (ocos_operators in onnxruntime_extensions still uses it; the fix is upstream).
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.50")
+    add_compile_options(
+      "$<$<COMPILE_LANGUAGE:C>:/wd4875>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/wd4875>"
+    )
+    add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+  endif()
 endif()
 
 include(cmake/ortlib.cmake)

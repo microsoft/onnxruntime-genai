@@ -145,10 +145,20 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
+// Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
+// add-on) are unloaded on teardown.
+struct LibraryHandle;
+
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+
+  // Get-or-create the DeviceInterface for a device type. The interface is owned by this
+  // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
+  // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
+  DeviceInterface* GetDeviceInterface(DeviceType type);
 
   struct Allocator {
     // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
@@ -173,11 +183,30 @@ struct OrtGlobals {
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
+
+  DeviceInterface* LoadCudaInterface(DeviceType type);
+
+  std::mutex device_interfaces_mutex_;
+  // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
+  // module-owned interface (DML). Rebuilt each env cycle.
+  std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
+  // In-process interfaces owned directly by genai (CPU / WebGPU / QNN / OpenVINO / RyzenAI).
+  std::vector<std::unique_ptr<DeviceInterface>> owned_interfaces_;
+  // The genai CUDA add-on library (onnxruntime-genai-cuda). Holds the loaded library so that
+  // unloading it (on teardown) runs the add-on's static destructors. The interface pointer it
+  // provides is non-owning and lives in device_interfaces_.
+  std::unique_ptr<LibraryHandle> cuda_library_;
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
+
+// §6: Returns the env's OrtEpDevice entries whose execution-provider name matches `ep_name`.
+// An empty result means the EP is not registered as a plugin EP on the env (legacy mode). The
+// returned pointers are non-owning and owned by the env. An EP name can appear on several devices
+// (e.g. multi-GPU), so all matches are returned.
+std::vector<const OrtEpDevice*> FindEpDevices(OrtEnv& env, const char* ep_name);
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);

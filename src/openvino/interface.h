@@ -5,7 +5,8 @@
 #include "../config.h"
 namespace Generators {
 
-DeviceInterface* GetOpenVINOInterface();
+// Creates a fresh OpenVINO DeviceInterface instance. Ownership is taken by OrtGlobals.
+std::unique_ptr<DeviceInterface> CreateOpenVINOInterface();
 
 struct Model;
 bool IsOpenVINOStatefulModel(const Model& model);

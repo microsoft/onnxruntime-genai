@@ -108,6 +108,12 @@ struct DeviceInterface {
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
 
+  // §11 host-accessible allocator. EPs that expose a pinned / mappable host allocator (e.g. CUDA
+  // host-pinned staging) return the env's shared allocator for their HOST_ACCESSIBLE mem-info.
+  // Default nullptr => callers take the EP-agnostic fallback (a plain host staging buffer with
+  // device<->CPU copies).
+  virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
+
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
   virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) = 0;

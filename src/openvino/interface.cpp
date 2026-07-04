@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
-#include "../cpu/interface.h"
 #include "../models/model.h"
 
 namespace Generators {
@@ -22,15 +21,15 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   Ort::Allocator& GetAllocator() override {
-    return GetCpuInterface()->GetAllocator();
+    return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    return GetCpuInterface()->AllocateBase(size);
+    return GetDeviceInterface(DeviceType::CPU)->AllocateBase(size);
   }
 
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
-    return GetCpuInterface()->WrapMemoryBase(p, size);
+    return GetDeviceInterface(DeviceType::CPU)->WrapMemoryBase(p, size);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
@@ -41,9 +40,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace OpenVINO
 
-DeviceInterface* GetOpenVINOInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<OpenVINO::InterfaceImpl>();
-  return g_device.get();
+std::unique_ptr<DeviceInterface> CreateOpenVINOInterface() {
+  return std::make_unique<OpenVINO::InterfaceImpl>();
 }
 
 bool IsOpenVINOStatefulModel(const Model& model) {

@@ -3,6 +3,7 @@
 
 namespace Generators {
 
-DeviceInterface* GetCpuInterface();
+// Creates a fresh CPU DeviceInterface instance. Ownership is taken by OrtGlobals.
+std::unique_ptr<DeviceInterface> CreateCpuInterface();
 
 }

@@ -408,29 +408,42 @@ All EPs are in scope (staged in §14). Per-EP specifics:
 
 - **WebGPU, CUDA / NvTensorRtRtx.** First migrations; detailed in §12.
 - **DML.** Currently on the trivial-session + `g_dml_device` +
-  `CloseDmlInterface` path. Migrating means moving it onto the
-  `GetEpDevices` detection + shared-allocator model like the others; its
-  existing `Model::~Model` teardown folds into `~OrtGlobals` (§3).
+  `CloseDmlInterface` path, with a `GetDmlInterface()` free-function accessor
+  (the only `GetXInterface()` wrapper still remaining — all others were removed
+  in Stage 0 in favour of `GetDeviceInterface(DeviceType::X)`). Migrating DML
+  follows the same pattern already applied to every other EP:
+  1. Add `CreateDmlInterface()` factory (replacing the `InitDmlInterface` +
+     `g_dml_device` static ownership pattern).
+  2. Remove `GetDmlInterface()` and `CloseDmlInterface()`; DML teardown folds
+     into `~OrtGlobals` (owned via `OrtGlobals::owned_interfaces_`).
+  3. Update the `#if USE_DML` arm of `OrtGlobals::GetDeviceInterface` to call
+     `CreateDmlInterface()` instead of `GetDmlInterface()`.
+  4. Update `dml/session_options.cpp`: replace the `!GetDmlInterface()` guard
+     (which triggered lazy `InitDmlInterface`) with `GetDeviceInterface`;
+     `InitDmlInterface` is absorbed into `CreateDmlInterface`.
+  5. Wire onto the §6 `GetEpDevices`-based shared-allocator path (same as
+     WebGPU/CUDA).
 - **QNN, OpenVINO.** Migrate to the shared-allocator path once each is
   exercised as a plugin EP. OpenVINO is the motivating multi-EP-name case
   (a single library exposing several EP names); the §6 per-interface
   self-lookup handles that without a central registry.
-- **RyzenAI.** Today `GetRyzenAIInterface()` self-registers the EP on first
-  call (fallback search for `onnxruntime_providers_ryzenai.dll` next to
-  `onnxruntime-genai.dll`, `onnxruntime.dll`, the executable, or CWD; see
-  [`ryzenai/interface.cpp`](../src/ryzenai/interface.cpp)), and the genai
-  binary is built with RyzenAI sources unconditionally (cmake glob in
-  [`global_variables.cmake`](../cmake/global_variables.cmake#L78)). Making it
-  recreatable is more than the §3 ownership move: its ctor early-returns when
-  the EP module is already resident (a process-once assumption that skips
-  re-registration against a fresh env), and its teardown calls the EP's
-  `RyzenAI_Shutdown` out-of-band (Windows-only, no unregister). Recreation
-  requires reworking the ctor to key off current-env registration and making
-  setup/teardown symmetric, gated on the EP tolerating register → shutdown →
-  register (§15 q3). Changing how it is registered may affect current callers,
-  so this stage carries its own compatibility review.
+- **RyzenAI.** `GetRyzenAIInterface()` has been removed (Stage 0 cleanup —
+  callers now use `GetDeviceInterface(DeviceType::RyzenAI)`).
+  The DLL-path probe that used `GetRyzenAIInterface` as a module-address
+  marker now uses `CreateRyzenAIInterface` instead. The deeper recreatability
+  work remains: its ctor early-returns when the EP module is already resident
+  (a process-once assumption that skips re-registration against a fresh env),
+  and its teardown calls `RyzenAI_Shutdown` out-of-band (Windows-only, no
+  unregister). Recreation requires reworking the ctor to key off current-env
+  registration and making setup/teardown symmetric, gated on the EP tolerating
+  register → shutdown → register (§15 q3). Changing how it is registered may
+  affect current callers, so this stage carries its own compatibility review.
 - **VitisAI.** Migrate when there is a concrete use case; leave the stub
   until then.
+- **`GetXInterface()` wrappers (all EPs except DML).** Removed in Stage 0.
+  Every caller now uses `GetDeviceInterface(DeviceType::X)` directly. The
+  only remaining wrapper is `GetDmlInterface()`, which is removed as part of
+  the DML Stage 4 migration above.
 
 Non-goals:
 
@@ -445,14 +458,19 @@ Each stage is independently shippable and testable.
 
 **Stage 0 — re-init foundation (EP-agnostic, unblocks Foundry Local).**
 Implement the §3 ownership refactor: `OrtGlobals` owns the interfaces
-(get-or-create, no `call_once`), `GetOrtGlobals()` re-creates when null,
-`OgaShutdown` unloads the add-on libraries via `~OrtGlobals` (moving the
-`GetCudaInterface` `LibraryHandle` + interface pointer into `OrtGlobals`), and
-the hard-coded `RyzenAIInterface::Shutdown()` goes away. Make CPU `InitOrt`
-idempotent (§9). Foundry Local then unloads its last model, calls
-`OgaShutdown`, optionally unregisters its EPs on its own env reference, then
-`ReleaseEnv`. Tests: shutdown → re-init cycle (CPU first; each EP added as it
-migrates).
+(get-or-create under a lock, no `call_once`), `GetOrtGlobals()` re-creates
+when null (guarded by `g_process_exiting`), `OgaShutdown` unloads the add-on
+libraries via `~OrtGlobals` (moving the CUDA `LibraryHandle` + interface
+pointer into `OrtGlobals`), and the hard-coded `RyzenAIInterface::Shutdown()`
+goes away. Make CPU `InitOrt` idempotent (§9). Remove all `GetXInterface()`
+wrappers (CPU / WebGPU / QNN / OpenVINO / RyzenAI) — callers use
+`GetDeviceInterface(DeviceType::X)` directly; `GetDmlInterface()` remains
+until DML is migrated in Stage 4. Add `CreateXInterface()` factories for each
+in-process EP; CUDA stays as `OrtGlobals::LoadCudaInterface` (add-on library
+path). Also: VS 2026 (MSVC 19.50+) build compatibility — suppress `C4875`
+globally and define `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` in
+`CMakeLists.txt` for third-party deps that haven't updated to VS 2026 yet.
+Tests: shutdown → re-init cycle (CPU first; each EP added as it migrates).
 
 **Stage 1 — shared-allocator plumbing (EP-agnostic).**
 
@@ -472,10 +490,12 @@ branches on the §6 check so WebGPU skips `EnsureDeviceOrtInit` (§12.1).
 host-accessible allocator path, keep the provider-bridge path; add-on library
 teardown via the Stage 0 `OrtGlobals` ownership (§12.2).
 
-**Stage 4 — remaining EPs, one at a time.** QNN and OpenVINO, then DML (move
-off the trivial-session path), then RyzenAI (ctor/teardown rework + symmetric
-register/unregister + reload proof), and VitisAI when it has a use case
-(§13).
+**Stage 4 — remaining EPs, one at a time.** QNN and OpenVINO (shared-allocator
+path, same pattern as WebGPU), then DML (see §13 for concrete steps: add
+`CreateDmlInterface()`, remove `GetDmlInterface()` + `CloseDmlInterface()`,
+fold `g_dml_device` into `OrtGlobals::owned_interfaces_`, wire onto §6
+detection), then RyzenAI (ctor/teardown rework + symmetric register/unregister
++ reload proof; §13 for detail), and VitisAI when it has a use case (§13).
 
 ## 15. Open questions / to verify
 

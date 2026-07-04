@@ -81,9 +81,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace QNN
 
-DeviceInterface* GetQNNInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<QNN::InterfaceImpl>();
-  return g_device.get();
+std::unique_ptr<DeviceInterface> CreateQNNInterface() {
+  return std::make_unique<QNN::InterfaceImpl>();
 }
 
 bool IsQNNStatefulModel(const Model& model) {

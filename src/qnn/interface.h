@@ -3,7 +3,8 @@
 
 namespace Generators {
 
-DeviceInterface* GetQNNInterface();
+// Creates a fresh QNN DeviceInterface instance. Ownership is taken by OrtGlobals.
+std::unique_ptr<DeviceInterface> CreateQNNInterface();
 
 struct Model;
 bool IsQNNStatefulModel(const Model& model);

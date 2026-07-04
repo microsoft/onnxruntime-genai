@@ -98,8 +98,8 @@ struct Interface : RyzenAIInterface {
     };
 
     if (ep_path_.empty())
-      // check next to onnxruntime-genai.dll
-      if (const auto hmod = get_hmod_for_method(GetRyzenAIInterface))
+      // check next to onnxruntime-genai.dll (use CreateRyzenAIInterface as module-address marker)
+      if (const auto hmod = get_hmod_for_method(CreateRyzenAIInterface))
         ep_path_ = find_next_to_module(hmod);
 
     if (ep_path_.empty())
@@ -192,22 +192,10 @@ struct Interface : RyzenAIInterface {
   std::filesystem::path ep_path_;
 };
 
-static std::unique_ptr<Interface> interface_;
-
 }  // namespace RyzenAI
 
-void RyzenAIInterface::Shutdown() {
-  RyzenAI::interface_.reset();
-}
-
-RyzenAIInterface* GetRyzenAIInterface() {
-  static std::once_flag once;
-
-  std::call_once(once, []() {
-    RyzenAI::interface_ = std::make_unique<RyzenAI::Interface>();
-  });
-
-  return RyzenAI::interface_.get();
+std::unique_ptr<DeviceInterface> CreateRyzenAIInterface() {
+  return std::make_unique<RyzenAI::Interface>();
 }
 
 }  // namespace Generators
