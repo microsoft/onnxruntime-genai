@@ -18,6 +18,7 @@
 #define OGA_USE_SPAN 1
 #include "models/onnxruntime_api.h"
 #include "ort_genai.h"
+#include "generators.h"  // for GetOrtGlobals() / DeviceType — validates plugin-path assertions
 
 #include <gtest/gtest.h>
 
@@ -780,6 +781,156 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   }
 }
 #endif
+
+// Exercises the WebGPU plugin-EP shared-allocator path (§6/§12.1).
+// Run with: unit_tests.exe --ep_dir <dir-containing-onnxruntime_providers_webgpu.dll>
+TEST(CAPITests, GreedySearchGptFp32WebGPUCAPI) {
+  extern bool g_webgpu_ep_registered;
+  if (!g_webgpu_ep_registered) {
+    GTEST_SKIP() << "WebGPU plugin EP not registered (pass --ep_dir to unit_tests.exe)";
+  }
+
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 10;
+
+  // Load the gpt2 FP32 model and override the provider to WebGPU plugin EP.
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("WebGPU");
+
+  auto model = OgaModel::Create(*config);
+
+  // Explicit plugin-path check: confirm the real plugin EP is registered and its shared
+  // allocator is present on the env.
+  //
+  // OrtEnv is a refcounted process-wide singleton. We create our own reference via the ORT
+  // C API (CreateEnv returns the same underlying instance genai already registered the WebGPU
+  // EP on, with the refcount incremented; ReleaseEnv decrements it). We use the raw C API
+  // (OrtGetApiBase()->GetApi()) rather than genai's Ort:: inline wrappers to avoid the
+  // inline-variable-per-module issue on MSVC across DLL boundaries.
+  {
+    const OrtApi* ort_api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+
+    OrtEnv* env = nullptr;
+    ASSERT_EQ(ort_api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "webgpu_test", &env), nullptr);
+
+    const OrtEpDevice* const* ep_devices = nullptr;
+    size_t num_ep_devices = 0;
+    ort_api->GetEpDevices(env, &ep_devices, &num_ep_devices);
+
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    for (size_t i = 0; i < num_ep_devices; ++i) {
+      if (std::strcmp(ort_api->EpDevice_EpName(ep_devices[i]), "WebGpuExecutionProvider") == 0) {
+        webgpu_mem_info = ort_api->EpDevice_MemoryInfo(ep_devices[i], OrtDeviceMemoryType_DEFAULT);
+        if (webgpu_mem_info) break;
+      }
+    }
+    EXPECT_NE(webgpu_mem_info, nullptr)
+        << "No WebGPU plugin EP device with DEFAULT allocator info "
+           "-- plugin-EP shared-allocator path was not used";
+
+    if (webgpu_mem_info) {
+      OrtAllocator* shared_alloc = nullptr;
+      ort_api->GetSharedAllocator(env, webgpu_mem_info, &shared_alloc);
+      EXPECT_NE(shared_alloc, nullptr)
+          << "GetSharedAllocator returned nullptr for WebGPU DEFAULT memory info";
+    }
+
+    ort_api->ReleaseEnv(env);
+  }
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify each sequence reached max_length (greedy search with no early EOS in this model).
+  for (int i = 0; i < batch_size; i++) {
+    EXPECT_EQ(generator->GetSequenceCount(i), static_cast<size_t>(max_length));
+  }
+}
+
+// Exercises the WebGPU legacy (trivial-session bootstrap) path (§12.1).
+// The internal WebGPU EP (built into ORT) registers as a fake plugin device but does NOT
+// advertise a DEFAULT allocator info, so FindMyEpDevices returns empty and genai falls back
+// to EnsureDeviceOrtInit. Run WITHOUT --ep_dir, against an ORT build that includes the
+// internal WebGPU EP (e.g. onnxruntime.dll from an ORT USE_WEBGPU build). Skips if the plugin
+// EP is registered or if WebGPU is unavailable in the current ORT build.
+TEST(CAPITests, GreedySearchGptFp32WebGPULegacyCAPI) {
+  extern bool g_webgpu_ep_registered;
+  if (g_webgpu_ep_registered) {
+    GTEST_SKIP() << "Plugin WebGPU EP is registered; this test validates the legacy path (run without --ep_dir)";
+  }
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  int batch_size = 2;
+  int max_length = 10;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("WebGPU");
+
+  // Enable genai logging so we can see which allocator path is taken. Expect:
+  //   "webgpu   Using legacy trivial-session allocator (InitOrt) ..."
+  Oga::SetLogBool("enabled", true);
+
+  std::unique_ptr<OgaModel> model;
+  try {
+    model = OgaModel::Create(*config);
+  } catch (const std::exception& e) {
+    Oga::SetLogBool("enabled", false);
+    GTEST_SKIP() << "WebGPU not available in this ORT build (legacy path): " << e.what();
+  }
+
+  // Verify legacy detection: no WebGPU EP device advertises a DEFAULT allocator info, so
+  // FindMyEpDevices returns empty and the legacy bootstrap path is taken.
+  {
+    const OrtApi* ort_api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+    OrtEnv* env = nullptr;
+    ASSERT_EQ(ort_api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "webgpu_legacy_test", &env), nullptr);
+
+    const OrtEpDevice* const* ep_devices = nullptr;
+    size_t num_ep_devices = 0;
+    ort_api->GetEpDevices(env, &ep_devices, &num_ep_devices);
+
+    bool found_default_mem_info = false;
+    for (size_t i = 0; i < num_ep_devices; ++i) {
+      if (std::strcmp(ort_api->EpDevice_EpName(ep_devices[i]), "WebGpuExecutionProvider") == 0) {
+        if (ort_api->EpDevice_MemoryInfo(ep_devices[i], OrtDeviceMemoryType_DEFAULT) != nullptr) {
+          found_default_mem_info = true;
+          break;
+        }
+      }
+    }
+    EXPECT_FALSE(found_default_mem_info)
+        << "A WebGPU EP device advertised DEFAULT allocator info -- this is the plugin EP, "
+           "not the internal/legacy EP. The legacy path is not being exercised.";
+
+    ort_api->ReleaseEnv(env);
+  }
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  Oga::SetLogBool("enabled", false);
+
+  for (int i = 0; i < batch_size; i++) {
+    EXPECT_EQ(generator->GetSequenceCount(i), static_cast<size_t>(max_length));
+  }
+}
 
 TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};

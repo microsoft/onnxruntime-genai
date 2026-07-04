@@ -168,6 +168,8 @@ struct InterfaceImpl : DeviceInterface {
     ort_allocator_ = &allocator;
     // Cache the memory info to avoid repeated GetInfo calls
     ort_memory_info_ = &ort_allocator_->GetInfo();
+    if (g_log.enabled)
+      Log("webgpu", "Using legacy internal WebGPU EP");
   }
 
  private:
@@ -192,6 +194,8 @@ struct InterfaceImpl : DeviceInterface {
     ort_allocator_ = Ort::GetSharedAllocator(&env, ort_memory_info_);
     if (!ort_allocator_)
       throw std::runtime_error("Failed to get shared WebGPU allocator from env");
+    if (g_log.enabled)
+      Log("webgpu", "Using plugin-EP WebGPU EP shared allocator");
   }
   // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
   // Content is always all 1s so sharing across generators is safe; only upload_bytes

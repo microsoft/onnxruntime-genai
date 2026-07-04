@@ -15,6 +15,8 @@
 
 // Global variable to store custom model base path
 std::string g_custom_model_path;
+// Set to true when the WebGPU plugin EP is successfully registered via --ep_dir.
+bool g_webgpu_ep_registered = false;
 
 namespace {
 
@@ -46,15 +48,17 @@ std::string EpLibraryFileName(std::string_view stem) {
 }
 
 // Registers an execution provider plugin library with ONNX Runtime, logging the outcome.
-// Registration failures are reported but do not abort the test run.
-void RegisterEpLibrary(const std::string& registration_name, const std::string& library_path) {
+// Returns true on success. Registration failures are reported but do not abort the test run.
+bool RegisterEpLibrary(const std::string& registration_name, const std::string& library_path) {
   try {
     std::cout << "Registering execution provider library '" << registration_name << "' -> "
               << library_path << std::endl;
     OgaRegisterExecutionProviderLibrary(registration_name.c_str(), library_path.c_str());
+    return true;
   } catch (const std::exception& e) {
     std::cerr << "Warning: failed to register execution provider library '" << registration_name
               << "': " << e.what() << std::endl;
+    return false;
   }
 }
 
@@ -74,7 +78,10 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
     if (!fs::is_regular_file(library_path, ec)) {
       continue;
     }
-    RegisterEpLibrary(std::string(ep_name), library_path.string());
+    bool ok = RegisterEpLibrary(std::string(ep_name), library_path.string());
+    if (ok && ep_name == "WebGpuExecutionProvider") {
+      g_webgpu_ep_registered = true;
+    }
   }
 }
 
