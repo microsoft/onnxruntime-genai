@@ -192,6 +192,7 @@ jobs:
         build_config: ${{ parameters.build_config }}
         ort_build_version: ${{ parameters.ort_build_version }}
         ort_build_source: ${{ parameters.ort_build_source }}
+        prebuilt_core: ${{ ne(parameters.core_dependency, '') }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:

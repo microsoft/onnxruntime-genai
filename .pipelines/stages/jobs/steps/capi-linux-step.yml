@@ -16,6 +16,13 @@ parameters:
 - name: ort_build_source
   type: string
   default: 'NuGet'
+# When true, build the wheel incrementally by consuming the prebuilt '-core'
+# artifact (only the pybind extension is compiled). When false, build the core
+# and the wheel together in a single self-contained build.py pass. CPU uses the
+# incremental path; EPs without a dedicated core producer (e.g. CUDA) do not.
+- name: prebuilt_core
+  type: boolean
+  default: false
 
 steps:
 
@@ -287,43 +294,91 @@ steps:
       targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/coreexport'
 
 - ${{ if eq(parameters.target, 'python') }}:
-  - task: DownloadPipelineArtifact@2
-    displayName: 'Download prebuilt core (incremental)'
-    inputs:
-      artifact: $(artifactName)-core
-      targetPath: '$(Build.Repository.LocalPath)/coreexport'
+  - ${{ if eq(parameters.prebuilt_core, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download prebuilt core (incremental)'
+      inputs:
+        artifact: $(artifactName)-core
+        targetPath: '$(Build.Repository.LocalPath)/coreexport'
 
-  - bash: |
-      set -e -x
-      case "$(build_config)" in
-        release)        cfg="Release" ;;
-        relwithdebinfo) cfg="RelWithDebInfo" ;;
-        debug)          cfg="Debug" ;;
-        *)              cfg="Release" ;;
-      esac
-      # Incremental wheel: compile only the pybind extension against the prebuilt
-      # core downloaded as the '-core' artifact (coreexport/{prefix,ort}); the core
-      # shared library is not rebuilt. auditwheel (MANYLINUX=ON) repairs + bundles it.
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ \
-      -e CFG="$cfg" \
-      ortgenai$(ep)build$(arch) \
-      bash -c '
-          set -e -x
-          PY=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer)
-          "$PY" -m pip install --quiet requests pybind11 wheel build auditwheel
-          "$PY" build.py \
-            --config "$CFG" \
-            --parallel \
-            --sdk python \
-            --prebuilt_genai_home /ort_genai_src/coreexport/prefix \
-            --ort_home /ort_genai_src/coreexport/ort \
-            --build_dir /ort_genai_src/build/$(ep) \
-            --cmake_extra_defines MANYLINUX=ON'
-    displayName: 'Build Python wheel $(PyNoDotVer) (prebuilt core)'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+    - bash: |
+        set -e -x
+        case "$(build_config)" in
+          release)        cfg="Release" ;;
+          relwithdebinfo) cfg="RelWithDebInfo" ;;
+          debug)          cfg="Debug" ;;
+          *)              cfg="Release" ;;
+        esac
+        # Incremental wheel: compile only the pybind extension against the prebuilt
+        # core downloaded as the '-core' artifact (coreexport/{prefix,ort}); the core
+        # shared library is not rebuilt. auditwheel (MANYLINUX=ON) repairs + bundles it.
+        docker run \
+        --rm \
+        --volume $(Build.Repository.LocalPath):/ort_genai_src \
+        -w /ort_genai_src/ \
+        -e CFG="$cfg" \
+        ortgenai$(ep)build$(arch) \
+        bash -c '
+            set -e -x
+            PY=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer)
+            "$PY" -m pip install --quiet requests pybind11 wheel build auditwheel
+            "$PY" build.py \
+              --config "$CFG" \
+              --parallel \
+              --sdk python \
+              --prebuilt_genai_home /ort_genai_src/coreexport/prefix \
+              --ort_home /ort_genai_src/coreexport/ort \
+              --build_dir /ort_genai_src/build/$(ep) \
+              --cmake_extra_defines MANYLINUX=ON'
+      displayName: 'Build Python wheel $(PyNoDotVer) (prebuilt core)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - ${{ if ne(parameters.prebuilt_core, true) }}:
+    - bash: |
+        set -e -x
+        case "$(build_config)" in
+          release)        cfg="Release" ;;
+          relwithdebinfo) cfg="RelWithDebInfo" ;;
+          debug)          cfg="Debug" ;;
+          *)              cfg="Release" ;;
+        esac
+
+        ep_args=""
+        if [ "$(ep)" = "cuda" ]; then
+          ep_args="--use_cuda --cuda_home /usr/local/cuda --cuda_archs $(CUDA_ARCHS)"
+        fi
+
+        ort_args=""
+        if [ "${{ parameters.ort_build_version }}" != "default" ]; then
+          ort_args="--ort_home /ort_genai_src/ort_build"
+        fi
+
+        # Self-contained wheel: build the native core and the pybind extension in a
+        # single build.py pass (no prebuilt '-core'). Used for EPs that do not (yet)
+        # publish a dedicated core artifact. auditwheel (MANYLINUX=ON) bundles the core.
+        docker run \
+        --rm \
+        --volume $(Build.Repository.LocalPath):/ort_genai_src \
+        -w /ort_genai_src/ \
+        -e CFG="$cfg" \
+        -e EP_ARGS="$ep_args" \
+        -e ORT_ARGS="$ort_args" \
+        ortgenai$(ep)build$(arch) \
+        bash -c '
+            set -e -x
+            PY=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer)
+            "$PY" -m pip install --quiet requests pybind11 wheel build auditwheel
+            "$PY" build.py \
+              --config "$CFG" \
+              --parallel \
+              --skip_tests \
+              --skip_examples \
+              --use_guidance \
+              --build_dir /ort_genai_src/build/$(ep) \
+              --cmake_extra_defines MANYLINUX=ON ENABLE_TESTS=OFF PYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) \
+              $ORT_ARGS $EP_ARGS'
+      displayName: 'Build Python wheel $(PyNoDotVer) (full build)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
