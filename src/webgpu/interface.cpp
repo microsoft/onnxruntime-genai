@@ -153,9 +153,9 @@ struct InterfaceImpl : DeviceInterface {
   // Discriminator: a real plugin EP calls EpDevice_AddAllocatorInfo (OrtDeviceMemoryType_DEFAULT)
   // on each OrtEpDevice; the internal EP does not. So we only include devices for which
   // GetMemoryInfo returns non-null for DEFAULT memory, matching the real plugin EP only.
-  std::vector<const OrtEpDevice*> FindMyEpDevices(OrtEnv& env) const override {
+  std::vector<const OrtEpDevice*> FindMyEpDevices() const override {
     std::vector<const OrtEpDevice*> result;
-    for (const auto* device : FindEpDevices(env, "WebGpuExecutionProvider"))
+    for (const auto* device : FindEpDevices(GetOrtEnv(), "WebGpuExecutionProvider"))
       if (Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT) != nullptr)
         result.push_back(device);
     return result;

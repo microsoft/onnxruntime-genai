@@ -89,9 +89,15 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // sessions (vision, embedding, speech) should set enable_cuda_graph=0
   // in their own session_options in genai_config.json.
 
-  // Try pre-registered plugin path first
+  // Try pre-registered plugin path first. The CUDA plugin EP may be registered under either the
+  // legacy/provider-bridge name "CUDAExecutionProvider" or the plugin factory name
+  // "CudaPluginExecutionProvider" (they differ in a released ORT — see cuda/interface.cpp). Only one
+  // is present at a time; try both before falling back. This mirrors FindMyEpDevices so plugin
+  // append and plugin allocator-mode detection always agree.
   if (!AppendExecutionProviderV2(session_options, provider_options,
-                                 DeviceType::CUDA, "CUDAExecutionProvider")) {
+                                 DeviceType::CUDA, "CUDAExecutionProvider") &&
+      !AppendExecutionProviderV2(session_options, provider_options,
+                                 DeviceType::CUDA, "CudaPluginExecutionProvider")) {
     // Register the CUDA execution provider as a provider-bridge provider.
     CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
         session_options, provider_options, device);

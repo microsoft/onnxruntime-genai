@@ -63,8 +63,9 @@ genai cannot observe, so genai never treats unregistration as a cleanup signal
    path). genai chooses plugin vs legacy *per model* from a live
    `GetEpDevices` lookup (§6) — plugin mode when the EP is registered as a
    plugin EP on the env, legacy otherwise — not from a build-time switch.
-5. No behavioral change for DML / QNN / OpenVINO / RyzenAI / NvTensorRtRtx
-   beyond what is stated here.
+5. No behavioral change for DML / QNN / OpenVINO / RyzenAI beyond what is
+   stated here. (NvTensorRtRtx now uses the plugin shared-allocator path — see
+   §12.2 / Stage 3 — as it is a plugin-only EP.)
 
 ## 3. Teardown and re-initialization model
 
@@ -185,18 +186,20 @@ A CUDA or WebGPU `DeviceInterface` can be reached two ways at runtime:
   dummy-session bootstrap.
 
 The authoritative signal for which mode applies is simply **whether the
-interface's EP name appears in `Ort::GetEpDevices(env)`**. Present → plugin
-mode (use the env's shared allocator); absent → legacy mode
-(`EnsureDeviceOrtInit`). Each interface knows its own EP name(s), so it looks
-*itself* up. An EP name can appear on **several** `OrtEpDevice` entries (e.g.
-multi-GPU), so the interface gathers them all rather than stopping at the
-first:
+interface's EP name appears in `Ort::GetEpDevices`**. Present (as a real plugin
+device) → plugin mode (use the env's shared allocator); absent → legacy mode
+(`EnsureDeviceOrtInit`). Each interface knows its own EP name(s) and its own env
+(in-process EPs call `GetOrtEnv()`; the CUDA add-on stores the env passed at
+construction), so it looks *itself* up with no arguments. An EP name can appear
+on **several** `OrtEpDevice` entries (e.g. multi-GPU), so the interface gathers
+them all rather than stopping at the first:
 
 ```cpp
-std::vector<const OrtEpDevice*> FindMyEpDevices(OrtEnv& env) {
+std::vector<const OrtEpDevice*> FindMyEpDevices() {  // env is the interface's own
   std::vector<const OrtEpDevice*> devices;
   for (const auto* d : Ort::GetEpDevices(env))
-    if (std::strcmp(Ort::EpName(d), kMyEpName) == 0)  // e.g. "CUDAExecutionProvider"
+    if (IsMyEpName(Ort::api->EpDevice_EpName(d)) &&                    // e.g. "CUDAExecutionProvider"
+        Ort::GetMemoryInfo(d, OrtDeviceMemoryType_DEFAULT) != nullptr)  // real plugin, not internal fake
       devices.push_back(d);
   return devices;  // empty -> legacy mode
 }
@@ -341,7 +344,7 @@ Keep both, narrowed to the legacy path:
   provider-bridge path, a separate decision.
 
 `Model` construction selects the path by the §6 check: if
-`p_device_->FindMyEpDevices(env)` is non-empty it is plugin mode (shared
+`p_device_->FindMyEpDevices()` is non-empty it is plugin mode (shared
 allocator fetched on demand, nothing to bootstrap); otherwise it calls
 `EnsureDeviceOrtInit(*p_device_, *config_)` (legacy path), which keeps its
 "early-return if already populated" behavior.
@@ -390,15 +393,38 @@ Files: [`cuda/interface.cpp`](../src/cuda/interface.cpp),
   `device_label` stays (it identifies the buffer type). `GpuMemory` captures
   the allocator at construction from the interface.
 - Discover the host-accessible mem-info (if any) via `GetEpDevices` and use
-  its shared allocator for `AllocateCpu` / free (§11); in plugin mode CUDA
-  always advertises one. The direct `::cudaHostAlloc` / `cudaFreeHost` calls
-  remain only as the legacy-mode (provider-bridge) fallback.
+   its shared allocator for `AllocateCpu` / free (§11); in plugin mode both the
+  CUDA and TensorRT-RTX plugin EPs advertise one (`CUDAPinnedAllocator`, added
+  via `EpDevice_AddAllocatorInfo` alongside the DEFAULT device mem-info). The
+  direct `::cudaHostAlloc` / `cudaFreeHost` calls remain only as the
+  legacy-mode (provider-bridge) fallback (CUDA only; TensorRT-RTX is
+  plugin-only).
 - The CUDA stream and kernels are genai add-on-library state, **not**
   EP-scoped: they are created with the interface and destroyed only when the
   add-on library is torn down at `OgaShutdown` (§3). They are not touched by
   EP registration state.
 - Keep `InitOrt` for the provider-bridge path; the two paths are mutually
-  exclusive at runtime and selected by the §6 check.
+  exclusive at runtime and selected by the §6 check. TensorRT-RTX has no
+  provider-bridge path, so it is always plugin mode in practice.
+- **EP name handling (CUDA).** The ORT CUDA *plugin* factory currently reports
+  the name `"CudaPluginExecutionProvider"` (`cuda_ep_factory.h`) in a released
+  ORT, which differs from the legacy/provider-bridge name
+  `"CUDAExecutionProvider"`. genai matches **both** names in both places — the
+  interface's `FindMyEpDevices` (plugin allocator-mode detection) and
+  `AppendExecutionProviderV2` (plugin-vs-bridge append) — so a CUDA plugin
+  registered under either name is detected, and the two decisions always agree.
+  Only one name is assumed present at a time (the plugin advertises a single
+  device name), so `FindMyEpDevices` returns one device and append uses it.
+  TensorRT-RTX has no such discrepancy (`"NvTensorRTRTXExecutionProvider"`
+  throughout).
+- The add-on library does not link `onnxruntime`, so it has no `OrtGetApiBase`
+  of its own and no `GetOrtEnv()`. Both `Ort::api` and the `OrtEnv*` are passed
+  into the DLL at `GetInterface` time (new `const OrtApi*` and `OrtEnv*`
+  parameters supplied by `LoadCudaInterface`). The env exists before the DLL is
+  loaded, so the interface stores it (`env_`, const) — guaranteed non-null —
+  rather than lazily caching it from `FindMyEpDevices`. Both are available
+  before the plugin-mode allocator fetch runs during `Model` construction, so
+  the plugin path never depends on `InitOrt`.
 - `cuda/session_options.cpp::AppendExecutionProvider` keeps its "try V2
   plugin, fall back to provider-bridge" logic.
 
@@ -502,9 +528,51 @@ WebGPU EP (from `onnxruntime/core/providers/webgpu/ep/factory.cc`) calls
 OrtDeviceMemoryType_DEFAULT}`. `FindMyEpDevices` filters on this: only devices with a
 non-null `DEFAULT` memory info are considered plugin-mode devices.
 
-**Stage 3 — CUDA / NvTensorRtRtx.** Remove the static allocator, add the
-host-accessible allocator path, keep the provider-bridge path; add-on library
-teardown via the Stage 0 `OrtGlobals` ownership (§12.2).
+**Stage 3 — CUDA / NvTensorRtRtx.** Dual-path support mirroring WebGPU.
+The file-static `ort_allocator_` is removed; `GpuMemory` captures its device
+(DEFAULT) allocator and optional pinned (HOST_ACCESSIBLE) allocator at
+construction. `CudaInterfaceImplBase` gains `FindMyEpDevices` +
+`EnsureAllocator`: `FindMyEpDevices` caches the `OrtEnv*` (the add-on library
+has no `GetOrtEnv()`) and returns the CUDA plugin devices (those advertising
+DEFAULT memory — same internal-vs-plugin discriminator as WebGPU);
+`EnsureAllocator` fetches the env's shared device allocator on first use and,
+if the EP advertises a HOST_ACCESSIBLE mem-info (`CUDAPinnedAllocator`), the
+shared pinned allocator for `AllocateCpu`/free (§11). Legacy (provider-bridge)
+mode leaves `host_allocator_` null so `AllocateCpu` falls back to
+`::cudaHostAlloc`. `InitOrt` is retained for the legacy path and is idempotent
+(no assert). Each concrete interface passes its EP name(s) to the base
+constructor (stored in `ep_names_`): `{"CUDAExecutionProvider",
+"CudaPluginExecutionProvider"}` for CUDA (both are matched — the plugin factory
+name differs from the legacy name in a released ORT, and only one is present at
+a time) and `{"NvTensorRTRTXExecutionProvider"}` for NvTensorRtRtx. Both are
+plugin EPs that advertise DEFAULT + HOST_ACCESSIBLE mem-infos. TensorRT-RTX is
+plugin-only (no provider-bridge fallback). `AppendExecutionProviderV2` tries
+both CUDA names too, so plugin-append and plugin allocator-mode detection always
+agree.
+
+**ORT API + env into the add-on DLL:** the add-on DLL's `Ort::api` and the
+`OrtEnv*` are passed at `GetInterface` time (new `const OrtApi* ort_api` and
+`OrtEnv* ort_env` parameters, supplied by `OrtGlobals::LoadCudaInterface` from
+`Ort::api` and `env_`). The env is created before the DLL is loaded, so it is
+guaranteed to exist; the interface stores it (`env_`, const) rather than lazily
+caching it from `FindMyEpDevices`. The DLL is loaded during
+`Model::CreateSessionOptions()`, before the `FindMyEpDevices()` /
+`EnsureAllocator()` calls later in the same `Model` constructor, so plugin-mode
+`GetEpDevices`/`GetSharedAllocator` lookups have a valid `Ort::api` and env
+without relying on `InitOrt` (which the plugin path skips). The CUDA
+stream/kernels remain add-on-library state (§12.2), torn down at `OgaShutdown`
+via the Stage 0 `OrtGlobals` ownership. Not runtime-validatable without CUDA
+hardware; the code compiles under the same declarations as the main module.
+
+*Tests* (authored, in [`test/c_api_tests.cpp`](../test/c_api_tests.cpp)):
+`GreedySearchGptFp32CudaCAPI` exercises the plugin path (asserts the CUDA plugin
+device advertises DEFAULT **and** HOST_ACCESSIBLE mem-info and that the env
+yields a shared allocator for each), and `GreedySearchGptFp32CudaLegacyCAPI`
+exercises the provider-bridge path (asserts no plugin DEFAULT mem-info). Both
+match EP device names `"CUDAExecutionProvider"` or `"CudaPluginExecutionProvider"`.
+They `GTEST_SKIP()` without an NVIDIA GPU, so they must be run on a CUDA machine:
+the plugin test with `--ep_dir <dir with onnxruntime_providers_cuda[_plugin].dll>`,
+the legacy test against a CUDA-enabled `onnxruntime.dll` with no `--ep_dir`.
 
 **Stage 4 — remaining EPs, one at a time.** QNN and OpenVINO (shared-allocator
 path, same pattern as WebGPU), then DML (see §13 for concrete steps: add

@@ -17,6 +17,8 @@
 std::string g_custom_model_path;
 // Set to true when the WebGPU plugin EP is successfully registered via --ep_dir.
 bool g_webgpu_ep_registered = false;
+// Set to true when the CUDA plugin EP is successfully registered via --ep_dir.
+bool g_cuda_ep_registered = false;
 
 namespace {
 
@@ -35,11 +37,22 @@ constexpr const char* kProviderPrefix = "lib";
 constexpr const char* kProviderSuffix = ".so";
 #endif
 
-// Execution providers that can be loaded as plugin libraries at test time, mapped to the
-// platform-independent stem of their library file. The full file name is built as
-// "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".
-constexpr std::array<std::pair<std::string_view, std::string_view>, 1> kPluginEpLibraries = {{
-    {"WebGpuExecutionProvider", "onnxruntime_providers_webgpu"},
+// Execution provider plugin libraries to register at test time. Each entry pairs an (arbitrary)
+// registration name passed to OgaRegisterExecutionProviderLibrary with the platform-independent
+// stem of the library file. The registration name is just a handle -- it is deliberately NOT an EP
+// name (we use a ".GenAI" suffix to make that obvious). The actual EP name(s) are defined by the
+// plugin EP implementation (e.g. "WebGpuExecutionProvider", "CudaPluginExecutionProvider") and are
+// what appear in OrtEpDevice / what genai matches on. The full file name is built as
+// "<prefix><stem><suffix>", e.g. on Windows "onnxruntime_providers_webgpu" ->
+// "onnxruntime_providers_webgpu.dll".
+// A single EP may ship under more than one library file name across ORT versions; list each
+// candidate (same registration name) and RegisterEpLibrariesFromDirectory registers whichever is
+// present. CUDA currently ships as either onnxruntime_providers_cuda or
+// onnxruntime_providers_cuda_plugin depending on ORT version.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 3> kPluginEpLibraries = {{
+    {"WebGPU.GenAI", "onnxruntime_providers_webgpu"},
+    {"CUDA.GenAI", "onnxruntime_providers_cuda"},
+    {"CUDA.GenAI", "onnxruntime_providers_cuda_plugin"},
 }};
 
 // Builds the platform-specific plugin library file name for an EP library stem.
@@ -73,14 +86,22 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
     return;
   }
 
-  for (const auto& [ep_name, library_stem] : kPluginEpLibraries) {
+  for (const auto& [registration_name, library_stem] : kPluginEpLibraries) {
+    // An EP may be listed under multiple candidate library names (see kPluginEpLibraries); once one
+    // has registered for a given EP, skip the rest to avoid double-registering the same provider.
+    // (registration_name is an arbitrary handle, not the EP name -- see kPluginEpLibraries.)
+    if (registration_name == "WebGPU.GenAI" && g_webgpu_ep_registered) continue;
+    if (registration_name == "CUDA.GenAI" && g_cuda_ep_registered) continue;
+
     const fs::path library_path = ep_dir / EpLibraryFileName(library_stem);
     if (!fs::is_regular_file(library_path, ec)) {
       continue;
     }
-    bool ok = RegisterEpLibrary(std::string(ep_name), library_path.string());
-    if (ok && ep_name == "WebGpuExecutionProvider") {
+    bool ok = RegisterEpLibrary(std::string(registration_name), library_path.string());
+    if (ok && registration_name == "WebGPU.GenAI") {
       g_webgpu_ep_registered = true;
+    } else if (ok && registration_name == "CUDA.GenAI") {
+      g_cuda_ep_registered = true;
     }
   }
 }

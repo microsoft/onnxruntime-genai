@@ -7,7 +7,9 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"
+#include <algorithm>
 #include <cstdarg>
+#include <cstring>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -16,19 +18,24 @@
 namespace Generators {
 
 GenaiInterface* gp_genai{};
-Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
 cuda_stream_holder g_stream;
 cudaStream_t GetStream() { return g_stream.get(); }
 
 struct GpuMemory final : DeviceBuffer {
-  GpuMemory(size_t size) : owned_{true} {
+  // ort_allocator: device (DEFAULT) allocator, sourced from the plugin-EP shared allocator in
+  //   plugin mode, or the trivial-session allocator (InitOrt) in legacy mode.
+  // host_allocator: pinned HOST_ACCESSIBLE allocator when the plugin EP advertises one
+  //   (CUDAPinnedAllocator); nullptr in legacy mode, where AllocateCpu falls back to ::cudaHostAlloc.
+  GpuMemory(size_t size, Ort::Allocator& ort_allocator, Ort::Allocator* host_allocator)
+      : owned_{true}, ort_allocator_{&ort_allocator}, host_allocator_{host_allocator} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size));
   }
 
-  GpuMemory(void* p, size_t size) : owned_{false} {
+  GpuMemory(void* p, size_t size, Ort::Allocator& ort_allocator, Ort::Allocator* host_allocator)
+      : owned_{false}, ort_allocator_{&ort_allocator}, host_allocator_{host_allocator} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(p);
   }
@@ -36,15 +43,23 @@ struct GpuMemory final : DeviceBuffer {
   ~GpuMemory() override {
     if (owned_)
       ort_allocator_->Free(p_device_);
-    if (p_cpu_)
-      ::cudaFreeHost(p_cpu_);
+    if (p_cpu_) {
+      if (host_allocator_)
+        host_allocator_->Free(p_cpu_);
+      else
+        ::cudaFreeHost(p_cpu_);
+    }
   }
 
   const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
-    if (!p_cpu_)
-      ::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0);
+    if (!p_cpu_) {
+      if (host_allocator_)
+        p_cpu_ = static_cast<uint8_t*>(host_allocator_->Alloc(size_in_bytes_));
+      else
+        ::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0);
+    }
   }
 
   void CopyDeviceToCpu() override {
@@ -70,32 +85,59 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   bool owned_;  // If we own the memory, we delete it on destruction
+  Ort::Allocator* ort_allocator_;   // Device (DEFAULT) allocator captured at construction.
+  Ort::Allocator* host_allocator_;  // Pinned host allocator (plugin mode) or nullptr (legacy).
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
-  CudaInterfaceImplBase() {
+  // env: the OrtEnv this interface belongs to, passed at construction (GetInterface) and guaranteed
+  // to exist for the interface's lifetime (the env is created before the add-on library is loaded).
+  // Held as a reference to make the non-null / always-valid contract explicit.
+  // ep_names: the EP name(s) this interface answers to in GetEpDevices. Includes both the
+  // legacy/provider-bridge name and the plugin factory name where they differ (CUDA), or a single
+  // name where they match (TensorRT-RTX). Empty => no plugin path (legacy only). Only one of the
+  // names is present on the env at a time.
+  CudaInterfaceImplBase(OrtEnv& env, std::vector<const char*> ep_names)
+      : ep_names_{std::move(ep_names)}, env_{env} {
     g_stream.Create();
   }
 
   ~CudaInterfaceImplBase() {
   }
 
+  // §6 plugin-mode detection. Returns this EP's plugin devices (those advertising DEFAULT
+  // device-local memory) on the construction-time env. Empty => legacy (provider-bridge) path.
+  std::vector<const OrtEpDevice*> FindMyEpDevices() const override {
+    return FindPluginDevices();
+  }
+
+  // §12.2 legacy (provider-bridge) path: EnsureDeviceOrtInit supplies the trivial-session allocator.
+  // Idempotent (no assert) so re-init can call it again (§9). Not called in plugin mode.
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
-    assert(!ort_allocator_);
     ort_allocator_ = &allocator;
   }
 
   Ort::Allocator& GetAllocator() override {
+    EnsureAllocator();
     return *ort_allocator_;
   }
 
+  // §11 host-accessible (pinned) allocator: the CUDA plugin EP advertises a HOST_ACCESSIBLE
+  // allocator (CUDAPinnedAllocator). nullptr in legacy mode (callers fall back to ::cudaHostAlloc).
+  Ort::Allocator* GetHostAccessibleAllocator() override {
+    EnsureAllocator();
+    return host_allocator_;
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    return std::make_shared<GpuMemory>(size);
+    EnsureAllocator();
+    return std::make_shared<GpuMemory>(size, *ort_allocator_, host_allocator_);
   }
 
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
-    return std::make_shared<GpuMemory>(p, size);
+    EnsureAllocator();
+    return std::make_shared<GpuMemory>(p, size, *ort_allocator_, host_allocator_);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
@@ -178,13 +220,74 @@ struct CudaInterfaceImplBase : DeviceInterface {
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     cudaMemGetInfo(&free_bytes, &total_bytes);
   }
+
+ private:
+  const std::vector<const char*> ep_names_;  // EP name(s) this interface answers to (see ctor). Empty => legacy only.
+  OrtEnv& env_;                              // The env this interface belongs to; a reference => always valid.
+  Ort::Allocator* ort_allocator_{};          // Device (DEFAULT) allocator; set by InitOrt (legacy) or EnsureAllocator (plugin).
+  Ort::Allocator* host_allocator_{};         // Pinned HOST_ACCESSIBLE allocator (plugin mode) or nullptr (legacy).
+  const OrtMemoryInfo* ort_memory_info_{};   // Device-local mem-info (plugin mode).
+
+  // Enumerate this EP's plugin devices on env_: those matching any of ep_names_ AND advertising
+  // DEFAULT device-local memory. The internal/provider-bridge path advertises none, so it is
+  // excluded (same internal-vs-plugin discriminator as WebGPU, §6).
+  std::vector<const OrtEpDevice*> FindPluginDevices() const {
+    std::vector<const OrtEpDevice*> result;
+    if (ep_names_.empty())
+      return result;
+    const OrtEpDevice* const* device_ptrs = nullptr;
+    size_t num_devices = 0;
+    Ort::GetEpDevices(&env_, &device_ptrs, &num_devices);
+    for (const auto* device : std::span{device_ptrs, num_devices}) {
+      const char* dev_name = Ort::api->EpDevice_EpName(device);
+      const bool name_matches = std::any_of(ep_names_.begin(), ep_names_.end(),
+                                            [dev_name](const char* n) { return std::strcmp(dev_name, n) == 0; });
+      if (name_matches && Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT) != nullptr)
+        result.push_back(device);
+    }
+    return result;
+  }
+
+  // Ensure the device allocator (and, in plugin mode, the host-accessible allocator) is set.
+  // - Legacy path: InitOrt() already set ort_allocator_ -> returns immediately.
+  // - Plugin path: fetches the env's shared allocator(s) from the registered CUDA plugin EP.
+  void EnsureAllocator() {
+    if (ort_allocator_)
+      return;  // Legacy (InitOrt) or a prior plugin-mode fetch.
+    auto devices = FindPluginDevices();
+    if (devices.empty())
+      throw std::runtime_error("CUDA EP is not registered as a plugin EP");
+    const OrtEpDevice* device = devices[0];
+    ort_memory_info_ = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT);
+    ort_allocator_ = Ort::GetSharedAllocator(&env_, ort_memory_info_);
+    if (!ort_allocator_)
+      throw std::runtime_error("Failed to get shared CUDA device allocator from env");
+    // §11 host-accessible (pinned) allocator, if the EP advertises one (CUDA plugin EP does).
+    if (const OrtMemoryInfo* host_mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_HOST_ACCESSIBLE))
+      host_allocator_ = Ort::GetSharedAllocator(&env_, host_mi);
+    if (GetLogItems().enabled)
+      Log("cuda", "Using plugin-EP CUDA shared allocator");
+  }
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
+  // CUDA answers to both the legacy/provider-bridge name and the CUDA *plugin* factory name. The
+  // plugin factory currently reports "CudaPluginExecutionProvider" (cuda_ep_factory.h) in a released
+  // ORT, while the legacy/provider-bridge name is "CUDAExecutionProvider". Both map to this same
+  // DeviceInterface, so we accept either (only one is present on the env at a time). genai's
+  // AppendExecutionProviderV2 tries both names too (cuda/session_options.cpp), keeping plugin-append
+  // and plugin allocator-mode detection in agreement.
+  CudaInterfaceImpl(OrtEnv& env)
+      : CudaInterfaceImplBase(env, {"CUDAExecutionProvider", "CudaPluginExecutionProvider"}) {}
   DeviceType GetType() const override { return DeviceType::CUDA; }
 };
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
+  // TensorRT-RTX is plugin-only (no provider-bridge path); its EP name is stable and matches genai's
+  // AppendExecutionProviderV2 name. The plugin advertises both DEFAULT and HOST_ACCESSIBLE
+  // (CUDAPinnedAllocator) mem-infos, so EnsureAllocator picks up the pinned allocator automatically.
+  NvTensorRtRtxInterfaceImpl(OrtEnv& env)
+      : CudaInterfaceImplBase(env, {"NvTensorRTRTXExecutionProvider"}) {}
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
 };
 
@@ -239,12 +342,18 @@ void operator delete(void* p, size_t /*size*/) noexcept {
 #endif
 
 extern "C" {
-Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const OrtApi* ort_api, OrtEnv* ort_env, const char* deviceType) {
   Generators::gp_genai = p_genai;
+  // Acquire the ORT API and env into this add-on DLL at load time. The DLL is loaded during
+  // Model::CreateSessionOptions(), before FindMyEpDevices()/EnsureAllocator() run later in the same
+  // Model constructor, so plugin-mode allocator lookups have a valid Ort::api and env without relying
+  // on InitOrt (which the plugin path skips). The env is created before the DLL is loaded, so it is
+  // guaranteed to exist. Legacy InitOrt also sets Ort::api (idempotent).
+  Ort::api = ort_api;
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
-    Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
+    Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>(*ort_env);
   } else {
-    Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
+    Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>(*ort_env);
   }
   return Generators::g_cuda_device.get();
 }

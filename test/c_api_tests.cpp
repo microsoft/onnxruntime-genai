@@ -932,6 +932,165 @@ TEST(CAPITests, GreedySearchGptFp32WebGPULegacyCAPI) {
   }
 }
 
+// Exercises the CUDA plugin-EP shared-allocator path (§6/§12.2), including the host-accessible
+// (pinned, CUDAPinnedAllocator) allocator. Requires an NVIDIA GPU.
+// Run with: unit_tests.exe --ep_dir <dir-containing-the-CUDA-plugin-EP-dll>
+// Skips if the plugin EP is not registered (e.g. no --ep_dir, or no CUDA GPU).
+TEST(CAPITests, GreedySearchGptFp32CudaCAPI) {
+  extern bool g_cuda_ep_registered;
+  if (!g_cuda_ep_registered) {
+    GTEST_SKIP() << "CUDA plugin EP not registered (pass --ep_dir to unit_tests.exe on a CUDA machine)";
+  }
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  int batch_size = 2;
+  int max_length = 10;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+
+  auto model = OgaModel::Create(*config);
+
+  // Explicit plugin-path check: confirm the CUDA plugin EP is registered and advertises BOTH a
+  // device-local (DEFAULT) allocator and a host-accessible (pinned) allocator, and that the env
+  // exposes a shared allocator for each. genai accepts either the plugin factory name
+  // ("CudaPluginExecutionProvider") or the legacy name ("CUDAExecutionProvider"); only one is
+  // present at a time. Uses the raw C API (OrtGetApiBase()->GetApi()) rather than genai's Ort::
+  // inline wrappers to avoid the inline-variable-per-module issue on MSVC across DLL boundaries.
+  {
+    const OrtApi* ort_api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+    OrtEnv* env = nullptr;
+    ASSERT_EQ(ort_api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "cuda_test", &env), nullptr);
+
+    const OrtEpDevice* const* ep_devices = nullptr;
+    size_t num_ep_devices = 0;
+    ort_api->GetEpDevices(env, &ep_devices, &num_ep_devices);
+
+    const OrtMemoryInfo* cuda_default_mem_info = nullptr;
+    const OrtMemoryInfo* cuda_host_mem_info = nullptr;
+    for (size_t i = 0; i < num_ep_devices; ++i) {
+      const char* name = ort_api->EpDevice_EpName(ep_devices[i]);
+      if (std::strcmp(name, "CUDAExecutionProvider") == 0 ||
+          std::strcmp(name, "CudaPluginExecutionProvider") == 0) {
+        const OrtMemoryInfo* def = ort_api->EpDevice_MemoryInfo(ep_devices[i], OrtDeviceMemoryType_DEFAULT);
+        if (def) {
+          cuda_default_mem_info = def;
+          cuda_host_mem_info = ort_api->EpDevice_MemoryInfo(ep_devices[i], OrtDeviceMemoryType_HOST_ACCESSIBLE);
+          break;
+        }
+      }
+    }
+
+    EXPECT_NE(cuda_default_mem_info, nullptr)
+        << "No CUDA plugin EP device with DEFAULT allocator info -- plugin-EP shared-allocator path not used";
+    EXPECT_NE(cuda_host_mem_info, nullptr)
+        << "CUDA plugin EP device does not advertise HOST_ACCESSIBLE (pinned) allocator info";
+
+    if (cuda_default_mem_info) {
+      OrtAllocator* shared_alloc = nullptr;
+      ort_api->GetSharedAllocator(env, cuda_default_mem_info, &shared_alloc);
+      EXPECT_NE(shared_alloc, nullptr) << "GetSharedAllocator returned nullptr for CUDA DEFAULT memory info";
+    }
+    if (cuda_host_mem_info) {
+      OrtAllocator* pinned_alloc = nullptr;
+      ort_api->GetSharedAllocator(env, cuda_host_mem_info, &pinned_alloc);
+      EXPECT_NE(pinned_alloc, nullptr) << "GetSharedAllocator returned nullptr for CUDA HOST_ACCESSIBLE memory info";
+    }
+
+    ort_api->ReleaseEnv(env);
+  }
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  for (int i = 0; i < batch_size; i++) {
+    EXPECT_EQ(generator->GetSequenceCount(i), static_cast<size_t>(max_length));
+  }
+}
+
+// Exercises the CUDA legacy (provider-bridge) path (§12.2). The provider-bridge CUDA EP is not a
+// plugin device, so FindMyEpDevices returns empty and genai falls back to EnsureDeviceOrtInit
+// (trivial-session allocator; pinned staging via ::cudaHostAlloc). Requires an NVIDIA GPU and an
+// onnxruntime.dll that includes CUDA (e.g. Microsoft.ML.OnnxRuntime.Gpu). Run WITHOUT --ep_dir.
+// Skips if the plugin EP is registered or CUDA is unavailable.
+TEST(CAPITests, GreedySearchGptFp32CudaLegacyCAPI) {
+  extern bool g_cuda_ep_registered;
+  if (g_cuda_ep_registered) {
+    GTEST_SKIP() << "Plugin CUDA EP is registered; this test validates the legacy path (run without --ep_dir)";
+  }
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  int batch_size = 2;
+  int max_length = 10;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+
+  // Enable genai logging for diagnostics (the legacy CUDA path uses InitOrt, which does not log a
+  // dedicated line, but this surfaces any allocator/EP messages).
+  Oga::SetLogBool("enabled", true);
+
+  std::unique_ptr<OgaModel> model;
+  try {
+    model = OgaModel::Create(*config);
+  } catch (const std::exception& e) {
+    Oga::SetLogBool("enabled", false);
+    GTEST_SKIP() << "CUDA not available in this build (legacy path): " << e.what();
+  }
+
+  // Verify legacy detection: no CUDA EP device is present as a plugin device advertising DEFAULT
+  // allocator info, so FindMyEpDevices returns empty and the legacy bootstrap path is taken.
+  {
+    const OrtApi* ort_api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+    OrtEnv* env = nullptr;
+    ASSERT_EQ(ort_api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "cuda_legacy_test", &env), nullptr);
+
+    const OrtEpDevice* const* ep_devices = nullptr;
+    size_t num_ep_devices = 0;
+    ort_api->GetEpDevices(env, &ep_devices, &num_ep_devices);
+
+    bool found_default_mem_info = false;
+    for (size_t i = 0; i < num_ep_devices; ++i) {
+      const char* name = ort_api->EpDevice_EpName(ep_devices[i]);
+      if ((std::strcmp(name, "CUDAExecutionProvider") == 0 ||
+           std::strcmp(name, "CudaPluginExecutionProvider") == 0) &&
+          ort_api->EpDevice_MemoryInfo(ep_devices[i], OrtDeviceMemoryType_DEFAULT) != nullptr) {
+        found_default_mem_info = true;
+        break;
+      }
+    }
+    EXPECT_FALSE(found_default_mem_info)
+        << "A CUDA EP device advertised DEFAULT allocator info -- this is the plugin EP, not the "
+           "provider-bridge/legacy path. The legacy path is not being exercised.";
+
+    ort_api->ReleaseEnv(env);
+  }
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  Oga::SetLogBool("enabled", false);
+
+  for (int i = 0; i < batch_size; i++) {
+    EXPECT_EQ(generator->GetSequenceCount(i), static_cast<size_t>(max_length));
+  }
+}
+
 TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};

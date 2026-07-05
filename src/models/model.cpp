@@ -584,7 +584,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   // §6/§10: Use the plugin-EP shared allocator if the EP is registered as a plugin; otherwise
   // fall back to the legacy trivial-session bootstrap (EnsureDeviceOrtInit).
-  if (p_device_->FindMyEpDevices(GetOrtEnv()).empty())
+  if (p_device_->FindMyEpDevices().empty())
     EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
