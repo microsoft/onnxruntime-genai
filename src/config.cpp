@@ -7,7 +7,6 @@
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
-#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -1403,8 +1402,15 @@ void ClearProviders(Config& config) {
 // Escape a string for safe embedding inside a JSON string literal. Prevents JSON
 // injection when caller-supplied values are concatenated into a JSON document that
 // will subsequently be parsed (e.g. in SetProviderOption below). Handles the
-// mandatory JSON escapes: quote, backslash, and the C0 control-character shortcuts.
-// Any other control characters (< 0x20) are emitted as \u00XX.
+// mandatory JSON escapes: quote, backslash, and the C0 control-character shortcuts
+// that the local JSON parser understands (\b \f \n \r \t).
+//
+// Other C0 control characters (< 0x20) have no shortcut and would require a
+// \uXXXX escape, which the local JSON parser in src/json.cpp does not support
+// (it throws "Unsupported uXXXX code used"). Since provider option names and
+// values are configuration strings that are not expected to contain raw
+// control characters, reject them here with a clear error rather than
+// producing JSON that the parser cannot consume.
 static std::string EscapeJsonString(std::string_view s) {
   std::string result;
   result.reserve(s.size());
@@ -1419,12 +1425,11 @@ static std::string EscapeJsonString(std::string_view s) {
       case '\t': result += "\\t";  break;
       default:
         if (static_cast<unsigned char>(c) < 0x20) {
-          char buf[7];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-          result += buf;
-        } else {
-          result += c;
+          throw std::runtime_error(
+              "Unsupported control character in provider option string (code " +
+              std::to_string(static_cast<unsigned char>(c)) + ")");
         }
+        result += c;
         break;
     }
   }
