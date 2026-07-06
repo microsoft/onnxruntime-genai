@@ -202,12 +202,6 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
-// §6: Returns the env's OrtEpDevice entries whose execution-provider name matches `ep_name`.
-// An empty result means the EP is not registered as a plugin EP on the env (legacy mode). The
-// returned pointers are non-owning and owned by the env. An EP name can appear on several devices
-// (e.g. multi-GPU), so all matches are returned.
-std::vector<const OrtEpDevice*> FindEpDevices(OrtEnv& env, const char* ep_name);
-
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
 

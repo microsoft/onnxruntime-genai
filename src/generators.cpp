@@ -90,13 +90,21 @@ struct EnsureShutdown {
   }
 };
 
-std::unique_ptr<OrtGlobals>&
-GetOrtGlobals() {
+std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   // Registered once; its destructor runs at process exit (before g_ort_globals is destroyed) and
   // performs the final Shutdown().
   static EnsureShutdown ensure_shutdown;
+  // Guard lazy (re)creation so concurrent first-use (or first-use after a shutdown) cannot
+  // double-construct the globals. Re-init after shutdown must remain possible, so this is a plain
+  // mutex rather than std::call_once (which is process-once). The OrtGlobals constructor does not
+  // re-enter GetOrtGlobals() (it bootstraps the CPU interface via the OrtGlobals member accessor),
+  // so acquiring this lock here cannot deadlock. The lock is released before the returned
+  // reference is dereferenced by callers, so it does not nest with device_interfaces_mutex_.
+  static std::mutex creation_mutex;
+  std::scoped_lock lock{creation_mutex};
   if (!g_ort_globals && !g_process_exiting)
     g_ort_globals = std::make_unique<OrtGlobals>();
+
   return g_ort_globals;
 }
 
@@ -341,18 +349,6 @@ std::string to_string(DeviceType device_type) {
 
 DeviceInterface* GetDeviceInterface(DeviceType type) {
   return GetOrtGlobals()->GetDeviceInterface(type);
-}
-
-std::vector<const OrtEpDevice*> FindEpDevices(OrtEnv& env, const char* ep_name) {
-  const OrtEpDevice* const* device_ptrs = nullptr;
-  size_t num_devices = 0;
-  Ort::GetEpDevices(&env, &device_ptrs, &num_devices);
-
-  std::vector<const OrtEpDevice*> devices;
-  for (const auto* device : std::span{device_ptrs, num_devices})
-    if (std::strcmp(Ort::api->EpDevice_EpName(device), ep_name) == 0)
-      devices.push_back(device);
-  return devices;
 }
 
 GeneratorParams::GeneratorParams(const Config& config)

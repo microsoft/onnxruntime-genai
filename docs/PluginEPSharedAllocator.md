@@ -533,7 +533,25 @@ in-process EP; CUDA stays as `OrtGlobals::LoadCudaInterface` (add-on library
 path). Also: VS 2026 (MSVC 19.50+) build compatibility — suppress `C4875`
 globally and define `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` in
 `CMakeLists.txt` for third-party deps that haven't updated to VS 2026 yet.
-Tests: shutdown → re-init cycle (CPU first; each EP added as it migrates).
+`GetOrtGlobals()` re-creation is mutex-guarded so concurrent first use (or
+first use after a shutdown) cannot double-construct the globals.
+
+*Testing.* A dedicated `reinit_tests` executable — separate from `unit_tests`
+because it calls `OgaShutdown` (which resets process-global state, so it must
+not share a process with the public-API suite) — drives repeated
+shutdown → re-init cycles. It links the genai **object library**
+(`onnxruntime-genai-obj`) instead of the shared library, giving white-box
+access to `GetDeviceInterface` so it can force each available EP's device
+interface to be created and then torn down directly (no model load, so it also
+covers EPs that can't run the tiny CPU test model). On Windows it registers
+WinML-installed EP packages (`Get-AppxPackage "*.EP.*"`, with the provider DLL
+found recursively under each package's install location). `unit_tests` stays on
+the public C API via the shared library (opt-in `--winml_eps` /  `--ep_dir` to
+register plugin EPs there). The object-library split — the shared library and
+the white-box tests both consume `onnxruntime-genai-obj` — is what lets tests
+reach internal symbols without exporting them from the shipped DLL purely for
+testing; the genai library targets are grouped under a `GenAI` IDE solution
+folder.
 
 **Stage 1 — shared-allocator plumbing (EP-agnostic).**
 
@@ -630,10 +648,16 @@ detail), and VitisAI when it has a use case (§13).
    re-init is safe w.r.t. the CUDA runtime. This is genai-side only; ORT EP
    libraries are handled by env teardown (§3). If unload/reload proves
    problematic, keep the add-on resident and recreate only the interface (the
-   §3 future optimization).
-2. Minimum ORT version shipping `EpDevice_MemoryInfo` and `GetSharedAllocator`
-   vs the version genai already requires for plugin EP loading. (API names
-   confirmed in `onnxruntime_cxx_api.h`.)
+   §3 future optimization). The `reinit_tests` cycle exercises exactly this on
+   a CUDA machine (it forces the CUDA `DeviceInterface`, which loads/unloads
+   the add-on, across cycles); *to be run on real CUDA hardware.*
+2. **Minimum ORT version — resolved, no check needed.** `EpDevice_MemoryInfo`
+   and `GetSharedAllocator` were added as part of the plugin-EP support itself,
+   so an EP cannot appear in `GetEpDevices` (i.e. be detected as a plugin EP)
+   in an ORT build that lacks these APIs. The §6 plugin-mode detection is
+   therefore self-gating: legacy mode is taken whenever the APIs/EP are absent,
+   and the plugin path only runs where the APIs exist. No explicit version
+   check is required.
 3. **RyzenAI EP re-init** — does the RyzenAI EP tolerate register →
    unregister → register within one process, and unregister/shutdown **before**
    env destruction (the reverse-order teardown, §3)? Gates the RyzenAI stage
