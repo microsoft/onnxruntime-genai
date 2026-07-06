@@ -24,6 +24,11 @@ struct DecodingStrategy {
   // Drop any per-round buffered state so a rewind/restart resumes cleanly.
   // Speculative strategy needs override to clear its pending-token buffer.
   virtual void Reset() {}
+
+  // Called at the start of a mid-stream AppendTokens (continuous decoding) so a strategy can
+  // reconcile any deferred/buffered per-round state with the committed sequence before the append
+  // runs. Default: nothing to do. Speculative overrides to realign its two inner KV caches.
+  virtual void PrepareForAppend(Generator& generator) { (void)generator; }
 };
 
 // Picks the right strategy after state_ and search_ are set up.
