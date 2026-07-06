@@ -107,7 +107,8 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
-symmetric_per_channel_quantize = sys.modules["models.builders.qmoe_quantizer"].symmetric_per_channel_quantize
+cuda_quantizer_module = sys.modules["models.builders.cuda_quantizer"]
+symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
 
@@ -187,7 +188,9 @@ def test_use_fp4_moe_requires_qmoe_precision():
     )
 
     with pytest.raises(ValueError, match="use_fp4_moe requires precision=int4"):
-        Model(config, base_module.ir.DataType.FLOAT16, base_module.ir.DataType.FLOAT16, "cuda", ".", {"use_fp4_moe": True})
+        Model(
+            config, base_module.ir.DataType.FLOAT16, base_module.ir.DataType.FLOAT16, "cuda", ".", {"use_fp4_moe": True}
+        )
 
 
 def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
@@ -529,7 +532,10 @@ def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(mon
     weights = torch.randn(17, 16, dtype=torch.float32) * 0.05
     model = _RealMoEModel("cuda", 0, 0, bits=4)
 
-    monkeypatch.setattr(base_module, "_ortpyb", types.SimpleNamespace())
+    def fail_if_called():
+        raise AssertionError("raw per-channel quantization should not request CUDA QMoE prepacking")
+
+    monkeypatch.setattr(cuda_quantizer_module, "_get_pack_weights_for_cuda_mixed_gemm", fail_if_called)
 
     qweight, scales = model.make_qmoe_weights(weights)
 
@@ -540,9 +546,9 @@ def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(mon
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")
-def test_cutlass_prepacked_scales_are_signed():
-    """Regression guard for the abs(scales) bug: blockwise scales must keep their
-    sign, and the encoded shapes must match the QMoE op's prepacked layout."""
+def test_cutlass_prepacked_scales_are_positive_with_full_range_symmetric_quantization():
+    """The synced CudaQuantizer full-range symmetric path returns positive
+    scales, and the encoded shapes must match the QMoE op's prepacked layout."""
     model = _FakeMoEModel("cuda", 128, -1)
     torch.manual_seed(0)
     weights = torch.randn(256, 256) * 0.05  # [N, K]
@@ -551,6 +557,4 @@ def test_cutlass_prepacked_scales_are_signed():
     assert qweight.dtype == torch.uint8
     assert tuple(qweight.shape) == (256, 128)  # [K, N/2] for INT4
     assert tuple(scales.shape) == (256, 2)  # [N, K/block]
-    # With zero-mean weights about half the blocks have a negative anchor; the
-    # scale must carry that sign. abs() would make every scale non-negative.
-    assert (scales < 0).any(), "blockwise scales should be signed (abs() regression)"
+    assert (scales > 0).all()

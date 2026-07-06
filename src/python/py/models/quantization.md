@@ -85,6 +85,28 @@ Uses `KQuantWeightOnlyQuantConfig` → Neural Compressor's k-quant (a more elabo
 per-block scaling derived from llama.cpp's K-quants). Honors per-node
 `customized_weight_config`, so int8 bit placement works in a single pass.
 
+## Builder-owned CUDA MatMulNBits blockwise quantization
+
+Some model-builder paths create `MatMulNBits` directly from raw PyTorch weights
+instead of using ONNX Runtime's graph quantizer passes above. In those paths, the
+builder uses the local CUDA quantizer helper to emit the standard `MatMulNBits`
+initializers: quantized weight `B` with shape
+`[N, K / block_size, block_size * bits / 8]`, scales with shape
+`[N, K / block_size]`, and packed zero-points when asymmetric quantization is used.
+
+For **symmetric** int4/int8, the default export uses unsigned-offset storage with
+the full integer range:
+
+| Bits | Numeric range | Scale | Stored value |
+| --- | --- | --- | --- |
+| 4 | `[-8, 7]` | `max(abs(w)) / 8` | `q + 8` |
+| 8 | `[-128, 127]` | `max(abs(w)) / 128` | `q + 128` |
+
+For testing, set environment variable `GENAI_MATMULNBITS_UNSIGNED_FULL_RANGE=0` to
+use the previous narrower unsigned-offset range: int4 `[-7, 7]` with scale
+`max(abs(w)) / 7`, and int8 `[-127, 127]` with scale `max(abs(w)) / 127`. This is
+not exposed as a model-builder `extra_options` flag.
+
 ## QMoE expert-weight quantization
 
 MoE expert weights that are exported as `com.microsoft::QMoE` are quantized by a

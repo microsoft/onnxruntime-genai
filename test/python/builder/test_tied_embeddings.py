@@ -7,6 +7,7 @@ from pathlib import Path
 
 import onnx_ir as ir
 import pytest
+import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
@@ -115,7 +116,17 @@ def test_shared_embeddings_are_disabled_when_embeddings_or_lm_head_are_excluded(
         (ir.DataType.FLOAT16, ("MatMul", "Gather"), (), False, False, False, "default", False, True),
         (ir.DataType.INT4, ("MatMul",), (), False, False, False, "rtn", False, False),
         (ir.DataType.INT4, ("Gather",), (), False, False, False, "rtn", False, False),
-        (ir.DataType.INT4, ("MatMul", "Gather"), ("/model/embed_tokens/Gather",), False, False, False, "rtn", False, False),
+        (
+            ir.DataType.INT4,
+            ("MatMul", "Gather"),
+            ("/model/embed_tokens/Gather",),
+            False,
+            False,
+            False,
+            "rtn",
+            False,
+            False,
+        ),
         (ir.DataType.INT4, ("MatMul", "Gather"), ("/lm_head/MatMul",), False, False, False, "rtn", False, False),
         (ir.DataType.INT4, ("MatMul", "Gather"), (), True, False, False, "rtn", False, False),
         (ir.DataType.INT4, ("MatMul", "Gather"), (), False, True, False, "rtn", False, False),
@@ -219,15 +230,87 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
         ("rtn", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", ""),
         ("rtn", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
         ("rtn_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", ""),
-        ("rtn_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_mixed", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_mixed", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_linear", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("k_quant_linear", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+        (
+            "rtn_last",
+            32,
+            False,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant",
+            32,
+            True,
+            4,
+            "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant",
+            32,
+            False,
+            4,
+            "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_last",
+            32,
+            True,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_last",
+            32,
+            False,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_mixed",
+            32,
+            True,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_mixed",
+            32,
+            False,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_linear",
+            32,
+            True,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
+        (
+            "k_quant_linear",
+            32,
+            False,
+            8,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+        ),
     ],
 )
 def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
@@ -309,9 +392,33 @@ def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_sym
         ("default", True, None, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", None, False),
         ("default", False, None, "lm_head.MatMul.weight", "", None, False),
         ("rtn", True, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", None, False),
-        ("rtn", False, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
-        ("k_quant", True, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
-        ("k_quant", False, None, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp", True),
+        (
+            "rtn",
+            False,
+            None,
+            "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+            True,
+        ),
+        (
+            "k_quant",
+            True,
+            None,
+            "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+            True,
+        ),
+        (
+            "k_quant",
+            False,
+            None,
+            "lm_head.MatMul.weight_Q4G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+            True,
+        ),
     ],
 )
 def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_quantized_embeddings(
@@ -433,7 +540,8 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
 def _make_minimal_model_for_int4_matmul():
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
-    model.quant_attrs = {"accuracy_level": 0}
+    model.quant_attrs = {"accuracy_level": 0, "is_symmetric": True}
+    model.matmul_block_size = 32
 
     model._float_called = False
     model._initializers = []
@@ -460,15 +568,30 @@ def _make_minimal_model_for_int4_matmul():
     return model
 
 
-def test_int4_matmul_uses_float_fallback_when_model_not_already_quantized():
+def test_int4_matmul_quantizes_float_weight_to_matmul_nbits(monkeypatch):
     model = _make_minimal_model_for_int4_matmul()
 
-    matmul = types.SimpleNamespace(weight=object())
+    calls = []
+
+    def _matmulnbits_blockwise_quantize(weights, bits, block_size, **kwargs):
+        calls.append((weights, bits, block_size, kwargs))
+        return torch.zeros((128, 2, 16), dtype=torch.uint8), torch.ones((128, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(base_module.CudaQuantizer, "matmulnbits_blockwise_quantize", _matmulnbits_blockwise_quantize)
+
+    matmul = types.SimpleNamespace(weight=torch.zeros((128, 64), dtype=torch.float16), in_features=64, out_features=128)
     result = model.make_matmul_int4(matmul, "/lm_head/MatMul", "hidden_states")
 
-    assert result == "float_fallback"
-    assert model._float_called is True
-    assert model._nodes == []
+    assert result == "/lm_head/MatMulNBits"
+    assert model._float_called is False
+    assert len(calls) == 1
+    assert torch.equal(calls[0][0], matmul.weight)
+    assert calls[0][1:] == (
+        4,
+        32,
+        {"symmetric": True, "return_zero_points": False, "flatten_qweight": False, "unsigned_full_range": True},
+    )
+    assert any(op_type == "MatMulNBits" for op_type, _ in model._nodes)
 
 
 def test_int4_matmul_emits_matmul_nbits_when_model_already_quantized():

@@ -5,7 +5,6 @@ import sys
 import types
 from pathlib import Path
 
-
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
 

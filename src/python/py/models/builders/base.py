@@ -17,7 +17,6 @@ import numpy as np
 import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
-from onnxruntime.capi import _pybind_state as _ortpyb
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
@@ -33,11 +32,18 @@ from transformers import (
     GenerationConfig,
 )
 
-from .qmoe_quantizer import cuda_per_channel_quantize, symmetric_per_channel_quantize
+from .cuda_quantizer import CudaQuantizer
 
 
 def _qmoe_unsigned_full_range(model):
     raw = os.environ.get("GENAI_QMOE_UNSIGNED_FULL_RANGE", "1")
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _matmulnbits_unsigned_full_range(model):
+    raw = os.environ.get("GENAI_MATMULNBITS_UNSIGNED_FULL_RANGE", "1")
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -1335,24 +1341,55 @@ class Model:
 
     def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
-            # TODO: quantize weights, then save new MatMul weights for onnx model
-            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
-            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
-            return self.make_matmul_float(matmul, basename, root_input, **kwargs)
+            if not hasattr(matmul, "weight"):
+                return self.make_matmul_float(matmul, basename, root_input, **kwargs)
+
+            # Honor the per-node int8 bit placement (e.g. int8 LM head / mixed qkv layers) built
+            # in `int4_customized_weight_config`. Without this the direct CUDA quantization path
+            # would quantize every MatMul as int4, dropping the int8-designated nodes.
+            node_weight_config = getattr(self, "int4_customized_weight_config", {}).get(basename, {})
+            bits = int(node_weight_config.get("bits", 4))
+            group_size = int(self.matmul_block_size)
+            symmetric = bool(self.quant_attrs["is_symmetric"])
+            quantized = CudaQuantizer.matmulnbits_blockwise_quantize(
+                matmul.weight.detach(),
+                bits,
+                group_size,
+                symmetric=symmetric,
+                return_zero_points=not symmetric,
+                flatten_qweight=False,
+                unsigned_full_range=_matmulnbits_unsigned_full_range(self),
+            )
+            if symmetric:
+                qweight, scales = quantized
+                qzeros = None
+            else:
+                qweight, scales, qzeros = quantized
+
+            in_features = matmul.in_features if hasattr(matmul, "in_features") else matmul.weight.shape[1]
+            out_features = matmul.out_features if hasattr(matmul, "out_features") else matmul.weight.shape[0]
+        else:
+            bits = matmul.bits
+            group_size = matmul.group_size
+            qweight = matmul.qweight
+            scales = matmul.scales
+            qzeros = matmul.qzeros if hasattr(matmul, "qzeros") else None
+            in_features = matmul.in_features
+            out_features = matmul.out_features
 
         name = f"{basename}NBits"
 
         # Input weights are quantized, save quantized MatMul weights for onnx model
-        weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_initializer(matmul.qweight, weight)
-        scales = name[1:].replace("/", ".") + ".scales"
-        self.make_initializer(matmul.scales, scales, to=self.io_dtype)
+        weight_name = name[1:].replace("/", ".") + ".qweight"
+        self.make_initializer(qweight, weight_name)
+        scales_name = name[1:].replace("/", ".") + ".scales"
+        self.make_initializer(scales, scales_name, to=self.io_dtype)
 
-        inputs = [root_input, weight, scales]
+        inputs = [root_input, weight_name, scales_name]
 
-        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+        if qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_initializer(matmul.qzeros, zeros)
+            self.make_initializer(qzeros, zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
@@ -1369,12 +1406,12 @@ class Model:
             name=name,
             domain="com.microsoft",
             accuracy_level=self.quant_attrs["accuracy_level"],
-            bits=matmul.bits,
-            block_size=matmul.group_size,
-            K=matmul.in_features,
-            N=matmul.out_features,
+            bits=bits,
+            block_size=group_size,
+            K=in_features,
+            N=out_features,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, matmul.out_features])
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
 
         return name
 
@@ -3639,7 +3676,7 @@ class Model:
         per-channel quantization when the ``block_size`` attribute is omitted.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return symmetric_per_channel_quantize(
+        return CudaQuantizer.symmetric_per_channel_quantize(
             weights,
             bits,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
@@ -3655,11 +3692,10 @@ class Model:
         default ``weights_prepacked=-1`` contract.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return cuda_per_channel_quantize(
+        return CudaQuantizer.cuda_per_channel_quantize(
             weights,
             bits,
             prepack,
-            _ortpyb.pack_weights_for_cuda_mixed_gemm if prepack and hasattr(_ortpyb, "pack_weights_for_cuda_mixed_gemm") else None,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
         )
 
@@ -3677,44 +3713,14 @@ class Model:
         ``[E, N, K/block_size]`` — the layout the QMoE op reads when
         ``weights_prepacked`` is left at its prepacked default.
         """
-
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
-        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
-        n, k = w.shape
-        if k % block_size != 0:
-            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
-        num_blocks = k // block_size
-        pack = 8 // bits
-        if n % pack != 0:
-            raise ValueError(f"N ({n}) must be divisible by {pack} (2 INT4 elements per byte) for QMoE blockwise quantization.")
-
-        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
-        # (column = output channel), quantizing each column along K.
-        w_t = np.ascontiguousarray(w.T)  # [K, N]
-        qweight = np.zeros((n, num_blocks, block_size // pack), dtype=np.uint8)
-        scales = np.zeros((n, num_blocks), dtype=np.float32)
-        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
-
-        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
-        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
-        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
-
-        # quantize_matmul_{4,8}bits returns SIGNED blockwise scales (the scale
-        # carries the sign of the block's max-magnitude element). The CUDA QMoE
-        # kernel dequantizes as (q - 2^(bits-1)) * scale, so the sign MUST be
-        # preserved — taking abs() here corrupts every block whose anchor element
-        # is negative and yields garbage weights.
-
-        # CUTLASS-prepack with force_arch=80: the fpA_intB kernel always expects
-        # the SM80-style interleaved layout for SM >= 80 (validated on SM89/SM90),
-        # so 80 is the correct universal choice regardless of build/runtime GPU.
-        q_reshaped = qweight.reshape(n, -1)  # [N, K/pack]
-        packed = _ortpyb.pack_weights_for_cuda_mixed_gemm(q_reshaped, n, k, bits, 80)
-        out_cols = n // pack
-        packed = np.asarray(packed).view(np.uint8).reshape(k, out_cols)  # [K, N/pack]
-
-        return torch.from_numpy(np.ascontiguousarray(packed)), torch.from_numpy(scales)
+        return CudaQuantizer.cutlass_prepacked_blockwise_quantize(
+            weights,
+            bits,
+            block_size,
+            unsigned_full_range=_qmoe_unsigned_full_range(self),
+        )
 
     def _matmulnbits_blockwise_quantize(self, weights):
         """Quantize per-expert weights with ONNX Runtime's MatMulNBits blockwise
@@ -3728,105 +3734,21 @@ class Model:
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
-        w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
-        n, k = w.shape
-        if k % block_size != 0:
-            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for QMoE blockwise quantization.")
-        num_blocks = k // block_size
-        pack = 8 // bits
-
-        # quantize_matmul_{4,8}bits expects the weight transposed to [K, N]
-        # (column = output channel), quantizing each column along K.
-        w_t = np.ascontiguousarray(w.T)  # [K, N]
-        qweight = np.zeros((n, k // pack), dtype=np.uint8)
-        scales = np.zeros((n, num_blocks), dtype=np.float32)
-        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
-
-        quantize = _ortpyb.quantize_matmul_4bits if bits == 4 else _ortpyb.quantize_matmul_8bits
-        # signature: (qweight, weight[K,N], scales, zero_points, block_size, N, K, is_symmetric)
-        quantize(qweight, w_t, scales, zero_points, block_size, n, k, True)
-
-        # The kernel applies (q - 2^(bits-1)) * scale, so scales must be positive.
-        scales = np.abs(scales)
-        return torch.from_numpy(qweight), torch.from_numpy(scales)
-
-    def _symmetric_blockwise_quantize(self, weights, block_size):
-        # Ensure weights are on CPU for quantization
-        weights = weights.cpu().contiguous()
-
-        original_shape = weights.shape
-        bits = self.moe_attrs["expert_weight_bits"]
-
-        qmin, qmax = (-7, 7) if bits == 4 else (-127, 127)
-
-        # Reshape weights to process the last dimension in blocks
-        # weights shape: [..., hidden_size] -> [..., num_blocks, block_size]
-        last_dim = original_shape[-1]
-        num_blocks = (last_dim + block_size - 1) // block_size
-
-        # Pad the last dimension if necessary
-        pad_size = num_blocks * block_size - last_dim
-        if pad_size > 0:
-            pad_shape = list(original_shape)
-            pad_shape[-1] = pad_size
-            padding = torch.zeros(pad_shape, dtype=weights.dtype, device=weights.device)
-            weights_padded = torch.cat([weights, padding], dim=-1)
-        else:
-            weights_padded = weights
-
-        reshaped_weights = weights_padded.view(*original_shape[:-1], num_blocks, block_size)
-        block_max_abs = torch.max(torch.abs(reshaped_weights), dim=-1)[0]
-        scales = block_max_abs / qmax
-
-        # Avoid division by zero - set minimum scale
-        min_scale = 1e-8
-        scales = torch.where(
-            scales < min_scale, torch.tensor(min_scale, dtype=scales.dtype, device=scales.device), scales
+        return CudaQuantizer.matmulnbits_blockwise_quantize(
+            weights,
+            bits,
+            block_size,
+            unsigned_full_range=_qmoe_unsigned_full_range(self),
         )
 
-        # Expand scales for broadcasting: [..., num_blocks, 1]
-        scales_expanded = scales.unsqueeze(-1)
-
-        # Quantize: q = round(w / scale), then clamp to valid range
-        quantized = torch.round(reshaped_weights / scales_expanded)
-        quantized = torch.clamp(quantized, qmin, qmax)
-
-        if bits == 4:
-            quantized_int8 = quantized.to(torch.int8)
-
-            quantized_flat = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
-
-            # remove padding
-            if pad_size > 0:
-                quantized_flat = quantized_flat[..., :-pad_size]
-
-            quantized_uint4 = (quantized_flat + 8).to(torch.uint8)
-
-            packed_shape = list(original_shape)
-            packed_shape[-1] = (original_shape[-1] + 1) // 2
-            qweight = torch.zeros(packed_shape, dtype=torch.uint8, device=weights.device)
-
-            # Pack two 4-bit values per byte
-            for i in range(0, quantized_uint4.shape[-1], 2):
-                val1 = quantized_uint4[..., i]
-                if i + 1 < quantized_uint4.shape[-1]:
-                    val2 = quantized_uint4[..., i + 1]
-                    packed_val = (val1 & 0xF) | ((val2 & 0xF) << 4)
-                else:
-                    # Odd number of values - pack only lower 4 bits
-                    packed_val = val1 & 0xF
-                qweight[..., i // 2] = packed_val
-
-        else:  # 8-bit
-            quantized_int8 = quantized.to(torch.int8)
-
-            qweight = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
-            if pad_size > 0:
-                qweight = qweight[..., :-pad_size]
-            else:
-                qweight = qweight.view(original_shape)
-
-        return qweight.cpu(), scales.cpu()
+    def _symmetric_blockwise_quantize(self, weights, block_size):
+        bits = self.moe_attrs["expert_weight_bits"]
+        return CudaQuantizer.symmetric_blockwise_quantize(
+            weights,
+            bits,
+            block_size,
+            unsigned_full_range=_qmoe_unsigned_full_range(self),
+        )
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE block-sparse subgraph
