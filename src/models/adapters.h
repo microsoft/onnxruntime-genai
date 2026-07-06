@@ -13,17 +13,21 @@ struct Adapter {
 
   Adapter(const char* adapter_file_path, Ort::Allocator* allocator);
 
+ private:
+  // AcquireRef/ReleaseRef/RefCount are intentionally private so that all
+  // access to ref_count_ is funneled through Adapters, which holds
+  // Adapters::mutex_. Exposing them publicly would make it easy for future
+  // call sites to bypass the mutex and reintroduce the data race / TOCTOU
+  // window between RefCount() and container erasure in
+  // Adapters::UnloadAdapter().
+  friend struct Adapters;
+
   const OrtLoraAdapter* AcquireRef();
 
   void ReleaseRef();
 
   int32_t RefCount() const;
 
- private:
-  // All access to ref_count_ is serialized by Adapters::mutex_, which is the
-  // sole entry point for AcquireRef/ReleaseRef/RefCount. This closes both the
-  // data race on the counter and the TOCTOU window between RefCount() and
-  // container erasure in Adapters::UnloadAdapter().
   int32_t ref_count_{};
   std::unique_ptr<OrtLoraAdapter> adapter_;
 };

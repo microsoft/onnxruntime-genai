@@ -10,14 +10,14 @@ Adapter::Adapter(const char* adapter_file_path, Ort::Allocator* allocator)
     : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str(), *allocator)} {}
 
 const OrtLoraAdapter* Adapter::AcquireRef() {
-  // Caller (Adapters::AcquireAdapter) holds Adapters::mutex_, which
-  // serializes all access to ref_count_.
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_
+  // and therefore serializes all access to ref_count_.
   ref_count_++;
   return adapter_.get();
 }
 
 void Adapter::ReleaseRef() {
-  // Caller (Adapters::ReleaseAdapter) holds Adapters::mutex_.
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_.
   ref_count_--;
   if (ref_count_ < 0) {
     // Restore invariant so a caller catching the exception doesn't leave the
@@ -28,7 +28,7 @@ void Adapter::ReleaseRef() {
 }
 
 int32_t Adapter::RefCount() const {
-  // Caller (Adapters::UnloadAdapter) holds Adapters::mutex_.
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_.
   return ref_count_;
 }
 

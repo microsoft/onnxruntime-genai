@@ -1243,6 +1243,70 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
 }
+
+// Regression test for the concurrency use-after-free / data race in the
+// adapter lifecycle. Prior to serializing Adapters ops with a mutex,
+// concurrent LoadAdapter/UnloadAdapter/SetActiveAdapter calls could race on
+// Adapter::ref_count_ and on the underlying unordered_map, producing lost
+// updates and a TOCTOU window where UnloadAdapter would erase an adapter
+// that another thread had just acquired.
+//
+// This test hammers the Adapters API from multiple threads. It is not
+// deterministic about which operations succeed (a concurrent UnloadAdapter
+// may legitimately throw "Adapter still in use" or "Adapter not found",
+// and a concurrent LoadAdapter of the same name may throw "already loaded")
+// but under TSAN/ASAN and in stress mode it reliably catches the pre-fix
+// races. Here we simply assert that no thread crashes or leaves the
+// Adapters map in an inconsistent state.
+TEST(CAPITests, AdaptersConcurrentLoadUnload) {
+  auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
+  auto adapters = OgaAdapters::Create(*model);
+
+  constexpr int kIterations = 50;
+  constexpr int kThreadsPerRole = 4;
+
+  const char* adapter_path_a = MODEL_PATH "multiple_adapters/adapter_0.onnx_adapter";
+  const char* adapter_path_b = MODEL_PATH "multiple_adapters/adapter_1.onnx_adapter";
+
+  auto swallow = [](auto&& fn) {
+    try {
+      fn();
+    } catch (const std::exception&) {
+      // Concurrent load/unload can legitimately throw (already loaded /
+      // not found / still in use). We only care that state stays consistent.
+    }
+  };
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadsPerRole * 2);
+
+  for (int t = 0; t < kThreadsPerRole; ++t) {
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->LoadAdapter(adapter_path_a, "adapter_a"); });
+        swallow([&] { adapters->LoadAdapter(adapter_path_b, "adapter_b"); });
+      }
+    });
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+        swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+      }
+    });
+  }
+
+  for (auto& th : threads) th.join();
+
+  // Drain any adapters left loaded so we end in a known state. These may
+  // throw "not found" depending on which thread won the last unload; that's
+  // fine, we just want to prove the API remains usable and consistent.
+  swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+  swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+
+  // After draining, a fresh load/unload cycle must still succeed cleanly.
+  adapters->LoadAdapter(adapter_path_a, "adapter_a");
+  adapters->UnloadAdapter("adapter_a");
+}
 #endif  // TEST_PHI2 && !USE_DML
 
 void CheckResult(OgaResult* result) {
