@@ -53,6 +53,33 @@ namespace {
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
 
+// Validates that a path-like string from the (untrusted) model config stays
+// within the model directory, then resolves it relative to that directory.
+// Rejects absolute paths and any parent-directory ("..") component to prevent
+// path traversal / arbitrary file writes (CWE-22).
+fs::path ResolveContainedConfigPath(const fs::path& model_dir, const std::string& value, const char* field_name) {
+  fs::path candidate{value};
+  if (!candidate.is_relative()) {
+    throw std::runtime_error(std::string(field_name) + " (" + value +
+                             ") must be a relative path contained within the model directory");
+  }
+
+  size_t start = 0;
+  while (start <= value.size()) {
+    size_t sep = value.find_first_of("/\\", start);
+    const std::string component = value.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+    if (component == "..") {
+      throw std::runtime_error(std::string(field_name) + " (" + value +
+                               ") must not contain parent-directory (\"..\") components");
+    }
+    if (sep == std::string::npos)
+      break;
+    start = sep + 1;
+  }
+
+  return model_dir / value;
+}
+
 }  // namespace
 
 State::State(const GeneratorParams& params, const Model& model)
@@ -655,7 +682,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   if (config_session_options.enable_profiling.has_value()) {
-    fs::path profile_file_prefix{config_session_options.enable_profiling.value()};
+    // The profiling path comes from the (untrusted) model config, so contain it
+    // to the model directory to prevent path traversal / arbitrary file writes.
+    fs::path profile_file_prefix = ResolveContainedConfigPath(
+        config_->config_path, config_session_options.enable_profiling.value(), "enable_profiling");
     session_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
