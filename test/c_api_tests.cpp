@@ -93,12 +93,35 @@ void UnsetEnvVar(const char* name) {
 #endif
 }
 
-// RAII: ensures an env var is cleared when leaving scope, so a throwing test
-// body cannot leak the opt-in to sibling tests.
+// RAII: sets (or clears) an env var on construction and restores whatever
+// value the process had before entering the scope on destruction. Pass
+// nullptr for `value` to force the variable to be unset within the guarded
+// scope. Restoring the previous value keeps tests isolated from each other
+// and from the ambient environment (e.g. a developer who intentionally
+// exported ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 for a local run).
 struct ScopedEnvVar {
   const char* name;
-  explicit ScopedEnvVar(const char* n, const char* v) : name(n) { SetEnvVar(name, v); }
-  ~ScopedEnvVar() { UnsetEnvVar(name); }
+  bool had_previous_value;
+  std::string previous_value;
+
+  ScopedEnvVar(const char* n, const char* v) : name(n), had_previous_value(false) {
+    if (const char* existing = std::getenv(name)) {
+      had_previous_value = true;
+      previous_value = existing;
+    }
+    if (v == nullptr) {
+      UnsetEnvVar(name);
+    } else {
+      SetEnvVar(name, v);
+    }
+  }
+  ~ScopedEnvVar() {
+    if (had_previous_value) {
+      SetEnvVar(name, previous_value.c_str());
+    } else {
+      UnsetEnvVar(name);
+    }
+  }
   ScopedEnvVar(const ScopedEnvVar&) = delete;
   ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
 };
@@ -112,8 +135,9 @@ struct ScopedEnvVar {
 // refuse to honor this setting unless the operator (not the model author) has
 // opted in via the ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY environment variable.
 TEST(CAPITests, CustomOpsLibraryRefusedWithoutOptIn) {
-  // Make sure the opt-in is not leaking in from the environment.
-  UnsetEnvVar("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY");
+  // Make sure the opt-in is not leaking in from the environment, and restore
+  // whatever value was set before this test on scope exit.
+  ScopedEnvVar guard("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", nullptr);
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   // Overlay a custom_ops_library value that would trigger a native library load.

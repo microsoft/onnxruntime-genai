@@ -686,8 +686,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error(
           "genai_config.json requests loading a custom ops library ('" +
           config_session_options.custom_ops_library.value() +
-          "'), which would execute arbitrary native code from the model directory. Loading has "
-          "been refused. If you trust this model, set the environment variable "
+          "'), which would execute arbitrary native code from a model-supplied library path. Loading "
+          "has been refused. If you trust this model, set the environment variable "
           "ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 before creating the model to opt in.");
     }
 
