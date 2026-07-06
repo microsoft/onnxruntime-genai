@@ -1122,6 +1122,37 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
+// Regression test: a top_k value larger than the model's vocab_size must be
+// rejected at generator creation time instead of triggering an out-of-bounds
+// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+TEST(CAPITests, TopKExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  // vocab_size for any real model is far below this, so the value is guaranteed
+  // to exceed it regardless of the specific test model.
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  EXPECT_THROW(OgaGenerator::Create(*test.model_, *test.params_), std::exception);
+}
+
+// Regression test for the combined Top-K + Top-P sampling path.
+TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("top_p", 0.6f);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  EXPECT_THROW(OgaGenerator::Create(*test.model_, *test.params_), std::exception);
+}
+
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
