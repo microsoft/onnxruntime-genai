@@ -669,6 +669,28 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
+    // Loading a custom ops library ultimately invokes dlopen() / LoadLibrary(),
+    // which executes arbitrary native code (DllMain on Windows, constructor functions on Linux/macOS)
+    // in the host process at load time. Because 'custom_ops_library' is read from genai_config.json
+    // that typically ships alongside the model (including models downloaded from public registries
+    // such as HuggingFace Hub) and the search order below happily picks up a library packaged with
+    // the model, honoring this setting by default is a supply-chain code-execution risk.
+    //
+    // Require an explicit, process-wide opt-in via environment variable before loading anything.
+    // Callers who trust the model can set ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 to restore the
+    // previous behavior. Absolute paths are subject to the same opt-in requirement because the
+    // attacker also controls the config value.
+    bool custom_ops_library_allowed = false;
+    GetEnv("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", custom_ops_library_allowed);
+    if (!custom_ops_library_allowed) {
+      throw std::runtime_error(
+          "genai_config.json requests loading a custom ops library ('" +
+          config_session_options.custom_ops_library.value() +
+          "'), which would execute arbitrary native code from the model directory. Loading has "
+          "been refused. If you trust this model, set the environment variable "
+          "ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 before creating the model to opt in.");
+    }
+
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
