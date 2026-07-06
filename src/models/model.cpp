@@ -694,7 +694,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     // 1. GenAI model folder
     std::error_code ec;
-    auto model_dir = std::filesystem::canonical(config_->config_path, ec);
+    auto model_dir = std::filesystem::canonical(std::filesystem::path(config_->config_path.string()), ec);
     if (!ec) allowed_dirs.push_back(model_dir);
 
     // 2. EP library directories
