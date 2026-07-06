@@ -712,32 +712,189 @@ class TestSpeculativeStateGuards:
 
 
 class TestSpeculativeRewind:
-    def test_rewind_then_generate_is_rejected(self, decoder_only_model_path, tmp_path):
-        """Rewind clears the cross-round anchor; generating without a fresh prefill would
-        silently produce wrong output, so it must raise."""
-        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "rw_bad", 4))
+    """Continuous decoding: RewindToLength followed directly by GenerateNextToken must resume
+    generation. The post-rewind first step recomputes the boundary logits the same way
+    StandardDecodingStrategy does -- replay the boundary token through the model -- which for
+    speculative refreshes both the target's pos0 row and the draft's pending row (via
+    SpeculativeDecodingState::Run).
+
+    Reproduction guarantees match what the mechanism can offer:
+      * K == 1 verifies one token per pass (like regular decoding), so a rewind resumes bit-exactly
+        and the output matches the uninterrupted run token-for-token (the regular-path
+        RewindGptFp32CAPI contract).
+      * K > 1: a rewind turns one K-wide batched verify into a single-token forward at the seam, so
+        near-tie greedy argmaxes may flip -- exactly as they do for the already-supported
+        rewind -> re-prefill flow. The contract there is that the direct rewind -> generate path is
+        byte-identical to that supported rewind -> append(boundary) -> generate path.
+    """
+
+    def _spec_gen(self, spec_path, k, max_length):
+        model = og.Model(spec_path)
         params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=False, max_length=24)
-        params.set_speculative_options(max_draft_tokens=4)
-        gen = og.Generator(model, params)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        return og.Generator(model, params)
+
+    def test_k1_rewind_then_generate_matches_uninterrupted(self, decoder_only_model_path, tmp_path):
+        """K=1 verifies one token per pass (like regular decoding), so rewind -> generate resumes
+        from the boundary token and reproduces the uninterrupted greedy output token-for-token."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "rw_k1", 1)
+        ref, _ = _greedy(spec_path, _PROMPT, max_length, k=1)
+
+        gen = self._spec_gen(spec_path, 1, max_length)
         gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
         for _ in range(3):
             gen.generate_next_token()
         gen.rewind_to(len(_PROMPT))
-        with pytest.raises(Exception, match="without fresh logits|RewindToLength"):
+        while not gen.is_done():
+            gen.generate_next_token()
+        got = [int(t) for t in gen.get_sequence(0)]
+        assert got == ref
+
+    @pytest.mark.parametrize("k", [1, 2, 4, 8])
+    def test_rewind_then_generate_matches_rewind_then_append(self, decoder_only_model_path, tmp_path, k):
+        """Core continuous-decoding contract for every K: the direct post-rewind flow
+        (rewind -> generate) must be byte-identical to the already-supported re-prefill flow
+        (rewind -> append(boundary) -> generate). Both recompute the same boundary logits, so
+        resuming is equivalent whichever way the caller does it -- including the K>1 seam case where
+        the resumed output legitimately differs from the uninterrupted run."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"rw_equiv_{k}", k)
+
+        # Flow A: rewind then generate directly (recomputes the boundary logits in the strategy).
+        gen_a = self._spec_gen(spec_path, k, max_length)
+        gen_a.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(3):
+            gen_a.generate_next_token()
+        boundary = int(gen_a.get_sequence(0)[len(_PROMPT)])
+        gen_a.rewind_to(len(_PROMPT))
+        while not gen_a.is_done():
+            gen_a.generate_next_token()
+        seq_a = [int(t) for t in gen_a.get_sequence(0)]
+
+        # Flow B: rewind then re-append the boundary token (re-prefill), then generate.
+        gen_b = self._spec_gen(spec_path, k, max_length)
+        gen_b.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(3):
+            gen_b.generate_next_token()
+        gen_b.rewind_to(len(_PROMPT))
+        gen_b.append_tokens(np.array([[boundary]], dtype=np.int32))
+        while not gen_b.is_done():
+            gen_b.generate_next_token()
+        seq_b = [int(t) for t in gen_b.get_sequence(0)]
+
+        assert seq_a == seq_b
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_rewind_to_zero_then_reprefill_matches_clean_run(self, decoder_only_model_path, tmp_path, k):
+        """Full rewind (to length 0) then a fresh whole-prompt prefill + generate reproduces a clean
+        run exactly (a full prefill has no partial-round seam), confirming both inner caches and the
+        draft carry-over reset cleanly."""
+        max_length = len(_PROMPT) + 12
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"rw_zero_{k}", k)
+        ref, _ = _greedy(spec_path, _PROMPT, max_length, k=k)
+
+        gen = self._spec_gen(spec_path, k, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(3):
+            gen.generate_next_token()
+        gen.rewind_to(0)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        got = [int(t) for t in gen.get_sequence(0)]
+        assert got == ref
+
+    def test_generate_without_prior_state_raises(self, decoder_only_model_path, tmp_path):
+        """No AppendTokens/prefill at all: there is no boundary token to recompute from, so a first
+        GenerateNextToken must still raise (the same guard StandardDecodingStrategy applies)."""
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "rw_nostate", 4)
+        gen = self._spec_gen(spec_path, 4, len(_PROMPT) + 8)
+        with pytest.raises(Exception, match="no prior state"):
             gen.generate_next_token()
 
-    def test_rewind_then_append_then_generate_works(self, decoder_only_model_path, tmp_path):
-        """The supported continuous-decoding flow: re-prefill after rewind, then generate."""
-        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "rw_ok", 4))
+
+class TestSpeculativeAppendContinuous:
+    """The repo's other form of continuous decoding: calling AppendTokens again mid-generation
+    (e.g. a chat turn). Regular decoding allows this at any point because it never buffers. The
+    speculative loop buffers a whole round and defers the KV re-anchor, so a mid-round append used
+    to leave the two inner caches out of sync with the committed sequence (crash) or leave stale
+    round bookkeeping (crash on the next generate). PrepareForAppend now reconciles the inner caches
+    to the committed length before the append runs, so append works at ANY point -- like regular.
+
+    Guaranteed invariants (independent of speculative round boundaries):
+      * no crash for any number of generated tokens before the append,
+      * the already-committed tokens plus the freshly appended tokens are preserved exactly (the
+        reconcile only rebuilds KV, it never rewrites emitted tokens),
+      * generation is deterministic.
+    """
+
+    def _spec_gen(self, spec_path, k, max_length):
+        model = og.Model(spec_path)
         params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=False, max_length=24)
-        params.set_speculative_options(max_draft_tokens=4)
-        gen = og.Generator(model, params)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        return og.Generator(model, params)
+
+    def _append_after(self, spec_path, k, max_length, n_generate, extra):
+        """Prompt, generate n tokens (possibly stopping mid-round), append `extra`, generate to
+        done. Returns (committed_before_append, full_sequence)."""
+        gen = self._spec_gen(spec_path, k, max_length)
         gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
-        for _ in range(3):
+        for _ in range(n_generate):
+            if gen.is_done():
+                break
             gen.generate_next_token()
-        gen.rewind_to(len(_PROMPT))
-        gen.append_tokens(np.array([[785, 3838]], dtype=np.int32))
-        gen.generate_next_token()
-        assert gen.get_sequence(0) is not None
+        committed_before = [int(t) for t in gen.get_sequence(0)]
+        gen.append_tokens(np.array([extra], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        return committed_before, [int(t) for t in gen.get_sequence(0)]
+
+    @pytest.mark.parametrize("k", [1, 2, 4, 8])
+    @pytest.mark.parametrize("n", [1, 2, 3, 5])
+    def test_mid_round_append_preserves_prefix_and_is_deterministic(
+            self, decoder_only_model_path, tmp_path, k, n):
+        """Appending after any number of generated tokens (including mid-round) must not crash,
+        must keep the committed tokens + appended tokens as an exact prefix, and must be
+        deterministic. Covers every K and both round-boundary and mid-round stop points."""
+        extra = [785, 6722]
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"ap_{k}_{n}", k)
+
+        committed_before, full = self._append_after(spec_path, k, max_length, n, extra)
+        # Prefix preserved: the reconcile rebuilds only KV, never the emitted tokens.
+        assert full[:len(committed_before)] == committed_before
+        assert full[len(committed_before):len(committed_before) + len(extra)] == extra
+        # Generation actually continued past the append (unless it legitimately hit max_length).
+        assert len(full) >= len(committed_before) + len(extra)
+        # Deterministic: an identical run yields an identical sequence.
+        _, full2 = self._append_after(spec_path, k, max_length, n, extra)
+        assert full == full2
+
+    @pytest.mark.parametrize("k", [2, 4])
+    @pytest.mark.parametrize("n", [1, 3, 5])
+    def test_mid_round_append_matches_full_reprefill(
+            self, decoder_only_model_path, tmp_path, k, n):
+        """A mid-round append yields the same continuation as building the identical committed
+        sequence from scratch (fresh prefill of committed_prefix + appended tokens) and generating.
+        This is the strong correctness check: the reconcile produces a state equivalent to a clean
+        rebuild of 'committed[0:L] + appended', so speculative append-based continuous decoding is
+        consistent with the model's own decoding of that sequence."""
+        extra = [785, 6722]
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"apr_{k}_{n}", k)
+
+        committed_before, mid_round = self._append_after(spec_path, k, max_length, n, extra)
+
+        # Oracle: feed the exact committed prefix to a fresh generator, then the same appended
+        # tokens, and generate. Same logical sequence, built via a clean prefill.
+        ref_gen = self._spec_gen(spec_path, k, max_length)
+        ref_gen.append_tokens(np.array([committed_before], dtype=np.int32))
+        ref_gen.append_tokens(np.array([extra], dtype=np.int32))
+        while not ref_gen.is_done():
+            ref_gen.generate_next_token()
+        ref = [int(t) for t in ref_gen.get_sequence(0)]
+
+        assert mid_round == ref
