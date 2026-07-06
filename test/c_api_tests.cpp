@@ -1128,15 +1128,21 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
 TEST(CAPITests, TopKExceedsVocabSizeThrows) {
   Phi2Test test;
 
-  // vocab_size for any real model is far below this, so the value is guaranteed
-  // to exceed it regardless of the specific test model.
+  // Chosen to sit well above typical vocabulary sizes (and above Phi-2's known
+  // vocab_size) so it reliably exceeds the model's vocab_size.
   constexpr int kTopKAboveVocabSize = 1'000'000;
 
   test.params_->SetSearchOptionBool("do_sample", true);
   test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
   test.params_->SetSearchOption("temperature", 0.6f);
 
-  EXPECT_THROW(OgaGenerator::Create(*test.model_, *test.params_), std::exception);
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
 }
 
 // Regression test for the combined Top-K + Top-P sampling path.
@@ -1150,7 +1156,13 @@ TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
   test.params_->SetSearchOption("top_p", 0.6f);
   test.params_->SetSearchOption("temperature", 0.6f);
 
-  EXPECT_THROW(OgaGenerator::Create(*test.model_, *test.params_), std::exception);
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
 }
 
 TEST(CAPITests, AdaptersTest) {
