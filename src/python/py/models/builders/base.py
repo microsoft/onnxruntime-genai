@@ -322,6 +322,8 @@ class Model:
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
             "qdq_block_size": int(self.matmul_block_size),
+            # onnx_dtype INT8/UINT8 selects 8-bit MatMulNBits weights; INT4/UINT4 selects 4-bit.
+            "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
             "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
@@ -783,9 +785,12 @@ class Model:
 
         return algo_config
 
-    def to_int4(self) -> ir.Model:
+    def to_nbits(self) -> ir.Model:
+        # Quantize the model's MatMul weights to N-bit MatMulNBits ops, where N is
+        # self.quant_attrs["bits"] (4 for INT4/UINT4, 8 for INT8/UINT8 precision).
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
+            bits=self.quant_attrs["bits"],
             block_size=self.quant_attrs["qdq_block_size"],
             is_symmetric=self.quant_attrs["is_symmetric"],
             accuracy_level=self.quant_attrs["accuracy_level"],
@@ -802,8 +807,9 @@ class Model:
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
-            model = self.to_int4()
+        # INT4/UINT4 and INT8/UINT8 precisions are quantized to 4-bit/8-bit MatMulNBits ops respectively.
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
+            model = self.to_nbits()
         else:
             model = self.model
 

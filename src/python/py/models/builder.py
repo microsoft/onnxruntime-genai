@@ -166,6 +166,9 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     if precision == "int4":
         return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
 
+    if precision == "int8":
+        return ir.DataType.INT8 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT8
+
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
         "fp16": ir.DataType.FLOAT16,
@@ -386,7 +389,7 @@ def get_args():
         "-p",
         "--precision",
         required=True,
-        choices=["int4", "bf16", "fp16", "fp32"],
+        choices=["int4", "int8", "bf16", "fp16", "fp32"],
         help="Precision of model",
     )
 
@@ -395,7 +398,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4/INT8 WebGPU)",
     )
 
     parser.add_argument(
@@ -425,7 +428,7 @@ def get_args():
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
-                    If true, quantization is done to int4. If false, quantization is done to uint4.
+                    If true, quantization uses signed ints (int4/int8). If false, it uses unsigned ints (uint4/uint8).
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
@@ -497,7 +500,7 @@ def get_args():
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU, INT8 CPU, INT8 WebGPU"
     )
     return args
 
