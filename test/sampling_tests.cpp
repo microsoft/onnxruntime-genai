@@ -102,6 +102,21 @@ TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
   }
 }
 
+// Regression test: an eos_token_id outside [0, vocab_size) must be rejected at
+// generator creation time instead of causing an out-of-bounds write in
+// Search_Cpu::ApplyMinLength (which uses eos_token_id as a score-row index).
+TEST(SamplingTests, EosTokenIdExceedsVocabSizeThrowsCpu) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 5 } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("min_length", 5);
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::exception);
+}
+
 TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,

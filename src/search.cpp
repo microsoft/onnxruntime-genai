@@ -553,7 +553,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
     for (auto token_id : params_->config.model.eos_token_id)
-      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
+      if (token_id >= 0 && token_id < params_->config.model.vocab_size)
+        beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
