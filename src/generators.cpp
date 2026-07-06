@@ -410,7 +410,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   // value would cause an out-of-bounds write, so reject it here.
   for (auto eos_token_id : params.config.model.eos_token_id) {
     if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
-      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in [0, vocab_size=" + std::to_string(params.config.model.vocab_size) + ")");
+      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
   }
 
   search_ = CreateSearch(params);

@@ -114,7 +114,13 @@ TEST(SamplingTests, EosTokenIdExceedsVocabSizeThrowsCpu) {
   params->SetSearchOption("max_length", 10);
   params->SetSearchOption("min_length", 5);
 
-  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::exception);
+  try {
+    OgaGenerator::Create(*model, *params);
+    FAIL() << "Expected std::runtime_error for eos_token_id >= vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
 }
 
 TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
