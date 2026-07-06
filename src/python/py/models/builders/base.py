@@ -1876,6 +1876,8 @@ class Model:
         self.eps_without_if_support = ["dml"]
         if self.extra_options.get("enable_webgpu_graph", False):
             self.eps_without_if_support.append("webgpu")
+        if self.ep == "trt-rtx":
+            self.eps_without_if_support.append("trt-rtx")
 
         if self.ep in self.eps_without_if_support:
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
@@ -1883,48 +1885,12 @@ class Model:
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
-            # Set multiRotaryCacheConcatOffset for WebGPU EP
+            # EPs that read a concatenated cache need the row where the long cache starts.
             if self.ep == "webgpu":
                 self.ep_attrs["webgpu"]["multiRotaryCacheConcatOffset"] = str(self.original_context_length)
-            # Do NOT make the subgraph with the If node for DML EP.
-            return
-
-        # TRT-RTX: Apply padding and create split If nodes with early return
-        if self.ep == "trt-rtx":
-            # Pad small caches to match large cache dimensions
-            # Pad cos_cache with 1s (cos(0)=1) and sin_cache with 0s (sin(0)=0)
-            cos_cache_small = self.make_padded_cache(cos_cache_small, cos_cache_large, pad_value=1.0)
-            sin_cache_small = self.make_padded_cache(sin_cache_small, sin_cache_large, pad_value=0.0)
-
-            # Create Greater condition node for If nodes
-            basename = "/model/rope_caches_subgraph"
-            gather_name = ""
-            if self.attention_attrs["op_type"] == "GroupQueryAttention":
-                gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
-            else:
-                gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
-
-            greater_name = f"{basename}/Greater"
-            greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
-            self.make_greater(greater_name, greater_inputs, shape=[])
-
-            # Create split If nodes and return early
-            self.make_split_if_nodes(
-                basename=basename,
-                greater_name=greater_name,
-                cos_cache_name=cos_cache_name,
-                sin_cache_name=sin_cache_name,
-                cos_cache_large=cos_cache_large,
-                sin_cache_large=sin_cache_large,
-                cos_cache_small=cos_cache_small,
-                sin_cache_small=sin_cache_small,
-                cos_cache_large_name=cos_cache_large_name,
-                sin_cache_large_name=sin_cache_large_name,
-                cos_cache_small_name=cos_cache_small_name,
-                sin_cache_small_name=sin_cache_small_name,
-                small_cache_shape=cos_cache_large.shape,
-            )
-            self.ep_attrs["trt-rtx"]["enable_cuda_graph"] = "0"
+            if self.ep == "trt-rtx":
+                self.ep_attrs["trt-rtx"]["multi_rotary_cache_concat_offset"] = str(self.original_context_length)
+            # Do NOT make the subgraph with the If node for EPs that select the cache in-kernel.
             return
 
         # For other EPs (CPU, CUDA, WebGPU), create regular If node with multiple outputs
