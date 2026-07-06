@@ -290,7 +290,8 @@ GeneratorParams::GeneratorParams(const Config& config)
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
-    : config{*model.config_.get()},
+    : model_owner_{model.shared_from_this()},
+      config{*model_owner_->config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_scoring_} {

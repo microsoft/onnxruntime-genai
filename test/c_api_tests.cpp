@@ -1182,6 +1182,31 @@ TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
   }
 }
 
+// Regression test: a GeneratorParams created from a model must keep that model
+// alive, so destroying the model handle before creating the generator does not
+// cause a use-after-free (GeneratorParams aliases the model-owned Config, and
+// Generator::Generator calls model.shared_from_this()).
+TEST(CAPITests, CreateGeneratorAfterDestroyModel) {
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(PHI2_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  ASSERT_NE(params, nullptr);
+
+  // Drop the external reference to the model. The params must keep the
+  // underlying model (and its Config) alive, so the handle stays usable.
+  OgaDestroyModel(model);
+
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+}
+
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
