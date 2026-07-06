@@ -207,7 +207,7 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 #### Hugging Face Remote Code
 
-This scenario is for when you need to enable trusting remote code from a Hugging Face repo. The default is `hf_remote=false`, which means `trust_remote_code` is **not** passed to `transformers.*.from_pretrained()` and any Python code shipped inside the repository (referenced by its `auto_map` field) will **not** be executed. Set `hf_remote=true` only for repositories you fully trust, because doing so is equivalent to running arbitrary code from that repository as the current user.
+This scenario is for when you need to enable trusting remote code from a Hugging Face repo. The default is `hf_remote=false`, which means `trust_remote_code=False` is used for `transformers.*.from_pretrained()` calls and any Python code shipped inside the repository (referenced by its `auto_map` field) will **not** be executed. Set `hf_remote=true` only for repositories you fully trust, because doing so is equivalent to running arbitrary code from that repository as the current user.
 
 ```bash
 # From wheel:

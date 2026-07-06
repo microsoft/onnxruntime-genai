@@ -51,7 +51,7 @@ def parse_args():
         action="store_true",
         help=(
             "Allow loading custom Python code shipped inside the Hugging Face repository "
-            "during tokenizer/model load (and forward `hf_remote=true` to the ONNX model "
+            "during tokenizer load (and forward `hf_remote=true` to the ONNX model "
             "builder). This is equivalent to running arbitrary code from that repository "
             "as the current user and should only be enabled for repositories you fully trust."
         ),

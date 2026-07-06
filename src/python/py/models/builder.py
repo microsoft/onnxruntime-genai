@@ -466,7 +466,7 @@ def get_args():
                 hf_remote = Use this to manage trusting remote code in Hugging Face repos.
                     Default behavior is set to false. When false, transformers `from_pretrained()`
                     calls will refuse to import or execute custom Python code shipped inside
-                    a Hugging Face repository (no `trust_remote_code`).
+                    a Hugging Face repository (`trust_remote_code=False`).
                     Set to true to opt in to executing repository-supplied code; only do this
                     for repositories you fully trust because it is equivalent to running
                     arbitrary code from that repository as the current user.
