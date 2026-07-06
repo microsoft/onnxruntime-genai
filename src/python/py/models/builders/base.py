@@ -285,11 +285,17 @@ class Model:
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
         }
 
+        # int8 precision requests 8-bit weight-only quantization; INT4/UINT4 onnx_dtype forces 4-bit.
+        quantize_to_8bits = (
+            bool(extra_options.get("use_8bit_matmul_weights", False))
+            and self.onnx_dtype not in {ir.DataType.INT4, ir.DataType.UINT4}
+        )
+
         # MoE-specific variables
-        moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
+        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
+        expert_weight_bits = 8 if (quantize_to_8bits or extra_options.get("use_8bits_moe", False)) else 4
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
@@ -322,8 +328,7 @@ class Model:
             "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
             "qdq_block_size": int(self.matmul_block_size),
-            # onnx_dtype INT8/UINT8 selects 8-bit MatMulNBits weights; INT4/UINT4 selects 4-bit.
-            "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,
+            "bits": 8 if quantize_to_8bits else 4,
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
             "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
@@ -516,14 +521,17 @@ class Model:
             and not self.prune_lm_head
         )
 
-        # Determine if embeddings and lm_head will be quantized or not
+        # Determine if embeddings and lm_head will be quantized or not.
+        # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
+        # The lm_head MatMul is quantized for INT4/UINT4 or for int8 precision (bits == 8).
+        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} or self.quant_attrs["bits"] == 8
         quantized_embeds = (
             self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
         quantized_lm_head = (
-            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            matmul_is_quantized
             and "MatMul" in self.quant_attrs["op_types_to_quantize"]
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
@@ -786,8 +794,6 @@ class Model:
         return algo_config
 
     def to_nbits(self) -> ir.Model:
-        # Quantize the model's MatMul weights to N-bit MatMulNBits ops, where N is
-        # self.quant_attrs["bits"] (4 for INT4/UINT4, 8 for INT8/UINT8 precision).
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
             bits=self.quant_attrs["bits"],
@@ -807,8 +813,8 @@ class Model:
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
-        # INT4/UINT4 and INT8/UINT8 precisions are quantized to 4-bit/8-bit MatMulNBits ops respectively.
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
+        # Quantize INT4/UINT4 (4-bit) and int8 (bits == 8) weights to MatMulNBits.
+        if (self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} or self.quant_attrs["bits"] == 8) and not already_quantized_in_qdq_format:
             model = self.to_nbits()
         else:
             model = self.model

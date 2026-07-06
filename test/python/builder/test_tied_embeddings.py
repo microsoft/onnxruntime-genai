@@ -39,6 +39,7 @@ def _make_model_for_tied_embeddings(
     exclude_lm_head=False,
     prune_lm_head=False,
     int4_algo_config="default",
+    bits=4,
 ):
     model = Model.__new__(Model)
     model.extra_options = {"int4_algo_config": int4_algo_config}
@@ -48,6 +49,7 @@ def _make_model_for_tied_embeddings(
     model.quant_attrs = {
         "op_types_to_quantize": op_types,
         "nodes_to_exclude": list(nodes_to_exclude),
+        "bits": bits,
     }
     model.exclude_embeds = exclude_embeds
     model.exclude_lm_head = exclude_lm_head
@@ -170,6 +172,38 @@ def test_tied_unquantized_embeddings_can_be_true_in_int4_mode_when_both_quant_pa
         op_types=op_types,
         nodes_to_exclude=nodes_to_exclude,
         int4_algo_config="rtn",
+    )
+
+    assert model.tied_quantized_embeddings is False
+    assert model.tied_unquantized_embeddings is True
+
+
+def test_int8_lm_head_is_quantized_so_shared_embeddings_are_not_tied():
+    # int8 keeps onnx_dtype FLOAT but quantizes the lm_head MatMul to 8-bit (bits == 8),
+    # while embeddings (Gather) stay unquantized (Gather only supports 4-bit). A quantized
+    # lm_head cannot be tied to an unquantized embedding, so neither tying path is selected.
+    model = _make_model_for_tied_embeddings(
+        shared_embeddings=True,
+        tie_word_embeddings=False,
+        onnx_dtype=ir.DataType.FLOAT,
+        op_types=("MatMul", "Gather"),
+        bits=8,
+    )
+
+    assert model.tied_quantized_embeddings is False
+    assert model.tied_unquantized_embeddings is False
+
+
+def test_int8_with_lm_head_excluded_allows_unquantized_tying():
+    # Excluding the lm_head MatMul leaves both layers unquantized, so int8 can share the
+    # unquantized embedding weights.
+    model = _make_model_for_tied_embeddings(
+        shared_embeddings=True,
+        tie_word_embeddings=False,
+        onnx_dtype=ir.DataType.FLOAT,
+        op_types=("MatMul", "Gather"),
+        nodes_to_exclude=("/lm_head/MatMul",),
+        bits=8,
     )
 
     assert model.tied_quantized_embeddings is False

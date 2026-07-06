@@ -167,7 +167,8 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
         return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
 
     if precision == "int8":
-        return ir.DataType.INT8 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT8
+        # int8 keeps FP32 weights; 8-bit quantization happens in the final MatMulNBits pass.
+        return ir.DataType.FLOAT
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -221,6 +222,12 @@ def create_model(
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
     config_only = "config_only" in extra_options
+
+    if precision == "int8":
+        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
+        if extra_options.get("use_qdq", False):
+            raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
+        extra_options["use_8bit_matmul_weights"] = True
 
     # List architecture options in alphabetical order
     if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
@@ -417,32 +424,33 @@ def get_args():
         nargs="+",
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
+                The int4_* options below control weight-only MatMulNBits quantization for both `--precision int4` and `--precision int8`.
+                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
+                int4_block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
                     Default value is 32.
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization uses signed ints (int4/int8). If false, it uses unsigned ints (uint4/uint8).
-                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
+                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
-                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization.
+                int4_nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
-                int4_algo_config = Method for int4 quantization. Default is 'default'.
+                int4_algo_config = Method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
-                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
-                    rtn = RTN algorithm for int4 quantization.
-                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                    k_quant = k_quant algorithm for int4 quantization.
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
+                    rtn = RTN algorithm for weight-only quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls use the requested bit width.
+                    k_quant = k_quant algorithm for weight-only quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
-                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls use the requested bit width.
                     k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
@@ -485,8 +493,10 @@ def get_args():
                     This affects attention mask reformatting and position IDs handling.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
+                    Not supported with `--precision int8` (8-bit MatMulNBits is QOperator-only).
                 use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                    Always true for `--precision int8`, which quantizes MoE experts to 8-bit to match the dense weights.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
