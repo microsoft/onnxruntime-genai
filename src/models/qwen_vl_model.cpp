@@ -31,7 +31,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
       if (stage.session_options.has_value()) {
         auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
-        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second, false);
+        CreateSessionOptionsFromConfig(*stage.session_options, *emplaced.first->second);
+        AppendSessionProviders(*stage.session_options, *emplaced.first->second, /*is_primary_session_options=*/false);
         vision_attn_so = emplaced.first->second.get();
       } else {
         // Fall back to primary session options when run_on_cpu=false but no stage-specific options

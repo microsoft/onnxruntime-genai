@@ -142,22 +142,20 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
 
-  if (config_->model.encoder.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
-  }
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                 *decoder_session_options_, true);
-  if (config_->model.joiner.session_options.has_value()) {
-    CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true);
-  } else {
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true);
-  }
+  const auto& encoder_session_options = config_->model.encoder.session_options.has_value()
+                                            ? config_->model.encoder.session_options.value()
+                                            : config_->model.decoder.session_options;
+  CreateSessionOptionsFromConfig(encoder_session_options, *encoder_session_options_);
+  AppendSessionProviders(encoder_session_options, *encoder_session_options_, true);
+
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *decoder_session_options_);
+  AppendSessionProviders(config_->model.decoder.session_options, *decoder_session_options_, true);
+
+  const auto& joiner_session_options = config_->model.joiner.session_options.has_value()
+                                           ? config_->model.joiner.session_options.value()
+                                           : config_->model.decoder.session_options;
+  CreateSessionOptionsFromConfig(joiner_session_options, *joiner_session_options_);
+  AppendSessionProviders(joiner_session_options, *joiner_session_options_, true);
 
   // Load the three ONNX models
   std::string encoder_filename = config_->model.encoder.filename;
