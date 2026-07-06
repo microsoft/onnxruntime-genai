@@ -81,6 +81,27 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   }
 }
 
+// Regression test: beam search with a vocab_size too small to supply
+// 2*num_beams candidates must be rejected at generator creation instead of
+// driving an out-of-bounds partial_sort in BeamSearch_Cpu::SelectTop.
+TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 1 } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("num_beams", 2);
+
+  try {
+    OgaGenerator::Create(*model, *params);
+    FAIL() << "Expected std::runtime_error for beam search with vocab_size < 2";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
 TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
