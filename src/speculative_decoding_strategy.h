@@ -35,6 +35,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void Step(Generator& g) final;
   SpeculativeStats GetStats() const final;
   void Reset() final;
+  void PrepareForAppend(Generator& g) final;
 
  protected:
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
@@ -87,6 +88,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   int saved_seed_length_{};
   int saved_K_{};
   bool reanchor_pending_{false};
+
+  // Set while a round has left the inner KV caches out of sync with the committed sequence (mid round/deferred fold).
+  bool round_dirty_{false};
 
   // Re-anchor fold: instead of giving the round's committed token its own target forward, 
   // we tack it onto the front of the next round's verify batch. Saves

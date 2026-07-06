@@ -521,6 +521,11 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  // Continuous decoding - let the decoding strategy realign any deferred per-round state with the
+  // committed sequence before we append on top (nothing for standard decoding + initial
+  // prefill; speculative -> reconcile two inner KV caches).
+  strategy_->PrepareForAppend(*this);
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;

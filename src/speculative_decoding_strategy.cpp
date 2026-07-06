@@ -31,13 +31,20 @@ int32_t RowArgmax(std::span<const float> logits) {
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
   if (pending_.empty()) {
-    // A new round needs a starting point: either fresh logits or a token left over from the 
-    // fold to feed into this round's verify.
-    if (!g.computed_logits_ && !pending_anchor_token_.has_value())
-      throw std::runtime_error(
-          "Speculative decoding: GenerateNextToken called without fresh logits. Call AppendTokens "
-          "before GenerateNextToken, and again after any RewindToLength. Continuous decoding via "
-          "RewindToLength followed directly by GenerateNextToken is not supported in this release.");
+    // Fresh logits already present after prefill/ComputeLogits or when fold left a token
+    // to start verify (pending_anchor_token_). After RewindToLength -> stale, so replay
+    // the boundary token like StandardDecodingStrategy - ComputeLogits -> Run refreshes both the
+    // target logits and draft_pending_logits_ before RunRound.
+    if (!g.computed_logits_ && !pending_anchor_token_.has_value()) {
+      if (g.search_->GetSequenceLength() == 0)
+        throw std::runtime_error(
+            "Speculative decoding: GenerateNextToken called with no prior state. Please call "
+            "AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
+      auto next_tokens = g.search_->GetNextTokens();
+      if (g.last_action_ == Generator::Action::rewound)
+        g.search_->AppendTokens(next_tokens);
+      g.ComputeLogits(next_tokens);
+    }
     RunRound(g);
   }
   DrainOne(g);
@@ -47,6 +54,49 @@ void SpeculativeDecodingStrategy::Reset() {
   pending_.clear();
   reanchor_pending_ = false;
   pending_anchor_token_.reset();
+  round_dirty_ = false;
+}
+
+// Continuous decoding via a mid-generation AppendTokens. A buffered round can leave the inner
+// caches ahead of the committed sequence (mid-round) or behind it (deferred fold). Both caches were 
+// consistent at the round start (saved_seed_length_), so rewind both just below it and replay 
+// the committed tail to land them on the committed length; drop interrupted round's buffered tokens.
+void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
+  if (!round_dirty_)
+    return;
+
+  auto* spec_state = dynamic_cast<SpeculativeDecodingState*>(g.state_.get());
+  if (!spec_state)
+    throw std::runtime_error(
+        "SpeculativeDecodingStrategy::PrepareForAppend requires a SpeculativeDecodingState.");
+
+  const auto& params = *g.search_->params_;
+  const int committed_length = g.search_->GetSequenceLength();
+  int floor = saved_seed_length_ - 1;
+  if (floor < 0)
+    floor = 0;
+
+  // Drop the interrupted round's tokens.
+  pending_.clear();
+  reanchor_pending_ = false;
+  pending_anchor_token_.reset();
+  round_dirty_ = false;
+
+  if (floor >= committed_length)
+    return;
+
+  // Rewind both caches below the round start + replay the committed tail [floor, L) so both land
+  // on the committed length (token identities unchanged -> only KV is rebuilt).
+  spec_state->RewindTo(static_cast<size_t>(floor));
+
+  auto committed = g.search_->GetSequence(0).CopyDeviceToCpu();
+  const int replay_count = committed_length - floor;
+  auto replay = params.p_device->Allocate<int32_t>(static_cast<size_t>(replay_count));
+  auto replay_cpu = replay.CpuSpan();
+  for (int i = 0; i < replay_count; i++)
+    replay_cpu[i] = committed[static_cast<size_t>(floor + i)];
+  replay.CopyCpuToDevice();
+  spec_state->Run(committed_length, replay, {});
 }
 
 // Runs one speculative round:
@@ -376,6 +426,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   saved_K_ = K;
   saved_proposal_ = std::move(proposal);
   reanchor_pending_ = true;
+  // Verify moved the inner caches past the committed sequence; FinalizeRound/PrepareForAppend re-sync.
+  round_dirty_ = true;
 
   // Stats - once per round, not per drained token.
   rounds_++;
@@ -467,6 +519,10 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   Advance(g, saved_proposal_, saved_n_direct_, saved_final_token_, saved_seed_length_);
   auto t_advance_end = clock::now();
   total_propose_ms_ += ms_f(t_advance_end - t_advance_start).count();
+
+  // Non-fold re-anchored the target to the committed length (caches match); the fold leaves the
+  // target one token behind -> it stays dirty until the next round / PrepareForAppend.
+  round_dirty_ = fold;
 }
 
 // Commit one already-decided token. The speculative accept logic picked it, so hand it straight
