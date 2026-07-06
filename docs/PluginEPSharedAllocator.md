@@ -128,9 +128,16 @@ cycle owns into `OrtGlobals` (concrete task list in §14 stage 0):
   raw pointer, so `OrtGlobals` holds the add-on `LibraryHandle` + a non-owning
   pointer; unloading the handle destroys the interface. In-process interfaces
   (CPU / WebGPU / QNN / OpenVINO / RyzenAI) are owned directly.
-- **`~OrtGlobals` sequences env destruction vs interface teardown**
-  deliberately (e.g. RyzenAI's EP shutdown currently runs after the env is
-  gone).
+- **`~OrtGlobals` tears down in the reverse of construction order:** everything
+  that uses env-owned resources (shared allocators, registered EP libraries) is
+  destroyed **before** the env. Concretely: session caches → device interfaces
+  (`owned_interfaces_`) + CUDA add-on library (`cuda_library_`) → legacy
+  trivial-session allocators (`device_allocators_`) → `env_`. This ends all
+  shared-allocator usage before the env clears them, so it stays correct even if
+  a future interface/buffer dereferences a cached allocator in its own
+  destructor — it does not rely on "nothing derefs it today". (This inverts an
+  earlier draft that dropped `env_` first to preserve RyzenAI's legacy
+  post-env shutdown; RyzenAI is updated to fit the clean order instead — §13.)
 - **Bootstrapping:** `OrtGlobals`'s constructor calls
   `GetDeviceInterface(CPU)->InitOrt(...)` via a member on `this`, not the free
   `GetDeviceInterface` → `GetOrtGlobals()` path, to avoid re-entering
@@ -186,32 +193,41 @@ A CUDA or WebGPU `DeviceInterface` can be reached two ways at runtime:
   dummy-session bootstrap.
 
 The authoritative signal for which mode applies is simply **whether the
-interface's EP name appears in `Ort::GetEpDevices`**. Present (as a real plugin
-device) → plugin mode (use the env's shared allocator); absent → legacy mode
-(`EnsureDeviceOrtInit`). Each interface knows its own EP name(s) and its own env
-(in-process EPs call `GetOrtEnv()`; the CUDA add-on stores the env passed at
-construction), so it looks *itself* up with no arguments. An EP name can appear
-on **several** `OrtEpDevice` entries (e.g. multi-GPU), so the interface gathers
-them all rather than stopping at the first:
+interface's EP name appears in `Ort::GetEpDevices`**. Present (a matching
+`OrtEpDevice` exists) → plugin mode; absent → legacy mode
+(`EnsureDeviceOrtInit`). The **presence of an `OrtEpDevice` is the plugin-EP
+signal**; whether that EP also exposes a usable shared allocator is a
+**separate** concern, resolved afterwards. Each interface knows its own EP
+name(s) and its own env (in-process EPs call `GetOrtEnv()`; the CUDA add-on
+stores the env passed at construction). Detection is a **two-step split**
+([`smartptrs.h`](../src/smartptrs.h)):
+
+- **Step 1 — `FindEpDevicesByName(env, ep_names)`**: pure name filtering over
+  `GetEpDevices`, returning every matching `OrtEpDevice` (an EP name can appear
+  on several entries, e.g. multi-GPU). Non-empty → plugin mode.
+- **Step 2 — `ResolveEpSharedAllocators(env, devices)`**: takes that device
+  list (independent of name filtering) and resolves the shared allocators,
+  returning an `EpSharedAllocators` — the device-local (`DEFAULT`) allocator and
+  the optional `HOST_ACCESSIBLE` allocator (only when a matched device is
+  non-CPU, §11), each with its mem-info, plus `HasDeviceAllocator()` /
+  `HasHostAccessibleAllocator()` predicates. "Availability" is decided by
+  whether `GetSharedAllocator` actually returns an allocator, **not** by whether
+  a mem-info is advertised.
 
 ```cpp
-std::vector<const OrtEpDevice*> FindMyEpDevices() {  // env is the interface's own
-  std::vector<const OrtEpDevice*> devices;
-  for (const auto* d : Ort::GetEpDevices(env))
-    if (IsMyEpName(Ort::api->EpDevice_EpName(d)) &&                    // e.g. "CUDAExecutionProvider"
-        Ort::GetMemoryInfo(d, OrtDeviceMemoryType_DEFAULT) != nullptr)  // real plugin, not internal fake
-      devices.push_back(d);
-  return devices;  // empty -> legacy mode
+// Step 1: name filter — presence == plugin EP. env is the interface's own.
+std::vector<const OrtEpDevice*> FindMyEpDevices() {
+  return FindEpDevicesByName(env, ep_names_);  // empty -> legacy mode
 }
 ```
 
-From the matched devices the interface collects the distinct `OrtMemoryInfo`s
-they advertise (`DEFAULT` device-local and, if present, `HOST_ACCESSIBLE`) and
-fetches one shared allocator per distinct mem-info via `GetSharedAllocator`.
-Two devices may advertise the **same** `OrtMemoryInfo` (a shared allocator),
-so the collection **de-duplicates by mem-info** — fetching by an identical
-mem-info just returns the same env allocator, so a set keyed on mem-info
-avoids redundant entries.
+**WebGPU is the sole exception.** ORT registers a built-in ("internal") WebGPU
+plugin EP that creates an `OrtEpDevice` but provides **no** shared allocator,
+and genai must run that through the legacy trivial-session path rather than
+plugin mode. So WebGPU — and only WebGPU — additionally gates `FindMyEpDevices`
+on `HasDeviceAllocator()` (step 2), treating "device present but no device
+allocator" as legacy. Every other EP uses presence alone. (WebGPU has never
+been a provider-bridge EP.)
 
 Consequences:
 
@@ -238,8 +254,9 @@ Source: [`smartptrs.h`](../src/smartptrs.h#L101).
   exactly the window the EP is registered — which, per §5, covers every live
   `DeviceBuffer`. This removes the file-static `ort_allocator_` and the
   `assert(!ort_allocator_)` re-init blocker.
-- **Mode + mem-infos via `GetEpDevices`** (§6): enumerate all matching
-  devices, collect their distinct mem-infos, memoized per env cycle.
+- **Mode + allocators via `GetEpDevices`** (§6): step 1 `FindEpDevicesByName`
+  for the mode signal, step 2 `ResolveEpSharedAllocators` for the device-local
+  and host-accessible shared allocators; may be memoized per env cycle.
 - **Keep `InitOrt(const OrtApi&, Ort::Allocator&)`** for the legacy path
   (provider-bridge CUDA, DML, anything still going through
   `EnsureDeviceOrtInit`). It must no longer assert on re-entry.
@@ -376,12 +393,15 @@ either way.
 Files: [`webgpu/interface.cpp`](../src/webgpu/interface.cpp),
 [`webgpu/session_options.cpp`](../src/webgpu/session_options.cpp).
 
-- Allocator fetched on demand; mode + device-local mem-info discovered via
-  `GetEpDevices` (§6).
-- Remove the cached `ort_allocator_` / `assert(!ort_allocator_)`; `InitOrt`
-  becomes a no-op / unreachable for WebGPU (plugin path is the only WebGPU
-  path).
-- Delete the WebGPU branches in `EnsureDeviceOrtInit` once no callers remain.
+- Allocator fetched on demand; mode + device-local allocator discovered via the
+  two-step `FindEpDevicesByName` / `ResolveEpSharedAllocators` split (§6).
+- **WebGPU is the plugin-detection exception** (§6): `FindMyEpDevices` gates on
+  `HasDeviceAllocator()`, so the internal WebGPU EP (no shared allocator) falls
+  through to the legacy path. `InitOrt` is therefore retained for that legacy
+  path and sets `ort_allocator_` / `ort_memory_info_` from the trivial-session
+  allocator; `EnsureAllocator()` is a no-op afterwards.
+- Keep the WebGPU fallback allocator name in `EnsureDeviceOrtInit` for the
+  legacy internal EP.
 
 ### 12.2 CUDA / NvTensorRtRtx
 
@@ -449,10 +469,17 @@ All EPs are in scope (staged in §14). Per-EP specifics:
      `InitDmlInterface` is absorbed into `CreateDmlInterface`.
   5. Wire onto the §6 `GetEpDevices`-based shared-allocator path (same as
      WebGPU/CUDA).
-- **QNN, OpenVINO.** Migrate to the shared-allocator path once each is
-  exercised as a plugin EP. OpenVINO is the motivating multi-EP-name case
-  (a single library exposing several EP names); the §6 per-interface
-  self-lookup handles that without a central registry.
+- **QNN.** Migrate to the shared-allocator path once exercised as a plugin EP.
+- **OpenVINO.** Investigated as a plugin EP and left on its original behavior:
+  the OpenVINO plugin EP exposes **no** shared allocator on the env
+  (`ResolveEpSharedAllocators(...).HasDeviceAllocator()` is false; its "device"
+  memory is host-accessible, and for stateful / `enable_causallm` models the KV
+  cache is managed inside the EP). So OpenVINO keeps delegating all allocation
+  to the CPU interface (`GetDeviceInterface(DeviceType::CPU)`) and is **not**
+  wired onto the §6 shared-allocator path. Only its lifecycle changed (Stage 0:
+  `CreateOpenVINOInterface`, owned by `OrtGlobals`). `FindMyEpDevices` stays at
+  the default (empty), so `EnsureDeviceOrtInit` early-returns for OpenVINO
+  exactly as before, and `InitOrt` remains `assert(false)` (never called).
 - **RyzenAI.** `GetRyzenAIInterface()` has been removed (Stage 0 cleanup —
   callers now use `GetDeviceInterface(DeviceType::RyzenAI)`).
   The DLL-path probe that used `GetRyzenAIInterface` as a module-address
@@ -460,10 +487,20 @@ All EPs are in scope (staged in §14). Per-EP specifics:
   work remains: its ctor early-returns when the EP module is already resident
   (a process-once assumption that skips re-registration against a fresh env),
   and its teardown calls `RyzenAI_Shutdown` out-of-band (Windows-only, no
-  unregister). Recreation requires reworking the ctor to key off current-env
+  unregister). **With the reverse-order teardown (§3), the RyzenAI interface is
+  now destroyed *before* `env_`**, so its `~Interface()` runs while the EP is
+  still registered on the live env (previously it ran post-env, when env
+  destruction had already unloaded the EP and the shutdown export was a no-op
+  fallback). The clean target design is a **symmetric register/unregister**:
+  the ctor registers the EP library on the env, the dtor unregisters it on that
+  same env *before* the env drops, replacing the out-of-band `RyzenAI_Shutdown`
+  export call. This requires reworking the ctor to key off current-env
   registration and making setup/teardown symmetric, gated on the EP tolerating
-  register → shutdown → register (§15 q3). Changing how it is registered may
-  affect current callers, so this stage carries its own compatibility review.
+  register → unregister → register within one process (§15 q3). Changing how it
+  is registered may affect current callers, so this stage carries its own
+  compatibility review. Until then the existing defensive `~Interface()` (which
+  no-ops when the module is absent) remains, and RyzenAI stays a documented
+  not-yet-recreatable exception.
 - **VitisAI.** Migrate when there is a concrete use case; leave the stub
   until then.
 - **`GetXInterface()` wrappers (all EPs except DML).** Removed in Stage 0.
@@ -519,22 +556,25 @@ fallback allocator name (`"WebGPU_Buffer"`) is retained in `EnsureDeviceOrtInit`
 `WebGPUMemory` constructors take `Ort::Allocator&` / `const OrtMemoryInfo&` (references, not
 pointers) to make the non-null contract explicit.
 
-**Internal-vs-plugin discriminator for WebGPU:** the internal WebGPU EP (built into ORT)
-registers itself in `GetEpDevices` as a fake plugin EP but does **not** call
-`EpDevice_AddAllocatorInfo` — so its `OrtEpDevice` has no memory-info entries and
-`GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT)` returns `nullptr`. The real plugin
-WebGPU EP (from `onnxruntime/core/providers/webgpu/ep/factory.cc`) calls
+**WebGPU is the plugin-detection exception.** The general rule is presence of a
+matching `OrtEpDevice` (§6). WebGPU differs because the internal WebGPU EP
+(built into ORT) registers itself in `GetEpDevices` as a fake plugin EP but does
+**not** call `EpDevice_AddAllocatorInfo`, so ORT exposes **no** shared allocator
+for it (`ResolveEpSharedAllocators(...).HasDeviceAllocator()` is false). The real
+plugin WebGPU EP (`onnxruntime/core/providers/webgpu/ep/factory.cc`) does call
 `EpDevice_AddAllocatorInfo` with `{WEBGPU_BUFFER, OrtMemoryInfoDeviceType_GPU,
-OrtDeviceMemoryType_DEFAULT}`. `FindMyEpDevices` filters on this: only devices with a
-non-null `DEFAULT` memory info are considered plugin-mode devices.
+OrtDeviceMemoryType_DEFAULT}`, so it does. `FindMyEpDevices` therefore gates on
+`HasDeviceAllocator()` for WebGPU only: device present but no device allocator →
+legacy path.
 
 **Stage 3 — CUDA / NvTensorRtRtx.** Dual-path support mirroring WebGPU.
 The file-static `ort_allocator_` is removed; `GpuMemory` captures its device
 (DEFAULT) allocator and optional pinned (HOST_ACCESSIBLE) allocator at
 construction. `CudaInterfaceImplBase` gains `FindMyEpDevices` +
-`EnsureAllocator`: `FindMyEpDevices` caches the `OrtEnv*` (the add-on library
-has no `GetOrtEnv()`) and returns the CUDA plugin devices (those advertising
-DEFAULT memory — same internal-vs-plugin discriminator as WebGPU);
+`EnsureAllocator`: `FindMyEpDevices` uses the stored `OrtEnv&` (the add-on
+library has no `GetOrtEnv()`) and returns the matching CUDA plugin devices by
+name (presence == plugin mode; CUDA has no internal fake-plugin EP, and the
+provider-bridge path registers no `OrtEpDevice`);
 `EnsureAllocator` fetches the env's shared device allocator on first use and,
 if the EP advertises a HOST_ACCESSIBLE mem-info (`CUDAPinnedAllocator`), the
 shared pinned allocator for `AllocateCpu`/free (§11). Legacy (provider-bridge)
@@ -574,12 +614,14 @@ They `GTEST_SKIP()` without an NVIDIA GPU, so they must be run on a CUDA machine
 the plugin test with `--ep_dir <dir with onnxruntime_providers_cuda[_plugin].dll>`,
 the legacy test against a CUDA-enabled `onnxruntime.dll` with no `--ep_dir`.
 
-**Stage 4 — remaining EPs, one at a time.** QNN and OpenVINO (shared-allocator
-path, same pattern as WebGPU), then DML (see §13 for concrete steps: add
-`CreateDmlInterface()`, remove `GetDmlInterface()` + `CloseDmlInterface()`,
-fold `g_dml_device` into `OrtGlobals::owned_interfaces_`, wire onto §6
-detection), then RyzenAI (ctor/teardown rework + symmetric register/unregister
-+ reload proof; §13 for detail), and VitisAI when it has a use case (§13).
+**Stage 4 — remaining EPs, one at a time.** OpenVINO (investigated — stays on
+CPU delegation, only its lifecycle changed; see §13), QNN (shared-allocator
+path, same pattern as WebGPU, when exercised as a plugin EP), then DML (see §13
+for concrete steps: add `CreateDmlInterface()`, remove `GetDmlInterface()` +
+`CloseDmlInterface()`, fold `g_dml_device` into
+`OrtGlobals::owned_interfaces_`, wire onto §6 detection), then RyzenAI
+(ctor/teardown rework + symmetric register/unregister + reload proof; §13 for
+detail), and VitisAI when it has a use case (§13).
 
 ## 15. Open questions / to verify
 
@@ -593,6 +635,7 @@ detection), then RyzenAI (ctor/teardown rework + symmetric register/unregister
    vs the version genai already requires for plugin EP loading. (API names
    confirmed in `onnxruntime_cxx_api.h`.)
 3. **RyzenAI EP re-init** — does the RyzenAI EP tolerate register →
-   `RyzenAI_Shutdown` → register within one process? Gates the RyzenAI stage
+   unregister → register within one process, and unregister/shutdown **before**
+   env destruction (the reverse-order teardown, §3)? Gates the RyzenAI stage
    (§14 stage 4); if not, RyzenAI stays a documented not-recreatable
    exception.

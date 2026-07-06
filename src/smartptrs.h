@@ -6,6 +6,7 @@
 #include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
+#include <cstring>  // for std::strcmp
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
 #include "span.h"
@@ -100,6 +101,76 @@ enum struct DeviceType {
   RyzenAI,
   MAX
 };
+
+// §6: Step 1 — find the OrtEpDevice entries on `env` whose EP name matches one of `ep_names`. This
+// is pure name filtering and is independent of allocators: a non-empty result means the EP is
+// registered as a plugin EP (the presence of an OrtEpDevice is the plugin-EP signal). `env` is the
+// caller's own env (in-process EPs pass GetOrtEnv(); the CUDA add-on passes the env handed to it at
+// load). Defined inline so the CUDA add-on library (which links neither onnxruntime nor genai core,
+// only Ort::api-based inline wrappers) can use it too.
+inline std::vector<const OrtEpDevice*> FindEpDevicesByName(OrtEnv& env, std::span<const char* const> ep_names) {
+  std::vector<const OrtEpDevice*> devices;
+  const OrtEpDevice* const* device_ptrs = nullptr;
+  size_t num_devices = 0;
+  Ort::GetEpDevices(&env, &device_ptrs, &num_devices);
+  for (const auto* device : std::span{device_ptrs, num_devices}) {
+    const char* dev_name = Ort::api->EpDevice_EpName(device);
+    for (const char* n : ep_names)
+      if (std::strcmp(dev_name, n) == 0) {
+        devices.push_back(device);
+        break;
+      }
+  }
+  return devices;
+}
+
+// §6/§11: The shared allocators an execution provider exposes on an OrtEnv, resolved (step 2) from a
+// device list produced by FindEpDevicesByName (step 1). "Availability" is decided by whether
+// Ort::GetSharedAllocator returns an allocator (not by whether EpDevice_MemoryInfo returns a
+// mem-info.
+struct EpSharedAllocators {
+  Ort::Allocator* device_allocator{};      // Shared allocator for device-local (DEFAULT) memory, or null.
+  const OrtMemoryInfo* device_mem_info{};  // Its mem-info, or null.
+  Ort::Allocator* host_allocator{};        // Shared allocator for HOST_ACCESSIBLE memory, only when a
+                                           // matched device is non-CPU (§11 gate), else null.
+  const OrtMemoryInfo* host_mem_info{};    // Its mem-info, or null.
+
+  bool HasDeviceAllocator() const { return device_allocator != nullptr; }
+  bool HasHostAccessibleAllocator() const { return host_allocator != nullptr; }
+};
+
+// §6/§11: Step 2 — resolve the shared allocators the given `devices` (from FindEpDevicesByName)
+// expose on `env`.
+inline EpSharedAllocators ResolveEpSharedAllocators(OrtEnv& env, std::span<const OrtEpDevice* const> devices) {
+  EpSharedAllocators result;
+  for (const auto* device : devices) {
+    // Device-local (DEFAULT) allocator. Signal = a shared allocator is actually available.
+    if (!result.device_allocator) {
+      if (const OrtMemoryInfo* mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT)) {
+        if (Ort::Allocator* a = Ort::GetSharedAllocator(&env, mi)) {
+          result.device_allocator = a;
+          result.device_mem_info = mi;
+        }
+      }
+    }
+
+    // Host-accessible allocator, usable only when this device is non-CPU (§11 gate): a CPU device
+    // needs no special host-accessible allocator (plain CPU memory suffices).
+    if (!result.host_allocator) {
+      const OrtHardwareDevice* hw = Ort::api->EpDevice_Device(device);
+      if (hw && Ort::api->HardwareDevice_Type(hw) != OrtHardwareDeviceType_CPU) {
+        if (const OrtMemoryInfo* mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_HOST_ACCESSIBLE)) {
+          if (Ort::Allocator* a = Ort::GetSharedAllocator(&env, mi)) {
+            result.host_allocator = a;
+            result.host_mem_info = mi;
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

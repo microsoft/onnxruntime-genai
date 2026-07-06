@@ -60,7 +60,7 @@ struct Memory : DeviceBuffer {
 };
 
 struct Interface : RyzenAIInterface {
-  Interface() {
+  Interface(OrtEnv& env) : env_{env} {
     ep_path_ = ep_filename_;
     // If already loaded then nothing to do
 #if defined(_WIN32)
@@ -117,7 +117,7 @@ struct Interface : RyzenAIInterface {
       // fallback to current working directory
       ep_path_ = std::filesystem::current_path(ec) / ep_filename_;
 
-    Ort::ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(GetOrtGlobals()->env_.get(), ep_name_, ep_path_.native().c_str()));
+    Ort::ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(&env_, ep_name_, ep_path_.native().c_str()));
   }
 
   ~Interface() {
@@ -136,7 +136,7 @@ struct Interface : RyzenAIInterface {
       const OrtEpDevice* const* devices = nullptr;
       size_t ndevices = 0;
 
-      Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devices, &ndevices));
+      Ort::ThrowOnError(Ort::api->GetEpDevices(&env_, &devices, &ndevices));
 
       for (const auto& device : std::span{devices, ndevices})
         if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(device) &&
@@ -157,7 +157,8 @@ struct Interface : RyzenAIInterface {
 
       // this call merges provider_options into session_options
       Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(&session_options,
-                                                                           &GetOrtEnv(), supported_devices.data(), supported_devices.size(),
+                                                                           &env_, supported_devices.data(),
+                                                                           supported_devices.size(),
                                                                            ep_keys.data(), ep_values.data(), ep_keys.size()));
     }
 
@@ -189,13 +190,14 @@ struct Interface : RyzenAIInterface {
   void Synchronize() override {}
 
  private:
+  OrtEnv& env_;  // The env this interface belongs to (valid for its whole lifetime; §3 teardown).
   std::filesystem::path ep_path_;
 };
 
 }  // namespace RyzenAI
 
-std::unique_ptr<DeviceInterface> CreateRyzenAIInterface() {
-  return std::make_unique<RyzenAI::Interface>();
+std::unique_ptr<DeviceInterface> CreateRyzenAIInterface(OrtEnv& env) {
+  return std::make_unique<RyzenAI::Interface>(env);
 }
 
 }  // namespace Generators

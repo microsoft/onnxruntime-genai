@@ -19,6 +19,8 @@ std::string g_custom_model_path;
 bool g_webgpu_ep_registered = false;
 // Set to true when the CUDA plugin EP is successfully registered via --ep_dir.
 bool g_cuda_ep_registered = false;
+// Set to true when the OpenVINO plugin EP is successfully registered via --ep_dir.
+bool g_openvino_ep_registered = false;
 
 namespace {
 
@@ -49,10 +51,11 @@ constexpr const char* kProviderSuffix = ".so";
 // candidate (same registration name) and RegisterEpLibrariesFromDirectory registers whichever is
 // present. CUDA currently ships as either onnxruntime_providers_cuda or
 // onnxruntime_providers_cuda_plugin depending on ORT version.
-constexpr std::array<std::pair<std::string_view, std::string_view>, 3> kPluginEpLibraries = {{
+constexpr std::array<std::pair<std::string_view, std::string_view>, 4> kPluginEpLibraries = {{
     {"WebGPU.GenAI", "onnxruntime_providers_webgpu"},
     {"CUDA.GenAI", "onnxruntime_providers_cuda"},
     {"CUDA.GenAI", "onnxruntime_providers_cuda_plugin"},
+    {"OpenVINO.GenAI", "onnxruntime_providers_openvino_plugin"},
 }};
 
 // Builds the platform-specific plugin library file name for an EP library stem.
@@ -92,6 +95,7 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
     // (registration_name is an arbitrary handle, not the EP name -- see kPluginEpLibraries.)
     if (registration_name == "WebGPU.GenAI" && g_webgpu_ep_registered) continue;
     if (registration_name == "CUDA.GenAI" && g_cuda_ep_registered) continue;
+    if (registration_name == "OpenVINO.GenAI" && g_openvino_ep_registered) continue;
 
     const fs::path library_path = ep_dir / EpLibraryFileName(library_stem);
     if (!fs::is_regular_file(library_path, ec)) {
@@ -102,6 +106,8 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
       g_webgpu_ep_registered = true;
     } else if (ok && registration_name == "CUDA.GenAI") {
       g_cuda_ep_registered = true;
+    } else if (ok && registration_name == "OpenVINO.GenAI") {
+      g_openvino_ep_registered = true;
     }
   }
 }

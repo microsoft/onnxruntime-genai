@@ -141,24 +141,19 @@ struct WebGPUMemory final : DeviceBuffer {
 };
 
 struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl() {
+  InterfaceImpl(OrtEnv& env) : env_{env} {
   }
 
   DeviceType GetType() const override { return DeviceType::WEBGPU; }
 
-  // §6/§12.1: Returns the WebGPU plugin-EP devices registered on this env.
-  // Non-empty => plugin mode; empty => legacy mode (V1 provider-bridge or the internal
-  // WebGPU EP which registers as a fake plugin EP but exposes no allocator info).
-  //
-  // Discriminator: a real plugin EP calls EpDevice_AddAllocatorInfo (OrtDeviceMemoryType_DEFAULT)
-  // on each OrtEpDevice; the internal EP does not. So we only include devices for which
-  // GetMemoryInfo returns non-null for DEFAULT memory, matching the real plugin EP only.
+  // Plugin-mode detection. In general the presence of a matching OrtEpDevice signals a plugin EP
+  // (a shared allocator is a separate concern). WebGPU is the exception: ORT registers a built-in
+  // ("internal") WebGPU plugin EP that creates an OrtEpDevice but provides NO shared allocator, and
+  // genai must run that through the legacy trivial-session path rather than plugin mode. So WebGPU
+  // — and only WebGPU — additionally requires a device-local shared allocator to be present.
   std::vector<const OrtEpDevice*> FindMyEpDevices() const override {
-    std::vector<const OrtEpDevice*> result;
-    for (const auto* device : FindEpDevices(GetOrtEnv(), "WebGpuExecutionProvider"))
-      if (Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT) != nullptr)
-        result.push_back(device);
-    return result;
+    auto [devices, shared] = ResolveEp();
+    return shared.HasDeviceAllocator() ? devices : std::vector<const OrtEpDevice*>{};
   }
 
   // §12.1 legacy path: called by EnsureDeviceOrtInit when WebGPU is not a plugin EP.
@@ -173,27 +168,39 @@ struct InterfaceImpl : DeviceInterface {
   }
 
  private:
+  // The env this interface belongs to (created before it, destroyed after it per the reverse-order
+  // teardown), so the reference is valid for the interface's whole lifetime.
+  OrtEnv& env_;
   // Lazily fetched on first use via EnsureAllocator(); memoized for the env cycle.
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
 
+  // Find this EP's plugin devices and resolve their shared allocators in one place (used by both
+  // FindMyEpDevices and EnsureAllocator).
+  struct ResolvedEp {
+    std::vector<const OrtEpDevice*> devices;
+    EpSharedAllocators shared;
+  };
+
+  ResolvedEp ResolveEp() const {
+    static constexpr const char* kEpNames[] = {"WebGpuExecutionProvider"};
+    auto devices = FindEpDevicesByName(env_, kEpNames);
+    auto shared = ResolveEpSharedAllocators(env_, devices);
+    return {std::move(devices), std::move(shared)};
+  }
+
   // §6/§12.1: Ensure ort_allocator_ is set before use.
   // - Legacy path (V1): InitOrt() already set ort_allocator_; returns immediately.
-  // - Plugin path (V2): fetches the env's shared allocator from the registered EP on first call.
+  // - Plugin path (V2): fetches the env's device-local shared allocator on first call.
   void EnsureAllocator() {
     if (ort_allocator_) return;  // Set by InitOrt() in legacy mode, or by a prior plugin-mode call.
-    auto& env = GetOrtEnv();
-    auto devices = FindEpDevices(env, "WebGpuExecutionProvider");
-    if (devices.empty())
+    auto shared = ResolveEp().shared;
+    if (!shared.HasDeviceAllocator())
       throw std::runtime_error(
-          "WebGPU EP is not registered. "
-          "Call OgaRegisterExecutionProviderLibrary with the WebGPU EP before loading models.");
-    ort_memory_info_ = Ort::GetMemoryInfo(devices[0], OrtDeviceMemoryType_DEFAULT);
-    if (!ort_memory_info_)
-      throw std::runtime_error("WebGPU EP does not advertise a device-local memory info");
-    ort_allocator_ = Ort::GetSharedAllocator(&env, ort_memory_info_);
-    if (!ort_allocator_)
-      throw std::runtime_error("Failed to get shared WebGPU allocator from env");
+          "WebGPU EP does not provide a device-local shared allocator. "
+          "Call OgaRegisterExecutionProviderLibrary with the WebGPU plugin EP before loading models.");
+    ort_allocator_ = shared.device_allocator;
+    ort_memory_info_ = shared.device_mem_info;
     if (g_log.enabled)
       Log("webgpu", "Using plugin-EP WebGPU EP shared allocator");
   }
@@ -328,8 +335,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace WebGPU
 
-std::unique_ptr<DeviceInterface> CreateWebGPUInterface() {
-  return std::make_unique<WebGPU::InterfaceImpl>();
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface(OrtEnv& env) {
+  return std::make_unique<WebGPU::InterfaceImpl>(env);
 }
 
 }  // namespace Generators

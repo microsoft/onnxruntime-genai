@@ -223,23 +223,33 @@ struct LibraryHandle {
 #endif
 
 OrtGlobals::~OrtGlobals() {
-  // Release env-derived state before the env itself. The device_allocators_ Allocator struct
-  // has session_ declared before allocator_ so allocator_ is naturally destroyed first (correct
-  // ordering within each entry); we just need to trigger that before env_ drops.
-  graph_session_cache_.sessions_.clear();  // No lock needed — shutdown is single-threaded.
-  for (auto& a : device_allocators_) a = {};
+  // Teardown is the reverse of construction: destroy everything that uses env-owned resources
+  // (shared allocators and registered EP libraries) BEFORE the env that owns them. Ending all
+  // shared-allocator usage before the env clears them keeps this correct even if a future
+  // interface or buffer dereferences a cached allocator during its own destruction — we do not
+  // rely on "nothing happens to deref it today". Shutdown is single-threaded, so no locks.
 
-  // Drop genai's env reference. If it was the last one, ORT destroys the environment, clearing
-  // shared allocators and unloading still-registered EP libraries.
-  env_.reset();
+  // 1. Sessions that hold env / EP state directly. Models (which own these indirectly) are already
+  //    gone per the §5 lifetime contract; drop the genai-side session caches here.
+  graph_session_cache_.sessions_.clear();
 
-  // Tear down device interfaces AFTER the env is gone: the RyzenAI EP shutdown historically runs
-  // after env destruction, the CPU allocator is process-global, and the CUDA add-on's stream/
-  // device are genai-side (not env-scoped). Unloading the CUDA add-on library runs its static
-  // destructors.
+  // 2. Device interfaces + the CUDA add-on library. Interfaces cache env-owned shared allocators
+  //    (plugin mode) or the legacy trivial-session allocator (device_allocators_), and the CUDA
+  //    add-on interface lives inside cuda_library_. Destroy them here so all shared-allocator
+  //    usage ends before the env. device_interfaces_ is only a non-owning index (cleared first);
+  //    owned_interfaces_ and cuda_library_ are the real owners.
   device_interfaces_.clear();
   owned_interfaces_.clear();
   cuda_library_.reset();
+
+  // 3. Legacy (trivial-session) env-derived allocators, now unreferenced by any interface. Within
+  //    each entry session_ is declared before allocator_, so ~allocator_ runs first.
+  for (auto& a : device_allocators_) a = {};
+
+  // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
+  //    clearing shared allocators and unregistering / unloading any still-registered EP libraries
+  //    — by now nothing references them.
+  env_.reset();
 }
 
 DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
@@ -282,24 +292,24 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       break;
 #endif
     case DeviceType::WEBGPU:
-      owned_interfaces_.push_back(CreateWebGPUInterface());
+      owned_interfaces_.push_back(CreateWebGPUInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::QNN:
-      owned_interfaces_.push_back(CreateQNNInterface());
+      owned_interfaces_.push_back(CreateQNNInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::OpenVINO:
-      owned_interfaces_.push_back(CreateOpenVINOInterface());
+      owned_interfaces_.push_back(CreateOpenVINOInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::RyzenAI:
-      owned_interfaces_.push_back(CreateRyzenAIInterface());
+      owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::CPU:
     default:
-      owned_interfaces_.push_back(CreateCpuInterface());
+      owned_interfaces_.push_back(CreateCpuInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
   }

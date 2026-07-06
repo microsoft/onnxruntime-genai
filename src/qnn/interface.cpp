@@ -44,7 +44,7 @@ struct QnnMemory final : DeviceBuffer {
 };
 
 struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl() {
+  InterfaceImpl(OrtEnv& /*env*/) {  // env unused: QNN is on the legacy trivial-session path.
   }
 
   DeviceType GetType() const override { return DeviceType::QNN; }
@@ -81,8 +81,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace QNN
 
-std::unique_ptr<DeviceInterface> CreateQNNInterface() {
-  return std::make_unique<QNN::InterfaceImpl>();
+std::unique_ptr<DeviceInterface> CreateQNNInterface(OrtEnv& env) {
+  return std::make_unique<QNN::InterfaceImpl>(env);
 }
 
 bool IsQNNStatefulModel(const Model& model) {

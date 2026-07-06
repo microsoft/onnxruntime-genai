@@ -43,7 +43,7 @@ struct CpuMemory final : DeviceBuffer {
 };
 
 struct CpuInterface : DeviceInterface {
-  CpuInterface() {
+  CpuInterface(OrtEnv& /*env*/) {  // env unused: CPU uses the process-global allocator (§9).
   }
 
   DeviceType GetType() const override { return DeviceType::CPU; }
@@ -168,8 +168,8 @@ struct CpuInterface : DeviceInterface {
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
 };
 
-std::unique_ptr<DeviceInterface> CreateCpuInterface() {
-  return std::make_unique<CpuInterface>();
+std::unique_ptr<DeviceInterface> CreateCpuInterface(OrtEnv& env) {
+  return std::make_unique<CpuInterface>(env);
 }
 
 }  // namespace Generators

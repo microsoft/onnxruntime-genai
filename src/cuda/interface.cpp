@@ -105,10 +105,11 @@ struct CudaInterfaceImplBase : DeviceInterface {
   ~CudaInterfaceImplBase() {
   }
 
-  // §6 plugin-mode detection. Returns this EP's plugin devices (those advertising DEFAULT
-  // device-local memory) on the construction-time env. Empty => legacy (provider-bridge) path.
+  // §6 plugin-mode detection: the presence of a matching OrtEpDevice signals a plugin EP. The
+  // provider-bridge (legacy) CUDA path does not create an OrtEpDevice, so an empty result means
+  // legacy. The device-local shared allocator is fetched separately in EnsureAllocator().
   std::vector<const OrtEpDevice*> FindMyEpDevices() const override {
-    return FindPluginDevices();
+    return FindEpDevicesByName(env_, ep_names_);
   }
 
   // §12.2 legacy (provider-bridge) path: EnsureDeviceOrtInit supplies the trivial-session allocator.
@@ -228,43 +229,23 @@ struct CudaInterfaceImplBase : DeviceInterface {
   Ort::Allocator* host_allocator_{};         // Pinned HOST_ACCESSIBLE allocator (plugin mode) or nullptr (legacy).
   const OrtMemoryInfo* ort_memory_info_{};   // Device-local mem-info (plugin mode).
 
-  // Enumerate this EP's plugin devices on env_: those matching any of ep_names_ AND advertising
-  // DEFAULT device-local memory. The internal/provider-bridge path advertises none, so it is
-  // excluded (same internal-vs-plugin discriminator as WebGPU, §6).
-  std::vector<const OrtEpDevice*> FindPluginDevices() const {
-    std::vector<const OrtEpDevice*> result;
-    if (ep_names_.empty())
-      return result;
-    const OrtEpDevice* const* device_ptrs = nullptr;
-    size_t num_devices = 0;
-    Ort::GetEpDevices(&env_, &device_ptrs, &num_devices);
-    for (const auto* device : std::span{device_ptrs, num_devices}) {
-      const char* dev_name = Ort::api->EpDevice_EpName(device);
-      const bool name_matches = std::any_of(ep_names_.begin(), ep_names_.end(),
-                                            [dev_name](const char* n) { return std::strcmp(dev_name, n) == 0; });
-      if (name_matches && Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT) != nullptr)
-        result.push_back(device);
-    }
-    return result;
-  }
-
-  // Ensure the device allocator (and, in plugin mode, the host-accessible allocator) is set.
+  // Ensure the device allocator (and, in plugin mode, the host-accessible pinned allocator) is set.
   // - Legacy path: InitOrt() already set ort_allocator_ -> returns immediately.
-  // - Plugin path: fetches the env's shared allocator(s) from the registered CUDA plugin EP.
+  // - Plugin path: resolves the env's shared allocator(s) for this EP (§6/§11) via the shared helper.
   void EnsureAllocator() {
     if (ort_allocator_)
       return;  // Legacy (InitOrt) or a prior plugin-mode fetch.
-    auto devices = FindPluginDevices();
-    if (devices.empty())
-      throw std::runtime_error("CUDA EP is not registered as a plugin EP");
-    const OrtEpDevice* device = devices[0];
-    ort_memory_info_ = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT);
-    ort_allocator_ = Ort::GetSharedAllocator(&env_, ort_memory_info_);
-    if (!ort_allocator_)
-      throw std::runtime_error("Failed to get shared CUDA device allocator from env");
-    // §11 host-accessible (pinned) allocator, if the EP advertises one (CUDA plugin EP does).
-    if (const OrtMemoryInfo* host_mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_HOST_ACCESSIBLE))
-      host_allocator_ = Ort::GetSharedAllocator(&env_, host_mi);
+
+    auto devices = FindEpDevicesByName(env_, ep_names_);
+    auto shared = ResolveEpSharedAllocators(env_, devices);
+
+    if (!shared.HasDeviceAllocator())
+      throw std::runtime_error("CUDA EP is not registered as a plugin EP with a device allocator");
+
+    ort_allocator_ = shared.device_allocator;
+    ort_memory_info_ = shared.device_mem_info;
+    host_allocator_ = shared.host_allocator;  // §11 pinned (CUDAPinnedAllocator), if advertised.
+
     if (GetLogItems().enabled)
       Log("cuda", "Using plugin-EP CUDA shared allocator");
   }
@@ -320,7 +301,10 @@ void DumpSpan<float>(std::ostream& stream, std::span<const float> values) { retu
 template <>
 void DumpSpan<int>(std::ostream& stream, std::span<const int> values) { return gp_genai->DumpSpan(stream, values); }
 
-void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size) { return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens, batch_beam_size); }
+void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size) {
+  return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens, batch_beam_size);
+}
+
 void Sequences::RewindTo(size_t new_length) { return gp_genai->Sequences_RewindTo(this, new_length); }
 }  // namespace Generators
 
@@ -342,7 +326,8 @@ void operator delete(void* p, size_t /*size*/) noexcept {
 #endif
 
 extern "C" {
-Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const OrtApi* ort_api, OrtEnv* ort_env, const char* deviceType) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const OrtApi* ort_api, OrtEnv* ort_env,
+                                          const char* deviceType) {
   Generators::gp_genai = p_genai;
   // Acquire the ORT API and env into this add-on DLL at load time. The DLL is loaded during
   // Model::CreateSessionOptions(), before FindMyEpDevices()/EnsureAllocator() run later in the same

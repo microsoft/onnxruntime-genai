@@ -1091,6 +1091,41 @@ TEST(CAPITests, GreedySearchGptFp32CudaLegacyCAPI) {
   }
 }
 
+// Exercises the OpenVINO plugin EP end-to-end. OpenVINO exposes no usable device-local shared
+// allocator (GetSharedAllocator returns null for its devices), so genai's OpenVINO interface uses
+// host/CPU memory -- it does not override FindMyEpDevices, so it always takes the CPU-delegating
+// allocation path. This test validates the full path with a real OpenVINO plugin EP.
+// Run with: unit_tests.exe --ep_dir <OpenVINO ExecutionProvider dir>. Skips if OV is not registered.
+TEST(CAPITests, GreedySearchGptFp32OpenVINOCAPI) {
+  extern bool g_openvino_ep_registered;
+  if (!g_openvino_ep_registered) {
+    GTEST_SKIP() << "OpenVINO plugin EP not registered (pass --ep_dir to unit_tests.exe)";
+  }
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  int batch_size = 2;
+  int max_length = 10;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("OpenVINO");
+
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  for (int i = 0; i < batch_size; i++) {
+    EXPECT_EQ(generator->GetSequenceCount(i), static_cast<size_t>(max_length));
+  }
+}
+
 TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};

@@ -10,13 +10,14 @@ namespace Generators {
 namespace OpenVINO {
 
 struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl() {
+  InterfaceImpl(OrtEnv& /*env*/) {  // env unused: OpenVINO delegates allocation to the CPU interface.
   }
 
   DeviceType GetType() const override { return DeviceType::OpenVINO; }
 
-  void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
-    // since we use the CPU interface for allocation (right now), InitOrt should not be getting called.
+  void InitOrt(const OrtApi& /*api*/, Ort::Allocator& /*allocator*/) override {
+    // Since we use the CPU interface for allocation (right now), InitOrt should not be getting
+    // called (EnsureDeviceOrtInit early-returns for OpenVINO).
     assert(false);
   }
 
@@ -40,8 +41,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace OpenVINO
 
-std::unique_ptr<DeviceInterface> CreateOpenVINOInterface() {
-  return std::make_unique<OpenVINO::InterfaceImpl>();
+std::unique_ptr<DeviceInterface> CreateOpenVINOInterface(OrtEnv& env) {
+  return std::make_unique<OpenVINO::InterfaceImpl>(env);
 }
 
 bool IsOpenVINOStatefulModel(const Model& model) {
