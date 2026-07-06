@@ -7,6 +7,7 @@
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -1399,6 +1400,37 @@ void ClearProviders(Config& config) {
   config.model.decoder.session_options.providers.clear();
 }
 
+// Escape a string for safe embedding inside a JSON string literal. Prevents JSON
+// injection when caller-supplied values are concatenated into a JSON document that
+// will subsequently be parsed (e.g. in SetProviderOption below). Handles the
+// mandatory JSON escapes: quote, backslash, and the C0 control-character shortcuts.
+// Any other control characters (< 0x20) are emitted as \u00XX.
+static std::string EscapeJsonString(std::string_view s) {
+  std::string result;
+  result.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '"':  result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\b': result += "\\b";  break;
+      case '\f': result += "\\f";  break;
+      case '\n': result += "\\n";  break;
+      case '\r': result += "\\r";  break;
+      case '\t': result += "\\t";  break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+          result += buf;
+        } else {
+          result += c;
+        }
+        break;
+    }
+  }
+  return result;
+}
+
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
   // Normalize the provider name once
   auto normalized_provider = NormalizeProviderName(provider_name);
@@ -1421,10 +1453,14 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     }
   }
 
+  // JSON-escape all caller-supplied string fragments before concatenating them into the
+  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // option_name, or option_value would let a caller inject arbitrary JSON structure
+  // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
-  json << R"({")" << provider_name << R"(":{)";
+  json << R"({")" << EscapeJsonString(provider_name) << R"(":{)";
   if (!option_name.empty()) {
-    json << R"(")" << option_name << R"(":")" << option_value << R"(")";
+    json << R"(")" << EscapeJsonString(option_name) << R"(":")" << EscapeJsonString(option_value) << R"(")";
   }
   json << R"(}})";
 
