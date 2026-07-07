@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
+#include "provider_options.h"
 
 namespace Generators {
 
@@ -92,18 +93,9 @@ struct Config {
   // else is joined with config_path.
   fs::path ResolvePath(std::string_view value) const;
 
-  using NamedString = std::pair<std::string, std::string>;
-  struct DeviceFilteringOptions {
-    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
-  };
-
-  struct ProviderOptions {
-    std::string name;
-    std::vector<NamedString> options;
-    std::optional<DeviceFilteringOptions> device_filtering_options;
-  };
+  using NamedString = Generators::NamedString;
+  using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
+  using ProviderOptions = Generators::ProviderOptions;
 
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
@@ -465,6 +457,8 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+int SafeDoubleToInt(double x, std::string_view name);
+
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
