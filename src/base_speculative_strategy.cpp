@@ -189,8 +189,8 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   single_buf.CopyCpuToDevice();
   auto draft_lgt = spec_state_.draft_state().Run(seed_length + n_direct + 1, single_buf, {});
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
-  std::vector<float> draft_logits(cpu_draft.data(), cpu_draft.data() + vocab_size);
-  spec_state_.set_draft_pending_logits(std::move(draft_logits));
+  // Reuse the pending-logits buffer instead of allocating a fresh vocab-sized vector each round.
+  spec_state_.assign_draft_pending_logits(cpu_draft.data(), static_cast<size_t>(vocab_size));
 }
 
 }  // namespace Generators
