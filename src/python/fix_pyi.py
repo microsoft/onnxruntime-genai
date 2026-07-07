@@ -46,6 +46,48 @@ def _has_numpy_import(content: str) -> bool:
     return bool(re.search(r"^import numpy\b", content, re.MULTILINE))
 
 
+def _is_single_line_docstring(stripped: str, quote: str) -> bool:
+    """Return True if *stripped* is a complete single-line triple-quoted string.
+
+    A single-line docstring starts with *quote*, has at least one character
+    (or is an explicit empty docstring ``quote + quote``), and contains a
+    closing *quote* after the opening one.
+    """
+    if not stripped.startswith(quote):
+        return False
+    rest = stripped[len(quote):]
+    return quote in rest
+
+
+def _find_post_docstring_line(lines: list[str]) -> int:
+    """Return the line index immediately after any leading module docstring.
+
+    If there is no module docstring the index 0 is returned so the caller
+    can prepend at the very top of the file.
+    """
+    in_docstring = False
+    docstring_quote: str | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_docstring:
+            for quote in ('"""', "'''"):
+                if stripped.startswith(quote):
+                    if _is_single_line_docstring(stripped, quote):
+                        return i + 1
+                    in_docstring = True
+                    docstring_quote = quote
+                    break
+            else:
+                if stripped:
+                    # First non-blank, non-docstring line – no leading docstring
+                    return 0
+        else:
+            if docstring_quote and docstring_quote in stripped:
+                in_docstring = False
+                return i + 1
+    return 0
+
+
 def _insert_numpy_import(content: str) -> str:
     """Insert 'import numpy' after any existing import block.
 
@@ -59,7 +101,7 @@ def _insert_numpy_import(content: str) -> str:
     # import/from line.
     last_import_line = -1
     in_docstring = False
-    docstring_quote = None
+    docstring_quote: str | None = None
     for i, line in enumerate(lines):
         stripped = line.strip()
         # Track triple-quoted docstrings so we don't mistake their contents
@@ -67,10 +109,7 @@ def _insert_numpy_import(content: str) -> str:
         if not in_docstring:
             for quote in ('"""', "'''"):
                 if stripped.startswith(quote):
-                    # Single-line docstring: starts AND ends with the same
-                    # quote and has content (or is empty) between them.
-                    if stripped.endswith(quote) and len(stripped) >= len(quote) * 2:
-                        # e.g. """text""" or """"""  – closed on this line
+                    if _is_single_line_docstring(stripped, quote):
                         break
                     in_docstring = True
                     docstring_quote = quote
@@ -84,31 +123,8 @@ def _insert_numpy_import(content: str) -> str:
             last_import_line = i
 
     if last_import_line == -1:
-        # No import statements found; find the first non-docstring, non-blank
-        # line so we insert after any module docstring.
-        after_docstring = 0
-        in_ds = False
-        ds_quote = None
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if not in_ds:
-                for quote in ('"""', "'''"):
-                    if stripped.startswith(quote):
-                        if stripped.endswith(quote) and len(stripped) >= len(quote) * 2:
-                            after_docstring = i + 1
-                            break
-                        in_ds = True
-                        ds_quote = quote
-                        break
-                else:
-                    if stripped:
-                        # First non-blank, non-docstring line
-                        break
-            else:
-                if ds_quote and ds_quote in stripped:
-                    in_ds = False
-                    after_docstring = i + 1
-        insert_pos = after_docstring
+        # No import statements found; insert after any leading module docstring.
+        insert_pos = _find_post_docstring_line(lines)
     else:
         insert_pos = last_import_line + 1
 
