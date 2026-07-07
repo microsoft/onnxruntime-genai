@@ -148,11 +148,9 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
         "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
         std::to_string(params.search.num_beams) + ".");
 
-  // No support for guidance in this release; applies a grammar mask and commits tokens one at a time. The speculative
-  // loop bypasses Generator::ComputeLogits, so guidance would be silently ignored -> reject it.
-  if (!params.guidance_type.empty() && !params.guidance_data.empty())
-    throw std::runtime_error(
-        "Speculative decoding does not support constrained decoding (guidance) in this release.");
+  // Guidance is supported for greedy and sampling, with or without repetition_penalty / min_length.
+  // The strategy drives the grammar inside the round (mask + CommitTokens + fast-forward), applying
+  // penalties after the mask.
 }
 
 // Run() - prefill path (called via Generator::AppendTokens -> ComputeLogits).

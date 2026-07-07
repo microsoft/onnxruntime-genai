@@ -10,6 +10,7 @@
 #include "search.h"
 #include "softmax.h"
 #include "speculative_sampling.h"
+#include "constrained_logits_processor.h"
 #include "models/speculative_decoding.h"
 
 namespace Generators {
@@ -60,8 +61,25 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   if (penalties_active) {
     auto seed = g.search_->GetSequence(0).CopyDeviceToCpu();
     prefix.assign(seed.begin(), seed.end());
-    row_buf.resize(static_cast<size_t>(vocab_size));
   }
+
+  // Grammar-mask the draft proposals - clone the main cursor and walk it over the K tokens (the
+  // verify cursor is untouched). Masking makes the draft propose only grammar-valid tokens, so the
+  // masked target accepts them. A fast-forward or EOS ends the walk.
+  const bool guidance_active = (g.guidance_logits_processor_ != nullptr);
+  std::unique_ptr<ConstrainedLogitsProcessor> draft_grammar;
+  DeviceSpan<float> guidance_buf;
+  bool grammar_walk_active = guidance_active;
+  if (guidance_active) {
+    draft_grammar = g.guidance_logits_processor_->Clone();
+    guidance_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
+  }
+  if (penalties_active || guidance_active)
+    row_buf.resize(static_cast<size_t>(vocab_size));
+
+  auto is_eos = [&](int32_t t) {
+    return std::find(eos_ids.begin(), eos_ids.end(), t) != eos_ids.end();
+  };
 
   Proposal proposal;
   proposal.tokens.resize(K);
@@ -85,6 +103,16 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
       ApplyRepetitionPenaltyToLogits({row_buf.data(), row_buf.size()}, prefix, repetition_penalty, rep_visited);
       row = {row_buf.data(), row_buf.size()};
     }
+    if (grammar_walk_active) {
+      // Mask this row with the draft cursor's grammar state (same ProcessLogits verify uses).
+      auto gb = guidance_buf.CpuSpan();
+      std::copy(row.begin(), row.end(), gb.begin());
+      guidance_buf.CopyCpuToDevice();
+      draft_grammar->ProcessLogits(guidance_buf);
+      auto masked = guidance_buf.CopyDeviceToCpu();
+      std::copy(masked.begin(), masked.begin() + vocab_size, row_buf.begin());
+      row = {row_buf.data(), static_cast<size_t>(vocab_size)};
+    }
     if (greedy) {
       proposal.tokens[idx] = argmax(row);
     } else {
@@ -92,6 +120,18 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
       proposal.probs[idx] = ScatterToFullVocab(sampled, vocab_size);
       std::discrete_distribution<int> dist(proposal.probs[idx].begin(), proposal.probs[idx].end());
       proposal.tokens[idx] = static_cast<int32_t>(dist(rng_));
+    }
+    if (grammar_walk_active) {
+      // Advance the draft cursor for the next position; EOS or fast-forward ends the walk.
+      const int32_t chosen = proposal.tokens[idx];
+      if (is_eos(chosen)) {
+        grammar_walk_active = false;
+      } else {
+        int32_t committed = chosen;
+        draft_grammar->CommitTokens({&committed, 1});
+        if (!draft_grammar->GetFFTokens(0).empty())
+          grammar_walk_active = false;
+      }
     }
   };
 

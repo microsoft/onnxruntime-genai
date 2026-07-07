@@ -32,6 +32,10 @@ struct ConstrainedLogitsProcessor {
 
   // Return a clone of the ff_tokens for the given index
   virtual std::vector<int32_t> GetFFTokens(size_t index) = 0;
+
+  // Clone as an independent grammar cursor at the current state. Speculative decoding uses this to
+  // mask a draft's proposals without disturbing the verify cursor.
+  virtual std::unique_ptr<ConstrainedLogitsProcessor> Clone() const = 0;
 };
 
 #if USE_GUIDANCE
@@ -48,6 +52,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
+  std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
 
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
@@ -58,6 +63,9 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
                                                const uint8_t* bytes, size_t bytes_len);
 
  private:
+  // Empty processor for Clone() to populate; skips the heavy tokenizer/constraint construction.
+  GuidanceLogitsProcessor() = default;
+
   // Initialize LlgTokenizer with the given state and params
   void InitializeLlgTokenizer();
 

@@ -78,6 +78,21 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void FinalizeRound(Generator& g);
   void EmitToken(Generator& g, int32_t tok);
 
+  // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
+  // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
+  // sampling. Runs instead of the normal batched path.
+  void RunGuidanceRound(Generator& g, const Proposal& proposal, int seed_length, int K,
+                        float propose_ms);
+
+  // Cleans up after a guidance round and returns the target's logits for the next position. Keeps
+  // the accepted tokens already in the cache and feeds the rest back one at a time; also refreshes
+  // the draft's saved logits.
+  DeviceSpan<float> FinalizeGuidanceRound(Generator& g);
+
+  // Rewinds both inner caches to floor and replays the committed tokens from there to the current
+  // length; lines both caches back up with the committed sequence. Used when AppendTokens resumes.
+  DeviceSpan<float> ReplayCommittedTail(Generator& g, int floor);
+
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
 
@@ -89,8 +104,15 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   int saved_K_{};
   bool reanchor_pending_{false};
 
+  // Guidance round context - the committed token set (accepted prefix + correction + fast-forward
+  // tokens), saved so FinalizeGuidanceRound can re-anchor the caches.
+  std::vector<int32_t> saved_committed_;
+
   // Set while a round has left the inner KV caches out of sync with the committed sequence (mid round/deferred fold).
   bool round_dirty_{false};
+
+  // True when the round just run was a guidance round.
+  bool guidance_round_{false};
 
   // Re-anchor fold: instead of giving the round's committed token its own target forward, 
   // we tack it onto the front of the next round's verify batch. Saves
