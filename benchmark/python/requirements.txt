@@ -8,3 +8,4 @@
 # IHV NPU EPs via Windows ML catalog (-e OpenVINO/QNN/VitisAI with --use-winml):
 #   pip install windowsml
 numpy<2
+psutil

@@ -36,18 +36,23 @@ The speculative config is composed on the fly from each standalone model's own
 ``genai_config.json`` (architecture), so ANY target/draft pair works (e.g.
 1.7b/0.6b now, 8b/1.7b later) without hand-maintaining a folder per pair.
 
-Prompts: a small built-in smoke-test set by default, or -- recommended -- the
-Spec-Bench dataset via ``--dataset question.jsonl`` (6 tasks x 80 prompts:
-mt_bench, translation, summarization, qa, math_reasoning, rag). We use each
-prompt's first turn only. Results are reported PER TASK (acceptance is
-domain-dependent) plus an overall geometric-mean speedup. ``--limit-per-task N``
-subsamples each task so a full run stays tractable on CPU.
+Prompts: the bundled Spec-Bench dataset (``question.jsonl``, 6 tasks x 80 prompts:
+mt_bench, translation, summarization, qa, math_reasoning, rag) is used BY DEFAULT --
+the whole dataset. We use each prompt's first turn only. Results are reported PER TASK
+(acceptance is domain-dependent) plus an overall geometric-mean speedup.
+``--limit-per-task N`` subsamples each task (round-robin across subcategories, so
+mt_bench stays representative across its 8 subcategories) to keep a run tractable on
+CPU. ``--builtin`` selects a tiny built-in smoke-test set instead.
 
 Examples:
-    # Quick built-in smoke test (local flat layout: <models-root>/qwen3-8b/, qwen3-1.7b/)
-    python benchmark_speculative.py --target 8b --draft 1.7b --k 1,2,4,8
+    # Default: whole bundled Spec-Bench dataset (local flat layout:
+    # <models-root>/qwen3-8b/, qwen3-1.7b/). Use --limit-per-task to shrink it.
+    python benchmark_speculative.py --target 8b --draft 1.7b --k 1,2,4,8 --limit-per-task 10
 
-    # Spec-Bench, 10 prompts/task, all 6 tasks, greedy + sampling
+    # Quick built-in smoke test (6 prompts, no dataset)
+    python benchmark_speculative.py --target 8b --draft 1.7b --k 1,2,4,8 --builtin
+
+    # Explicit dataset + output prefix, greedy + sampling
     python benchmark_speculative.py --target 8b --draft 1.7b \
         --dataset question.jsonl --limit-per-task 10 \
         --k 1,2,4,8 --modes greedy,sampling --reps 2 -o results/spec_8b_1.7b
@@ -64,6 +69,10 @@ Examples:
         --target qwen3-8b --draft qwen3-0.6b \
         -e cuda --device-dir cuda --k 1,2,4,8 --modes greedy,sampling \
         -o results/cuda/spec_qwen3-8b_qwen3-0.6b
+
+Peak memory (target-only vs target+draft) is sampled per phase and reported in the
+summary + as peak_gpu_mem_gib/peak_cpu_mem_gib columns (GPU via nvidia-smi on NVIDIA
+systems, else host RAM via psutil -- mirrors benchmark_e2e.py / benchmark_multimodal.py).
 
 Device/EP coverage note (Foundry-Local): the target+draft pair must both be present under the SAME
 onnx/<device-dir> for the chosen EP, and must share a vocab/tokenizer. Some EPs (e.g. NPU/DML)
@@ -82,10 +91,97 @@ import json
 import os
 import re
 import statistics
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Peak-memory monitoring (mirrors benchmark_e2e.py / benchmark_multimodal.py):
+# poll nvidia-smi for GPU memory on NVIDIA systems, else psutil for host RAM.
+# Non-NVIDIA accelerators (DML/WebGPU/OpenVINO/QNN/VitisAI) have no portable
+# memory probe here, so those runs report host RAM only -- the same limitation
+# the other benchmark scripts carry.
+# ---------------------------------------------------------------------------
+try:
+    subprocess.run(["nvidia-smi"], check=True, capture_output=True)
+    IS_NVIDIA_SYSTEM = True
+except Exception:
+    IS_NVIDIA_SYSTEM = False
+
+
+class PeakMemoryMonitor:
+    """Background sampler of peak GPU (nvidia-smi) or host RAM (psutil), in GiB.
+
+    Used once per load+run phase so the target-only baseline footprint and the
+    target+draft speculative footprint are reported separately -- the extra
+    resident memory of holding two models is the headline cost of speculative
+    decoding, so it is exactly what a perf reviewer needs to see.
+    """
+
+    _warned_no_psutil = False
+
+    def __init__(self):
+        self.peak_gpu_gib = 0.0
+        self.peak_cpu_gib = 0.0
+        self._stop = False
+        self._thread = None
+        try:
+            import psutil  # noqa: PLC0415
+            self._psutil = psutil
+        except ImportError:
+            self._psutil = None
+            if not IS_NVIDIA_SYSTEM and not PeakMemoryMonitor._warned_no_psutil:
+                print("[warn] psutil not installed and no NVIDIA GPU: peak-memory columns "
+                      "will be 0. Install it with `pip install psutil`.")
+                PeakMemoryMonitor._warned_no_psutil = True
+
+    def _run(self):
+        while not self._stop:
+            if IS_NVIDIA_SYSTEM:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used",
+                     "--format=csv,noheader,nounits"],
+                    check=False, capture_output=True, text=True)
+                lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+                if lines:
+                    self.peak_gpu_gib = max(
+                        self.peak_gpu_gib, round(max(float(x) for x in lines) / 1024, 2))
+            if self._psutil is not None:
+                self.peak_cpu_gib = max(
+                    self.peak_cpu_gib,
+                    round(self._psutil.virtual_memory().used / 1024**3, 2))
+            time.sleep(0.1)
+
+    def start(self):
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop = True
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def _backfill_memory(rows, decoder, monitor):
+    """Stamp a phase's peak memory onto its rows (memory is per-phase, not per-row)."""
+    for row in rows:
+        if row["decoder"] == decoder:
+            row["peak_gpu_mem_gib"] = monitor.peak_gpu_gib if IS_NVIDIA_SYSTEM else ""
+            row["peak_cpu_mem_gib"] = monitor.peak_cpu_gib
 
 # ---------------------------------------------------------------------------
 # onnxruntime_genai import shim: prefer the freshly built extension in the build
@@ -292,20 +388,15 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     # `speculative` is a sibling of `model`/`search` (placement-sensitive parser).
     # K is overridden per-run via set_speculative_options, so this default is moot.
     cfg["speculative"] = {"max_draft_tokens": 4}
-    # Speculative decoding rewinds the target KV cache on each rejection. On the
-    # fully-dynamic CPU / WebGPU path we disable the shared past/present buffer so
-    # DefaultKeyValueCache::RewindTo resizes the cache. But hardware backends chosen
-    # by an explicit --device (OpenVINO / VitisAI / QNN NPU, TensorRT) COMPILE to
-    # static shapes and REQUIRE the shared buffer: forcing it off leaves the KV
-    # seq_len dim symbolic and the NPU compiler aborts ("Got non broadcastable
-    # dimensions ... to_shape was called on a dynamic shape"). For those we inherit
-    # the stock model's value (the same setting the standard baseline loads, which
-    # compiles + runs on the NPU). This stays correct for speculative decoding:
-    # under a shared buffer RewindTo is a no-op and the target is re-anchored via the
-    # total_length passed to the next Run (the same mechanism CUDA uses), so rejected
-    # KV entries are simply overwritten on the following step.
-    if not device:
-        cfg["search"]["past_present_share_buffer"] = False
+    # past_present_share_buffer is INHERITED from the target's stock config (cfg started as a
+    # copy of the target genai_config), so the speculative decoder uses the exact same KV-buffer
+    # policy as the standalone baseline (both load the target's value) on every EP. Speculative
+    # decoding supports both settings: with the shared buffer (the qwen3 default, and the value
+    # REQUIRED by static-shape NPU/compiled EPs) RewindTo is a no-op and the target is re-anchored
+    # via the total_length passed to the next Run (the same mechanism CUDA uses), so rejected KV
+    # entries are overwritten on the following step; without it the cache is resized on each
+    # rejection. Inheriting (rather than overriding) mirrors benchmark_e2e.py / benchmark_multimodal
+    # / model_benchmark and keeps the baseline-vs-speculative comparison apples-to-apples.
 
     # Pin the execution provider on BOTH blocks (target decoder + draft). The engine
     # requires target and draft to use the same EP. CRITICAL: preserve each block's
@@ -479,6 +570,39 @@ def builtin_prompts(max_prompts=0):
              "text": t} for i, t in enumerate(lst)]
 
 
+def _sample_across_subcategories(items, limit_per_task):
+    """Take up to ``limit_per_task`` items, round-robin across subcategories.
+
+    ``mt_bench`` collapses 8 subcategories (writing, roleplay, reasoning, math,
+    coding, extraction, stem, humanities) that are stored as contiguous blocks in
+    question.jsonl, so a naive ``items[:N]`` would return N prompts from only the
+    FIRST subcategory -- an unrepresentative sample. Round-robin instead picks one
+    from each subcategory in turn, so e.g. ``--limit-per-task 8`` yields one prompt
+    per MT-Bench subcategory. Deterministic (no RNG) to keep runs reproducible.
+    Single-subcategory tasks (qa/rag/summarization/translation/math_reasoning)
+    reduce to ``items[:N]``.
+    """
+    if limit_per_task <= 0 or limit_per_task >= len(items):
+        return items
+    import collections
+    groups = collections.OrderedDict()
+    for it in items:
+        groups.setdefault(it["subcategory"], []).append(it)
+    out, idx = [], 0
+    while len(out) < limit_per_task:
+        advanced = False
+        for g in groups.values():
+            if idx < len(g):
+                out.append(g[idx])
+                advanced = True
+                if len(out) >= limit_per_task:
+                    break
+        if not advanced:
+            break
+        idx += 1
+    return out
+
+
 def load_dataset_prompts(path, tasks=None, limit_per_task=0,
                          mt_bench_by_subcategory=False):
     """Load a Spec-Bench-style question.jsonl into prompt items.
@@ -525,7 +649,7 @@ def load_dataset_prompts(path, tasks=None, limit_per_task=0,
             })
     items = []
     for task, lst in buckets.items():
-        items.extend(lst if limit_per_task <= 0 else lst[:limit_per_task])
+        items.extend(_sample_across_subcategories(lst, limit_per_task))
     return items
 
 
@@ -556,12 +680,17 @@ def encode_prompt(tokenizer, prompt, chat=True, think=False):
 def run_once(og, model, ids, max_new, mode, speculative, K, seed):
     import numpy as np
     p = og.GeneratorParams(model)
-    # Speculative decoding rewinds the KV cache, so it needs a non-shared
-    # past/present buffer. We use it for BOTH decoders so the only thing the
-    # comparison measures is speculative vs standard (matches chat.py). min_length
-    # is left unset -- speculative rejects min_length > 0, and chat.py never pins
-    # it -- so both decoders may stop early on EOS, the fair/realistic behavior.
-    opts = dict(max_length=len(ids) + max_new, past_present_share_buffer=False)
+    # past_present_share_buffer is NOT overridden here -- we inherit whatever each model's
+    # genai_config specifies (True for the qwen3 models), exactly like benchmark_e2e.py /
+    # benchmark_multimodal.py / model_benchmark. Speculative decoding supports both settings
+    # (verified: identical output either way): with the shared buffer RewindTo is a no-op and the
+    # target is re-anchored via total_length (the CUDA/NPU mechanism); without it the cache is
+    # resized on each rejection. Inheriting keeps the baseline and speculative decoders on the SAME
+    # buffer policy, so the comparison is apples-to-apples and matches how each EP runs in production.
+    # min_length is left unset to mirror chat.py, so both decoders may stop early on EOS (the fair,
+    # realistic behavior). NOTE: min_length IS supported by speculative decoding; it is simply not
+    # pinned here to keep the comparison faithful to chat.py.
+    opts = dict(max_length=len(ids) + max_new)
     if mode == "sampling":
         # Same knobs as chat.py, but a FIXED seed so sampling runs reproduce.
         opts.update(do_sample=True, temperature=0.7, top_k=20, top_p=0.95,
@@ -576,9 +705,11 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed):
 
     t0 = time.perf_counter()
     g.append_tokens(np.array([ids], dtype=np.int32))
+    # token_count() forces prefill to finish, so prefill_s is accurate even on async
+    # accelerators (append_tokens can otherwise return before the compute completes).
+    start_len = g.token_count()
     prefill_s = time.perf_counter() - t0
 
-    start_len = g.token_count()
     target = start_len + max_new
     t1 = time.perf_counter()
     while not g.is_done() and g.token_count() < target:
@@ -596,10 +727,14 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed):
 
 CSV_COLUMNS = [
     "mode", "K", "task", "subcategory", "question_id", "prompt_id", "rep", "decoder",
+    "provider", "device",
     "new_tokens", "prefill_s", "decode_s", "decode_tok_s", "e2e_tok_s",
     "speedup_decode", "speedup_e2e",
     "acceptance_rate", "rounds", "draft_proposed", "draft_accepted",
-    "corrections", "bonuses", "mean_accepted_tokens", "greedy_match",
+    "corrections", "bonuses", "mean_accepted_tokens",
+    "avg_draft_ms_per_token", "avg_target_ms_per_token", "effective_speedup",
+    "greedy_match",
+    "peak_gpu_mem_gib", "peak_cpu_mem_gib",
 ]
 
 
@@ -621,16 +756,25 @@ def main():
     # ---- fixed run configuration (NOT swept) ----
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="new tokens to generate per prompt (fixed)")
-    # ---- prompt source: Spec-Bench dataset (preferred) or built-in smoke-test ----
-    ap.add_argument("--dataset", default=None,
-                    help="path to Spec-Bench question.jsonl; overrides the built-in "
-                         "PROMPTS. Uses turns[0] only (single-turn).")
+    # ---- prompt source: Spec-Bench dataset (default) or built-in smoke-test ----
+    _default_dataset = os.path.join(here, "question.jsonl")
+    ap.add_argument("--dataset",
+                    default=(_default_dataset if os.path.exists(_default_dataset) else None),
+                    help="path to a Spec-Bench question.jsonl. Defaults to the bundled "
+                         "question.jsonl next to this script (the WHOLE dataset -- use "
+                         "--limit-per-task to subsample for CPU runs). Uses turns[0] only "
+                         "(single-turn). Pass --builtin to force the small smoke-test set.")
+    ap.add_argument("--builtin", action="store_true",
+                    help="use the built-in smoke-test PROMPTS instead of the dataset "
+                         "(overrides --dataset).")
     ap.add_argument("--tasks", default=None,
                     help="comma list of tasks to include when --dataset is set: "
                          "mt_bench,translation,summarization,qa,math_reasoning,rag "
                          "(default: all present)")
     ap.add_argument("--limit-per-task", type=int, default=0,
-                    help="cap prompts per task (0 = all, e.g. 80); subsample for CPU runs")
+                    help="cap prompts per task (0 = all/whole dataset, e.g. 80). Samples "
+                         "round-robin across subcategories so the subset is representative "
+                         "(mt_bench spreads across its 8 subcategories). Subsample for CPU runs.")
     ap.add_argument("--mt-bench-by-subcategory", action="store_true",
                     help="with --dataset: keep ONLY the 8 MT-Bench subcategories "
                          "(writing/roleplay/reasoning/math/coding/extraction/stem/"
@@ -677,11 +821,11 @@ def main():
         if not (1 <= k <= 16):
             ap.error(f"K={k} out of range [1,16]")
 
-    if args.mt_bench_by_subcategory and not args.dataset:
-        ap.error("--mt-bench-by-subcategory requires --dataset (the question.jsonl "
-                 "holding the MT-Bench subcategories)")
+    if args.mt_bench_by_subcategory and (args.builtin or not args.dataset):
+        ap.error("--mt-bench-by-subcategory requires a dataset (the question.jsonl "
+                 "holding the MT-Bench subcategories); it is incompatible with --builtin")
 
-    if args.dataset:
+    if args.dataset and not args.builtin:
         tasks_filter = (set(t.strip() for t in args.tasks.split(",") if t.strip())
                         if args.tasks else None)
         prompt_items = load_dataset_prompts(args.dataset, tasks_filter,
@@ -709,6 +853,9 @@ def main():
     # Resolve the execution provider + device filter from the EP args.
     provider = None if args.execution_provider in ("follow_config", "cpu") else args.execution_provider
     device = args.device
+    # Self-describing labels recorded in every output row so cross-EP artifacts are unambiguous.
+    provider_label = args.execution_provider
+    device_label = device or ""
     use_winml = args.use_winml or (provider in _WINML_PLUGIN_EPS and not args.ep_library_path)
     # Foundry-Local onnx/<device-dir> to resolve models from: explicit, else derived from the EP.
     device_dir = args.device_dir or default_fl_device_dir(provider)
@@ -781,6 +928,8 @@ def main():
     baselines = {}  # (mode, prompt_id) -> dict(dec, e2e, tail)
 
     # ---- Phase 1: standard baseline (target only) ----
+    # Monitor peak memory for the target-only footprint (baseline of the two-model cost).
+    mem_baseline = PeakMemoryMonitor().start()
     print(f"[phase 1/2] Loading standard baseline (target={tgt_label}) ...", flush=True)
     t0 = time.time()
     std_model = load_model(og, std_dir, provider, device)
@@ -813,11 +962,14 @@ def main():
                 rows.append(dict(
                     mode=mode, K="", task=it["task"], subcategory=it["subcategory"],
                     question_id=it["question_id"], prompt_id=idx, rep=rep, decoder="standard",
+                    provider=provider_label, device=device_label,
                     new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                     decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                     e2e_tok_s=round(e2e_tps, 3), speedup_decode="", speedup_e2e="",
                     acceptance_rate="", rounds="", draft_proposed="", draft_accepted="",
-                    corrections="", bonuses="", mean_accepted_tokens="", greedy_match=""))
+                    corrections="", bonuses="", mean_accepted_tokens="",
+                    avg_draft_ms_per_token="", avg_target_ms_per_token="", effective_speedup="",
+                    greedy_match="", peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
             baselines[(mode, idx)] = dict(
                 dec=statistics.median(base_dec), e2e=statistics.median(base_e2e),
                 tail=base_tail)
@@ -829,8 +981,17 @@ def main():
     # Free the standalone target before loading the (larger) speculative pair.
     del std_model, tokenizer
     gc.collect()
+    mem_baseline.stop()
+    _backfill_memory(rows, "standard", mem_baseline)
+    if IS_NVIDIA_SYSTEM:
+        print(f"  [phase 1] peak GPU memory (target only): {mem_baseline.peak_gpu_gib:.2f} GiB",
+              flush=True)
+    print(f"  [phase 1] peak host RAM (target only): {mem_baseline.peak_cpu_gib:.2f} GiB",
+          flush=True)
 
     # ---- Phase 2: speculative (target + draft) ----
+    # Monitor peak memory for the target+draft footprint (the two-model cost of spec decode).
+    mem_spec = PeakMemoryMonitor().start()
     print(f"[phase 2/2] Loading speculative model "
           f"(target={tgt_label}, draft={dft_label}) ...", flush=True)
     t0 = time.time()
@@ -866,6 +1027,7 @@ def main():
                         mode=mode, K=K, task=it["task"], subcategory=it["subcategory"],
                         question_id=it["question_id"], prompt_id=idx, rep=rep,
                         decoder="speculative",
+                        provider=provider_label, device=device_label,
                         new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                         decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                         e2e_tok_s=round(e2e_tps, 3),
@@ -877,10 +1039,12 @@ def main():
                         draft_accepted=st.get("draft_tokens_accepted", ""),
                         corrections=st.get("correction_tokens", ""),
                         bonuses=st.get("bonus_tokens", ""),
-                        mean_accepted_tokens=round(
-                            st.get("mean_accepted_tokens")
-                            or st.get("effective_speedup", 0.0), 3),
-                        greedy_match=match))
+                        mean_accepted_tokens=round(st.get("mean_accepted_tokens", 0.0), 3),
+                        avg_draft_ms_per_token=round(st.get("avg_draft_ms_per_token", 0.0), 4),
+                        avg_target_ms_per_token=round(st.get("avg_target_ms_per_token", 0.0), 4),
+                        effective_speedup=round(st.get("effective_speedup", 0.0), 3),
+                        greedy_match=match,
+                        peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
                 s_dec_med = statistics.median(s_dec)
                 acc = (last or {}).get("acceptance_rate", 0.0)
                 done += 1
@@ -891,8 +1055,23 @@ def main():
                 flush()
 
     flush()
+    mem_spec.stop()
+    _backfill_memory(rows, "speculative", mem_spec)
+    flush()
     print(f"\nDone in {time.time()-bench_t0:.0f}s. Wrote {csv_path}, {json_path} and {log_path}")
     print_summary(rows, modes, ks)
+
+    print("\n===== PEAK MEMORY (GiB) =====")
+    if IS_NVIDIA_SYSTEM:
+        print(f"  {'baseline (target only)':28} GPU {mem_baseline.peak_gpu_gib:6.2f}   "
+              f"host RAM {mem_baseline.peak_cpu_gib:6.2f}")
+        print(f"  {'speculative (target+draft)':28} GPU {mem_spec.peak_gpu_gib:6.2f}   "
+              f"host RAM {mem_spec.peak_cpu_gib:6.2f}")
+    else:
+        print(f"  {'baseline (target only)':28} host RAM {mem_baseline.peak_cpu_gib:6.2f}")
+        print(f"  {'speculative (target+draft)':28} host RAM {mem_spec.peak_cpu_gib:6.2f}")
+        print("  (no NVIDIA GPU detected; on DML/WebGPU/OpenVINO/QNN/VitisAI only host "
+              "RAM is sampled)")
 
 
 def print_summary(rows, modes, ks):
@@ -925,13 +1104,15 @@ def print_summary(rows, modes, ks):
         return statistics.median(vals) if vals else None
 
     print("\n===== SUMMARY: per-task median across prompts x reps "
-          "(mean_acc_tok = #Mean Accepted Tokens) =====")
+          "(mean_acc_tok = #Mean Accepted Tokens; dft/tgt_ms = draft/target ms per "
+          "proposed token; eff_sp = effective_speedup) =====")
     for mode in modes:
         print(f"\n#### mode = {mode} ####")
         for K in ks:
             print(f"\n  K={K}")
             print(f"    {'task':16} {'std tok/s':>9} {'spec tok/s':>10} {'speedup':>8} "
-                  f"{'accept':>7} {'mean_acc_tok':>12} {'match':>6}")
+                  f"{'accept':>7} {'mean_acc_tok':>12} {'dft_ms':>7} {'tgt_ms':>7} "
+                  f"{'eff_sp':>7} {'match':>6}")
             speedups = []
             for task in tasks:
                 std = med_std(mode, task)
@@ -943,12 +1124,16 @@ def print_summary(rows, modes, ks):
                     sp = spec / std if std else 0.0
                 acc = med_spec(mode, task, K, "acceptance_rate") or 0.0
                 mat = med_spec(mode, task, K, "mean_accepted_tokens") or 0.0
+                dft = med_spec(mode, task, K, "avg_draft_ms_per_token") or 0.0
+                tgt = med_spec(mode, task, K, "avg_target_ms_per_token") or 0.0
+                eff = med_spec(mode, task, K, "effective_speedup") or 0.0
                 gm = med_spec(mode, task, K, "greedy_match")
                 matchs = f"{gm:.0%}" if gm not in (None, "") else "-"
                 flag = "*" if task in INPUT_GUIDED_TASKS else ""
                 speedups.append(sp)
                 print(f"    {task + flag:16} {std:>9.1f} {spec:>10.1f} "
-                      f"{'x' + format(sp, '.2f'):>8} {acc:>6.0%} {mat:>12.2f} {matchs:>6}")
+                      f"{'x' + format(sp, '.2f'):>8} {acc:>6.0%} {mat:>12.2f} "
+                      f"{dft:>7.2f} {tgt:>7.2f} {'x' + format(eff, '.2f'):>7} {matchs:>6}")
             if speedups:
                 geo = math.exp(sum(math.log(max(s, 1e-9)) for s in speedups) / len(speedups))
                 print(f"    {'OVERALL geomean':16} {'':>9} {'':>10} "
