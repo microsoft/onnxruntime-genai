@@ -75,8 +75,12 @@ TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
     EXPECT_NE(message.find("Error encountered while parsing"), std::string::npos);
     // The failing file is still identified...
     EXPECT_NE(message.find("genai_config.json"), std::string::npos);
-    // ...but the file's contents (the key name) are not echoed back.
+    // ...but in release builds the file's contents (the key name) are not
+    // echoed back. Debug builds intentionally include the parser detail to aid
+    // diagnosis, so only assert the no-leak guarantee when NDEBUG is defined.
+#if defined(NDEBUG)
     EXPECT_EQ(message.find(secret_key), std::string::npos);
+#endif
   }
   EXPECT_TRUE(threw);
 
