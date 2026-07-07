@@ -151,7 +151,7 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device
     }
   } else {
     printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
-    printf("The given module path: %s", current_module_path.c_str());
+    printf("The given module path: %s\n", current_module_path.c_str());
   }
 
   if (!agility_device_created) {
