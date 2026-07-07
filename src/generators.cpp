@@ -62,6 +62,24 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
 }
 
+static bool HasTrtRtxMultiRotaryCacheConcatOffset(const Config& config) {
+  for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
+    if (provider_options.name != "NvTensorRtRtx")
+      continue;
+
+    for (const auto& [name, value] : provider_options.options) {
+      if (name != "multi_rotary_cache_concat_offset")
+        continue;
+
+      char* parse_end{};
+      const auto offset = std::strtol(value.c_str(), &parse_end, 10);
+      return parse_end != value.c_str() && *parse_end == '\0' && offset > 0;
+    }
+  }
+
+  return false;
+}
+
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
   const char* keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk"};
@@ -408,9 +426,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
-  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
-  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-                                          model_->p_device_->GetType() == DeviceType::DML;
+  const auto device_type = model_->p_device_->GetType();
+  // TRT-RTX exports with concatenated short/long rotary caches still need rewind
+  // when the sequence crosses the short-cache boundary.
+  const bool trt_rtx_uses_multi_rope_cache = device_type == DeviceType::NvTensorRtRtx &&
+                                             HasTrtRtxMultiRotaryCacheConcatOffset(*model_->config_);
+  const bool ep_uses_single_rope_factor = device_type == DeviceType::DML ||
+                                          (device_type == DeviceType::NvTensorRtRtx && !trt_rtx_uses_multi_rope_cache);
 
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
