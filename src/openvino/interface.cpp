@@ -18,7 +18,7 @@ struct InterfaceImpl : DeviceInterface {
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     // since we use the CPU interface for allocation (right now), InitOrt should not be getting called.
-    assert(false);
+    throw std::runtime_error("InitOrt for OpenVINO should not be getting called. Expected to use CPU interface instead.");
   }
 
   Ort::Allocator& GetAllocator() override {
@@ -26,11 +26,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    assert(!"GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
-    return OrtMemoryInfo::Create("Cpu",
-                                 OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
-                                 OrtMemType::OrtMemTypeDefault);
+    throw std::runtime_error("GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
