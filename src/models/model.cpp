@@ -313,7 +313,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // Resolve tokenizer_dir (may be empty, relative, or a "sha256:" shared-asset reference).
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }

@@ -14,8 +14,6 @@
 // Included only for the compile-time ORT_GENAI_HAS_MODEL_PACKAGE gate; the tests below
 // drive the feature exclusively through the public C++ API (ort_genai.h).
 #include "models/model_package.h"
-// For Generators::GetOrtEnv(), used by the external-data test setup helper.
-#include "generators.h"
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
 
@@ -118,7 +116,8 @@ fs_std::path ExportModelWithExternalData(const fs_std::path& src_onnx, const fs_
   session_options->AddConfigEntry("session.optimized_model_external_initializers_min_size_in_bytes",
                                   "0");
   // Creating the session writes the optimized model + external data as a side effect.
-  auto session = OrtSession::Create(Generators::GetOrtEnv(), src_onnx.c_str(), session_options.get());
+  auto env = OrtEnv::Create();
+  OrtSession::Create(*env, src_onnx.c_str(), session_options.get());
   return model_path;
 }
 

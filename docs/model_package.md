@@ -43,7 +43,7 @@ component named `model`:
 ```jsonc
 // manifest.json
 {
-  "schema_version": 1,
+  "schema_version": "1.0",
   "components": {
     "model": {
       "variants": {
