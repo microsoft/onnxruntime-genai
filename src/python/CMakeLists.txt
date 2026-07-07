@@ -54,6 +54,28 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+
+  # Generate type stubs using pybind11_stubgen if it is available
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} -c "import pybind11_stubgen"
+    RESULT_VARIABLE PYBIND11_STUBGEN_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(PYBIND11_STUBGEN_RESULT EQUAL 0)
+    set(STUB_WORK_DIR "${CMAKE_BINARY_DIR}/wheel/${PACKAGE_DIR_NAME}-generate-type")
+    add_custom_command(TARGET python POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${STUB_WORK_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${STUB_WORK_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${ORT_LIB_DIR}" "${STUB_WORK_DIR}"
+      COMMAND ${Python_EXECUTABLE} -m pybind11_stubgen onnxruntime_genai --output-dir "${WHEEL_TARGET_NAME}"
+      COMMAND ${Python_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py" -i "${WHEEL_TARGET_NAME}/onnxruntime_genai.pyi"
+      WORKING_DIRECTORY "${STUB_WORK_DIR}"
+      COMMENT "Generate type stubs for onnxruntime_genai"
+    )
+  else()
+    message(STATUS "pybind11_stubgen not found, skipping type stub generation. To enable, install with: pip install pybind11-stubgen")
+  endif()
   set(auditwheel_exclude_list
     "libcublas.so.11"
     "libcublas.so.12"
