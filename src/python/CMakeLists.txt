@@ -67,7 +67,7 @@ if(BUILD_WHEEL)
     # --numpy-array-use-type-var makes stubgen emit valid `numpy.ndarray[Any, numpy.dtype[...]]`
     # annotations (equivalent to numpy.typing.NDArray[...]) instead of the invalid
     # `numpy.ndarray[numpy.<dtype>]` form that type checkers reject.
-    COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --numpy-array-use-type-var --output-dir "${WHEEL_TARGET_NAME}"
+    COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir "${WHEEL_TARGET_NAME}" --numpy-array-use-type-var
     COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py" -i "${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi"
     WORKING_DIRECTORY "${GENERATE_TYPE_DIR}"
     COMMENT "Generate type stubs for onnxruntime_genai"
