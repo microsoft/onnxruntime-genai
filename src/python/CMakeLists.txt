@@ -67,7 +67,7 @@ if(BUILD_WHEEL)
     ERROR_QUIET
   )
   if(PYBIND11_STUBGEN_RESULT EQUAL 0)
-    set(PYBIND11_STUB_WORK_DIR "${CMAKE_BINARY_DIR}/wheel/${PACKAGE_DIR_NAME}-generate-type")
+    set(PYBIND11_STUB_WORK_DIR "${CMAKE_BINARY_DIR}/wheel/${PACKAGE_DIR_NAME}-type-stubs")
     add_custom_command(TARGET python POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E make_directory "${PYBIND11_STUB_WORK_DIR}"
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${PYBIND11_STUB_WORK_DIR}"
@@ -78,7 +78,8 @@ if(BUILD_WHEEL)
       COMMENT "Generate type stubs for onnxruntime_genai"
     )
   else()
-    message(STATUS "pybind11_stubgen not found, skipping type stub generation. To enable, install with: pip install pybind11-stubgen")
+    message(STATUS "pybind11_stubgen not found, skipping type stub generation. "
+                   "To enable, run: pip install pybind11-stubgen")
   endif()
   set(auditwheel_exclude_list
     "libcublas.so.11"
