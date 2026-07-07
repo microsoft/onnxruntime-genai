@@ -1,3 +1,6 @@
+# Used by various tools such as ripgrep, fd-find, etc.
+# Same syntax and path semantics as `.gitignore`.
+
 !/.config
 !/.github
 !/.pipelines
