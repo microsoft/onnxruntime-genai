@@ -1195,8 +1195,11 @@ TEST(CAPITests, CreateGeneratorAfterDestroyModel) {
   ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
   ASSERT_NE(params, nullptr);
 
-  // Drop the external reference to the model. The params must keep the
-  // underlying model (and its Config) alive, so the handle stays usable.
+  // Drop the external reference to the model by destroying its handle. Because
+  // params co-owns the underlying Model (and its Config) via shared ownership,
+  // the object itself stays alive, so dereferencing the raw model pointer below
+  // remains valid. This does NOT imply the handle is generally usable after
+  // OgaDestroyModel; it is valid here only because another owner keeps it alive.
   OgaDestroyModel(model);
 
   OgaGenerator* generator = nullptr;
