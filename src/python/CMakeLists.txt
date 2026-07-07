@@ -55,7 +55,9 @@ if(BUILD_WHEEL)
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
 
-  # Generate type stubs using pybind11_stubgen if it is available
+  # Generate type stubs using pybind11_stubgen if it is available.
+  # Note: the Python module is imported as 'pybind11_stubgen' (underscores)
+  # while the pip package is named 'pybind11-stubgen' (hyphens).
   execute_process(
     COMMAND ${Python_EXECUTABLE} -c "import pybind11_stubgen"
     RESULT_VARIABLE PYBIND11_STUBGEN_RESULT
