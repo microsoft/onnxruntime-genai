@@ -64,7 +64,7 @@ jobs:
           --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8 \
           --context tools/ci_build/github/linux/docker/manylinux \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
+          --container-registry onnxruntimebuildcache.azurecr.io \
           --repository ortgenaicudabuildx64
       displayName: 'Build manylinux CUDA docker image'
       workingDirectory: '$(Build.Repository.LocalPath)'
