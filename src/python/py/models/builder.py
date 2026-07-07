@@ -13,7 +13,6 @@ Run the model builder to create the desired ONNX model.
 import argparse
 import os
 import textwrap
-import warnings
 from typing import Any
 
 import onnx_ir as ir
@@ -202,16 +201,6 @@ def create_model(
     # matches the safe default that `transformers` itself uses for
     # `trust_remote_code`.
     hf_remote = extra_options.get("hf_remote", False)
-    if hf_remote:
-        warnings.warn(
-            "hf_remote=True was passed: trust_remote_code=True will be forwarded "
-            "to every transformers `from_pretrained()` call. This causes Python "
-            f"code shipped inside the Hugging Face repository '{hf_name}' "
-            "(referenced by its `auto_map` field) to be imported and executed "
-            "with the current user's privileges, before any weights are read. "
-            "Only enable this for repositories you fully trust.",
-            stacklevel=2,
-        )
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:

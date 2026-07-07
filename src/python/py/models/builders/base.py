@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import json
 import os
-import warnings
 from collections.abc import Mapping, Sequence
 
 import numpy as np
@@ -92,15 +91,6 @@ class Model:
         # caller has explicitly opted in via `hf_remote=true` in
         # `--extra_options`. See the security note in builder.py.
         self.hf_remote = extra_options.get("hf_remote", False)
-        if self.hf_remote:
-            warnings.warn(
-                "hf_remote=True is set: `trust_remote_code=True` will be "
-                "forwarded to transformers `from_pretrained()` calls inside "
-                f"{type(self).__name__}. This allows Python code shipped "
-                f"inside '{self.model_name_or_path}' to be executed during "
-                "model loading. Only enable this for fully trusted repositories.",
-                stacklevel=2,
-            )
         self.extra_options = extra_options
 
         # States for building the model
