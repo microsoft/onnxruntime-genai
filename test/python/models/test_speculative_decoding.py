@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -673,15 +674,8 @@ class TestSpeculativeStateGuards:
         with pytest.raises(Exception, match="num_beams"):
             og.Generator(model, self._params(model, do_sample=False, num_beams=2))
 
-    def test_guidance(self, decoder_only_model_path, tmp_path):
-        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "g_guid", 4))
-        params = self._params(model, do_sample=False)
-        params.set_guidance("regex", r"[0-9]+")
-        with pytest.raises(Exception, match="guidance|constrained"):
-            og.Generator(model, params)
-
-    # Note: repetition_penalty and min_length are now SUPPORTED (see TestSpeculativePenalties),
-    # so they are intentionally not in the fail-fast list below.
+    # Note: guidance now supports greedy, sampling, AND repetition_penalty / min_length
+    # (see TestSpeculativeGuidance), so none of those combinations fail fast anymore.
     @pytest.mark.parametrize("bad", [
         {"batch_size": 2},
         {"num_beams": 2},
@@ -898,3 +892,277 @@ class TestSpeculativeAppendContinuous:
         ref = [int(t) for t in ref_gen.get_sequence(0)]
 
         assert mid_round == ref
+
+
+# ---------------------------------------------------------------------------
+# Guidance (constrained decoding) parity. Requires a USE_GUIDANCE build (llguidance) and a model
+# with tokenizer.json. Speculative greedy + guidance must reproduce regular greedy + guidance.
+# ---------------------------------------------------------------------------
+
+def _build_self_spec_guided(source_dir, dest_dir, k):
+    """Self-spec wrapper that also carries the tokenizer files guidance (llguidance) needs."""
+    spec_path = _build_self_spec(source_dir, dest_dir, k)
+    for fn in ("tokenizer.json", "tokenizer_config.json"):
+        src = os.path.join(source_dir, fn)
+        if os.path.exists(src):
+            shutil.copyfile(src, os.path.join(spec_path, fn))
+    return spec_path
+
+
+def _build_spec_guided(target_dir, draft_dir, dest_dir, k):
+    """Draft != target wrapper that also carries the tokenizer files guidance needs (guidance uses
+    the target tokenizer)."""
+    spec_path = _build_spec(target_dir, draft_dir, dest_dir, k)
+    for fn in ("tokenizer.json", "tokenizer_config.json"):
+        src = os.path.join(target_dir, fn)
+        if os.path.exists(src):
+            shutil.copyfile(src, os.path.join(spec_path, fn))
+    return spec_path
+
+
+_GUIDANCE_SUPPORTED_CACHE = {}
+
+
+def _guidance_supported(model_path):
+    """True if this build actually constrains output (USE_GUIDANCE=ON and tokenizer.json present).
+    On a guidance-off build CreateGuidanceLogitsProcessor returns nullptr and masking is skipped."""
+    if model_path in _GUIDANCE_SUPPORTED_CACHE:
+        return _GUIDANCE_SUPPORTED_CACHE[model_path]
+    ok = False
+    try:
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=len(_PROMPT) + 4)
+        params.set_guidance("regex", r"[0-9]")  # forces the next token to be a single digit
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        gen.generate_next_token()
+        first = int(gen.get_sequence(0)[len(_PROMPT)])
+        ok = og.Tokenizer(model).decode([first]).strip().isdigit()
+    except Exception:
+        ok = False
+    _GUIDANCE_SUPPORTED_CACHE[model_path] = ok
+    return ok
+
+
+@pytest.fixture
+def guidance_model_path(decoder_only_model_path):
+    if not _guidance_supported(decoder_only_model_path):
+        pytest.skip("Build lacks guidance (USE_GUIDANCE=OFF) or model has no tokenizer.json")
+    return decoder_only_model_path
+
+
+def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=False,
+                   repetition_penalty=None, min_length=None):
+    """Greedy + guidance generation. k=None -> regular; k set -> speculative. Returns the generated
+    tail token ids (after the prompt); with want_stats=True also returns the speculative stats dict."""
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    opts = dict(do_sample=False, max_length=max_length)
+    if repetition_penalty is not None:
+        opts["repetition_penalty"] = repetition_penalty
+    if min_length is not None:
+        opts["min_length"] = min_length
+    params.set_search_options(**opts)
+    if k is not None:
+        params.set_speculative_options(max_draft_tokens=k)
+    params.set_guidance(gtype, gdata)
+    gen = og.Generator(model, params)
+    gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+    while not gen.is_done():
+        gen.generate_next_token()
+    tail = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+    if want_stats:
+        return tail, gen.get_speculative_stats()
+    return tail
+
+
+def _sampled_guided_tokens(model_path, gtype, gdata, max_length, seed, k=None,
+                           temperature=1.0, top_p=1.0, top_k=0):
+    """Sampling (do_sample=True) + guidance. k=None -> regular; k set -> speculative. Returns the
+    generated tail token ids. A fixed seed makes a single run reproducible."""
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    opts = dict(do_sample=True, max_length=max_length, temperature=temperature, random_seed=seed)
+    if top_p:
+        opts["top_p"] = top_p
+    if top_k:
+        opts["top_k"] = top_k
+    params.set_search_options(**opts)
+    if k is not None:
+        params.set_speculative_options(max_draft_tokens=k)
+    params.set_guidance(gtype, gdata)
+    gen = og.Generator(model, params)
+    gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+    while not gen.is_done():
+        gen.generate_next_token()
+    return [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+
+
+_GUIDANCE_CASES = [
+    ("regex", r"[0-9]{3}-[0-9]{3}"),
+    ("regex", r"(yes|no) [a-z]{2,5}"),
+    ("json_schema", json.dumps({"type": "object",
+                                "properties": {"a": {"type": "integer"}},
+                                "required": ["a"]})),
+    ("lark_grammar", 'start: "answer:" /[0-9]{1,6}/'),
+]
+
+
+class TestSpeculativeGuidance:
+    """Speculative greedy + guidance. Contract mirrors the rest of speculative decoding:
+      - K=1 reproduces regular greedy + guidance token-for-token (no batched verify -> bit-exact).
+      - K>1 stays grammar-valid and deterministic; it may differ from regular only where the batched
+        verify's logits differ from per-token logits at fp near-ties in UNCONSTRAINED free regions
+        (the same batched-verify seam the non-guidance path has).
+    Draft proposals are grammar-masked so the masked target accepts them -- that is what preserves
+    the speculative speedup under guidance. The strategy reuses the regular constrained-decoding
+    ops (ProcessLogits mask + CommitTokens + fast-forward) and commits accepted draft tokens by their
+    per-token value, exactly like the non-guidance accept loop."""
+
+    @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
+    def test_k1_matches_regular_guidance(self, guidance_model_path, tmp_path, gtype, gdata):
+        """K=1: bit-exact with regular greedy + guidance (no batching, so the guarantee is exact)."""
+        max_length = len(_PROMPT) + 24
+        ref = _guided_tokens(guidance_model_path, gtype, gdata, max_length)
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "guid_k1", 1)
+        got = _guided_tokens(spec_path, gtype, gdata, max_length, k=1)
+        assert got == ref
+
+    @pytest.mark.parametrize("k", [2, 4, 8])
+    @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
+    def test_kgt1_is_deterministic(self, guidance_model_path, tmp_path, k, gtype, gdata):
+        """K>1: identical output run-to-run (the batched-verify seam must stay deterministic)."""
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_det_{k}", k)
+        a = _guided_tokens(spec_path, gtype, gdata, max_length, k=k)
+        b = _guided_tokens(spec_path, gtype, gdata, max_length, k=k)
+        assert a == b
+
+    @pytest.mark.parametrize("k", [1, 2, 4, 8])
+    def test_regex_output_satisfies_grammar(self, guidance_model_path, tmp_path, k):
+        """The decoded speculative output actually matches the constraining regex at every K (a
+        bounded regex completes before max_length, so the whole output is checkable)."""
+        pattern = r"[0-9]{3}-[0-9]{3}"
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_sat_{k}", k)
+        got = _guided_tokens(spec_path, "regex", pattern, max_length, k=k)
+        eos = _eos_ids(guidance_model_path)
+        text = og.Tokenizer(og.Model(spec_path)).decode([t for t in got if t not in eos])
+        assert re.fullmatch(pattern, text), f"output {text!r} does not match {pattern!r}"
+
+    @pytest.mark.parametrize("k", [4, 8])
+    def test_draft_masking_keeps_acceptance_high(self, guidance_model_path, tmp_path, k):
+        """Draft proposals are grammar-masked, so under self-spec (draft == target) the masked target
+        accepts essentially all of them. Without masking the draft proposes grammar-invalid tokens
+        and acceptance collapses (~0.1 at K=8), which is what would kill the speedup under guidance."""
+        pattern = r"[0-9]{3}-[0-9]{3}"
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_acc_{k}", k)
+        _, stats = _guided_tokens(spec_path, "regex", pattern, max_length, k=k, want_stats=True)
+        assert stats["acceptance_rate"] >= 0.6
+
+    @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
+    def test_draft_neq_target_k1_matches_regular_guidance(self, test_data_path, tmp_path, gtype, gdata):
+        """A real draft != target pair under guidance: the draft genuinely mispredicts, so rounds
+        reject and re-anchor on the target's masked correction token. K=1 speculative + guidance
+        must equal regular + guidance of the target exactly (the guaranteed greedy contract)."""
+        pair = _find_two_distinct_models(test_data_path)
+        if pair is None:
+            pytest.skip("Need two distinct decoder-only models under --test_models")
+        target_dir, draft_dir = pair
+        if not _guidance_supported(target_dir):
+            pytest.skip("Build lacks guidance (USE_GUIDANCE=OFF) or model has no tokenizer.json")
+        max_length = len(_PROMPT) + 24
+        ref = _guided_tokens(target_dir, gtype, gdata, max_length)
+        spec_path = _build_spec_guided(target_dir, draft_dir, tmp_path / "guid_pair", 1)
+        got = _guided_tokens(spec_path, gtype, gdata, max_length, k=1)
+        assert got == ref
+
+    # --- Sampling + guidance -------------------------------------------------------------------
+    # Speculative sampling over the grammar-masked distributions (accept min(1, p_t/p_d) else
+    # resample the residual) is unbiased, so the output is a valid sample from the masked target
+    # distribution. We assert grammar-validity and per-seed determinism (matching regular sampling
+    # bit-for-bit is not expected: the speculative path consumes the RNG differently, exactly like
+    # non-guidance sampling).
+
+    @pytest.mark.parametrize("k", [1, 2, 4, 8])
+    def test_sampling_output_satisfies_grammar(self, guidance_model_path, tmp_path, k):
+        """Sampling + guidance output matches the constraining regex at every K."""
+        pattern = r"[0-9]{3}-[0-9]{3}"
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_samp_{k}", k)
+        eos = _eos_ids(guidance_model_path)
+        tok = og.Tokenizer(og.Model(spec_path))
+        for seed in range(4):
+            got = _sampled_guided_tokens(spec_path, "regex", pattern, max_length, seed, k=k)
+            text = tok.decode([t for t in got if t not in eos])
+            assert re.fullmatch(pattern, text), f"seed {seed}: {text!r} !~ {pattern!r}"
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_sampling_deterministic_with_seed(self, guidance_model_path, tmp_path, k):
+        """Same seed -> identical sampled output (the batched-verify seam stays deterministic)."""
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_sampdet_{k}", k)
+        a = _sampled_guided_tokens(spec_path, "regex", r"[0-9]{3}-[0-9]{3}", max_length, 1234, k=k)
+        b = _sampled_guided_tokens(spec_path, "regex", r"[0-9]{3}-[0-9]{3}", max_length, 1234, k=k)
+        assert a == b
+
+    # --- Penalty + guidance --------------------------------------------------------------------
+    # repetition_penalty / min_length combine with guidance by applying the penalty AFTER the grammar
+    # mask (matching the regular ProcessLogits -> ApplyMinLength -> ApplyRepetitionPenalty order).
+
+    @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
+    def test_k1_penalty_matches_regular_guidance(self, guidance_model_path, tmp_path, gtype, gdata):
+        """K=1 greedy + guidance + repetition_penalty is bit-exact with regular + guidance + penalty."""
+        max_length = len(_PROMPT) + 24
+        ref = _guided_tokens(guidance_model_path, gtype, gdata, max_length, repetition_penalty=1.3)
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "guid_pen_k1", 1)
+        got = _guided_tokens(spec_path, gtype, gdata, max_length, k=1, repetition_penalty=1.3)
+        assert got == ref
+
+    def test_min_length_with_guidance_blocks_early_eos(self, guidance_model_path, tmp_path):
+        """min_length + guidance: the constrained output must reach at least min_length tokens (EOS is
+        masked below it, applied after the grammar mask)."""
+        min_length = len(_PROMPT) + 12
+        max_length = len(_PROMPT) + 24
+        # A grammar that CAN stop early (0+ digits), so only min_length forces continuation.
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "guid_minlen", 4)
+        got = _guided_tokens(spec_path, "regex", r"[0-9]*", max_length, k=4, min_length=min_length)
+        eos = _eos_ids(guidance_model_path)
+        non_eos = [t for t in got if t not in eos]
+        assert len(non_eos) >= (min_length - len(_PROMPT))
+
+    # --- Continuous decoding + guidance ---------------------------------------------------------
+    # rewind-to-0 + a fresh whole-prompt reprefill reuses the generator for a clean constrained run
+    # (grammar Reset to initial, sequence emptied, draft carry-over reset). Rewinding to a
+    # mid-generation length with a grammar active is NOT supported -- the llguidance grammar cannot
+    # roll back to an arbitrary position, a limitation shared with the regular guidance path -- so
+    # only rewind-to-0 is exercised.
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_rewind_to_zero_reprefill_with_guidance(self, guidance_model_path, tmp_path, k):
+        """rewind_to(0) + reprefill + guidance reproduces a fresh guided run for every K (both inner
+        caches, the draft carry-over, and the grammar all reset cleanly)."""
+        pattern = r"[0-9]{2}-[0-9]{2}"
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_rw0_{k}", k)
+        ref = _guided_tokens(spec_path, "regex", pattern, max_length, k=k)
+
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        params.set_guidance("regex", pattern)
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(3):
+            if gen.is_done():
+                break
+            gen.generate_next_token()
+        gen.rewind_to(0)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        got = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+        assert got == ref
