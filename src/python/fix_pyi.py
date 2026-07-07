@@ -67,21 +67,51 @@ def _insert_numpy_import(content: str) -> str:
         if not in_docstring:
             for quote in ('"""', "'''"):
                 if stripped.startswith(quote):
-                    if stripped.count(quote) >= 2 and len(stripped) > len(quote):
-                        # Single-line docstring – stays on this line
+                    # Single-line docstring: starts AND ends with the same
+                    # quote and has content (or is empty) between them.
+                    if stripped.endswith(quote) and len(stripped) >= len(quote) * 2:
+                        # e.g. """text""" or """"""  – closed on this line
                         break
                     in_docstring = True
                     docstring_quote = quote
                     break
         else:
-            if docstring_quote in stripped:
+            if docstring_quote and docstring_quote in stripped:
                 in_docstring = False
             continue
 
         if stripped.startswith("import ") or stripped.startswith("from "):
             last_import_line = i
 
-    insert_pos = last_import_line + 1
+    if last_import_line == -1:
+        # No import statements found; find the first non-docstring, non-blank
+        # line so we insert after any module docstring.
+        after_docstring = 0
+        in_ds = False
+        ds_quote = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not in_ds:
+                for quote in ('"""', "'''"):
+                    if stripped.startswith(quote):
+                        if stripped.endswith(quote) and len(stripped) >= len(quote) * 2:
+                            after_docstring = i + 1
+                            break
+                        in_ds = True
+                        ds_quote = quote
+                        break
+                else:
+                    if stripped:
+                        # First non-blank, non-docstring line
+                        break
+            else:
+                if ds_quote and ds_quote in stripped:
+                    in_ds = False
+                    after_docstring = i + 1
+        insert_pos = after_docstring
+    else:
+        insert_pos = last_import_line + 1
+
     lines.insert(insert_pos, "import numpy\n")
     return "".join(lines)
 
