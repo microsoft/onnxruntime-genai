@@ -568,33 +568,22 @@ def _make_minimal_model_for_int4_matmul():
     return model
 
 
-def test_int4_matmul_quantizes_float_weight_to_matmul_nbits(monkeypatch):
+def test_nbits_matmul_defers_float_weight_to_graph_quantizer():
+    # Raw float weights are not quantized inside make_matmul_nbits. They are emitted as a
+    # float MatMul and quantized later by the graph-level `to_nbits` pass (which honors
+    # `int4_algo_config`). Because base.py runs for every EP, the CUDA-only CudaQuantizer
+    # must never be invoked here.
     model = _make_minimal_model_for_int4_matmul()
 
-    calls = []
-
-    def _matmulnbits_blockwise_quantize(weights, bits, block_size, **kwargs):
-        calls.append((weights, bits, block_size, kwargs))
-        return torch.zeros((128, 2, 16), dtype=torch.uint8), torch.ones((128, 2), dtype=torch.float32)
-
-    monkeypatch.setattr(base_module.CudaQuantizer, "matmulnbits_blockwise_quantize", _matmulnbits_blockwise_quantize)
-
     matmul = types.SimpleNamespace(weight=torch.zeros((128, 64), dtype=torch.float16), in_features=64, out_features=128)
-    result = model.make_matmul_int4(matmul, "/lm_head/MatMul", "hidden_states")
+    result = model.make_matmul_nbits(matmul, "/lm_head/MatMul", "hidden_states")
 
-    assert result == "/lm_head/MatMulNBits"
-    assert model._float_called is False
-    assert len(calls) == 1
-    assert torch.equal(calls[0][0], matmul.weight)
-    assert calls[0][1:] == (
-        4,
-        32,
-        {"symmetric": True, "return_zero_points": False, "flatten_qweight": False, "unsigned_full_range": True},
-    )
-    assert any(op_type == "MatMulNBits" for op_type, _ in model._nodes)
+    assert result == "float_fallback"
+    assert model._float_called is True
+    assert not any(op_type == "MatMulNBits" for op_type, _ in model._nodes)
 
 
-def test_int4_matmul_emits_matmul_nbits_when_model_already_quantized():
+def test_nbits_matmul_emits_matmul_nbits_when_model_already_quantized():
     model = _make_minimal_model_for_int4_matmul()
 
     matmul = types.SimpleNamespace(
@@ -607,7 +596,7 @@ def test_int4_matmul_emits_matmul_nbits_when_model_already_quantized():
         in_features=64,
         out_features=128,
     )
-    result = model.make_matmul_int4(matmul, "/lm_head/MatMul", "hidden_states")
+    result = model.make_matmul_nbits(matmul, "/lm_head/MatMul", "hidden_states")
 
     assert result == "/lm_head/MatMulNBits"
     assert model._float_called is False

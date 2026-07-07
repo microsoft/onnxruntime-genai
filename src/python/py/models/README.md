@@ -417,6 +417,18 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
 ```
 
+##### MatMulNBits Weights Prepacked
+
+This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP, and an offline-prepacked model must be run with `ORT_FPA_INTB_GEMM` enabling the relevant nbits.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+```
+
 ##### Is Symmetric
 
 This scenario is for when you want to choose symmetric (`int4`) or asymmetric (`uint4`) weight quantization.

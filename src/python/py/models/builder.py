@@ -430,6 +430,10 @@ def get_args():
                 qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
                     -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
                     Default is -1.
+                matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
+                    0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
+                    Only applies to the CUDA EP. An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant nbits.
+                    Default is 0.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.

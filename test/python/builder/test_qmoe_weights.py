@@ -108,7 +108,7 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 base_module = _load_builder_module("base")
 Model = base_module.Model
 cuda_quantizer_module = sys.modules["models.builders.cuda_quantizer"]
-symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.symmetric_per_channel_quantize
+qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
 
@@ -395,7 +395,7 @@ def test_per_channel_int8_uses_qmoe_full_range_unsigned_offset_storage_by_defaul
     ],
 )
 def test_per_channel_can_emit_full_range_unsigned_offset_storage(bits, weights, expected_qweight):
-    qweight, scales = symmetric_per_channel_quantize(weights, bits)
+    qweight, scales = qmoe_symmetric_per_channel_quantize(weights, bits)
 
     assert torch.equal(scales, torch.tensor([1.0]))
     assert torch.equal(qweight, expected_qweight)
@@ -428,7 +428,7 @@ def test_per_channel_env_var_can_use_legacy_15_bucket_unsigned_offset_storage(mo
     ],
 )
 def test_per_channel_can_emit_legacy_15_bucket_unsigned_offset_storage(bits, weights, expected_qweight):
-    qweight, scales = symmetric_per_channel_quantize(weights, bits, unsigned_full_range=False)
+    qweight, scales = qmoe_symmetric_per_channel_quantize(weights, bits, unsigned_full_range=False)
 
     assert torch.equal(scales, torch.tensor([1.0]))
     assert torch.equal(qweight, expected_qweight)

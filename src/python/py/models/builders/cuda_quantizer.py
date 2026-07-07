@@ -1,6 +1,24 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+"""CUDA weight-only quantization helpers.
+
+This module contains small Python utilities for producing the weight layouts
+consumed by CUDA weight-only kernels. The helpers deliberately wrap the same C++
+pybind entry points used by runtime prepacking so tests and model builders can
+generate byte-identical quantized weights.
+
+Two storage families are exposed:
+
+* raw MatMulNBits blockwise storage, laid out by output channel as ``[N, K/pack]``;
+* CUDA mixed-GEMM prepacked storage. MatMulNBits prepacked initializers keep the
+    schema shape ``[N, K/block_size, block_size*bits/8]`` and require the node
+    attribute ``weight_prepacked=1``. QMoE/CUTLASS callers use the kernel-facing
+    shape ``[K, N/pack]``.
+
+All public helpers take one logical expert weight matrix with shape ``[N, K]``.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -61,7 +79,7 @@ class CudaQuantizer:
     """
 
     @staticmethod
-    def symmetric_per_channel_quantize(
+    def qmoe_symmetric_per_channel_quantize(
         weights: torch.Tensor,
         bits: int,
         *,
@@ -81,6 +99,9 @@ class CudaQuantizer:
 
         weights = weights.detach().cpu().to(torch.float32).contiguous()
         bits = int(bits)
+        if bits not in (4, 8):
+            raise ValueError(f"QMoE per-channel quantization only supports 4 or 8 bits, got {bits}.")
+
         n, k = weights.shape
         pack = 8 // bits
         if k % pack != 0:
@@ -91,14 +112,11 @@ class CudaQuantizer:
                 qmin, qmax, scale_divisor, zero_point = -8, 7, 8, 8
             else:
                 qmin, qmax, scale_divisor, zero_point = -7, 7, 7, 8
-        elif bits == 8:
+        else:  # bits == 8, already validated above
             if unsigned_full_range:
                 qmin, qmax, scale_divisor, zero_point = -128, 127, 128, 128
             else:
                 qmin, qmax, scale_divisor, zero_point = -127, 127, 127, 128
-        else:
-            raise ValueError(f"QMoE per-channel quantization only supports 4 or 8 bits, got {bits}.")
-
         scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
         scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
         quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
@@ -113,7 +131,7 @@ class CudaQuantizer:
         return qweight.contiguous(), scales.squeeze(-1).contiguous()
 
     @staticmethod
-    def cuda_per_channel_quantize(
+    def qmoe_per_channel_quantize(
         weights: torch.Tensor,
         bits: int,
         prepack: bool,
@@ -130,7 +148,7 @@ class CudaQuantizer:
         """
         torch = _get_torch()
 
-        qweight, scales = CudaQuantizer.symmetric_per_channel_quantize(
+        qweight, scales = CudaQuantizer.qmoe_symmetric_per_channel_quantize(
             weights,
             bits,
             unsigned_full_range=unsigned_full_range,
@@ -167,12 +185,13 @@ class CudaQuantizer:
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
         n, k = w.shape
         if bits not in (4, 8):
-            raise ValueError(f"CUDA blockwise quantization only supports 4 or 8 bits, got {bits}.")
-        if k % block_size != 0:
-            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for CUDA blockwise quantization.")
+            raise ValueError(f"Blockwise quantization only supports 4 or 8 bits, got {bits}.")
+        if block_size <= 0:
+            raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
 
-        num_blocks = k // block_size
+        num_blocks = (k + block_size - 1) // block_size
         pack = 8 // bits
+        blob_size = (block_size + pack - 1) // pack
 
         if symmetric:
             if bits == 4:
@@ -182,6 +201,10 @@ class CudaQuantizer:
                     (-128, 127, 128, 128) if unsigned_full_range else (-127, 127, 127, 128)
                 )
 
+            padded_k = num_blocks * block_size
+            if padded_k != k:
+                w = np.pad(w, ((0, 0), (0, padded_k - k)), "constant")
+
             blocked = w.reshape(n, num_blocks, block_size)
             scales = np.max(np.abs(blocked), axis=2).astype(np.float32) / np.float32(scale_divisor)
             scales = np.maximum(scales, np.finfo(np.float32).eps)
@@ -189,8 +212,9 @@ class CudaQuantizer:
             quantized = (quantized + zero_point).astype(np.uint8)
 
             if bits == 4:
-                qweight = (quantized[:, :, 0::2] & 0xF) | ((quantized[:, :, 1::2] & 0xF) << 4)
-                qweight = qweight.astype(np.uint8)
+                qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
+                qweight[:, :, : quantized[:, :, 0::2].shape[2]] = quantized[:, :, 0::2] & 0xF
+                qweight[:, :, : quantized[:, :, 1::2].shape[2]] |= (quantized[:, :, 1::2] & 0xF) << 4
             else:
                 qweight = quantized
 
@@ -198,7 +222,7 @@ class CudaQuantizer:
             return torch.from_numpy(qweight), torch.from_numpy(scales), torch.from_numpy(zero_points)
 
         w_t = np.ascontiguousarray(w.T)
-        qweight = np.zeros((n, num_blocks, block_size // pack), dtype=np.uint8)
+        qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
         scales = np.zeros((n, num_blocks), dtype=np.float32)
         zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
 
@@ -226,9 +250,10 @@ class CudaQuantizer:
         """Quantize one expert with ONNX Runtime's MatMulNBits blockwise encoding.
 
         ``weights`` has logical shape ``[N, K]``. Returns raw flattened storage
-        ``[N, K/pack]`` and block scales ``[N, K/block_size]`` by default. Set
-        ``flatten_qweight=False`` for the MatMulNBits initializer shape
-        ``[N, K/block_size, block_size*bits/8]``.
+        ``[N, ceil(K/block_size)*ceil(block_size/pack)]`` and block scales
+        ``[N, ceil(K/block_size)]`` by default. Set ``flatten_qweight=False`` for
+        the MatMulNBits initializer shape
+        ``[N, ceil(K/block_size), ceil(block_size/pack)]``.
         Set ``return_zero_points=True`` to also return packed block zero-points.
         Symmetric quantization uses the full ``[-8, 7]`` / ``[-128, 127]`` range
         by default. Set ``unsigned_full_range=False`` to use the legacy
@@ -265,17 +290,34 @@ class CudaQuantizer:
 
         ``weights`` has logical shape ``[N, K]``. Returns ``B`` with the standard
         MatMulNBits initializer shape ``[N, K/block_size, block_size*bits/8]``
-        and scales with shape ``[N, K/block_size]``. Use the returned ``B`` with
-        ``weight_prepacked=1`` on the MatMulNBits node.
+        and scales with shape ``[N, K/block_size]``.
 
-        The default ``force_arch=80`` matches the current CUDA MatMulNBits
-        fpA_intB path: runtime prepacking and offline prepacking both consume the
-        SM80 mixed-GEMM layout, including on newer GPUs.
+        The ``force_arch`` value selects the mixed-GEMM weight layout and must match
+        the ``weight_prepacked`` attribute set on the MatMulNBits node:
+
+        * ``force_arch=80`` (default): SM80/Ampere layout, consumed by the SM80 kernel
+          (also used on newer GPUs via the compatibility path). Use ``weight_prepacked=1``.
+        * ``force_arch=90``: SM90/Hopper layout, consumed by the native SM90 TMA/WGMMA
+          kernel. Use ``weight_prepacked=2``. Requires ``block_size`` in {64, 128}.
         """
         torch = _get_torch()
 
         bits = int(bits)
+        block_size = int(block_size)
+        force_arch = int(force_arch)
+        if force_arch not in (80, 90):
+            raise ValueError(f"force_arch must be 80 (SM80) or 90 (SM90), but got {force_arch}.")
+        # The native SM90 kernel needs group_size to be a multiple of the 64-element Hopper K tile,
+        # so block_size=32 is only supported by the SM80/Ampere-class kernel.
+        allowed_block_sizes = (32, 64, 128) if force_arch == 80 else (64, 128)
+        if block_size not in allowed_block_sizes:
+            raise ValueError(
+                f"block_size must be one of {allowed_block_sizes} for force_arch={force_arch}, but got {block_size}."
+            )
         n, k = weights.shape
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for CUDA-prepacked weights.")
+
         qweight, scales, zero_points = CudaQuantizer._matmulnbits_blockwise_quantize_impl(
             weights,
             bits,
@@ -295,7 +337,36 @@ class CudaQuantizer:
         return packed, scales
 
     @staticmethod
-    def cutlass_prepacked_blockwise_quantize(
+    def prepack_matmulnbits_weight(
+        qweight,
+        n: int,
+        k: int,
+        bits: int,
+        force_arch: int = 80,
+    ) -> np.ndarray:
+        """Prepack an already-quantized MatMulNBits weight ``B`` into the fpA_intB layout.
+
+        ``qweight`` holds the standard MatMulNBits ``B`` bytes (uint8, total
+        ``N * K * bits / 8``) as produced by any weight-only quantizer, in the initializer
+        shape ``[N, K/block_size, block_size*bits/8]``. Returns the CUDA mixed-GEMM
+        prepacked bytes with the same shape, matching what
+        :meth:`matmulnbits_prepacked_blockwise_quantize` emits for freshly quantized weights.
+
+        Prepacking is a pure layout transform: it only rearranges the quantized bytes and
+        does not depend on the quantization method or numeric values. ``force_arch`` selects
+        the layout (80 -> SM80/Ampere, 90 -> SM90/Hopper) and must match the node's
+        ``weight_prepacked`` attribute (1 or 2 respectively).
+        """
+        pack_weights_for_cuda_mixed_gemm = _get_pack_weights_for_cuda_mixed_gemm()
+
+        qweight = np.ascontiguousarray(np.asarray(qweight)).view(np.uint8)
+        original_shape = qweight.shape
+        flat = np.ascontiguousarray(qweight.reshape(int(n), -1))
+        packed = pack_weights_for_cuda_mixed_gemm(flat, int(n), int(k), int(bits), int(force_arch))
+        return np.asarray(packed).view(np.uint8).reshape(original_shape)
+
+    @staticmethod
+    def qmoe_prepacked_blockwise_quantize(
         weights: torch.Tensor,
         bits: int,
         block_size: int,
@@ -316,6 +387,8 @@ class CudaQuantizer:
         block_size = int(block_size)
         n, k = weights.shape
         pack = 8 // bits
+        if k % block_size != 0:
+            raise ValueError(f"K ({k}) must be divisible by block_size ({block_size}) for CUDA-prepacked weights.")
         if n % pack != 0:
             raise ValueError(f"N ({n}) must be divisible by {pack} for QMoE blockwise quantization.")
 

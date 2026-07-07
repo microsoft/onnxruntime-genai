@@ -46,18 +46,25 @@ This uses the full negative range of int4 (`-8`), giving the finest step. Node t
 are named `*.weight_Q4` / `*.weight_scales`.
 
 > Note: the `DefaultWeightOnlyQuantizer` applies a **single global** bit-width per
-> pass and ignores per-node `customized_weight_config`. To support int8 bit placement
-> on top of `default`, the builder quantizes the int4 body first (excluding the int8
-> nodes) and then upgrades just those nodes in a second pass (see `to_int4`). The int4
-> body remains byte-identical to a plain `default` model.
+> pass and its config (`DefaultWeightOnlyQuantConfig`) does not accept a per-node
+> `customized_weight_config` (unlike RTN/k-quant, which honor per-node bits in one
+> pass). To support int8 bit placement on top of `default`, the builder quantizes the
+> int4 body first (excluding the int8 nodes) and then upgrades just those nodes in a
+> second **DEFAULT (bits=8)** pass (see `to_nbits`). The int4 body remains byte-identical
+> to a plain `default` model, and the int8 nodes use the same MLAS quantizer as the body.
 >
-> ⚠️ The second (int8) pass uses the **RTN** quantizer, *not* a second DEFAULT pass.
-> The DEFAULT (MLAS) symmetric 8-bit format emits **signed int8 with negative scales**,
-> which the `MatMulNBits` runtime kernel does **not** consume correctly (it expects
-> unsigned uint8 offset-by-128 with positive scales, as produced by RTN/k-quant).
-> A DEFAULT-int8 LM head measured MMLU **0.6722** vs **~0.798** for the RTN-int8 LM head
-> on GPT-OSS-20B — i.e. the DEFAULT 8-bit QOperator output is effectively broken at
-> runtime, so RTN is used for the int8 nodes.
+> The DEFAULT (MLAS) symmetric 8-bit format stores unsigned uint8 offset-by-128 with
+> **signed** per-block scales. The `MatMulNBits` CUDA kernels consume negative scales
+> **correctly** in every path — default GEMV / batched / dequant+GEMM and the fpA_intB
+> int8 GEMM/GEMV — verified on both sm_80 (A100) and sm_90 (H200), and end-to-end on an
+> offline-prepacked GPT-OSS-20B model. DEFAULT int8 is also more accurate than RTN int8
+> (finer `/128` vs `/127.5` step, and it exploits the asymmetric `[-128,127]` range via
+> the scale sign): on GPT-OSS-20B (int4 body + int8 lm_head/mixed-qkv, MMLU-800) DEFAULT
+> int8 scored **0.8662** vs **0.8512** for RTN int8, so the int8 pass uses DEFAULT.
+>
+> (A stale earlier note claimed the DEFAULT-int8 LM head measured MMLU 0.6722 and was
+> "broken at runtime"; that was not reproducible — negative scales are handled correctly
+> on both architectures.)
 
 ### `rtn`
 Uses `RTNWeightOnlyQuantConfig` → Intel Neural Compressor's `rtn_quantize`. Also plain
@@ -85,27 +92,27 @@ Uses `KQuantWeightOnlyQuantConfig` → Neural Compressor's k-quant (a more elabo
 per-block scaling derived from llama.cpp's K-quants). Honors per-node
 `customized_weight_config`, so int8 bit placement works in a single pass.
 
-## Builder-owned CUDA MatMulNBits blockwise quantization
+## CUDA MatMulNBits weight prepacking
 
-Some model-builder paths create `MatMulNBits` directly from raw PyTorch weights
-instead of using ONNX Runtime's graph quantizer passes above. In those paths, the
-builder uses the local CUDA quantizer helper to emit the standard `MatMulNBits`
-initializers: quantized weight `B` with shape
-`[N, K / block_size, block_size * bits / 8]`, scales with shape
-`[N, K / block_size]`, and packed zero-points when asymmetric quantization is used.
+All int4/int8 `MatMulNBits` weights are produced by the graph quantizer passes above
+(`to_nbits`), on every EP. For the CUDA EP the builder can additionally prepack those
+weights into the fpA_intB mixed-GEMM layout the CUDA kernel consumes directly.
 
-For **symmetric** int4/int8, the default export uses unsigned-offset storage with
-the full integer range:
+Prepacking is a **pure layout transform**: it only rearranges the already-quantized
+weight bytes and does not change the numeric values, so it is independent of the base
+method (`default`/`rtn`/`k_quant`) and the bit width (int4/int8). It is applied as an
+orthogonal post-pass over the quantized `MatMulNBits` nodes (see
+`prepack_matmulnbits_weights`), keeping the standard initializer shape
+`[N, K / block_size, block_size * bits / 8]` and setting the node attribute
+`weight_prepacked = 1` (SM80/Ampere) or `2` (SM90/Hopper).
 
-| Bits | Numeric range | Scale | Stored value |
-| --- | --- | --- | --- |
-| 4 | `[-8, 7]` | `max(abs(w)) / 8` | `q + 8` |
-| 8 | `[-128, 127]` | `max(abs(w)) / 128` | `q + 128` |
-
-For testing, set environment variable `GENAI_MATMULNBITS_UNSIGNED_FULL_RANGE=0` to
-use the previous narrower unsigned-offset range: int4 `[-7, 7]` with scale
-`max(abs(w)) / 7`, and int8 `[-127, 127]` with scale `max(abs(w)) / 127`. This is
-not exposed as a model-builder `extra_options` flag.
+Enable it with `--extra_options matmulnbits_weights_prepacked=1` (SM80) or `=2` (SM90).
+A node is prepacked only when the fpA_intB kernel supports it: symmetric weights, bits
+in {4, 8}, `block_size` supported by the target layout (SM80 → {32, 64, 128}, SM90 →
+{64, 128}), `K % block_size == 0`, and `N` aligned to the kernel tile (`N % 32` for
+int8, `N % 64` for int4). Ineligible nodes (e.g. an `N = 32` MoE router) keep the raw
+blockwise layout. An offline-prepacked model must be run with `ORT_FPA_INTB_GEMM`
+enabling the relevant nbits (use `ORT_FPA_INTB_GEMM=1` for int4 and int8).
 
 ## QMoE expert-weight quantization
 

@@ -34,16 +34,9 @@ from transformers import (
 
 from .cuda_quantizer import CudaQuantizer
 
-
+# Some environment variables for internal test only and not exposed to user since the default value is best choice.
 def _qmoe_unsigned_full_range(model):
     raw = os.environ.get("GENAI_QMOE_UNSIGNED_FULL_RANGE", "1")
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _matmulnbits_unsigned_full_range(model):
-    raw = os.environ.get("GENAI_MATMULNBITS_UNSIGNED_FULL_RANGE", "1")
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -358,6 +351,16 @@ class Model:
         self.int4_customized_weight_config = self.make_bit_placement_config(self.int4_bit_placement)
         algo_config = self.make_algo_config(self.int4_base_method, self.int4_customized_weight_config)
         self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
+        # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
+        # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
+        # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
+        # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
+        # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
+        self.matmulnbits_weights_prepacked = int(extra_options.get("matmulnbits_weights_prepacked", 0))
+        if self.matmulnbits_weights_prepacked not in (0, 1, 2):
+            raise ValueError(
+                f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {self.matmulnbits_weights_prepacked}."
+            )
         # MXFP4 mandates a block size of 32; ignore any user override for FP4 QMoE.
         if self.moe_attrs.get("quant_type") == "fp4":
             self.qmoe_block_size = 32
@@ -868,7 +871,7 @@ class Model:
         `quant_method` is one of {"default", "rtn", "k_quant"}. Per-node int8 bit
         placement is supplied via `customized_weight_config`. The "default" method
         returns ``None`` (MatMulNBitsQuantizer's built-in DEFAULT quantizer), which
-        cannot apply per-node bits in a single pass; `to_int4` performs a second
+        cannot apply per-node bits in a single pass; `to_nbits` performs a second
         RTN pass to honor any int8 placement for that method.
         """
         customized_weight_config = customized_weight_config or {}
@@ -886,22 +889,24 @@ class Model:
             "or a legacy alias ('rtn_last', 'k_quant_last', 'k_quant_mixed', 'k_quant_linear')."
         )
 
-    def to_int4(self) -> ir.Model:
+    def to_nbits(self) -> ir.Model:
         quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
         nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
         customized_weight_config = getattr(self, "int4_customized_weight_config", {}) or {}
         base_method = getattr(self, "int4_base_method", "default")
 
-        # The DEFAULT quantizer applies a single global bit-width per pass and ignores
-        # `customized_weight_config`. To support int8 bit placement (e.g. the int8 last
-        # MatMul) on top of the DEFAULT method, quantize the int4 body first (excluding
-        # the int8-designated nodes), keeping the int4 body byte-identical to a plain
-        # DEFAULT model. Then upgrade just the designated nodes to int8 with a second
-        # pass. NOTE: the DEFAULT (MLAS) symmetric 8-bit format emits signed int8 with
-        # negative scales, which the MatMulNBits runtime kernel does NOT consume
-        # correctly (it expects unsigned uint8 offset-by-128 with positive scales).
-        # The RTN quantizer produces the kernel-compatible int8 format, so the int8
-        # pass uses RTN even when the body method is DEFAULT.
+        # The DEFAULT quantizer (`DefaultWeightOnlyQuantConfig`) applies a single global
+        # bit-width per pass and does not accept a per-node `customized_weight_config`
+        # (its constructor rejects that kwarg), unlike RTN/k_quant which honor per-node
+        # bits in one pass. So mixing an int4 body with int8 bit placement under the
+        # DEFAULT method requires two passes: quantize the int4 body first (excluding the
+        # int8-designated nodes), then upgrade just those nodes to int8 in a second pass.
+        # Both passes use the MLAS DefaultWeightOnlyQuantizer, so the int4 body stays
+        # byte-identical to a plain DEFAULT model and the int8 nodes get DEFAULT int8.
+        # (MLAS symmetric int8 stores unsigned uint8 offset-by-128 with SIGNED per-block
+        # scales. The MatMulNBits CUDA kernels — default GEMV/batched/dequant-GEMM and the
+        # fpA_intB int8 GEMM/GEMV — consume negative scales correctly on sm_80 and sm_90,
+        # verified end-to-end, so RTN is no longer needed for the int8 nodes.)
         if base_method == "default" and customized_weight_config:
             int8_nodes = list(customized_weight_config.keys())
 
@@ -917,9 +922,9 @@ class Model:
             )
             quant_int4.process()
 
-            int8_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
             quant_int8 = MatMulNBitsQuantizer(
                 model=quant_int4.model.model,
+                bits=8,
                 block_size=self.quant_attrs["qdq_block_size"],
                 is_symmetric=self.quant_attrs["is_symmetric"],
                 accuracy_level=self.quant_attrs["accuracy_level"],
@@ -927,23 +932,90 @@ class Model:
                 nodes_to_include=int8_nodes,
                 quant_format=quant_format,
                 op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
-                algo_config=int8_algo_config,
+                algo_config=None,
             )
             quant_int8.process()
-            return ir.from_proto(quant_int8.model.model)
+            model_proto = quant_int8.model.model
+        else:
+            quant = MatMulNBitsQuantizer(
+                model=ir.to_proto(self.model),
+                block_size=self.quant_attrs["qdq_block_size"],
+                is_symmetric=self.quant_attrs["is_symmetric"],
+                accuracy_level=self.quant_attrs["accuracy_level"],
+                nodes_to_exclude=nodes_to_exclude,
+                quant_format=quant_format,
+                op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
+                algo_config=self.quant_attrs["algo_config"],
+            )
+            quant.process()
+            model_proto = quant.model.model
 
-        quant = MatMulNBitsQuantizer(
-            model=ir.to_proto(self.model),
-            block_size=self.quant_attrs["qdq_block_size"],
-            is_symmetric=self.quant_attrs["is_symmetric"],
-            accuracy_level=self.quant_attrs["accuracy_level"],
-            nodes_to_exclude=nodes_to_exclude,
-            quant_format=quant_format,
-            op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
-            algo_config=self.quant_attrs["algo_config"],
-        )
-        quant.process()
-        return ir.from_proto(quant.model.model)
+        # Offline CUDA weight prepacking is a pure weight *layout* conversion for the
+        # fpA_intB mixed-GEMM kernel and is independent of the quantization method or bit
+        # width above, so it is applied here as an orthogonal post-pass over the quantized
+        # MatMulNBits nodes.
+        self.prepack_matmulnbits_weights(model_proto)
+        return ir.from_proto(model_proto)
+
+    def prepack_matmulnbits_weights(self, model_proto):
+        """CUDA-only post-pass that converts eligible MatMulNBits weights to the fpA_intB layout.
+
+        Prepacking only rearranges the already-quantized weight bytes into the layout the
+        CUDA mixed-GEMM kernel consumes directly; it does not change the numeric values and
+        is independent of the quantization method (default/rtn/k_quant) and bit width
+        (int4/int8) used to produce them. This lets any `int4_algo_config` (e.g. `k_quant`)
+        be combined with `matmulnbits_weights_prepacked > 0`.
+
+        Eligibility mirrors the runtime fpA_intB kernel: bits in {4, 8}, block_size supported
+        by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
+        and N aligned to the kernel tile (N % 32 for int8, N % 64 for int4). Only symmetric
+        weights are prepacked; nodes already carrying `weight_prepacked` are left untouched.
+        An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant
+        nbits (use ORT_FPA_INTB_GEMM=1 for int4 and int8).
+        """
+        prepack_mode = self.matmulnbits_weights_prepacked
+        if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
+            return
+
+        from onnx import helper as onnx_helper, numpy_helper  # noqa: PLC0415
+
+        force_arch = 90 if prepack_mode == 2 else 80
+        allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
+        initializers = {init.name: init for init in model_proto.graph.initializer}
+
+        for node in model_proto.graph.node:
+            if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
+                continue
+            attrs = {a.name: a for a in node.attribute}
+            if "weight_prepacked" in attrs:
+                continue
+            # Skip asymmetric weights: a non-empty zero-point input (4th input) means the
+            # weights are not symmetric, which the fpA_intB prepacked path does not target.
+            if len(node.input) > 3 and node.input[3]:
+                continue
+            if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
+                continue
+
+            bits = attrs["bits"].i
+            block_size = attrs["block_size"].i
+            k = attrs["K"].i
+            n = attrs["N"].i
+            fpa_intb_eligible = (
+                bits in (4, 8)
+                and block_size in allowed_block_sizes
+                and k % block_size == 0
+                and n % (32 if bits == 8 else 64) == 0
+            )
+            if not fpa_intb_eligible:
+                continue
+
+            init = initializers.get(node.input[1])
+            if init is None:
+                continue
+
+            packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
+            init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
+            node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
 
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
@@ -951,7 +1023,7 @@ class Model:
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
         if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
-            model = self.to_int4()
+            model = self.to_nbits()
         else:
             model = self.model
 
@@ -1321,9 +1393,9 @@ class Model:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             if self.quant_attrs["use_qdq"]:
-                return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
+                return self.make_matmul_nbits_qdq(matmul, basename, root_input, **kwargs)
             else:
-                return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
+                return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
@@ -1339,43 +1411,28 @@ class Model:
 
         return name
 
-    def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
+    def make_matmul_nbits(self, matmul, basename, root_input, **kwargs):
+        # Emit a `MatMulNBits` (weight-only int4/int8) node.
+        #
+        # Raw float weights are NOT quantized here. Instead emit a float `MatMul` and defer
+        # the int4/int8 quantization to the graph-level pass `to_nbits`, which honors the
+        # selected `int4_algo_config` (default/rtn/k_quant) and any per-node int8 bit
+        # placement. Only pre-quantized weights (e.g. AWQ/GPTQ, already carrying `qweight`/
+        # `scales`) are emitted directly below. Keeping quantization in `to_nbits` also means
+        # this path never depends on the CUDA-only `CudaQuantizer`, so it is safe for every EP
+        # (cpu/cuda/webgpu). Offline CUDA weight prepacking is likewise not done here: it is a
+        # pure weight *layout* conversion applied as an orthogonal post-pass in `to_nbits`
+        # (see `prepack_matmulnbits_weights`).
         if not hasattr(matmul, "qweight"):
-            if not hasattr(matmul, "weight"):
-                return self.make_matmul_float(matmul, basename, root_input, **kwargs)
+            return self.make_matmul_float(matmul, basename, root_input, **kwargs)
 
-            # Honor the per-node int8 bit placement (e.g. int8 LM head / mixed qkv layers) built
-            # in `int4_customized_weight_config`. Without this the direct CUDA quantization path
-            # would quantize every MatMul as int4, dropping the int8-designated nodes.
-            node_weight_config = getattr(self, "int4_customized_weight_config", {}).get(basename, {})
-            bits = int(node_weight_config.get("bits", 4))
-            group_size = int(self.matmul_block_size)
-            symmetric = bool(self.quant_attrs["is_symmetric"])
-            quantized = CudaQuantizer.matmulnbits_blockwise_quantize(
-                matmul.weight.detach(),
-                bits,
-                group_size,
-                symmetric=symmetric,
-                return_zero_points=not symmetric,
-                flatten_qweight=False,
-                unsigned_full_range=_matmulnbits_unsigned_full_range(self),
-            )
-            if symmetric:
-                qweight, scales = quantized
-                qzeros = None
-            else:
-                qweight, scales, qzeros = quantized
-
-            in_features = matmul.in_features if hasattr(matmul, "in_features") else matmul.weight.shape[1]
-            out_features = matmul.out_features if hasattr(matmul, "out_features") else matmul.weight.shape[0]
-        else:
-            bits = matmul.bits
-            group_size = matmul.group_size
-            qweight = matmul.qweight
-            scales = matmul.scales
-            qzeros = matmul.qzeros if hasattr(matmul, "qzeros") else None
-            in_features = matmul.in_features
-            out_features = matmul.out_features
+        bits = matmul.bits
+        group_size = matmul.group_size
+        qweight = matmul.qweight
+        scales = matmul.scales
+        qzeros = matmul.qzeros if hasattr(matmul, "qzeros") else None
+        in_features = matmul.in_features
+        out_features = matmul.out_features
 
         name = f"{basename}NBits"
 
@@ -1464,7 +1521,7 @@ class Model:
 
         return dequantize_output
 
-    def make_matmul_int4_qdq(self, matmul, matmul_name, root_input, **kwargs):
+    def make_matmul_nbits_qdq(self, matmul, matmul_name, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
             # TODO: quantize weights, then save new MatMul weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
@@ -1608,7 +1665,7 @@ class Model:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
 
         matmul = self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
-        new_name = self.make_matmul_int4(matmul, basename, root_input, **kwargs)
+        new_name = self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         return new_name
 
     def make_add_bias(self, add, name, root_input, **kwargs):
@@ -3676,7 +3733,7 @@ class Model:
         per-channel quantization when the ``block_size`` attribute is omitted.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return CudaQuantizer.symmetric_per_channel_quantize(
+        return CudaQuantizer.qmoe_symmetric_per_channel_quantize(
             weights,
             bits,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
@@ -3692,7 +3749,7 @@ class Model:
         default ``weights_prepacked=-1`` contract.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        return CudaQuantizer.cuda_per_channel_quantize(
+        return CudaQuantizer.qmoe_per_channel_quantize(
             weights,
             bits,
             prepack,
@@ -3715,7 +3772,7 @@ class Model:
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
-        return CudaQuantizer.cutlass_prepacked_blockwise_quantize(
+        return CudaQuantizer.qmoe_prepacked_blockwise_quantize(
             weights,
             bits,
             block_size,
