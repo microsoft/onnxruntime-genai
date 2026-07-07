@@ -55,8 +55,9 @@ constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath 
 
 // Validates that a path-like string from the (untrusted) model config stays
 // within the model directory, then resolves it relative to that directory.
-// Rejects absolute paths and any parent-directory ("..") component to prevent
-// path traversal / arbitrary file writes (CWE-22).
+// Rejects absolute paths and any current/parent-directory (".", "..") component
+// -- including Windows trailing dot/space variants -- to prevent path traversal
+// / arbitrary file writes (CWE-22).
 fs::path ResolveContainedConfigPath(const fs::path& model_dir, const std::string& value, const char* field_name) {
   fs::path candidate{value};
   if (!candidate.is_relative()) {
@@ -68,9 +69,15 @@ fs::path ResolveContainedConfigPath(const fs::path& model_dir, const std::string
   while (start <= value.size()) {
     size_t sep = value.find_first_of("/\\", start);
     const std::string component = value.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
-    if (component == "..") {
+    // Windows trims trailing '.' and ' ' from path components, so values like
+    // ".. ", "..." or ". " can be interpreted by the OS as a current/parent
+    // directory reference and bypass a naive component == ".." check. Reject any
+    // component that, after stripping trailing dots/spaces, collapses to nothing
+    // while still containing a '.' (covers ".", "..", "...", ".. ", etc.).
+    const size_t last_significant = component.find_last_not_of(". ");
+    if (last_significant == std::string::npos && component.find('.') != std::string::npos) {
       throw std::runtime_error(std::string(field_name) + " (" + value +
-                               ") must not contain parent-directory (\"..\") components");
+                               ") must not contain current- or parent-directory (\".\"/\"..\") components");
     }
     if (sep == std::string::npos)
       break;

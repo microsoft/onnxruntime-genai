@@ -595,3 +595,19 @@ TEST(ModelTests, EnableProfilingRejectsAbsolutePath) {
         << "Unexpected error message: " << e.what();
   }
 }
+
+// A parent-directory component with a trailing dot/space (".. ") must be
+// rejected too: Windows trims trailing dots/spaces, so such a component can be
+// interpreted by the OS as "..", bypassing a naive lexical check.
+TEST(ModelTests, EnableProfilingRejectsTrailingDotSpaceTraversal) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "decoder": { "session_options": { "enable_profiling": ".. /evil_profile" } } } })");
+
+  try {
+    OgaModel::Create(*config);
+    FAIL() << "Expected std::runtime_error for trailing-dot/space traversal path";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("enable_profiling"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
