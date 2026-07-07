@@ -49,6 +49,12 @@ struct SpeculativeDecodingState : State {
     draft_pending_logits_ = std::move(logits);
     draft_pending_valid_ = true;
   }
+  // Copy count floats into the pending-logits buffer, reusing its existing capacity (no per-round
+  // reallocation of a vocab-sized vector). Mirrors the assign() the prefill Run() uses.
+  void assign_draft_pending_logits(const float* data, size_t count) {
+    draft_pending_logits_.assign(data, data + count);
+    draft_pending_valid_ = true;
+  }
   bool draft_pending_valid() const { return draft_pending_valid_; }
 
  private:

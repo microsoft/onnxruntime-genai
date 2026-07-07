@@ -103,15 +103,23 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
         "such as the original gpt2 graph (past_%d/present_%d) are not supported in this release.");
 
-  // Sliding-window and LFM2 caches discard old K/V by design, so RewindTo throws.
-  // Speculative decoding rewinds on every rejection, so reject these up front (checked on both target and draft).
+  // Sliding-window (physical cache sliding) and LFM2 caches discard old state by design, so their
+  // RewindTo throws. Speculative decoding rewinds on every rejection, so reject these up front (on
+  // both target and draft).
+  //
+  // Scope note - only models whose window is realized by physically sliding the KV cache
+  // (sliding_window.slide_key_value_cache = true, which selects WindowedKeyValueCache) are affected.
+  // Models whose sliding window is enforced by the attention *mask* (slide_key_value_cache = false)
+  // use DefaultKeyValueCache, which rewinds, so they already work and are not rejected here.
   auto uses_sliding_kv = [](const Config::Model::Decoder& d) {
     return d.sliding_window.has_value() && d.sliding_window->slide_key_value_cache;
   };
   if (uses_sliding_kv(config_->model.decoder) || uses_sliding_kv(config_->model.draft))
     throw std::runtime_error(
-        "Speculative decoding does not support sliding-window KV cache models in this release; "
-        "rewind is impossible once the window slides.");
+        "Speculative decoding does not support models that physically slide the KV cache "
+        "(sliding_window.slide_key_value_cache=true) in this release: rewind is impossible once the "
+        "window slides. Models whose sliding window is enforced by the attention mask "
+        "(slide_key_value_cache=false) are supported.");
   if (!config_->model.decoder.layer_types.empty() || !config_->model.draft.layer_types.empty())
     throw std::runtime_error(
         "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "

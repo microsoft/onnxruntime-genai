@@ -797,7 +797,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
     draft_logits = spec_state->draft_state().Run(seed + p + 1, single, {});
   }
   auto dcpu = draft_logits.CopyDeviceToCpu();
-  spec_state->set_draft_pending_logits(std::vector<float>(dcpu.data(), dcpu.data() + vocab_size));
+  spec_state->assign_draft_pending_logits(dcpu.data(), static_cast<size_t>(vocab_size));
 
   // Target - keep the accepted tokens the verify already added, then feed the rest one at a time. If
   // none are left, step back one and re-run the last token (single-token pass).
