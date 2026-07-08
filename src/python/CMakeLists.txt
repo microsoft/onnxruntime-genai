@@ -29,6 +29,9 @@ if(NOT DEFINED REPO_ROOT)
   if(NOT DEFINED ORT_HOME)
     message(FATAL_ERROR "ORT_HOME must be set (-DORT_HOME=...) for a standalone python SDK build.")
   endif()
+  # Desktop ORT layout: headers under <ORT_HOME>/include and libs under
+  # <ORT_HOME>/lib. Android/iOS use different ORT package layouts (see
+  # cmake/ortlib.cmake) and are not yet supported by the standalone SDK build.
   set(ORT_HEADER_DIR ${ORT_HOME}/include)
   set(ORT_LIB_DIR ${ORT_HOME}/lib)
 

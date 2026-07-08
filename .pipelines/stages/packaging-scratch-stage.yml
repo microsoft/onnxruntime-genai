@@ -57,6 +57,25 @@ stages:
 
     - powershell: |
         $ErrorActionPreference = 'Stop'
+        $exePath = "$env:TEMP\rustup-init.exe"
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        & $exePath -y --default-toolchain=1.86.0
+        $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+        Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+      displayName: 'Install Rust toolchain (guidance)'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
+        $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
+        Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+        $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+        Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+      displayName: 'Install LLVM (guidance bindgen)'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
         Write-Host "Downloading ORT ${{ parameters.ort_version }} from Lotus feed"
         $zip = "$(Agent.TempDirectory)\ort.zip"
         Invoke-WebRequest -Uri "$(ortUrl)" -OutFile $zip
@@ -69,7 +88,7 @@ stages:
       displayName: 'Download ORT from Lotus feed'
 
     - script: |
-        python build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel --ort_home $(ortHome) --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF --build_dir build\core --install_dir $(coreInstall)
+        python build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel --use_guidance --ort_home $(ortHome) --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF --build_dir build\core --install_dir $(coreInstall)
       displayName: 'Build core (build.py) + install CMake package'
 
     - powershell: |
@@ -105,6 +124,9 @@ stages:
         $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)\build\pysdk" -Filter *.whl | Select-Object -First 1
         if (-not $whl) { Write-Error "ASSERT FAIL: no wheel produced"; exit 1 }
         Write-Host "Wheel: $($whl.FullName)"
+        # onnxruntime-genai imports the onnxruntime package at load time
+        # (see py/_dll_directory.py), so it must be installed before the import test.
+        python -m pip install onnxruntime
         python -m pip install --force-reinstall --no-deps $whl.FullName
         $expected = (Get-Content "$(Build.SourcesDirectory)\VERSION_INFO" -Raw).Trim()
         $actual = (python -c "import onnxruntime_genai as og; print(og.__version__)").Trim()
@@ -185,7 +207,9 @@ stages:
             $PY -m pip install pybind11 wheel requests
 
             # 1. Build core + install exported CMake package.
-            $PY build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel \
+            # The manylinux docker image already provides the Rust + LLVM
+            # toolchain that --use_guidance needs.
+            $PY build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel --use_guidance \
               --ort_home /ort_genai_src/ort_home \
               --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
               --build_dir build/core --install_dir /ort_genai_src/install
@@ -207,13 +231,20 @@ stages:
             echo "ASSERT OK: find_package(onnxruntime-genai) links the imported target"
 
             # 3. Build Python SDK incrementally against the prebuilt core.
+            # MANYLINUX=ON runs auditwheel repair to produce a manylinux tag
+            # (matches production); the Linux core loads ORT via dlopen, so the
+            # genai .so has no DT_NEEDED on libonnxruntime.so to resolve.
             $PY build.py --sdk python --config Release --parallel \
               --prebuilt_genai_home /ort_genai_src/install --ort_home /ort_genai_src/ort_home \
+              --cmake_extra_defines MANYLINUX=ON \
               --build_dir build/pysdk
 
             WHL=$(find /ort_genai_src/build/pysdk -name "*.whl" | head -n1)
             test -n "$WHL" || { echo "ASSERT FAIL: no wheel produced"; exit 1; }
             echo "Wheel: $WHL"
+            # onnxruntime-genai imports the onnxruntime package at load time
+            # (see py/_dll_directory.py), so install it before the import test.
+            $PY -m pip install onnxruntime
             $PY -m pip install --force-reinstall --no-deps "$WHL"
             EXPECTED=$(tr -d "[:space:]" < /ort_genai_src/VERSION_INFO)
             ACTUAL=$($PY -c "import onnxruntime_genai as og; print(og.__version__)" | tr -d "[:space:]")

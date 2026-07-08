@@ -558,6 +558,30 @@ def _get_windows_build_args(args: argparse.Namespace):
     return win_args
 
 
+def _get_vs_platform_args(args: argparse.Namespace) -> list[str]:
+    """
+    Return the Visual Studio generator platform (`-A`) arguments for the requested target
+    architecture.
+
+    Shared by the core, incremental SDK, and examples configure paths so that a
+    cross-compiled SDK targets the same architecture as the prebuilt core it links against.
+    Without this, a standalone SDK build (build.py --sdk ...) would silently default to the
+    host architecture and mismatch the prebuilt core.
+    """
+    platform_args: list[str] = []
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            platform_args += ["-A", "ARM64"]
+        elif args.arm64ec:
+            platform_args += ["-A", "ARM64EC"]
+        elif args.use_winml:
+            # WinML resolves its ONNX Runtime artifacts based on the generator
+            # platform (see cmake/ortlib.cmake). For a default x64 build the
+            # platform is otherwise left unset, so set it explicitly.
+            platform_args += ["-A", "x64"]
+    return platform_args
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -708,16 +732,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DMAC_CATALYST=1",
         ]
 
-    if args.cmake_generator.startswith("Visual Studio"):
-        if args.arm64:
-            command += ["-A", "ARM64"]
-        elif args.arm64ec:
-            command += ["-A", "ARM64EC"]
-        elif args.use_winml:
-            # WinML resolves its ONNX Runtime artifacts based on the generator
-            # platform (see cmake/ortlib.cmake). For a default x64 build the
-            # platform is otherwise left unset, so set it explicitly.
-            command += ["-A", "x64"]
+    command += _get_vs_platform_args(args)
 
     if args.arm64 or args.arm64ec:
         if args.test:
@@ -831,6 +846,9 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
         f"-Donnxruntime-genai_DIR={genai_cmake_dir}",
         f"-DORT_HOME={args.ort_home}",
     ]
+    # Target the same architecture as the prebuilt core (e.g. Windows ARM64 cross-compile),
+    # otherwise the SDK would configure for the host architecture and mismatch the core.
+    command += _get_vs_platform_args(args)
     if args.sdk == "python":
         command += [f"-DBUILD_WHEEL={'OFF' if args.skip_wheel else 'ON'}"]
     if args.sdk == "java":
@@ -972,11 +990,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         ]
     )
 
-    if args.cmake_generator.startswith("Visual Studio"):
-        if args.arm64:
-            cmake_command += ["-A", "ARM64"]
-        elif args.arm64ec:
-            cmake_command += ["-A", "ARM64EC"]
+    cmake_command += _get_vs_platform_args(args)
 
     if args.cmake_extra_defines != []:
         cmake_command += args.cmake_extra_defines

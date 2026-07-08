@@ -29,14 +29,22 @@ resources:
 trigger: none
 
 extends:
-  # Non-production scratch pipeline: use the 1ES Unofficial template for faster,
-  # lighter runs (no production signing/SDL injection required to validate the
-  # build machinery).
-  template: v1/1ES.Unofficial.PipelineTemplate.yml@1esPipelines
+  # Registered production pipeline (id 1385): the aiinfra org's 1ES drift
+  # management requires extending the *Official* template. The Unofficial
+  # template is rejected for this pipeline id.
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
     pool:
       name: 'onnxruntime-Win-CPU-2022'
       os: windows
+    sdl:
+      policheck:
+        enabled: true
+        break: true
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
       - template: stages/packaging-scratch-stage.yml
         parameters:
