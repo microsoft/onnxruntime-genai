@@ -246,7 +246,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGPU";
-    case DeviceType::QNN:
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
@@ -273,8 +274,9 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
 #endif
     case DeviceType::WEBGPU:
       return GetWebGPUInterface();
-    case DeviceType::QNN:
-      return GetQNNInterface();
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
+      return GetQNNInterface(type);
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
     case DeviceType::RyzenAI:

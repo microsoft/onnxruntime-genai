@@ -18,6 +18,9 @@ env:
 
 jobs:
   linux-cpu-arm64-build:
+    permissions:
+      contents: read
+      packages: write # needed for GHCR push
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -73,12 +76,14 @@ jobs:
       - name: Download Docker Image
         run: |
           set -e -x
-          az login --identity --object-id b44538a9-6545-4353-907e-da46df88a2ab
+          az login --identity --object-id 161bbca8-9899-4f61-950c-4d556fbcf830
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          docker login --username "$GITHUB_ACTOR" --password '${{ secrets.GITHUB_TOKEN }}' ghcr.io
+
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
+          --container-registry ghcr.io/microsoft/onnxruntime-genai \
           --repository ort_genai_linux_arm64_gha
 
       - name: Docker -- Configure with CMake and GCC
