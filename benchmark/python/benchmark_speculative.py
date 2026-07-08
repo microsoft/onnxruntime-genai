@@ -293,6 +293,24 @@ def resolve_model_arg(models_root: str, value: str, model_prefix: str,
 # Speculative config composition (target + draft -> one speculative config dir).
 # ---------------------------------------------------------------------------
 
+def _graph_capture_option(provider: str | None) -> str | None:
+    """The provider_options key that turns graph capture ON for this EP, or None.
+
+    Graph capture (CUDA graph on CUDA / TensorRT-RTX, capture on WebGPU) pins the KV cache to a
+    single shared past/present buffer. Speculative decoding rewinds the target KV on every
+    rejection, which is impossible under a shared buffer, so graph capture must be disabled for the
+    speculative phase. genai reads these exact keys in IsGraphCaptureEnabled (config.cpp).
+    """
+    if not provider:
+        return None
+    norm = provider.replace("ExecutionProvider", "").lower()
+    if norm in ("nvtensorrtrtx", "cuda"):
+        return "enable_cuda_graph"
+    if norm == "webgpu":
+        return "enableGraphCapture"
+    return None
+
+
 def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                       provider: str | None = None, device: str | None = None) -> str:
     """Splice already-resolved target + draft model dirs into one speculative config.
@@ -334,6 +352,8 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     # dropping them forces a fresh compile of the dynamic-shape ONNX, which the NPU compiler
     # rejects ("to_shape was called on a dynamic shape").
     if provider:
+        gc_key = _graph_capture_option(provider)
+
         def _merge_provider_options(block_name: str) -> None:
             session_options = cfg["model"][block_name].setdefault("session_options", {})
             po_list = session_options.setdefault("provider_options", [])
@@ -348,6 +368,12 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                 po_list.append({provider: entry})
             if device:
                 entry["device_filtering_options"] = {"hardware_device_type": device.upper()}
+            # Speculative rewind needs the shared KV buffer OFF, which is incompatible with graph
+            # capture. Disable it so the target can roll back rejected tokens; otherwise genai throws
+            # "Graph capture is not supported with past_present_share_buffer set to false" (or, if the
+            # buffer were forced on, rewind silently no-ops and acceptance collapses).
+            if gc_key:
+                entry[gc_key] = "0"
         _merge_provider_options("decoder")
         _merge_provider_options("draft")
         # Diagnostic: log the composed EP config for both blocks so a mismatch
@@ -446,6 +472,14 @@ def load_model(og, model_dir: str, provider: str | None, device: str | None):
     cfg = og.Config(model_dir)
     cfg.clear_providers()
     cfg.append_provider(provider)
+    # Graph capture (CUDA graph / WebGPU capture) requires a shared past/present KV buffer. The
+    # speculative phase must run with it OFF (rewind can't roll back a shared buffer), so disable it
+    # on the standard baseline too -- both phases then share one KV policy (apples-to-apples), and the
+    # baseline stops tripping genai's "Graph capture is not supported with past_present_share_buffer
+    # set to false" guard on dynamic-shape EPs (e.g. TensorRT-RTX ships enable_cuda_graph=1).
+    gc_key = _graph_capture_option(provider)
+    if gc_key:
+        cfg.set_provider_option(provider, gc_key, "0")
     if device:
         cfg.set_decoder_provider_options_hardware_device_type(provider, device.upper())
     return og.Model(cfg)
