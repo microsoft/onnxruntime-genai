@@ -357,7 +357,16 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
         def _merge_provider_options(block_name: str) -> None:
             session_options = cfg["model"][block_name].setdefault("session_options", {})
             po_list = session_options.setdefault("provider_options", [])
-            norm = lambda n: n.replace("ExecutionProvider", "")
+            # Match genai's NormalizeProviderName (config.cpp): lowercase, then strip the shared
+            # "executionprovider" suffix. A case-sensitive compare is NOT safe here -- genai's
+            # canonical stock key is e.g. "NvTensorRtRtx" while the CLI provider is
+            # "NvTensorRTRTXExecutionProvider"; a naive match misses the stock entry and appends a
+            # SECOND entry that normalizes to the same name at load time, so the EP is added twice
+            # ("Provider ... has already been registered"). Normalizing both sides updates the stock
+            # entry in place instead.
+            def norm(n: str) -> str:
+                n = n.lower()
+                return n[:-len("executionprovider")] if n.endswith("executionprovider") else n
             entry = None
             for item in po_list:
                 if item and norm(next(iter(item))) == norm(provider):
@@ -368,14 +377,21 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                 po_list.append({provider: entry})
             if device:
                 entry["device_filtering_options"] = {"hardware_device_type": device.upper()}
-            # Speculative rewind needs the shared KV buffer OFF, which is incompatible with graph
-            # capture. Disable it so the target can roll back rejected tokens; otherwise genai throws
-            # "Graph capture is not supported with past_present_share_buffer set to false" (or, if the
-            # buffer were forced on, rewind silently no-ops and acceptance collapses).
-            if gc_key:
-                entry[gc_key] = "0"
         _merge_provider_options("decoder")
         _merge_provider_options("draft")
+        # Speculative rewind needs the shared KV buffer OFF, which is incompatible with graph capture
+        # (genai throws "Graph capture is not supported with past_present_share_buffer set to false",
+        # or, if the buffer were forced on, rewind silently no-ops and acceptance collapses). Disable
+        # graph capture ROBUSTLY: zero the key on EVERY provider_options entry in both blocks. A
+        # case-sensitive name match is not reliable here -- the stock config key (e.g. "NvTensorRtRtx")
+        # can differ in casing from the CLI provider ("NvTensorRTRTXExecutionProvider"), so a targeted
+        # match could miss the stock entry and leave enable_cuda_graph=1 in place.
+        if gc_key:
+            for block_name in ("decoder", "draft"):
+                for item in cfg["model"][block_name].get("session_options", {}).get("provider_options", []):
+                    for opts in item.values():
+                        if isinstance(opts, dict):
+                            opts[gc_key] = "0"
         # Diagnostic: log the composed EP config for both blocks so a mismatch
         # (which the engine's identical-provider-options check rejects) is visible.
         print("decoder provider_options:",
