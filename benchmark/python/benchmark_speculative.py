@@ -3,82 +3,34 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""End-to-end benchmark for SPECULATIVE decoding in onnxruntime-genai.
+"""End-to-end benchmark for speculative decoding in onnxruntime-genai.
 
-Compares speculative decoding (big ``target`` decoder + small ``draft``) against
-standard decoding of the target alone, on identical prompts, and reports
-wall-clock decode throughput, speedup, and acceptance statistics.
+Compares speculative decoding (large ``target`` decoder + small ``draft``) against
+standard target-only decoding on identical prompts, reporting decode throughput,
+speedup, acceptance rate, and peak memory. Prompts are wrapped in the model's chat
+template so results reflect real generation, and total decode time over total new
+tokens is measured (not per-token latency, which is uneven across speculative rounds).
 
-This benchmark MIRRORS chat.py: every prompt is wrapped in the model's chat
-template (Qwen3 no-think mode) and decoded as a real assistant answer, so the
-acceptance/speedup numbers reflect genuine generation -- NOT the degenerate
-repetition loops the old length-padded prompts produced. (The previous version
-selected prompts by token length and *repeated* any prompt shorter than the
-requested length; that primed a repetition loop in which the small draft
-trivially matched the target's argmax, inflating greedy acceptance to a
-misleading ~100%.)
-
-Only TWO things are swept:
-  * mode -- greedy or sampling
-  * K    -- max_draft_tokens
-
-Everything else is fixed for reproducibility: a built-in set of real prompts, a
-fixed max-new-tokens budget, and a fixed sampling seed (so sampling runs
-reproduce -- unlike chat.py, which uses a random seed).
-
-Why a dedicated script (vs benchmark_e2e.py)? benchmark_e2e.py attributes one
-token to each ``generate_next_token()`` call and times calls individually. The
-speculative round structure makes per-call latency lumpy (one heavy propose+
-verify call followed by cheap drains), so the fair measure is total decode time
-over total NEW tokens. That is what this script measures.
-
-The speculative config is composed on the fly from each standalone model's own
-``genai_config.json`` (architecture), so ANY target/draft pair works (e.g.
-1.7b/0.6b now, 8b/1.7b later) without hand-maintaining a folder per pair.
-
-Prompts: the bundled Spec-Bench dataset (``question.jsonl``, 6 tasks x 80 prompts:
-mt_bench, translation, summarization, qa, math_reasoning, rag) is used BY DEFAULT --
-the whole dataset. We use each prompt's first turn only. Results are reported PER TASK
-(acceptance is domain-dependent) plus an overall geometric-mean speedup.
-``--limit-per-task N`` subsamples each task (round-robin across subcategories, so
-mt_bench stays representative across its 8 subcategories) to keep a run tractable on
-CPU. ``--builtin`` selects a tiny built-in smoke-test set instead.
+Two things are swept: ``--modes`` (greedy/sampling) and ``--k`` (max_draft_tokens).
+The speculative config is composed on the fly from each model's own
+``genai_config.json``, so any target/draft pair works. Prompts default to the bundled
+Spec-Bench dataset (``question.jsonl``); ``--limit-per-task`` subsamples it and
+``--builtin`` uses a small smoke-test set. Results are reported per task plus an
+overall geometric-mean speedup.
 
 Examples:
-    # Default: whole bundled Spec-Bench dataset (local flat layout:
-    # <models-root>/qwen3-8b/, qwen3-1.7b/). Use --limit-per-task to shrink it.
+    # Default local flat layout (<models-root>/qwen3-8b/, qwen3-1.7b/)
     python benchmark_speculative.py --target 8b --draft 1.7b --k 1,2,4,8 --limit-per-task 10
 
-    # Quick built-in smoke test (6 prompts, no dataset)
+    # Quick built-in smoke test (no dataset)
     python benchmark_speculative.py --target 8b --draft 1.7b --k 1,2,4,8 --builtin
 
-    # Explicit dataset + output prefix, greedy + sampling
-    python benchmark_speculative.py --target 8b --draft 1.7b \
-        --dataset question.jsonl --limit-per-task 10 \
-        --k 1,2,4,8 --modes greedy,sampling --reps 2 -o results/spec_8b_1.7b
+    # Foundry-Local layout + installed wheel on a specific EP
+    python benchmark_speculative.py --use-installed --models-root %ORTGENAI_MODEL_ROOT% \
+        --model-prefix "" --target qwen3-8b --draft qwen3-0.6b \
+        -e cuda --device-dir cuda --k 1,2,4,8 -o results/cuda/spec_qwen3-8b_qwen3-0.6b
 
-    # Foundry-Local layout + installed wheel (ep-cert style). Models resolve from
-    # <models-root>/<id>/onnx/<device-dir>/v<N>/, and the pip-installed
-    # onnxruntime-genai wheel is used (not a local build tree):
-    #   CPU:    -e cpu    --device-dir cpu_and_mobile
-    #   CUDA:   -e cuda   --device-dir cuda
-    #   WebGPU: -e webgpu --device-dir webgpu   (needs `pip install onnxruntime-ep-webgpu`)
-    #   NPU:    -e OpenVINOExecutionProvider --device npu --device-dir <fl-npu-dir> --use-winml
-    python benchmark_speculative.py --use-installed \
-        --models-root %ORTGENAI_MODEL_ROOT% --model-prefix "" \
-        --target qwen3-8b --draft qwen3-0.6b \
-        -e cuda --device-dir cuda --k 1,2,4,8 --modes greedy,sampling \
-        -o results/cuda/spec_qwen3-8b_qwen3-0.6b
-
-Peak memory (target-only vs target+draft) is sampled per phase and reported in the
-summary + as peak_gpu_mem_gib/peak_cpu_mem_gib columns (GPU via nvidia-smi on NVIDIA
-systems, else host RAM via psutil -- mirrors benchmark_e2e.py / benchmark_multimodal.py).
-
-Device/EP coverage note (Foundry-Local): the target+draft pair must both be present under the SAME
-onnx/<device-dir> for the chosen EP, and must share a vocab/tokenizer. Some EPs (e.g. NPU/DML)
-may not have both models published in the catalog; in that case model resolution fails fast (a
-FileNotFoundError naming the missing path) rather than silently running on CPU -- which is the
-intended "let unsupported devices fail" behavior for a cross-EP sweep.
+Run ``benchmark_speculative.py -h`` for the full list of options.
 """
 from __future__ import annotations
 
@@ -101,10 +53,8 @@ from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Peak-memory monitoring (mirrors benchmark_e2e.py / benchmark_multimodal.py):
-# poll nvidia-smi for GPU memory on NVIDIA systems, else psutil for host RAM.
-# Non-NVIDIA accelerators (DML/WebGPU/OpenVINO/QNN/VitisAI) have no portable
-# memory probe here, so those runs report host RAM only -- the same limitation
-# the other benchmark scripts carry.
+# nvidia-smi for GPU memory on NVIDIA systems, else psutil for host RAM. Other
+# accelerators (DML/WebGPU/OpenVINO/QNN/VitisAI) report host RAM only.
 # ---------------------------------------------------------------------------
 try:
     subprocess.run(["nvidia-smi"], check=True, capture_output=True)
@@ -116,10 +66,8 @@ except Exception:
 class PeakMemoryMonitor:
     """Background sampler of peak GPU (nvidia-smi) or host RAM (psutil), in GiB.
 
-    Used once per load+run phase so the target-only baseline footprint and the
-    target+draft speculative footprint are reported separately -- the extra
-    resident memory of holding two models is the headline cost of speculative
-    decoding, so it is exactly what a perf reviewer needs to see.
+    Used once per load+run phase so the target-only baseline and target+draft
+    speculative footprints are reported separately.
     """
 
     _warned_no_psutil = False
@@ -191,13 +139,10 @@ def _backfill_memory(rows, decoder, monitor):
 def _import_og(build_root: str, use_installed: bool = False):
     """Import onnxruntime_genai with the speculative API.
 
-    Default: prefer a freshly built extension in the local build tree (handy for
-    local dev, since an installed wheel may predate the speculative API), falling
-    back to the installed wheel when no build tree is present.
-
-    use_installed=True skips the build tree entirely and imports the pip-installed
-    wheel -- this is what ep-cert / CI should use so the package under test is the
-    one pulled from the ORT-Nightly feed, never a stale local build.
+    Default prefers a freshly built extension in the local build tree (an
+    installed wheel may predate the speculative API), falling back to the
+    installed wheel. use_installed=True skips the build tree and imports the
+    pip-installed wheel (for ep-cert/CI, so the feed package is what runs).
     """
     if not use_installed:
         pyd = os.path.join(build_root, "build", "Windows", "Release", "src", "python", "Release")
@@ -221,8 +166,7 @@ class _Tee:
     """Duplicate a text stream to several sinks (console + per-run .log file).
 
     Only Python-level writes are captured; native EP logs (e.g. OpenVINO) go to
-    the OS stderr and are not mirrored here, keeping the .log to the run's own
-    progress + summary (and any Python traceback).
+    OS stderr and are not mirrored here.
     """
 
     def __init__(self, *streams):
@@ -298,11 +242,10 @@ def default_fl_device_dir(provider: str | None) -> str | None:
 def resolve_model_dir(models_root: str, logical_id: str, device_dir: str | None) -> str:
     """Resolve a logical model id to an on-disk genai model directory.
 
-    Tries the Foundry-Local layout first when a device_dir is known
-    (``<root>/<id>/onnx/<device_dir>/v<N>/``, newest N, or that dir directly),
-    then falls back to the flat layout ``<root>/<id>/``. Raises with both
-    attempted paths if neither has a genai_config.json -- a loud, intended
-    failure for a device whose model isn't published (e.g. an unsupported EP).
+    Tries the Foundry-Local layout when a device_dir is known
+    (``<root>/<id>/onnx/<device_dir>/v<N>/``, newest N, or that dir), then the
+    flat layout ``<root>/<id>/``. Raises with both attempted paths if neither
+    has a genai_config.json.
     """
     attempted = []
     if device_dir:
@@ -325,15 +268,10 @@ def resolve_model_arg(models_root: str, value: str, model_prefix: str,
                       device_dir: str | None) -> str:
     """Resolve a --target/--draft value to an on-disk genai model directory.
 
-    Accepts either:
-      * a short KEY (e.g. ``8b``), resolved as ``model_prefix + key`` under
-        ``models_root`` via resolve_model_dir (Foundry-Local ``onnx/<device>/v<N>``
-        layout, then flat), or
-      * an explicit model DIRECTORY (absolute or relative). If it already holds a
-        genai_config.json it is used as-is; otherwise the newest ``v<N>`` subdir or
-        the first immediate subdir containing a genai_config.json is used. This is
-        the path ep-cert/CI passes: the Foundry cache dir
-        ``<cache>/Microsoft/<name>-<version>/<subdir>/`` resolved on the agent.
+    Accepts either a short KEY (e.g. ``8b``), resolved as ``model_prefix + key``
+    under ``models_root`` via resolve_model_dir, or an explicit model DIRECTORY:
+    used as-is if it holds a genai_config.json, else the newest ``v<N>`` subdir
+    or first immediate subdir that does (the path ep-cert/CI passes).
     """
     if os.path.isdir(value):
         if os.path.exists(os.path.join(value, "genai_config.json")):
@@ -359,12 +297,10 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                       provider: str | None = None, device: str | None = None) -> str:
     """Splice already-resolved target + draft model dirs into one speculative config.
 
-    ``target_path`` / ``draft_path`` are absolute genai model directories (each
-    holding a genai_config.json + its onnx weights), as returned by
-    resolve_model_dir. If ``provider`` is set, the same EP and optional ``device``
-    filter (cpu/gpu/npu) is written into BOTH the target (decoder) and draft
-    blocks -- speculative decoding requires identical EP config on both, and the
-    device filter pins e.g. OpenVINO to the GPU/NPU instead of its AUTO default.
+    ``target_path`` / ``draft_path`` are absolute genai model directories from
+    resolve_model_dir. If ``provider`` is set, the same EP and optional
+    ``device`` filter (cpu/gpu/npu) is written into BOTH the decoder and draft
+    blocks (speculative decoding requires identical EP config on both).
     """
     with open(os.path.join(target_path, "genai_config.json")) as f:
         cfg = json.load(f)
@@ -372,12 +308,10 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
         draft_cfg = json.load(f)
 
     cfg["model"]["type"] = "speculative"
-    # onnxruntime-genai resolves `filename` by concatenating it onto the config
-    # dir (it does NOT honor absolute paths), so express each model path as a
-    # path RELATIVE to the generated config dir. Read the actual onnx filename
-    # from each config (Foundry-Local models are not always named model.onnx).
-    # External weights (e.g. model.onnx.data) then load from alongside the
-    # resolved onnx file.
+    # onnxruntime-genai resolves `filename` relative to the config dir (absolute
+    # paths are not honored), so express each model path relative to out_dir. The
+    # onnx filename is read from each config (FL models aren't always model.onnx);
+    # external weights (e.g. model.onnx.data) load alongside it.
     out_abs = os.path.abspath(out_dir)
     tgt_onnx = os.path.abspath(os.path.join(target_path, cfg["model"]["decoder"]["filename"]))
     dft_onnx = os.path.abspath(os.path.join(draft_path, draft_cfg["model"]["decoder"]["filename"]))
@@ -388,25 +322,17 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     # `speculative` is a sibling of `model`/`search` (placement-sensitive parser).
     # K is overridden per-run via set_speculative_options, so this default is moot.
     cfg["speculative"] = {"max_draft_tokens": 4}
-    # past_present_share_buffer is INHERITED from the target's stock config (cfg started as a
-    # copy of the target genai_config), so the speculative decoder uses the exact same KV-buffer
-    # policy as the standalone baseline (both load the target's value) on every EP. Speculative
-    # decoding supports both settings: with the shared buffer (the qwen3 default, and the value
-    # REQUIRED by static-shape NPU/compiled EPs) RewindTo is a no-op and the target is re-anchored
-    # via the total_length passed to the next Run (the same mechanism CUDA uses), so rejected KV
-    # entries are overwritten on the following step; without it the cache is resized on each
-    # rejection. Inheriting (rather than overriding) mirrors benchmark_e2e.py / benchmark_multimodal
-    # / model_benchmark and keeps the baseline-vs-speculative comparison apples-to-apples.
+    # past_present_share_buffer is inherited from the target's stock config, so the
+    # speculative decoder uses the same KV-buffer policy as the standalone baseline
+    # (keeping the comparison apples-to-apples). The shared buffer is the qwen3
+    # default and is required by static-shape NPU/compiled EPs.
 
-    # Pin the execution provider on BOTH blocks (target decoder + draft). The engine
-    # requires target and draft to use the same EP. CRITICAL: preserve each block's
-    # STOCK provider_options and only MERGE the device filter in -- do NOT replace them.
-    # OpenVINO NPU (and other compiled backends) carry stock options such as device_type
-    # / cache_dir / load_config that point at a PRECOMPILED static-shape blob; dropping
-    # them forces a fresh compile of the raw ONNX, whose seq/batch dims are dynamic, and
-    # the NPU compiler aborts ("to_shape was called on a dynamic shape"). This mirrors
-    # the standalone baseline path (clear_providers clears only the provider *list*, not
-    # provider_options), which compiles + runs on the NPU.
+    # Pin the EP on BOTH blocks (decoder + draft); the engine requires them to match.
+    # Preserve each block's stock provider_options and only MERGE the device filter in --
+    # do NOT replace them: compiled backends (e.g. OpenVINO NPU) carry stock options
+    # (device_type/cache_dir/load_config) pointing at a precompiled static-shape blob, and
+    # dropping them forces a fresh compile of the dynamic-shape ONNX, which the NPU compiler
+    # rejects ("to_shape was called on a dynamic shape").
     if provider:
         def _merge_provider_options(block_name: str) -> None:
             session_options = cfg["model"][block_name].setdefault("session_options", {})
@@ -424,17 +350,15 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                 entry["device_filtering_options"] = {"hardware_device_type": device.upper()}
         _merge_provider_options("decoder")
         _merge_provider_options("draft")
-        # Diagnostic: show the composed EP config for both blocks so a mismatch
-        # (e.g. per-model cache_dir differing between target and draft, which the
-        # engine's identical-provider-options check rejects) is visible in the log.
+        # Diagnostic: log the composed EP config for both blocks so a mismatch
+        # (which the engine's identical-provider-options check rejects) is visible.
         print("decoder provider_options:",
               json.dumps(cfg["model"]["decoder"]["session_options"]["provider_options"]))
         print("draft provider_options:  ",
               json.dumps(cfg["model"]["draft"]["session_options"]["provider_options"]))
 
     # Recreate the output dir from scratch so support files (tokenizer, chat
-    # template, etc.) always match the current target. Reusing a stale dir from a
-    # previous target/draft pair would silently load the wrong tokenizer.
+    # template) always match the current target, not a stale previous pair.
     import shutil
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -456,9 +380,8 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
 # examples/python/common.py + winml.py).
 # ---------------------------------------------------------------------------
 
-# Plug-in EPs registered through the Windows ML catalog. All ship as MSIX EP
-# packages that the catalog enumerates + registers; requesting any of them sets
-# use_winml=True so register_execution_providers() takes the EpCatalog path.
+# Plug-in EPs registered through the Windows ML catalog. Requesting any of them
+# sets use_winml=True so register_execution_providers() takes the EpCatalog path.
 _WINML_PLUGIN_EPS = {
     "OpenVINOExecutionProvider",         # Intel (LNL): gpu=Arc, npu=AI Boost
     "VitisAIExecutionProvider",          # AMD (STX)
@@ -470,11 +393,9 @@ _WINML_PLUGIN_EPS = {
 def _maybe_register_webgpu(og) -> bool:
     """Register the onnxruntime-ep-webgpu plugin so append_provider("webgpu") works.
 
-    The base onnxruntime package doesn't ship a WebGPU EP; the plugin package
-    provides it as a separate shared library that must be registered with ORT
-    GenAI first. Mirrors test/python/integration/test_integration_text.py.
-    Returns True on success (or if already registered), False if the plugin
-    package is not installed.
+    The base onnxruntime package doesn't ship a WebGPU EP; the plugin provides it
+    as a separate shared library that must be registered first. Returns True on
+    success (or if already registered), False if the plugin isn't installed.
     """
     if getattr(_maybe_register_webgpu, "_done", False):
         return True
@@ -534,10 +455,8 @@ def load_model(og, model_dir: str, provider: str | None, device: str | None):
 # Prompts (mimic chat.py: real instructions, wrapped in the chat template).
 # ---------------------------------------------------------------------------
 
-# A fixed, reproducible set of real-world prompts. They are decoded as genuine
-# assistant answers (via the chat template), so they exercise normal-entropy
-# generation -- the regime where draft/target agreement is actually meaningful.
-# Edit this list to benchmark your own workload; results stay reproducible.
+# A fixed, reproducible set of real-world prompts, decoded as genuine assistant
+# answers via the chat template. Edit this list to benchmark your own workload.
 PROMPTS = [
     "How are astronauts launched into space quickly on those rockets?",
     "Today, we will learn how to bake a chocolate cake. First, you need to "
@@ -549,9 +468,8 @@ PROMPTS = [
     "Give me three practical tips for improving my sleep quality.",
 ]
 
-# Spec-Bench tasks whose outputs heavily overlap the prompt (the model echoes the
-# input), which structurally inflates acceptance. We still report them, but flag
-# them so they're never mistaken for general open-ended generation performance.
+# Spec-Bench tasks whose outputs heavily overlap the prompt, structurally inflating
+# acceptance. Still reported, but flagged so they're not mistaken for open-ended gen.
 INPUT_GUIDED_TASKS = {"translation", "summarization", "rag"}
 
 # The 8 MT-Bench subcategories collapse into a single "mt_bench" task.
@@ -573,14 +491,10 @@ def builtin_prompts(max_prompts=0):
 def _sample_across_subcategories(items, limit_per_task):
     """Take up to ``limit_per_task`` items, round-robin across subcategories.
 
-    ``mt_bench`` collapses 8 subcategories (writing, roleplay, reasoning, math,
-    coding, extraction, stem, humanities) that are stored as contiguous blocks in
-    question.jsonl, so a naive ``items[:N]`` would return N prompts from only the
-    FIRST subcategory -- an unrepresentative sample. Round-robin instead picks one
-    from each subcategory in turn, so e.g. ``--limit-per-task 8`` yields one prompt
-    per MT-Bench subcategory. Deterministic (no RNG) to keep runs reproducible.
-    Single-subcategory tasks (qa/rag/summarization/translation/math_reasoning)
-    reduce to ``items[:N]``.
+    ``mt_bench``'s 8 subcategories are stored as contiguous blocks, so a naive
+    ``items[:N]`` would sample only the FIRST. Round-robin picks one per
+    subcategory in turn (deterministic, no RNG). Single-subcategory tasks reduce
+    to ``items[:N]``.
     """
     if limit_per_task <= 0 or limit_per_task >= len(items):
         return items
@@ -607,20 +521,13 @@ def load_dataset_prompts(path, tasks=None, limit_per_task=0,
                          mt_bench_by_subcategory=False):
     """Load a Spec-Bench-style question.jsonl into prompt items.
 
-    Each line is {"question_id", "category", "turns": [...]}. We use turns[0]
-    ONLY (single-turn: turn 2 of MT-Bench says "your previous response", which is
-    meaningless without first generating turn 1 -- out of scope here). The 8
-    MT-Bench subcategories normally collapse into one "mt_bench" task. --tasks
-    filters to a subset; --limit-per-task takes the first N of each task so a full
-    480-prompt run stays tractable on CPU. Returns dicts: {task, question_id,
-    subcategory, text}.
+    Each line is {"question_id", "category", "turns": [...]}; we use turns[0]
+    only (single-turn). The 8 MT-Bench subcategories normally collapse into one
+    "mt_bench" task; --tasks filters to a subset and --limit-per-task caps each.
+    Returns dicts: {task, question_id, subcategory, text}.
 
-    mt_bench_by_subcategory=True gives a FULL per-category breakdown: every category
-    becomes its own task, so the 8 MT-Bench subcategories (writing, roleplay, reasoning,
-    math, coding, extraction, stem, humanities) are split out AND the 5 Spec-Bench tasks
-    (math_reasoning, qa, rag, summarization, translation) are kept -- 13 tasks total,
-    nothing collapsed or dropped. --limit-per-task N then yields N prompts per category
-    and the summary reports all 13 separately.
+    mt_bench_by_subcategory=True keeps every category as its own task instead
+    (8 MT-Bench subcategories + 5 Spec-Bench tasks = 13, nothing collapsed).
     """
     import collections
     buckets = collections.OrderedDict()
@@ -635,11 +542,7 @@ def load_dataset_prompts(path, tasks=None, limit_per_task=0,
                 continue
             category = r.get("category", "unknown")
             if mt_bench_by_subcategory:
-                # Per-category breakdown: every category becomes its own task, so the 8
-                # MT-Bench subcategories (writing, roleplay, ...) are split out AND the 5
-                # Spec-Bench tasks (math_reasoning, qa, rag, summarization, translation)
-                # are retained -- 13 tasks total. Nothing is collapsed or dropped.
-                task = category
+                task = category  # every category is its own task (no collapsing)
             else:
                 task = _task_of(category)
             if tasks and task not in tasks:
@@ -657,12 +560,11 @@ def load_dataset_prompts(path, tasks=None, limit_per_task=0,
 
 
 def encode_prompt(tokenizer, prompt, chat=True, think=False):
-    """Wrap a prompt exactly like chat.py and return its token ids.
+    """Wrap a prompt like chat.py and return its token ids.
 
-    chat=True applies the model's chat/instruct template (so the model answers
-    instead of doing raw text completion); think=False seeds an empty
-    ``<think></think>`` block to put Qwen3 in concise no-think mode. chat=False
-    falls back to raw text completion.
+    chat=True applies the model's chat template; think=False seeds an empty
+    ``<think></think>`` block for Qwen3 concise no-think mode. chat=False does
+    raw text completion.
     """
     if chat:
         msgs = json.dumps([{"role": "user", "content": prompt}])
@@ -683,16 +585,9 @@ def encode_prompt(tokenizer, prompt, chat=True, think=False):
 def run_once(og, model, ids, max_new, mode, speculative, K, seed):
     import numpy as np
     p = og.GeneratorParams(model)
-    # past_present_share_buffer is NOT overridden here -- we inherit whatever each model's
-    # genai_config specifies (True for the qwen3 models), exactly like benchmark_e2e.py /
-    # benchmark_multimodal.py / model_benchmark. Speculative decoding supports both settings
-    # (verified: identical output either way): with the shared buffer RewindTo is a no-op and the
-    # target is re-anchored via total_length (the CUDA/NPU mechanism); without it the cache is
-    # resized on each rejection. Inheriting keeps the baseline and speculative decoders on the SAME
-    # buffer policy, so the comparison is apples-to-apples and matches how each EP runs in production.
-    # min_length is left unset to mirror chat.py, so both decoders may stop early on EOS (the fair,
-    # realistic behavior). NOTE: min_length IS supported by speculative decoding; it is simply not
-    # pinned here to keep the comparison faithful to chat.py.
+    # past_present_share_buffer and min_length are inherited from each model's genai_config
+    # (not overridden), so baseline and speculative decoders share the same policy and both
+    # may stop early on EOS -- keeping the comparison apples-to-apples and faithful to chat.py.
     opts = dict(max_length=len(ids) + max_new)
     if mode == "sampling":
         # Same knobs as chat.py, but a FIXED seed so sampling runs reproduce.
@@ -893,8 +788,7 @@ def main():
         register_execution_providers(og, use_winml, args.ep_library_path, provider)
 
     # Resolve target + draft to on-disk dirs (Foundry-Local layout, flat fallback).
-    # A missing model here fails fast (naming the tried paths) -- the intended
-    # behavior when an EP's model isn't published for this device.
+    # A missing model fails fast, naming the tried paths.
     target_path = resolve_model_arg(args.models_root, args.target, args.model_prefix, device_dir)
     draft_path = resolve_model_arg(args.models_root, args.draft, args.model_prefix, device_dir)
     print(f"target={target_path}")
@@ -911,11 +805,8 @@ def main():
     json_path = out_prefix + ".json"
 
     def flush():
-        # Rewrites the full CSV+JSON after every completed config. Called
-        # incrementally in both phases so a mid-sweep failure (e.g. an
-        # unsupported EP that throws on model load) still leaves all completed
-        # metrics on disk for the CI artifact step, while the exception
-        # propagates and the process exits non-zero ("let unsupported fail").
+        # Rewrite the full CSV+JSON after every completed config, so a mid-sweep
+        # failure still leaves all completed metrics on disk for the CI artifact.
         with open(csv_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             w.writeheader()
@@ -929,9 +820,8 @@ def main():
     bench_t0 = time.time()
 
     # Two-phase design (memory-safe): run all STANDARD baselines with only the
-    # target loaded, free it, then load the speculative pair (target+draft) and
-    # run all speculative configs. Peak RAM = target+draft, not target*2+draft,
-    # which matters for the larger pairs (e.g. 8b target).
+    # target loaded, free it, then load the speculative pair and run all spec
+    # configs. Peak RAM = target+draft, not target*2+draft (matters for 8b).
     baselines = {}  # (mode, prompt_id) -> dict(dec, e2e, tail)
 
     # ---- Phase 1: standard baseline (target only) ----
@@ -1066,29 +956,21 @@ def main():
     _backfill_memory(rows, "speculative", mem_spec)
     flush()
     print(f"\nDone in {time.time()-bench_t0:.0f}s. Wrote {csv_path}, {json_path} and {log_path}")
-    print_summary(rows, modes, ks)
-
-    print("\n===== PEAK MEMORY (GiB) =====")
-    if IS_NVIDIA_SYSTEM:
-        print(f"  {'baseline (target only)':28} GPU {mem_baseline.peak_gpu_gib:6.2f}   "
-              f"host RAM {mem_baseline.peak_cpu_gib:6.2f}")
-        print(f"  {'speculative (target+draft)':28} GPU {mem_spec.peak_gpu_gib:6.2f}   "
-              f"host RAM {mem_spec.peak_cpu_gib:6.2f}")
-    else:
-        print(f"  {'baseline (target only)':28} host RAM {mem_baseline.peak_cpu_gib:6.2f}")
-        print(f"  {'speculative (target+draft)':28} host RAM {mem_spec.peak_cpu_gib:6.2f}")
-        print("  (no NVIDIA GPU detected; on DML/WebGPU/OpenVINO/QNN/VitisAI only host "
-              "RAM is sampled)")
+    print_summary(
+        rows, modes, ks,
+        run_ctx=dict(target=tgt_label, draft=dft_label, provider=provider_label,
+                     device=device_label, n_prompts=len(prompt_items),
+                     reps=args.reps, max_new=max_new),
+        mem_baseline=mem_baseline, mem_spec=mem_spec)
 
 
-def print_summary(rows, modes, ks):
-    """Per-task median (across prompts x reps) of speedup / acceptance /
-    mean-accepted-tokens, plus an overall geometric-mean speedup per (mode, K).
+def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=None):
+    """Interpretable summary: a headline BEST config, a speedup-by-K pivot per
+    mode (regressions flagged with '!'), and a best-K detail table.
 
-    Per-task reporting is mandatory for speculative decoding: acceptance is
-    entropy/domain-dependent, and input-guided tasks (translation/summarization/
-    rag) inflate it via prompt->output overlap. The headline number the field
-    reports is the GEOMETRIC MEAN of per-task speedups (Spec-Bench convention).
+    Speedup is the measured decode-throughput ratio vs the target-only baseline
+    (>1.0 = faster); the headline is the geometric mean of per-task speedups
+    (Spec-Bench convention). Full per-token metrics live in the CSV/JSON.
     """
     import math
 
@@ -1097,6 +979,9 @@ def print_summary(rows, modes, ks):
     for r in rows:
         if r["decoder"] == "speculative" and r["task"] not in tasks:
             tasks.append(r["task"])
+    if not tasks:
+        print("\n(no speculative rows to summarize)")
+        return
 
     def med_spec(mode, task, K, key):
         vals = [r[key] for r in rows
@@ -1110,44 +995,114 @@ def print_summary(rows, modes, ks):
                 and r["task"] == task and r["decode_tok_s"] != ""]
         return statistics.median(vals) if vals else None
 
-    print("\n===== SUMMARY: per-task median across prompts x reps "
-          "(mean_acc_tok = #Mean Accepted Tokens; dft/tgt_ms = draft/target ms per "
-          "proposed token; eff_sp = effective_speedup) =====")
+    def task_speedup(mode, task, K):
+        sp = med_spec(mode, task, K, "speedup_decode")
+        if sp is None:
+            std, spec = med_std(mode, task), med_spec(mode, task, K, "decode_tok_s")
+            sp = (spec / std) if (std and spec) else None
+        return sp
+
+    def geomean(vals):
+        vals = [v for v in vals if v is not None]
+        return math.exp(sum(math.log(max(v, 1e-9)) for v in vals) / len(vals)) if vals else None
+
+    def median_over_tasks(mode, K, key):
+        vals = [v for v in (med_spec(mode, t, K, key) for t in tasks) if v is not None]
+        return statistics.median(vals) if vals else 0.0
+
+    # Geomean speedup for every (mode, K), plus the winning K per mode.
+    geo = {(mode, K): geomean([task_speedup(mode, t, K) for t in tasks])
+           for mode in modes for K in ks}
+    best_k = {}
     for mode in modes:
-        print(f"\n#### mode = {mode} ####")
-        for K in ks:
-            print(f"\n  K={K}")
-            print(f"    {'task':16} {'std tok/s':>9} {'spec tok/s':>10} {'speedup':>8} "
-                  f"{'accept':>7} {'mean_acc_tok':>12} {'dft_ms':>7} {'tgt_ms':>7} "
-                  f"{'eff_sp':>7} {'match':>6}")
-            speedups = []
+        cand = [(K, geo[(mode, K)]) for K in ks if geo[(mode, K)] is not None]
+        best_k[mode] = max(cand, key=lambda kv: kv[1])[0] if cand else None
+
+    width = 78
+
+    # ---- run-context header ----
+    print("\n" + "=" * width)
+    print("SPECULATIVE DECODING SUMMARY".center(width))
+    print("=" * width)
+    if run_ctx:
+        ep = run_ctx["provider"] + (f"/{run_ctx['device']}" if run_ctx.get("device") else "")
+        print(f"target={run_ctx['target']}  draft={run_ctx['draft']}   EP={ep}   "
+              f"prompts={run_ctx['n_prompts']}  reps={run_ctx['reps']}  "
+              f"max_new={run_ctx['max_new']}")
+
+    # ---- headline BEST config (highest geomean speedup across all mode x K) ----
+    best = max((kv for kv in geo.items() if kv[1] is not None),
+               key=lambda kv: kv[1], default=None)
+    if best is not None:
+        (bmode, bK), bgeo = best
+        bacc = median_over_tasks(bmode, bK, "acceptance_rate")
+        bmat = median_over_tasks(bmode, bK, "mean_accepted_tokens")
+        if bgeo >= 1.0:
+            print(f"\n>> BEST: {bmode} K={bK}  ->  {bgeo:.2f}x faster decode   "
+                  f"(accept {bacc:.0%}, {bmat:.1f} tokens/round)")
+        else:
+            print(f"\n>> BEST: {bmode} K={bK}  ->  {bgeo:.2f}x  (speculative did NOT beat "
+                  f"baseline on average; accept {bacc:.0%})")
+
+    # ---- memory (baseline -> speculative, and the draft's added cost) ----
+    if mem_baseline is not None and mem_spec is not None:
+        if IS_NVIDIA_SYSTEM:
+            base_gib, spec_gib, unit = mem_baseline.peak_gpu_gib, mem_spec.peak_gpu_gib, "GiB GPU"
+        else:
+            base_gib, spec_gib, unit = mem_baseline.peak_cpu_gib, mem_spec.peak_cpu_gib, "GiB host RAM"
+        print(f">> Memory: {base_gib:.1f} -> {spec_gib:.1f} {unit}  "
+              f"(+{max(spec_gib - base_gib, 0.0):.1f} for the draft model)")
+
+    # ---- legend ----
+    print("\nLegend: speedup > 1.0 = speculative faster (higher is better); '!' = slower than baseline")
+    print("        accept   = % of drafted tokens the target accepted")
+    print("        mean_acc = avg tokens accepted per round (higher = fewer target calls)")
+    print("        match    = greedy output matches baseline (sanity, expect ~100%; '-' in sampling)")
+    print("        *        = input-guided task (prompt->output overlap inflates acceptance)")
+
+    def sp_cell(sp):
+        if sp is None:
+            return f"{'-':>7} "
+        return f"{sp:>7.2f}" + ("!" if sp < 1.0 else " ")
+
+    for mode in modes:
+        # ---- speedup-by-K pivot (one row per task, geomean at the bottom) ----
+        print(f"\n---- mode = {mode} : decode speedup (x) by K ----")
+        print(f"  {'task':16}" + "".join(f"{'K=' + str(K):>7} " for K in ks) + f"  {'best':>5}")
+        for task in tasks:
+            flag = "*" if task in INPUT_GUIDED_TASKS else ""
+            cells, bk, bsp = "", None, None
+            for K in ks:
+                sp = task_speedup(mode, task, K)
+                cells += sp_cell(sp)
+                if sp is not None and (bsp is None or sp > bsp):
+                    bsp, bk = sp, K
+            print(f"  {task + flag:16}{cells}  {('K=' + str(bk)) if bk else '-':>5}")
+        print(f"  {'-' * (16 + 8 * len(ks))}")
+        gcells = "".join(sp_cell(geo[(mode, K)]) for K in ks)
+        bestlbl = f"K={best_k[mode]}" if best_k[mode] else "-"
+        print(f"  {'GEOMEAN':16}{gcells}  {bestlbl:>5}")
+
+        # ---- detail at the winning K (acceptance / mean_acc / greedy match) ----
+        bK = best_k[mode]
+        if bK is not None:
+            print(f"\n  detail at best K={bK}:")
+            print(f"  {'task':16}{'std t/s':>9}{'spec t/s':>9}{'accept':>8}"
+                  f"{'mean_acc':>9}{'match':>7}")
             for task in tasks:
-                std = med_std(mode, task)
-                spec = med_spec(mode, task, K, "decode_tok_s")
+                std, spec = med_std(mode, task), med_spec(mode, task, bK, "decode_tok_s")
                 if std is None or spec is None:
                     continue
-                sp = med_spec(mode, task, K, "speedup_decode")
-                if sp is None:
-                    sp = spec / std if std else 0.0
-                acc = med_spec(mode, task, K, "acceptance_rate") or 0.0
-                mat = med_spec(mode, task, K, "mean_accepted_tokens") or 0.0
-                dft = med_spec(mode, task, K, "avg_draft_ms_per_token") or 0.0
-                tgt = med_spec(mode, task, K, "avg_target_ms_per_token") or 0.0
-                eff = med_spec(mode, task, K, "effective_speedup") or 0.0
-                gm = med_spec(mode, task, K, "greedy_match")
+                acc = med_spec(mode, task, bK, "acceptance_rate") or 0.0
+                mat = med_spec(mode, task, bK, "mean_accepted_tokens") or 0.0
+                gm = med_spec(mode, task, bK, "greedy_match")
                 matchs = f"{gm:.0%}" if gm not in (None, "") else "-"
                 flag = "*" if task in INPUT_GUIDED_TASKS else ""
-                speedups.append(sp)
-                print(f"    {task + flag:16} {std:>9.1f} {spec:>10.1f} "
-                      f"{'x' + format(sp, '.2f'):>8} {acc:>6.0%} {mat:>12.2f} "
-                      f"{dft:>7.2f} {tgt:>7.2f} {'x' + format(eff, '.2f'):>7} {matchs:>6}")
-            if speedups:
-                geo = math.exp(sum(math.log(max(s, 1e-9)) for s in speedups) / len(speedups))
-                print(f"    {'OVERALL geomean':16} {'':>9} {'':>10} "
-                      f"{'x' + format(geo, '.2f'):>8}")
-    print("\n  * input-guided task (prompt->output overlap inflates acceptance; "
-          "report separately)")
-    print("=" * 84)
+                print(f"  {task + flag:16}{std:>9.1f}{spec:>9.1f}{acc:>7.0%} "
+                      f"{mat:>9.2f}{matchs:>7}")
+
+    print("\nFull per-prompt metrics (per-token ms, effective_speedup, memory) are in the CSV/JSON.")
+    print("=" * width)
 
 
 if __name__ == "__main__":
