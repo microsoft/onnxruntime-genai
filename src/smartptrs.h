@@ -127,12 +127,24 @@ inline std::vector<const OrtEpDevice*> FindEpDevicesByName(OrtEnv& env, std::spa
 // §6/§11: The shared allocators an execution provider exposes on an OrtEnv, resolved (step 2) from a
 // device list produced by FindEpDevicesByName (step 1). "Availability" is decided by whether
 // Ort::GetSharedAllocator returns an allocator (not by whether EpDevice_MemoryInfo returns a
-// mem-info.
+// mem-info).
+//
+// Generic allocator policy — one model for every plugin EP:
+//   * device_allocator is the allocator genai uses for a DeviceBuffer's device memory. It is the
+//     EP's DEFAULT (device-local) shared allocator when it advertises one (e.g. CUDA, real WebGPU);
+//     otherwise it is the HOST_ACCESSIBLE shared allocator. EPs that do not allocate separate
+//     device memory (e.g. QNN's QnnHtpShared, OpenVINO) expose only CPU-accessible shared memory
+//     that serves as both device and host memory (a DeviceBuffer then has p_device_ == p_cpu_).
+//   * host_allocator is the EP's HOST_ACCESSIBLE (pinned / mappable) shared allocator, reported
+//     whenever the EP advertises one — independent of whether a DEFAULT allocator also exists. It
+//     is used for host-side staging (e.g. copying a CPU input into EP-visible memory). When the EP
+//     has no DEFAULT allocator, device_allocator is set to this same host-accessible allocator (so
+//     device == host) but host_allocator still reports it, so callers that specifically need
+//     host-accessible memory behave the same regardless of whether a DEFAULT allocator exists.
 struct EpSharedAllocators {
-  Ort::Allocator* device_allocator{};      // Shared allocator for device-local (DEFAULT) memory, or null.
+  Ort::Allocator* device_allocator{};      // Device-memory allocator: DEFAULT, or HOST_ACCESSIBLE when no DEFAULT exists.
   const OrtMemoryInfo* device_mem_info{};  // Its mem-info, or null.
-  Ort::Allocator* host_allocator{};        // Shared allocator for HOST_ACCESSIBLE memory, only when a
-                                           // matched device is non-CPU (§11 gate), else null.
+  Ort::Allocator* host_allocator{};        // HOST_ACCESSIBLE staging allocator, whenever the EP advertises one, else null.
   const OrtMemoryInfo* host_mem_info{};    // Its mem-info, or null.
 
   bool HasDeviceAllocator() const { return device_allocator != nullptr; }
@@ -167,6 +179,16 @@ inline EpSharedAllocators ResolveEpSharedAllocators(OrtEnv& env, std::span<const
         }
       }
     }
+  }
+
+  // Generic policy: if the EP advertises no DEFAULT device allocator, use its HOST_ACCESSIBLE
+  // allocator as the device allocator — device memory is host-accessible shared memory (QNN,
+  // OpenVINO). host_allocator is left populated so GetHostAccessibleAllocator() still returns it:
+  // code that specifically needs host-accessible memory (e.g. staging a CPU input for the EP)
+  // behaves the same whether or not the EP also advertised a DEFAULT allocator.
+  if (!result.device_allocator && result.host_allocator) {
+    result.device_allocator = result.host_allocator;
+    result.device_mem_info = result.host_mem_info;
   }
 
   return result;

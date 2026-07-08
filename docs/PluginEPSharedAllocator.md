@@ -206,13 +206,27 @@ stores the env passed at construction). Detection is a **two-step split**
   `GetEpDevices`, returning every matching `OrtEpDevice` (an EP name can appear
   on several entries, e.g. multi-GPU). Non-empty → plugin mode.
 - **Step 2 — `ResolveEpSharedAllocators(env, devices)`**: takes that device
-  list (independent of name filtering) and resolves the shared allocators,
-  returning an `EpSharedAllocators` — the device-local (`DEFAULT`) allocator and
-  the optional `HOST_ACCESSIBLE` allocator (only when a matched device is
-  non-CPU, §11), each with its mem-info, plus `HasDeviceAllocator()` /
-  `HasHostAccessibleAllocator()` predicates. "Availability" is decided by
-  whether `GetSharedAllocator` actually returns an allocator, **not** by whether
-  a mem-info is advertised.
+  list (independent of name filtering) and resolves the shared allocators into
+  an `EpSharedAllocators`, under a **generic allocator policy — one model for
+  every plugin EP**:
+  - `device_allocator` (the allocator genai uses for a `DeviceBuffer`'s device
+    memory) is the EP's `DEFAULT` (device-local) shared allocator when it
+    advertises one (CUDA, real WebGPU); **otherwise it is the
+    `HOST_ACCESSIBLE` allocator**. EPs that don't allocate separate device
+    memory (QNN's `QnnHtpShared`, OpenVINO) expose only CPU-accessible shared
+    memory that serves as both device and host (`p_device_ == p_cpu_`), so the
+    host-accessible allocator *is* the device allocator.
+  - `host_allocator` is the EP's `HOST_ACCESSIBLE` (pinned / mappable) shared
+    allocator, reported **whenever the EP advertises one** — independent of
+    whether a `DEFAULT` allocator also exists. When the EP has no `DEFAULT`,
+    `device_allocator` is set to this same host-accessible allocator (device ==
+    host), but `host_allocator` still reports it, so code that specifically
+    needs host-accessible memory (e.g. staging a CPU input for the EP) behaves
+    the same regardless of whether a `DEFAULT` allocator exists.
+
+  "Availability" is decided by whether `GetSharedAllocator` actually returns an
+  allocator, **not** by whether a mem-info is advertised; `HasDeviceAllocator()`
+  / `HasHostAccessibleAllocator()` reflect the resolved result.
 
 ```cpp
 // Step 1: name filter — presence == plugin EP. env is the interface's own.
@@ -222,12 +236,15 @@ std::vector<const OrtEpDevice*> FindMyEpDevices() {
 ```
 
 **WebGPU is the sole exception.** ORT registers a built-in ("internal") WebGPU
-plugin EP that creates an `OrtEpDevice` but provides **no** shared allocator,
-and genai must run that through the legacy trivial-session path rather than
-plugin mode. So WebGPU — and only WebGPU — additionally gates `FindMyEpDevices`
-on `HasDeviceAllocator()` (step 2), treating "device present but no device
-allocator" as legacy. Every other EP uses presence alone. (WebGPU has never
-been a provider-bridge EP.)
+plugin EP that creates an `OrtEpDevice` but advertises **no** shared allocator
+of any kind, so genai must run it through the legacy trivial-session path
+rather than plugin mode. So WebGPU — and only WebGPU — additionally gates
+`FindMyEpDevices` on `HasDeviceAllocator()` (step 2), treating "device present
+but no usable allocator" as legacy. Every other plugin EP uses presence alone:
+a real plugin EP advertises either a `DEFAULT` or a `HOST_ACCESSIBLE`
+allocator, and the generic policy above resolves either into a usable
+`device_allocator` — so QNN / OpenVINO-style host-accessible-only EPs need no
+special case. (WebGPU has never been a provider-bridge EP.)
 
 Consequences:
 
@@ -370,21 +387,27 @@ Once CUDA's provider-bridge path is retired, both `EnsureDeviceOrtInit` and
 
 ## 11. Host-accessible allocator
 
-The rule is EP-agnostic. On demand, genai looks for a `HOST_ACCESSIBLE`
-mem-info among the EP's matched devices (§6;
-`Ort::GetMemoryInfo(dev, OrtDeviceMemoryType_HOST_ACCESSIBLE)`, §4):
+`GetHostAccessibleAllocator()` returns the EP's `HOST_ACCESSIBLE` shared
+allocator whenever it advertises one — independent of whether a `DEFAULT`
+allocator also exists (§6):
 
-- **Found** → `GetHostAccessibleAllocator()` returns the env's shared
-  allocator for it, and genai uses that for host-side staging (`AllocateCpu`).
-- **Not found** → it returns `nullptr` and callers take the EP-agnostic
-  fallback: a plain host staging buffer with device↔CPU copies via
-  `OrtEnv::CopyTensors`.
+- **Present** (CUDA's `CUDAPinnedAllocator`) → genai uses it for host-side
+  staging ([`GpuMemory::AllocateCpu`](../src/cuda/interface.cpp#L46)).
+- **Absent** → `GetHostAccessibleAllocator()` returns `nullptr` and callers
+  take the EP-agnostic fallback: a plain host staging buffer with device↔CPU
+  copies via `OrtEnv::CopyTensors`.
 
-No per-EP special-casing. As examples: the CUDA plugin EP advertises a
-`HOST_ACCESSIBLE` allocator (`CUDAPinnedAllocator`, used for
-[`GpuMemory::AllocateCpu`](../src/cuda/interface.cpp#L46)); WebGPU advertises
-none and so takes the `CopyTensors` fallback. The calling code is identical
-either way.
+No per-EP special-casing. Cases, all handled by the one policy:
+
+- **CUDA** — `DEFAULT` device allocator + `HOST_ACCESSIBLE` pinned allocator;
+  `GetHostAccessibleAllocator()` returns the pinned one.
+- **WebGPU** (real plugin) — `DEFAULT` only; no host allocator, so device↔CPU
+  copies go through `CopyTensors`.
+- **QNN / OpenVINO** (host-accessible-only) — the `HOST_ACCESSIBLE`
+  (`QnnHtpShared`) allocator serves as **both** the device allocator (device ==
+  host, `p_device_ == p_cpu_`) **and** the host-accessible allocator, so
+  `GetHostAccessibleAllocator()` still returns it and CPU-input staging works
+  uniformly.
 
 ## 12. Per-EP impact (in scope)
 
@@ -469,17 +492,33 @@ All EPs are in scope (staged in §14). Per-EP specifics:
      `InitDmlInterface` is absorbed into `CreateDmlInterface`.
   5. Wire onto the §6 `GetEpDevices`-based shared-allocator path (same as
      WebGPU/CUDA).
-- **QNN.** Migrate to the shared-allocator path once exercised as a plugin EP.
-- **OpenVINO.** Investigated as a plugin EP and left on its original behavior:
-  the OpenVINO plugin EP exposes **no** shared allocator on the env
-  (`ResolveEpSharedAllocators(...).HasDeviceAllocator()` is false; its "device"
-  memory is host-accessible, and for stateful / `enable_causallm` models the KV
-  cache is managed inside the EP). So OpenVINO keeps delegating all allocation
-  to the CPU interface (`GetDeviceInterface(DeviceType::CPU)`) and is **not**
-  wired onto the §6 shared-allocator path. Only its lifecycle changed (Stage 0:
+- **QNN.** A natural fit for the generic host-accessible-as-device policy
+  (§6/§11): the QNN plugin EP advertises **no** `DEFAULT` allocator and only a
+  `HOST_ACCESSIBLE` allocator (`QnnHtpShared`), which the generic policy
+  promotes to the `device_allocator` (device == host, `p_device_ == p_cpu_`).
+  Two caveats when wiring it on: (1) that allocator is added via
+  `EpDevice_AddAllocatorInfo` at **session-creation** time and only when
+  `enable_htp_shared_memory_allocator=1`, so it is not present the instant the
+  library is registered; and (2) it can only be hardware-validated on a QNN
+  device. So the interface work (`FindMyEpDevices` returning
+  `QNNExecutionProvider` devices, on-demand fetch of the promoted allocator)
+  is compile-verifiable here but is staged for QNN-hardware validation.
+- **OpenVINO.** Investigated as a plugin EP and currently left on its original
+  behavior: at the time of investigation the OpenVINO plugin EP exposed **no**
+  usable shared allocator on the env
+  (`ResolveEpSharedAllocators(...).HasDeviceAllocator()` was false), and for
+  stateful / `enable_causallm` models the KV cache is managed inside the EP. So
+  OpenVINO keeps delegating all allocation to the CPU interface
+  (`GetDeviceInterface(DeviceType::CPU)`) and is **not** wired onto the §6
+  shared-allocator path. Only its lifecycle changed (Stage 0:
   `CreateOpenVINOInterface`, owned by `OrtGlobals`). `FindMyEpDevices` stays at
   the default (empty), so `EnsureDeviceOrtInit` early-returns for OpenVINO
   exactly as before, and `InitOrt` remains `assert(false)` (never called).
+  Under the generic policy (§6), if a future OpenVINO build advertises a
+  `HOST_ACCESSIBLE` shared allocator it would automatically resolve to a
+  usable `device_allocator` (host == device), so migrating OpenVINO onto the
+  shared-allocator path is then just enabling `FindMyEpDevices` — worth
+  re-checking on OpenVINO hardware.
 - **RyzenAI.** `GetRyzenAIInterface()` has been removed (Stage 0 cleanup —
   callers now use `GetDeviceInterface(DeviceType::RyzenAI)`).
   The DLL-path probe that used `GetRyzenAIInterface` as a module-address
