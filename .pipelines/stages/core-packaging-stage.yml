@@ -98,45 +98,46 @@ stages:
         ort_version: ${{ parameters.ort_version }}
 
 # ---------------------------------------------------------------------------
-# Core · CUDA
+# Core · CUDA  (only included when at least one CUDA cell is enabled)
 # ---------------------------------------------------------------------------
-- stage: core_cuda
-  displayName: 'Core · CUDA'
-  jobs:
+- ${{ if or(eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true), eq(parameters.enable_linux_x64_cuda, true)) }}:
+  - stage: core_cuda
+    displayName: 'Core · CUDA'
+    jobs:
 
-  - ${{ if eq(parameters.enable_win_x64_cuda, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: win
-        arch: x64
-        ep: cuda
-        # Use the CUDA-specific ORT version if provided, otherwise fall back to ort_version.
-        ${{ if ne(parameters.ort_cuda_version, '') }}:
-          ort_version: ${{ parameters.ort_cuda_version }}
-        ${{ else }}:
-          ort_version: ${{ parameters.ort_version }}
-        cuda_version: ${{ parameters.cuda_version }}
+    - ${{ if eq(parameters.enable_win_x64_cuda, true) }}:
+      - template: jobs/core-build-job.yml
+        parameters:
+          os: win
+          arch: x64
+          ep: cuda
+          # Use the CUDA-specific ORT version if provided, otherwise fall back to ort_version.
+          ${{ if ne(parameters.ort_cuda_version, '') }}:
+            ort_version: ${{ parameters.ort_cuda_version }}
+          ${{ else }}:
+            ort_version: ${{ parameters.ort_version }}
+          cuda_version: ${{ parameters.cuda_version }}
 
-  - ${{ if eq(parameters.enable_win_arm64_cuda, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: win
-        arch: arm64
-        ep: cuda
-        ${{ if ne(parameters.ort_cuda_version, '') }}:
-          ort_version: ${{ parameters.ort_cuda_version }}
-        ${{ else }}:
-          ort_version: ${{ parameters.ort_version }}
-        cuda_version: ${{ parameters.cuda_version }}
+    - ${{ if eq(parameters.enable_win_arm64_cuda, true) }}:
+      - template: jobs/core-build-job.yml
+        parameters:
+          os: win
+          arch: arm64
+          ep: cuda
+          ${{ if ne(parameters.ort_cuda_version, '') }}:
+            ort_version: ${{ parameters.ort_cuda_version }}
+          ${{ else }}:
+            ort_version: ${{ parameters.ort_version }}
+          cuda_version: ${{ parameters.cuda_version }}
 
-  - ${{ if eq(parameters.enable_linux_x64_cuda, true) }}:
-    - template: jobs/core-build-job.yml
-      parameters:
-        os: linux
-        arch: x64
-        ep: cuda
-        ${{ if ne(parameters.ort_cuda_version, '') }}:
-          ort_version: ${{ parameters.ort_cuda_version }}
-        ${{ else }}:
-          ort_version: ${{ parameters.ort_version }}
-        cuda_version: ${{ parameters.cuda_version }}
+    - ${{ if eq(parameters.enable_linux_x64_cuda, true) }}:
+      - template: jobs/core-build-job.yml
+        parameters:
+          os: linux
+          arch: x64
+          ep: cuda
+          ${{ if ne(parameters.ort_cuda_version, '') }}:
+            ort_version: ${{ parameters.ort_cuda_version }}
+          ${{ else }}:
+            ort_version: ${{ parameters.ort_version }}
+          cuda_version: ${{ parameters.cuda_version }}
