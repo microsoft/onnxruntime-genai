@@ -37,6 +37,10 @@ if(NOT DEFINED REPO_ROOT)
 
   include(${REPO_ROOT}/cmake/target_platform.cmake)
 
+  # Apply the same MSVC security hardening as the top-level CMakeLists.txt so
+  # standalone SDK builds match the security posture of an in-tree build.
+  include(${REPO_ROOT}/cmake/msvc_security.cmake)
+
   if(WIN32)
     set(ONNXRUNTIME_LIB "onnxruntime.dll")
   elseif(APPLE)
@@ -104,9 +108,11 @@ endif()
 
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_link_options(python PRIVATE "/CETCOMPAT")
-  target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
+if(MSVC)
+  # /sdl: enables additional SDL security checks (e.g. buffer overread detection).
+  # The global hardening flags (/GS /guard:cf /DYNAMICBASE /CETCOMPAT /Qspectre)
+  # are already applied project-wide by cmake/msvc_security.cmake above.
+  target_compile_options(python PRIVATE "/sdl")
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})

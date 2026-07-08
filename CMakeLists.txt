@@ -26,40 +26,10 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # Add compiler options for security standards
-  # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
-
-  # Explicitly enable (/GS) stack protection to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/GS>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/GS>")
-
-  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/guard:cf>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
-  add_link_options(/guard:cf /DYNAMICBASE)
-
-  # Determine the target platform (from MSBuild generator)
-  if (CMAKE_VS_PLATFORM_NAME)
-    set(onnxruntime_target_platform ${CMAKE_VS_PLATFORM_NAME})
-  else()
-    set(onnxruntime_target_platform ${CMAKE_SYSTEM_PROCESSOR})
-  endif()
-
-  # Enable CET shadow stack unless building for ARM64 (not supported there)
-  if (onnxruntime_target_platform STREQUAL "x64" OR
-      onnxruntime_target_platform STREQUAL "Win32" OR
-      onnxruntime_target_platform STREQUAL "x86")
-    add_link_options("/CETCOMPAT")
-    message(STATUS "CET shadow stack enabled (/CETCOMPAT).")
-  else()
-    message(STATUS "CET shadow stack skipped.")
-  endif()
-
-  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
-  add_compile_options(
-    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
-  )
+  # BinSkim-required security flags: /GS, /guard:cf, /DYNAMICBASE, /CETCOMPAT, /Qspectre.
+  # Factored into a shared module so standalone SDK sub-projects (src/python, src/java)
+  # can include the same flags without rebuilding the full core.
+  include(cmake/msvc_security.cmake)
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support

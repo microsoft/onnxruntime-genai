@@ -1,23 +1,27 @@
 # =============================================================================
-# TEMPORARY: Packaging pipeline scratch entry point (Phase 0 pipeline check).
+# TEMPORARY: Packaging pipeline scratch entry point (Phase 1 pipeline check).
 #
 # This file normally hosts the nuget-publishing pipeline. It has been
 # repurposed to drive the packaging redesign's scratch validation pipeline so
-# the incremental core + SDK machinery can be exercised on real 1ES pool agents
-# without registering a new pipeline in ADO. The original nuget-publishing
+# the reusable core-packaging-stage templates can be exercised on real 1ES pool
+# agents without registering a new pipeline. The original nuget-publishing
 # content is preserved in git history and will be superseded by the unified
 # packaging pipeline in Phase 5.
 #
-# Reduced matrix: win-x64 (CPU) + linux-x64 (CPU). It builds the core once,
-# installs the exported find_package(onnxruntime-genai) package, links a probe
-# consumer against it, then builds the Python SDK incrementally and asserts the
-# wheel imports. See .pipelines/stages/packaging-scratch-stage.yml.
+# Phase 1 reduced matrix: win-x64 CPU + linux-x64 CPU.
+# Validation: core build + CPack archive + CMake package installed correctly.
+# See .pipelines/stages/packaging-scratch-stage.yml.
 # =============================================================================
 parameters:
   - name: ort_version
     displayName: 'ORT version (downloaded from the Lotus feed)'
     type: string
     default: '1.26.0'
+
+  - name: cuda_version
+    displayName: 'CUDA version (13.1 or 12.8)'
+    type: string
+    default: '13.1'
 
 resources:
   repositories:
@@ -49,3 +53,4 @@ extends:
       - template: stages/packaging-scratch-stage.yml
         parameters:
           ort_version: ${{ parameters.ort_version }}
+          cuda_version: ${{ parameters.cuda_version }}

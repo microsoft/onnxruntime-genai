@@ -1,0 +1,210 @@
+# =============================================================================
+# core-win-step.yml — Windows core build step template (Phase 1).
+#
+# Builds onnxruntime-genai core using build.py on a Windows agent, installs
+# the exported find_package CMake package, runs CPack to produce a zip archive,
+# asserts both artifacts, and publishes two pipeline artifacts:
+#   $(artifactName)-cmake-pkg  — CMake package (SDK handoff)
+#   $(artifactName)-archive    — CPack zip (distribution)
+#
+# Job-level variables expected from the parent job:
+#   ortHome       - path where ORT headers+libs are unpacked
+#   coreInstall   - cmake --install prefix (exported CMake package)
+#   buildDir      - build.py --build_dir (relative, e.g. build/core)
+#   artifactName  - artifact name prefix (e.g. core-win-x64-cpu)
+# =============================================================================
+
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+
+steps:
+
+# --- Python -----------------------------------------------------------------
+- script: |
+    MKDIR "$(Agent.ToolsDirectory)\Python\3.11.0\arm64"
+    XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" "$(Agent.ToolsDirectory)\Python\3.11.0\arm64\"
+    COPY NUL "$(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete"
+  displayName: 'Install Python 3.11 (arm64 agent)'
+  condition: eq('${{ parameters.arch }}', 'arm64')
+
+- task: UsePythonVersion@0
+  displayName: 'Use Python 3.11 (${{ parameters.arch }})'
+  condition: ne('${{ parameters.arch }}', 'arm64')
+  inputs:
+    versionSpec: '3.11'
+    addToPath: true
+    architecture: '${{ parameters.arch }}'
+
+- script: python -m pip install requests wheel
+  displayName: 'Install build-time Python deps'
+
+# --- Rust (required by --use_guidance) -------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $exePath = "$env:TEMP\rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile(
+      'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.86.0
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    rustc --version
+  displayName: 'Install Rust toolchain'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- LLVM (arm64 only — needed by guidance bindgen) ------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $llvmUrl = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe'
+    $installer = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installer
+    Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+    $llvmBin = 'C:\Program Files\LLVM\bin'
+    if (-not (Test-Path $llvmBin)) { Write-Error 'LLVM install failed'; exit 1 }
+    $env:PATH = "$llvmBin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    clang --version
+  displayName: 'Install LLVM 18 (arm64 guidance bindgen)'
+  condition: eq('${{ parameters.arch }}', 'arm64')
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- CUDA SDK (CUDA EP only) ------------------------------------------------
+- powershell: |
+    azcopy.exe cp --recursive `
+      "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" `
+      'cuda_sdk'
+  displayName: 'Download CUDA ${{ parameters.cuda_version }} SDK (x64)'
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.arch }}', 'x64'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: AzureCLI@2
+  displayName: 'Download CUDA ${{ parameters.cuda_version }} SDK (arm64)'
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.arch }}', 'arm64'))
+  inputs:
+    azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+    scriptType: batch
+    scriptLocation: inlineScript
+    inlineScript: |
+      set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+      azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v${{ parameters.cuda_version }}" "cuda_sdk"
+
+# --- ORT download from Lotus feed ------------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    # CUDA x64 uses the GPU ORT package; CPU and CUDA arm64 use the CPU package
+    # (arm64 CUDA is linked against CPU ORT headers — same as the existing pipeline).
+    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
+      $pkgName = 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
+    } else {
+      $pkgName = 'Microsoft.ML.OnnxRuntime'
+    }
+    $orgName  = 'aiinfra'
+    $projId   = '2692857e-05ef-43b4-ba9c-ccf1c22c437c'
+    $feedId   = '7982ae20-ed19-4a35-a362-a96ac99897b7'
+    $url = "https://pkgs.dev.azure.com/$orgName/$projId/_apis/packaging/feeds/$feedId/nuget/packages/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    Write-Host "Downloading $pkgName ${{ parameters.ort_version }} from Lotus"
+    $zip = "$(Agent.TempDirectory)\ort.zip"
+    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop
+    Expand-Archive -Path $zip -DestinationPath "$(Agent.TempDirectory)\ort_extracted" -Force
+    New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
+    # CUDA x64 headers live under buildTransitive; CPU (and CUDA arm64) under build
+    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
+      $hdrSrc = 'buildTransitive\native\include'
+    } else {
+      $hdrSrc = 'build\native\include'
+    }
+    $platform = 'win-${{ parameters.arch }}'
+    Copy-Item "$(Agent.TempDirectory)\ort_extracted\$hdrSrc\*" "$(ortHome)\include\" -Recurse -Force
+    Copy-Item "$(Agent.TempDirectory)\ort_extracted\runtimes\$platform\native\*" "$(ortHome)\lib\" -Recurse -Force
+    Write-Host 'ORT layout:'; Get-ChildItem '$(ortHome)' -Recurse | Select-Object -ExpandProperty FullName
+  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Build core + CPack archive + install CMake package --------------------
+# build.py stages: configure → build → package (CPack) → install (--install_dir).
+# A single call avoids re-running cmake configure on separate CPack/install steps.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $args = @(
+      'build.py',
+      '--config', '${{ parameters.build_config }}',
+      '--parallel',
+      '--skip_tests',
+      '--skip_examples',
+      '--use_guidance',
+      '--ort_home', '$(ortHome)',
+      '--cmake_extra_defines', 'ENABLE_PYTHON=OFF', 'ENABLE_TESTS=OFF',
+      '--build_dir', '$(buildDir)',
+      '--install_dir', '$(coreInstall)',
+      '--package'
+    )
+    if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
+    if ('${{ parameters.ep }}' -eq 'cuda') {
+      $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk\v${{ parameters.cuda_version }}"
+      $args += '--use_cuda', '--cuda_home', $cudaHome
+      if ('${{ parameters.cuda_version }}' -like '13.*') {
+        $cudaArchs = '75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual'
+      } else {
+        $cudaArchs = '60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120'
+      }
+      $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
+    }
+    Write-Host "Running: python $($args -join ' ')"
+    & python @args
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  displayName: 'Build core (build.py)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Assert: CMake package installed ----------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $req = @(
+      '$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genaiConfig.cmake',
+      '$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genaiConfigVersion.cmake',
+      '$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genai-targets.cmake',
+      '$(coreInstall)\include\ort_genai_c.h',
+      '$(coreInstall)\include\ort_genai.h',
+      '$(coreInstall)\lib\onnxruntime-genai.dll'
+    )
+    foreach ($f in $req) {
+      if (-not (Test-Path $f)) { Write-Error "ASSERT FAIL: missing $f"; exit 1 }
+    }
+    Write-Host "ASSERT OK: CMake package installed at $(coreInstall)"
+  displayName: 'Assert: CMake package installed'
+
+# --- Assert: CPack archive produced -----------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $pkgDir = '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\package'
+    $zips = Get-ChildItem -Path $pkgDir -Filter '*.zip' -ErrorAction SilentlyContinue
+    if (-not $zips) {
+      Write-Error "ASSERT FAIL: no CPack .zip found in $pkgDir"; exit 1
+    }
+    Write-Host "ASSERT OK: CPack archive: $($zips[0].FullName)"
+    Write-Host "Contents:"; $zips | ForEach-Object { Write-Host "  $_" }
+  displayName: 'Assert: CPack archive produced'
+
+# --- Publish artifacts -------------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish core CMake package ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)-cmake-pkg'
+    targetPath: '$(coreInstall)'
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish core archive ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)-archive'
+    targetPath: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\package'

@@ -28,6 +28,9 @@ if(NOT DEFINED REPO_ROOT)
 
   include(${REPO_ROOT}/cmake/target_platform.cmake)
 
+  # Apply the same MSVC security hardening as the top-level CMakeLists.txt.
+  include(${REPO_ROOT}/cmake/msvc_security.cmake)
+
   if(NOT TARGET onnxruntime-genai)
     add_library(onnxruntime-genai ALIAS onnxruntime-genai::onnxruntime-genai)
   endif()
@@ -110,6 +113,12 @@ file(GLOB genai4j_native_src
 add_library(onnxruntime-genai-jni SHARED ${genai4j_native_src})
 set_property(TARGET onnxruntime-genai-jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai-jni onnxruntime-genai4j)
+if(MSVC)
+  # /sdl: additional SDL security checks for the JNI native library.
+  # Global hardening (/GS /guard:cf /DYNAMICBASE /CETCOMPAT /Qspectre) is applied
+  # project-wide by cmake/msvc_security.cmake.
+  target_compile_options(onnxruntime-genai-jni PRIVATE "/sdl")
+endif()
 # the JNI headers are generated in the genai4j target
 target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
                                                            ${JAVA_SRC_ROOT}/build/headers
