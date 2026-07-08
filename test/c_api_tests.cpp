@@ -1537,7 +1537,7 @@ TEST(CAPITests, RewindQwen25CAPI) {
 // Streaming ASR models exercised by the StreamingASR* tests below, each paired
 // with its chunk size (samples per Process() call).
 struct StreamingASRModel {
-  const char* subdir;
+  std::string subdir;
   size_t chunk_samples;
 };
 
