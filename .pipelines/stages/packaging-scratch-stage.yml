@@ -1,0 +1,237 @@
+# =============================================================================
+# Packaging scratch stage (Phase 0 pipeline check)
+#
+# Proves the incremental packaging machinery on real 1ES pool agents:
+#   1. Build the core once with build.py and install the exported
+#      find_package(onnxruntime-genai) CMake package.
+#   2. Configure + link a probe consumer against the imported target.
+#   3. Build the Python SDK *incrementally* against the prebuilt core
+#      (the core is NOT recompiled), then import the wheel and assert its
+#      version.
+#
+# This is a temporary validation stage. It is wired in via the repurposed
+# nuget-publishing.yml entry point and uses the existing agent pools. It will be
+# folded into the unified packaging pipeline and deleted in Phase 5.
+# =============================================================================
+parameters:
+- name: ort_version
+  type: string
+
+stages:
+- stage: packaging_scratch
+  displayName: 'Scratch · Incremental core + Python SDK'
+  jobs:
+
+  # ---------------------------------------------------------------------------
+  # Windows x64 (CPU)
+  # ---------------------------------------------------------------------------
+  - job: scratch_win_x64
+    displayName: 'win-x64 · CPU · core + python'
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+    timeoutInMinutes: 120
+    variables:
+    - name: ortHome
+      value: '$(Build.SourcesDirectory)\ort_home'
+    - name: coreInstall
+      value: '$(Build.SourcesDirectory)\install'
+    - name: ortUrl
+      value: 'https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/Microsoft.ML.OnnxRuntime/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1'
+    workspace:
+      clean: all
+    steps:
+    - checkout: self
+      submodules: recursive
+      lfs: true
+
+    - task: UsePythonVersion@0
+      displayName: 'Use Python 3.11 (x64)'
+      inputs:
+        versionSpec: '3.11'
+        addToPath: true
+        architecture: 'x64'
+
+    - script: python -m pip install pybind11 wheel requests
+      displayName: 'Install build-time Python deps'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        Write-Host "Downloading ORT ${{ parameters.ort_version }} from Lotus feed"
+        $zip = "$(Agent.TempDirectory)\ort.zip"
+        Invoke-WebRequest -Uri "$(ortUrl)" -OutFile $zip
+        $ex = "$(Agent.TempDirectory)\ort_extracted"
+        Expand-Archive -Path $zip -DestinationPath $ex -Force
+        New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
+        Copy-Item "$ex\build\native\include\*" "$(ortHome)\include\" -Recurse -Force
+        Copy-Item "$ex\runtimes\win-x64\native\*" "$(ortHome)\lib\" -Recurse -Force
+        Get-ChildItem "$(ortHome)" -Recurse | Select-Object -ExpandProperty FullName
+      displayName: 'Download ORT from Lotus feed'
+
+    - script: |
+        python build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel --ort_home $(ortHome) --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF --build_dir build\core --install_dir $(coreInstall)
+      displayName: 'Build core (build.py) + install CMake package'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $req = @(
+          "$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genaiConfig.cmake",
+          "$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genaiConfigVersion.cmake",
+          "$(coreInstall)\lib\cmake\onnxruntime-genai\onnxruntime-genai-targets.cmake",
+          "$(coreInstall)\include\ort_genai_c.h",
+          "$(coreInstall)\lib\onnxruntime-genai.dll"
+        )
+        foreach ($f in $req) { if (-not (Test-Path $f)) { Write-Error "ASSERT FAIL: missing $f"; exit 1 } }
+        Write-Host "ASSERT OK: exported CMake package installed"
+      displayName: 'Assert core CMake package installed'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $build = "$(Agent.TempDirectory)\probe-build"
+        cmake -S "$(Build.SourcesDirectory)\.pipelines\scratch\genai_probe" -B $build -Donnxruntime-genai_DIR="$(coreInstall)\lib\cmake\onnxruntime-genai"
+        if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe configure failed"; exit 1 }
+        cmake --build $build --config Release
+        if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe build failed"; exit 1 }
+        if (-not (Test-Path "$build\Release\genai_probe.exe")) { Write-Error "ASSERT FAIL: probe exe missing"; exit 1 }
+        Write-Host "ASSERT OK: find_package(onnxruntime-genai) links the imported target"
+      displayName: 'Probe: find_package links imported target'
+
+    - script: |
+        python build.py --sdk python --config Release --parallel --prebuilt_genai_home $(coreInstall) --ort_home $(ortHome) --build_dir build\pysdk
+      displayName: 'Build Python SDK (incremental)'
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)\build\pysdk" -Filter *.whl | Select-Object -First 1
+        if (-not $whl) { Write-Error "ASSERT FAIL: no wheel produced"; exit 1 }
+        Write-Host "Wheel: $($whl.FullName)"
+        python -m pip install --force-reinstall --no-deps $whl.FullName
+        $expected = (Get-Content "$(Build.SourcesDirectory)\VERSION_INFO" -Raw).Trim()
+        $actual = (python -c "import onnxruntime_genai as og; print(og.__version__)").Trim()
+        Write-Host "expected=$expected actual=$actual"
+        if ($actual -ne $expected) { Write-Error "ASSERT FAIL: wheel version mismatch"; exit 1 }
+        Write-Host "ASSERT OK: wheel imports and reports $actual"
+      displayName: 'Assert wheel imports + version'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish core CMake package (win-x64)'
+      inputs:
+        artifactName: 'scratch-core-cmake-win-x64'
+        targetPath: '$(coreInstall)'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish Python wheel (win-x64)'
+      inputs:
+        artifactName: 'scratch-python-win-x64'
+        targetPath: '$(Build.SourcesDirectory)\build\pysdk\Release\wheel'
+
+  # ---------------------------------------------------------------------------
+  # Linux x64 (CPU) — built inside the manylinux docker image
+  # ---------------------------------------------------------------------------
+  - job: scratch_linux_x64
+    displayName: 'linux-x64 · CPU · core + python'
+    pool:
+      name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+    timeoutInMinutes: 120
+    variables:
+    - name: ortUrl
+      value: 'https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/Microsoft.ML.OnnxRuntime/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1'
+    workspace:
+      clean: all
+    steps:
+    - checkout: self
+      submodules: recursive
+
+    - task: Docker@2
+      displayName: 'Login to build cache ACR'
+      inputs:
+        containerRegistry: 'onnxruntimebuildcache'
+        command: 'login'
+        addPipelineData: false
+
+    - bash: |
+        set -e -x
+        python3 -m pip install requests
+        python3 tools/ci_build/get_docker_image.py \
+          --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu \
+          --context tools/ci_build/github/linux/docker/manylinux \
+          --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+          --container-registry onnxruntimebuildcache.azurecr.io \
+          --repository ortgenaicpubuildx64
+      displayName: 'Get manylinux docker image'
+      workingDirectory: '$(Build.SourcesDirectory)'
+
+    - bash: |
+        set -e -x
+        mkdir -p ort_home/include ort_home/lib
+        curl --fail --retry 5 --retry-all-errors -L -o ort.zip "$(ortUrl)"
+        unzip -o ort.zip -d ort_extracted >/dev/null
+        cp -r ort_extracted/build/native/include/* ort_home/include/
+        cp -r ort_extracted/runtimes/linux-x64/native/* ort_home/lib/
+        ls -la ort_home/include ort_home/lib
+      displayName: 'Download ORT from Lotus feed'
+      workingDirectory: '$(Build.SourcesDirectory)'
+
+    - bash: |
+        set -e -x
+        docker run --rm \
+          --volume $(Build.SourcesDirectory):/ort_genai_src \
+          -w /ort_genai_src \
+          ortgenaicpubuildx64 \
+          bash -c '
+            set -e -x
+            PY=/opt/python/cp311-cp311/bin/python3.11
+            $PY -m pip install pybind11 wheel requests
+
+            # 1. Build core + install exported CMake package.
+            $PY build.py --config Release --parallel --skip_tests --skip_examples --skip_wheel \
+              --ort_home /ort_genai_src/ort_home \
+              --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
+              --build_dir build/core --install_dir /ort_genai_src/install
+
+            for f in \
+              install/lib/cmake/onnxruntime-genai/onnxruntime-genaiConfig.cmake \
+              install/lib/cmake/onnxruntime-genai/onnxruntime-genai-targets.cmake \
+              install/include/ort_genai_c.h \
+              install/lib/libonnxruntime-genai.so ; do
+              test -f "/ort_genai_src/$f" || { echo "ASSERT FAIL: missing $f"; exit 1; }
+            done
+            echo "ASSERT OK: exported CMake package installed"
+
+            # 2. Probe: find_package links the imported target.
+            /usr/bin/cmake -S .pipelines/scratch/genai_probe -B /tmp/probe-build \
+              -Donnxruntime-genai_DIR=/ort_genai_src/install/lib/cmake/onnxruntime-genai
+            /usr/bin/cmake --build /tmp/probe-build
+            test -f /tmp/probe-build/genai_probe || { echo "ASSERT FAIL: probe exe missing"; exit 1; }
+            echo "ASSERT OK: find_package(onnxruntime-genai) links the imported target"
+
+            # 3. Build Python SDK incrementally against the prebuilt core.
+            $PY build.py --sdk python --config Release --parallel \
+              --prebuilt_genai_home /ort_genai_src/install --ort_home /ort_genai_src/ort_home \
+              --build_dir build/pysdk
+
+            WHL=$(find /ort_genai_src/build/pysdk -name "*.whl" | head -n1)
+            test -n "$WHL" || { echo "ASSERT FAIL: no wheel produced"; exit 1; }
+            echo "Wheel: $WHL"
+            $PY -m pip install --force-reinstall --no-deps "$WHL"
+            EXPECTED=$(tr -d "[:space:]" < /ort_genai_src/VERSION_INFO)
+            ACTUAL=$($PY -c "import onnxruntime_genai as og; print(og.__version__)" | tr -d "[:space:]")
+            echo "expected=$EXPECTED actual=$ACTUAL"
+            test "$EXPECTED" = "$ACTUAL" || { echo "ASSERT FAIL: wheel version mismatch"; exit 1; }
+            echo "ASSERT OK: wheel imports and reports $ACTUAL"
+          '
+      displayName: 'Incremental core + python (manylinux)'
+      workingDirectory: '$(Build.SourcesDirectory)'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish core CMake package (linux-x64)'
+      inputs:
+        artifactName: 'scratch-core-cmake-linux-x64'
+        targetPath: '$(Build.SourcesDirectory)/install'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish Python wheel (linux-x64)'
+      inputs:
+        artifactName: 'scratch-python-linux-x64'
+        targetPath: '$(Build.SourcesDirectory)/build/pysdk/Release/wheel'

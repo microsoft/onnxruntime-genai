@@ -94,6 +94,31 @@ def _parse_args():
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
+    # Incremental packaging: build the core once, install it, then build SDK layers against it.
+    parser.add_argument(
+        "--install_dir",
+        type=Path,
+        default=None,
+        help="If set, install the built core (libraries, public headers, and the exported "
+        "find_package(onnxruntime-genai) CMake package) to this prefix after building. This is "
+        "the hand-off point for incremental SDK builds.",
+    )
+    parser.add_argument(
+        "--prebuilt_genai_home",
+        type=Path,
+        default=None,
+        help="Path to a prebuilt-and-installed onnxruntime-genai core (produced by a prior "
+        "--install_dir build). When combined with --sdk, only the requested SDK layer is built, "
+        "linking against this prebuilt core instead of rebuilding it.",
+    )
+    parser.add_argument(
+        "--sdk",
+        choices=["python", "java", "csharp"],
+        default=None,
+        help="Build a single SDK layer incrementally against a prebuilt core "
+        "(requires --prebuilt_genai_home and --ort_home). Skips building the core.",
+    )
+
     # CI's sometimes explicitly set the path to the CMake and CTest executables.
     parser.add_argument("--cmake_path", default="cmake", type=Path, help="Path to the CMake program.")
     parser.add_argument("--ctest_path", default="ctest", type=Path, help="Path to the CTest program.")
@@ -376,6 +401,16 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 
 def _validate_args(args: argparse.Namespace):
+    # A standalone SDK build reuses a prebuilt core; it does not run the core update/build/test phases.
+    if args.sdk:
+        if not args.prebuilt_genai_home:
+            raise ValueError("--sdk requires --prebuilt_genai_home pointing at a prebuilt-and-installed core.")
+        if not args.ort_home:
+            raise ValueError("--sdk requires --ort_home pointing at the matching ONNX Runtime.")
+        if not args.prebuilt_genai_home.exists() or not args.prebuilt_genai_home.is_dir():
+            raise ValueError(f"{args.prebuilt_genai_home} does not exist or is not a directory.")
+        args.prebuilt_genai_home = args.prebuilt_genai_home.resolve(strict=True)
+
     # default to all 3 stages
     if not any((args.update, args.clean, args.build, args.test)):
         args.update = True
@@ -399,6 +434,10 @@ def _validate_args(args: argparse.Namespace):
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
 
         args.ort_home = args.ort_home.resolve(strict=True)
+
+    if args.install_dir:
+        # The install prefix may not exist yet; resolve without requiring existence.
+        args.install_dir = args.install_dir.resolve()
 
 
 def _create_env(args: argparse.Namespace):
@@ -733,6 +772,99 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
 
+def install_core(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Install the built core (libraries, public headers, and the exported
+    find_package(onnxruntime-genai) CMake package) to args.install_dir.
+
+    This is the hand-off point that lets SDK layers be built incrementally against a
+    prebuilt core (see build_sdk).
+    """
+    log.info(f"Installing core to {args.install_dir}")
+    cmd = [
+        str(args.cmake_path),
+        "--install",
+        str(args.build_dir),
+        "--config",
+        args.config,
+        "--prefix",
+        str(args.install_dir),
+    ]
+    util.run(cmd, env=env)
+
+
+def _sdk_build_dir(args: argparse.Namespace) -> Path:
+    # args.build_dir already ends with the config (see _validate_build_dir). Keep SDK build
+    # artifacts in a sibling directory so they don't collide with a core build tree.
+    return args.build_dir
+
+
+def build_sdk(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Build a single SDK layer (python, java, or csharp) incrementally against a prebuilt core
+    referenced by --prebuilt_genai_home. The core itself is not rebuilt.
+    """
+    if args.sdk == "csharp":
+        _build_sdk_csharp(args, env)
+    else:
+        _build_sdk_cmake(args, env)
+
+
+def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
+    """Configure and build a CMake-based SDK project (python or java) standalone."""
+    sdk_src = REPO_ROOT / "src" / args.sdk
+    build_dir = _sdk_build_dir(args)
+    genai_cmake_dir = args.prebuilt_genai_home / "lib" / "cmake" / "onnxruntime-genai"
+    if not genai_cmake_dir.is_dir():
+        raise RuntimeError(
+            f"Could not find the exported onnxruntime-genai CMake package at {genai_cmake_dir}. "
+            "Build the core with --install_dir first."
+        )
+
+    command = [str(args.cmake_path), "-G", args.cmake_generator]
+    command += [
+        "-S",
+        str(sdk_src),
+        "-B",
+        str(build_dir),
+        f"-DCMAKE_BUILD_TYPE={args.config}",
+        f"-Donnxruntime-genai_DIR={genai_cmake_dir}",
+        f"-DORT_HOME={args.ort_home}",
+    ]
+    if args.sdk == "python":
+        command += [f"-DBUILD_WHEEL={'OFF' if args.skip_wheel else 'ON'}"]
+    if args.sdk == "java":
+        command += [f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}"]
+    if args.cmake_extra_defines:
+        command += args.cmake_extra_defines
+
+    util.run(command, env=env)
+
+    build_command = [str(args.cmake_path), "--build", str(build_dir), "--config", args.config]
+    if args.parallel:
+        build_command.append("--parallel")
+    util.run(build_command, env=env)
+
+    if args.sdk == "python" and not args.skip_wheel:
+        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+
+
+def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):
+    """Build the C# SDK against a prebuilt core's native libraries."""
+    dotnet = str(_resolve_executable_path("dotnet"))
+    native_lib_dir = args.prebuilt_genai_home / "lib"
+    csharp_build_command = [
+        dotnet,
+        "build",
+        ".",
+        f"/p:Configuration={args.config}",
+        "/p:Platform=Any CPU",
+        f"/p:NativeBuildOutputDir={native_lib_dir}",
+        f"/p:OrtLibDir={args.ort_home / 'lib'}",
+    ]
+    util.run(csharp_build_command, env=env, cwd=REPO_ROOT / "src" / "csharp")
+
+
 def package(args: argparse.Namespace, env: dict[str, str]):
     """
     Package the build output with CMake targets.
@@ -862,6 +994,11 @@ if __name__ == "__main__":
     _validate_args(arguments)
     environment = _create_env(arguments)
 
+    if arguments.sdk:
+        # Incremental SDK build against a prebuilt core: skip the core update/build/test phases.
+        build_sdk(arguments, environment)
+        sys.exit(0)
+
     if arguments.update:
         update(arguments, environment)
 
@@ -873,6 +1010,9 @@ if __name__ == "__main__":
 
     if arguments.package:
         package(arguments, environment)
+
+    if arguments.install_dir:
+        install_core(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)

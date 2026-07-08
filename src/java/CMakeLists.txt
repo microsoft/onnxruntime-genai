@@ -1,6 +1,49 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+if(NOT DEFINED REPO_ROOT)
+  # ---------------------------------------------------------------------------
+  # Standalone (incremental) SDK build.
+  #
+  # Configured directly (cmake -S src/java) and linked against a prebuilt core via
+  # find_package(onnxruntime-genai). build.py drives this through
+  # `--sdk java --prebuilt_genai_home <prefix> --ort_home <ort>`.
+  # ---------------------------------------------------------------------------
+  cmake_minimum_required(VERSION 3.26)
+  project(onnxruntime_genai_java LANGUAGES C CXX)
+
+  get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+  set(SRC_ROOT ${REPO_ROOT}/src)
+
+  find_package(onnxruntime-genai CONFIG REQUIRED)
+
+  if(NOT DEFINED ORT_HOME)
+    message(FATAL_ERROR "ORT_HOME must be set (-DORT_HOME=...) for a standalone java SDK build.")
+  endif()
+  set(ORT_HEADER_DIR ${ORT_HOME}/include)
+  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+
+  include(${REPO_ROOT}/cmake/target_platform.cmake)
+
+  if(NOT TARGET onnxruntime-genai)
+    add_library(onnxruntime-genai ALIAS onnxruntime-genai::onnxruntime-genai)
+  endif()
+
+  get_filename_component(_genai_install_lib_dir "${onnxruntime-genai_DIR}/../.." ABSOLUTE)
+  if(WIN32)
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.dll")
+  elseif(APPLE)
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.dylib")
+  else()
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.so")
+  endif()
+
+  # Tests are driven separately in the incremental packaging flow.
+  if(NOT DEFINED ENABLE_TESTS)
+    set(ENABLE_TESTS OFF)
+  endif()
+endif()
+
 set(JAVA_AWT_LIBRARY NotNeeded)
 set(JAVA_AWT_INCLUDE_PATH NotNeeded)
 include(FindJava)
