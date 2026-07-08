@@ -62,7 +62,7 @@ def check_extra_options(kv_pairs, execution_provider):
     Check key-value pairs and set values correctly
     """
     bools = [
-        "int4_is_symmetric",
+        "is_symmetric",
         "exclude_embeds",
         "exclude_lm_head",
         "include_hidden_states",
@@ -89,14 +89,14 @@ def check_extra_options(kv_pairs, execution_provider):
     if "hf_token" in kv_pairs:
         kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
 
-    if "int4_op_types_to_quantize" in kv_pairs:
+    if "op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
-        for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
+        for op_type in kv_pairs["op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type,)
-        kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+        kv_pairs["op_types_to_quantize"] = op_types_to_quantize
 
-    if "int4_nodes_to_exclude" in kv_pairs:
-        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
+    if "nodes_to_exclude" in kv_pairs:
+        kv_pairs["nodes_to_exclude"] = kv_pairs["nodes_to_exclude"].split(",")
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -164,7 +164,7 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
     if precision == "int4":
-        return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
+        return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
 
     if precision == "int8":
         # int8 keeps FP32 weights; 8-bit quantization happens in the final MatMulNBits pass.
@@ -224,7 +224,6 @@ def create_model(
     config_only = "config_only" in extra_options
 
     if precision == "int8":
-        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         if extra_options.get("use_qdq", False):
             raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
         extra_options["use_8bit_matmul_weights"] = True
@@ -424,26 +423,26 @@ def get_args():
         nargs="+",
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                The int4_* options below control weight-only MatMulNBits quantization for both `--precision int4` and `--precision int8`.
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
+                The options below control weight-only MatMulNBits quantization for both `--precision int4` and `--precision int8`.
+                accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
+                block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
                     Default value is 32.
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                int4_is_symmetric = Quantize the weights symmetrically. Default is true.
+                is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization uses signed ints (int4/int8). If false, it uses unsigned ints (uint4/uint8).
-                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
+                op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
                     Use this option when you want to quantize specific ops.
-                    Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
-                int4_nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
+                    Separate the op types with a '/' when passing them here (e.g. op_types_to_quantize=MatMul/Gather)
+                nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
-                    Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
-                int4_algo_config = Method for int4/int8 weight-only quantization. Default is 'default'.
+                    Separate the node names with a ',' when passing them here (e.g. nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                algo_config = Method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
                     rtn = RTN algorithm for weight-only quantization.

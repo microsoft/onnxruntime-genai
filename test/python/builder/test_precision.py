@@ -54,21 +54,21 @@ Model = base_module.Model
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("int4_is_symmetric", [True, False, None])
-def test_int8_onnx_dtype_stays_float(int4_is_symmetric):
-    extra_options = {} if int4_is_symmetric is None else {"int4_is_symmetric": int4_is_symmetric}
+@pytest.mark.parametrize("is_symmetric", [True, False, None])
+def test_int8_onnx_dtype_stays_float(is_symmetric):
+    extra_options = {} if is_symmetric is None else {"is_symmetric": is_symmetric}
     assert builder_module.set_onnx_dtype("int8", extra_options) == ir.DataType.FLOAT
 
 
 @pytest.mark.parametrize(
-    "int4_is_symmetric, expected",
+    "is_symmetric, expected",
     [
         (True, ir.DataType.INT4),
         (False, ir.DataType.UINT4),
     ],
 )
-def test_int4_onnx_dtype_is_still_int4(int4_is_symmetric, expected):
-    assert builder_module.set_onnx_dtype("int4", {"int4_is_symmetric": int4_is_symmetric}) == expected
+def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
+    assert builder_module.set_onnx_dtype("int4", {"is_symmetric": is_symmetric}) == expected
 
 
 def test_int8_io_dtype_is_fp32():

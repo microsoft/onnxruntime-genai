@@ -321,17 +321,17 @@ class Model:
         self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
-        self.algo_config_name = extra_options.get("int4_algo_config", "default")
-        self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
+        self.algo_config_name = extra_options.get("algo_config", "default")
+        self.matmul_block_size = int(extra_options.get("block_size", 32))
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32))
         self.quant_attrs = {
-            "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
+            "accuracy_level": int(extra_options.get("accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
             "qdq_block_size": int(self.matmul_block_size),
             "bits": 8 if quantize_to_8bits else 4,
-            "is_symmetric": extra_options.get("int4_is_symmetric", True),
-            "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
-            "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
+            "is_symmetric": extra_options.get("is_symmetric", True),
+            "op_types_to_quantize": extra_options.get("op_types_to_quantize", ("MatMul",)),
+            "nodes_to_exclude": extra_options.get("nodes_to_exclude", []),
             "algo_config": self.make_algo_config(),
             "use_qdq": extra_options.get("use_qdq", False),
         }
@@ -813,7 +813,6 @@ class Model:
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
-        # Quantize INT4/UINT4 (4-bit) and int8 (bits == 8) weights to MatMulNBits.
         if (self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} or self.quant_attrs["bits"] == 8) and not already_quantized_in_qdq_format:
             model = self.to_nbits()
         else:
