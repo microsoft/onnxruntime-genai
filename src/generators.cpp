@@ -63,7 +63,7 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
 }
 
-static int GetTrtRtxMultiRotaryCacheConcatOffset(const Config& config) {
+static bool HasValidTrtRtxMultiRotaryCacheConcatOffset(const Config& config) {
   for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
     if (provider_options.name != "NvTensorRtRtx")
       continue;
@@ -76,14 +76,12 @@ static int GetTrtRtxMultiRotaryCacheConcatOffset(const Config& config) {
       const auto* const value_begin = value.data();
       const auto* const value_end = value_begin + value.size();
       const auto [parse_end, error_code] = std::from_chars(value_begin, value_end, offset);
-      if (error_code != std::errc{} || parse_end != value_end || offset <= 0 || offset > config.model.context_length)
-        return 0;
-
-      return offset;
+      return error_code == std::errc{} && parse_end == value_end && offset > 0 &&
+             offset <= config.model.context_length;
     }
   }
 
-  return 0;
+  return false;
 }
 
 OrtGlobals::OrtGlobals()
@@ -433,19 +431,16 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
   const auto device_type = model_->p_device_->GetType();
-  const auto trt_rtx_multi_rope_cache_offset = device_type == DeviceType::NvTensorRtRtx
-                                                   ? GetTrtRtxMultiRotaryCacheConcatOffset(*model_->config_)
-                                                   : 0;
+  const bool trt_rtx_uses_multi_rope_cache = device_type == DeviceType::NvTensorRtRtx &&
+                                             HasValidTrtRtxMultiRotaryCacheConcatOffset(*model_->config_);
   const bool ep_uses_single_rope_factor = device_type == DeviceType::DML ||
-                                          (device_type == DeviceType::NvTensorRtRtx && trt_rtx_multi_rope_cache_offset == 0);
+                                          (device_type == DeviceType::NvTensorRtRtx && !trt_rtx_uses_multi_rope_cache);
 
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
   if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
-    if (trt_rtx_multi_rope_cache_offset > 0 && trt_rtx_multi_rope_cache_offset < model_->config_->model.context_length)
-      phi3_rope_threshold_ = trt_rtx_multi_rope_cache_offset + 1;
-    else if (model_type == "phi3" || model_type == "phimoe")
+    if (model_type == "phi3" || model_type == "phimoe")
       phi3_rope_threshold_ = 4097;
     else if (model_type == "phi3small")
       phi3_rope_threshold_ = 8193;

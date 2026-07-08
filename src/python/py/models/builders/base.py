@@ -343,8 +343,6 @@ class Model:
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
-            self.make_padded_cache = TRT_RTX.make_padded_cache.__get__(self, self.__class__)
-            self.make_split_if_nodes = TRT_RTX.make_split_if_nodes.__get__(self, self.__class__)
 
         elif self.ep == "webgpu":
             from .expansions import WebGPU
@@ -1873,11 +1871,9 @@ class Model:
         )
 
         # Determine which EPs don't support the If operator
-        self.eps_without_if_support = ["dml"]
+        self.eps_without_if_support = ["dml", "trt-rtx"]
         if self.extra_options.get("enable_webgpu_graph", False):
             self.eps_without_if_support.append("webgpu")
-        if self.ep == "trt-rtx":
-            self.eps_without_if_support.append("trt-rtx")
 
         if self.ep in self.eps_without_if_support:
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
