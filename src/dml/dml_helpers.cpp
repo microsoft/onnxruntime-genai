@@ -147,10 +147,10 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device
     if (SUCCEEDED(create_device_hr)) {
       agility_device_created = true;
     } else {
-      printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK (HRESULT 0x%08X). Falling back to the system D3D12 runtime; some scenarios may not work.\n", static_cast<unsigned int>(create_device_hr));
+      printf("Warning: Unable to create a device from version 1.%u.0 of the DirectX 12 Agility SDK (HRESULT 0x%08X). Falling back to the system D3D12 runtime; some scenarios may not work.\n", agility_sdk_version, static_cast<unsigned int>(create_device_hr));
     }
   } else {
-    printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
+    printf("Warning: Unable to create a device from version 1.%u.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n", agility_sdk_version);
     printf("The given module path: %s\n", current_module_path.c_str());
   }
 
