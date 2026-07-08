@@ -93,8 +93,8 @@ def path_for_model(request):
 # ASR streaming model directories exercised by the streaming-ASR tests.
 ASR_SPEECH_MODELS = [
     "nemotron-speech-streaming",
-    "moonshine-streaming-small-official",
-    "moonshine-streaming-tiny-official",
+    "moonshine-streaming-small",
+    "moonshine-streaming-tiny",
 ]
 
 

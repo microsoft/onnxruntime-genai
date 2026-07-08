@@ -1768,8 +1768,8 @@ INSTANTIATE_TEST_SUITE_P(
     StreamingASR, CAPITests,
     ::testing::Values(
         StreamingASRModel{"nemotron-speech-streaming", 8960},
-        StreamingASRModel{"moonshine-streaming-small-official", 8000},
-        StreamingASRModel{"moonshine-streaming-tiny-official", 8000}),
+        StreamingASRModel{"moonshine-streaming-small", 8000},
+        StreamingASRModel{"moonshine-streaming-tiny", 8000}),
     [](const ::testing::TestParamInfo<StreamingASRModel>& info) {
       std::string name = info.param.subdir;
       std::replace(name.begin(), name.end(), '-', '_');

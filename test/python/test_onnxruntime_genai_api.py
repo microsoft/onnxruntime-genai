@@ -1087,8 +1087,8 @@ def test_streaming_asr_sine_wave(asr_speech_model_path):
 # Expected model "type" reported by each ASR streaming model's genai_config.json.
 _ASR_MODEL_TYPES = {
     "nemotron-speech-streaming": "nemotron_speech",
-    "moonshine-streaming-small-official": "streaming_enc_dec_asr",
-    "moonshine-streaming-tiny-official": "streaming_enc_dec_asr",
+    "moonshine-streaming-small": "streaming_enc_dec_asr",
+    "moonshine-streaming-tiny": "streaming_enc_dec_asr",
 }
 
 
@@ -1178,8 +1178,8 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
 # Per-model word-error-rate thresholds for the transcription-quality test.
 _ASR_WER_THRESHOLDS = {
     "nemotron-speech-streaming": 0.15,
-    "moonshine-streaming-small-official": 0.2,
-    "moonshine-streaming-tiny-official": 0.25,
+    "moonshine-streaming-small": 0.2,
+    "moonshine-streaming-tiny": 0.25,
 }
 
 
