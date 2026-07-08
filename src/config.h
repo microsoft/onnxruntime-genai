@@ -137,11 +137,15 @@ struct Config {
     int video_token_id{};
     int vision_start_token_id{};
 
-    // Tool-calling and reasoning token IDs (used for efficient token-level detection)
-    int tool_call_start_token_id{-1};
-    int tool_call_end_token_id{-1};
-    int reasoning_start_token_id{-1};
-    int reasoning_end_token_id{-1};
+    // Tool-calling and reasoning token IDs.
+    // Follows the bos/eos/pad naming convention:
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    // -1 means the model does not define this token.
+    int bot_token_id{-1};
+    int eot_token_id{-1};
+    int bor_token_id{-1};
+    int eor_token_id{-1};
 
     int vocab_size{};
     int context_length{};

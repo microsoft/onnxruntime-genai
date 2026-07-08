@@ -106,12 +106,26 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
   int32_t GetPadTokenId() const { return pad_token_id_; }
 
+  // Tool-calling and reasoning token IDs.
+  // Naming follows the bos/eos/pad convention:
+  //   bot = beginning of tool (call), eot = end of tool (call)
+  //   bor = beginning of reasoning,   eor = end of reasoning
+  // Returns -1 if the model does not define the token.
+  int32_t GetBotTokenId() const { return bot_token_id_; }
+  int32_t GetEotTokenId() const { return eot_token_id_; }
+  int32_t GetBorTokenId() const { return bor_token_id_; }
+  int32_t GetEorTokenId() const { return eor_token_id_; }
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
+  int32_t bot_token_id_;
+  int32_t eot_token_id_;
+  int32_t bor_token_id_;
+  int32_t eor_token_id_;
 };
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
@@ -168,11 +182,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   bool IsPruned() const;
 
-  // Returns the token ID for the given tag, or -1 if the model doesn't define the tag.
-  // Checks genai_config.json model section first, then encodes the model-type fallback string.
-  // Known tag names: "tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end".
-  int32_t GetTagId(const std::string& tag_name) const;
-
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
@@ -194,13 +203,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
  protected:
   void CreateSessionOptions();
-  void InitTagIdCache() const;
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
-
-  // Cached tag token IDs (lazily populated on first GetTagId call).
-  mutable std::unordered_map<std::string, int32_t> tag_id_cache_;
-  mutable std::once_flag tag_id_cache_flag_;
 };
 
 }  // namespace Generators

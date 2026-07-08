@@ -1817,19 +1817,20 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
   EXPECT_FALSE(transcription.empty());
 }
 
-// Test that GetTagId returns -1 for unknown model types (not in config, not in fallback map)
+// Test that bot/eot/bor/eor return -1 for models without these tokens configured
 TEST(CAPITests, TagId_Unknown) {
   // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → -1
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = OgaTokenizer::Create(*model);
 
-  EXPECT_EQ(model->GetTagId("tool_call_start"), -1);
-  EXPECT_EQ(model->GetTagId("tool_call_end"), -1);
-  EXPECT_EQ(model->GetTagId("reasoning_start"), -1);
-  EXPECT_EQ(model->GetTagId("reasoning_end"), -1);
+  EXPECT_EQ(tokenizer->GetBotTokenId(), -1);
+  EXPECT_EQ(tokenizer->GetEotTokenId(), -1);
+  EXPECT_EQ(tokenizer->GetBorTokenId(), -1);
+  EXPECT_EQ(tokenizer->GetEorTokenId(), -1);
 }
 
 TEST(CAPITests, TagId_FromConfig) {
-  // Create a temporary model directory with tool_call/reasoning token IDs in model section
+  // Create a temporary model directory with bot/eot/bor/eor token IDs in model section
   auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
   std::filesystem::remove_all(temp_dir);  // Clean up any leftover from a previous failed run
   std::filesystem::create_directories(temp_dir);
@@ -1854,10 +1855,10 @@ TEST(CAPITests, TagId_FromConfig) {
     "eos_token_id": 98,
     "vocab_size": 1000,
     "context_length": 512,
-    "tool_call_start_token_id": 151657,
-    "tool_call_end_token_id": 151658,
-    "reasoning_start_token_id": 151659,
-    "reasoning_end_token_id": 151660,
+    "bot_token_id": 151657,
+    "eot_token_id": 151658,
+    "bor_token_id": 151659,
+    "eor_token_id": 151660,
     "decoder": {
       "session_options": { "provider_options": [] },
       "filename": "past.onnx",
@@ -1872,12 +1873,13 @@ TEST(CAPITests, TagId_FromConfig) {
   }
 
   auto model = OgaModel::Create(temp_dir.string().c_str());
+  auto tokenizer = OgaTokenizer::Create(*model);
 
-  // GetTagId returns configured IDs from model section
-  EXPECT_EQ(model->GetTagId("tool_call_start"), 151657);
-  EXPECT_EQ(model->GetTagId("tool_call_end"), 151658);
-  EXPECT_EQ(model->GetTagId("reasoning_start"), 151659);
-  EXPECT_EQ(model->GetTagId("reasoning_end"), 151660);
+  // Tokenizer returns configured IDs from model section
+  EXPECT_EQ(tokenizer->GetBotTokenId(), 151657);
+  EXPECT_EQ(tokenizer->GetEotTokenId(), 151658);
+  EXPECT_EQ(tokenizer->GetBorTokenId(), 151659);
+  EXPECT_EQ(tokenizer->GetEorTokenId(), 151660);
 
   // Cleanup
   std::filesystem::remove_all(temp_dir);

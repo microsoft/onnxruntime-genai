@@ -298,9 +298,37 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
+namespace {
+
+// Fallback token strings for models whose genai_config.json doesn't yet include
+// bot/eot/bor/eor token IDs in the model section. This exists specifically for
+// Foundry Local backward compatibility with older model packages that predate
+// these config fields.
+// Keyed by model.type string from genai_config.json.
+// Inner map: tag_name -> token string (used for vocab lookup to get the ID).
+const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
+  static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
+      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
+      {"phi3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
+  };
+  auto type_it = fallback_map.find(model_type);
+  if (type_it == fallback_map.end()) return nullptr;
+  auto tag_it = type_it->second.find(tag_name);
+  if (tag_it == type_it->second.end()) return nullptr;
+  return &tag_it->second;
+}
+
+}  // namespace
+
 Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
                                        eos_token_id_{config.model.eos_token_id},
-                                       pad_token_id_{config.model.pad_token_id} {
+                                       pad_token_id_{config.model.pad_token_id},
+                                       bot_token_id_{config.model.bot_token_id},
+                                       eot_token_id_{config.model.eot_token_id},
+                                       bor_token_id_{config.model.bor_token_id},
+                                       eor_token_id_{config.model.eor_token_id} {
   // Default tokenizer options
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
@@ -309,10 +337,24 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
-  // TODO: Once ORT Extensions supports an "additional_special_tokens" option, pass the generation
-  // tags (tool_calling/reasoning tokens) here so that models which don't already mark them as
-  // special in their tokenizer_config.json will still get correct skip_special_tokens behavior.
-  // This is needed for the FL SDK's dual-stream special token detection in OnnxChatGenerator::Decode().
+  // Fallback: if bot/eot/bor/eor were not explicitly set in genai_config.json (-1),
+  // attempt to resolve them by encoding well-known token strings for the model type.
+  // This provides backward compatibility for Foundry Local when consuming older model
+  // packages that predate the bot/eot/bor/eor config fields.
+  if (bot_token_id_ < 0 || eot_token_id_ < 0 || bor_token_id_ < 0 || eor_token_id_ < 0) {
+    auto try_fallback = [&](int32_t& id, const std::string& tag_name) {
+      if (id >= 0) return;
+      const auto* fallback_str = GetFallbackTag(config.model.type, tag_name);
+      if (fallback_str && !fallback_str->empty()) {
+        int32_t resolved = TokenToTokenId(fallback_str->c_str());
+        if (resolved >= 0) id = resolved;
+      }
+    };
+    try_fallback(bot_token_id_, "tool_call_start");
+    try_fallback(eot_token_id_, "tool_call_end");
+    try_fallback(bor_token_id_, "reasoning_start");
+    try_fallback(eor_token_id_, "reasoning_end");
+  }
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -825,64 +867,6 @@ bool Model::IsPruned() const {
     return false;
   const auto logits_shape = session_info_.GetOutputShape(logits_name);
   return logits_shape[1] == 1;
-}
-
-namespace {
-
-// Fallback map for models whose genai_config.json doesn't yet have token IDs in the model section.
-// Keyed by model.type string from genai_config.json.
-// Inner map: tag_name -> token string (used for vocab lookup to get the ID).
-const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
-  static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
-      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
-      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
-      {"phi3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
-      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
-  };
-  auto type_it = fallback_map.find(model_type);
-  if (type_it == fallback_map.end()) return nullptr;
-  auto tag_it = type_it->second.find(tag_name);
-  if (tag_it == type_it->second.end()) return nullptr;
-  return &tag_it->second;
-}
-
-}  // namespace
-
-void Model::InitTagIdCache() const {
-  auto tokenizer = CreateTokenizer();
-
-  static const char* tag_names[] = {"tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end"};
-
-  auto get_config_id = [&](const std::string& name) -> int32_t {
-    if (name == "tool_call_start") return config_->model.tool_call_start_token_id;
-    if (name == "tool_call_end") return config_->model.tool_call_end_token_id;
-    if (name == "reasoning_start") return config_->model.reasoning_start_token_id;
-    if (name == "reasoning_end") return config_->model.reasoning_end_token_id;
-    return -1;
-  };
-
-  for (const auto* tag_name : tag_names) {
-    int32_t id = get_config_id(tag_name);
-    if (id >= 0) {
-      tag_id_cache_[tag_name] = id;
-      continue;
-    }
-
-    // Fallback: look up the token string in the vocabulary to get its ID.
-    const auto* fallback_str = GetFallbackTag(config_->model.type, tag_name);
-    if (fallback_str && !fallback_str->empty()) {
-      int32_t fallback_id = tokenizer->TokenToTokenId(fallback_str->c_str());
-      if (fallback_id >= 0) {
-        tag_id_cache_[tag_name] = fallback_id;
-      }
-    }
-  }
-}
-
-int32_t Model::GetTagId(const std::string& tag_name) const {
-  std::call_once(tag_id_cache_flag_, [this]() { InitTagIdCache(); });
-  auto it = tag_id_cache_.find(tag_name);
-  return (it != tag_id_cache_.end()) ? it->second : -1;
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {

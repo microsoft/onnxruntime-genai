@@ -258,12 +258,6 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
-  int32_t GetTagId(const char* tag_name) const {
-    int32_t id;
-    OgaCheckResult(OgaModelGetTagId(this, tag_name, &id));
-    return id;
-  }
-
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 
@@ -345,6 +339,32 @@ struct OgaTokenizer : OgaAbstract {
   int32_t GetPadTokenId() const {
     int32_t token_id;
     OgaCheckResult(OgaTokenizerGetPadTokenId(this, &token_id));
+    return token_id;
+  }
+
+  // Tool-calling and reasoning token IDs (bot/eot/bor/eor).
+  // Returns -1 if the model does not define the token.
+  int32_t GetBotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetBorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBorTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEorTokenId(this, &token_id));
     return token_id;
   }
 

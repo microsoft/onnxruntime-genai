@@ -378,13 +378,6 @@ OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char*
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelGetTagId(const OgaModel* model, const char* tag_name, int32_t* out) {
-  OGA_TRY
-  *out = model->GetTagId(tag_name);
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
   auto params = std::make_shared<Generators::GeneratorParams>(*model);
@@ -670,6 +663,34 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer
 OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
   OGA_TRY
   *out = tokenizer->GetPadTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEorTokenId();
   return nullptr;
   OGA_CATCH
 }

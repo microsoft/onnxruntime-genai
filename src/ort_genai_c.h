@@ -416,21 +416,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
 /**
- * \brief Returns a tag token ID for this model by name.
- *
- * Checks the genai_config.json model section first, then falls back to encoding the
- * model-type-specific fallback token string via the tokenizer vocabulary.
- * Known tag names: "tool_call_start", "tool_call_end", "reasoning_start", "reasoning_end".
- * Returns -1 if the model doesn't define the requested tag.
- *
- * \param[in] model The model to query.
- * \param[in] tag_name The name of the tag to retrieve.
- * \param[out] out The tag token ID.
- * \return OgaResult containing the error message if the call failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetTagId(const OgaModel* model, const char* tag_name, int32_t* out);
-
-/**
  * \brief Destroys the given config
  * \param[in] config The config to be destroyed.
  */
@@ -731,6 +716,38 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer
  * \return OgaResult containing the error message if returning the PAD token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the BOT (beginning of tool call) token id, or -1 if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOT token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the EOT (end of tool call) token id, or -1 if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The EOT token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the BOR (beginning of reasoning) token id, or -1 if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOR token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the EOR (end of reasoning) token id, or -1 if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The EOR token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
