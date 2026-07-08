@@ -851,6 +851,9 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
     command += _get_vs_platform_args(args)
     if args.sdk == "python":
         command += [f"-DBUILD_WHEEL={'OFF' if args.skip_wheel else 'ON'}"]
+        # Pin CMake to the interpreter running build.py so it selects the correct
+        # (and possibly non-default-path) Python, e.g. the manylinux CPython.
+        command += [f"-DPython_EXECUTABLE={sys.executable}"]
     if args.sdk == "java":
         command += [f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}"]
     if args.cmake_extra_defines:

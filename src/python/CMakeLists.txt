@@ -46,7 +46,13 @@ if(NOT DEFINED REPO_ROOT)
   endif()
 
   # pybind11 (installed via pip). Locate its CMake package through the interpreter.
-  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+  # Only the Development.Module component is needed to build the extension (like the
+  # in-tree pybind11_add_module path); requesting the full Development component would
+  # demand an embeddable libpython, which manylinux CPython builds do not ship.
+  # build.py passes -DPython_EXECUTABLE so CMake uses the exact interpreter that will
+  # build the wheel (e.g. /opt/python/cp311-cp311/... in the manylinux container),
+  # which is otherwise not on CMake's default search paths.
+  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
   # The wheel-packaging custom target uses ${PYTHON_EXECUTABLE}; in-tree this is
   # provided by the parent build, so mirror it from the modern Python module here.
   set(PYTHON_EXECUTABLE ${Python_EXECUTABLE})
