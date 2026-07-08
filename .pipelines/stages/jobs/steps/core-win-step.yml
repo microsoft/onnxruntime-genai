@@ -143,6 +143,7 @@ steps:
       '--parallel',
       '--skip_tests',
       '--skip_examples',
+      '--skip_wheel',
       '--use_guidance',
       '--ort_home', '$(ortHome)',
       '--cmake_extra_defines', 'ENABLE_PYTHON=OFF', 'ENABLE_TESTS=OFF',
