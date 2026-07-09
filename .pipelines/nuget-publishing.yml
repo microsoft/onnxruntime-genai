@@ -19,9 +19,12 @@ parameters:
     default: '1.26.0'
 
   - name: cuda_version
-    displayName: 'CUDA version (13.1 or 12.8)'
+    displayName: 'CUDA version'
     type: string
     default: '13.1'
+    values:
+      - '13.1'
+      - '12.8'
 
 resources:
   repositories:
@@ -31,6 +34,9 @@ resources:
       ref: refs/tags/release
 
 trigger: none
+
+variables:
+- template: lotus-feed-variables.yml
 
 extends:
   # Registered production pipeline (id 1385): the aiinfra org's 1ES drift

@@ -809,9 +809,12 @@ def install_core(args: argparse.Namespace, env: dict[str, str]):
 
 
 def _sdk_build_dir(args: argparse.Namespace) -> Path:
-    # args.build_dir already ends with the config (see _validate_build_dir). Keep SDK build
-    # artifacts in a sibling directory so they don't collide with a core build tree.
-    return args.build_dir
+    # args.build_dir already ends with the config (see _validate_build_dir). Place SDK
+    # artifacts in a per-SDK sibling directory (…/<sdk>/<config>) so a standalone SDK
+    # configure never collides with (or is rejected against) the core CMake build tree
+    # that shares the same default build_dir.
+    config = args.build_dir.name
+    return args.build_dir.parent / args.sdk / config
 
 
 def build_sdk(args: argparse.Namespace, env: dict[str, str]):

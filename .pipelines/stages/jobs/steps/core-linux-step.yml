@@ -39,6 +39,41 @@ steps:
     command: 'login'
     addPipelineData: false
 
+# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+# Sets PIP_INDEX_URL to the authenticated Lotus PyPI index (no pypi.org fallback)
+# for host pip (get_docker_image.py deps) and, forwarded into the container, for
+# the in-docker build.
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+# --- Feed isolation: cargo → Lotus (crates.io replaced) ---------------------
+# Repo-root .cargo/config.toml is mounted into the container (repo is the volume)
+# and discovered by cargo when building the llguidance crate. The credential is
+# supplied at build time via the CARGO_REGISTRIES_LOTUS_TOKEN env var — no secret
+# on disk.
+- bash: |
+    set -e
+    mkdir -p "$(Build.SourcesDirectory)/.cargo"
+    {
+      echo '[source.crates-io]'
+      echo 'replace-with = "lotus"'
+      echo ''
+      echo '[source.lotus]'
+      echo 'registry = "$(lotusCargoSparse)"'
+      echo ''
+      echo '[registries.lotus]'
+      echo 'index = "$(lotusCargoSparse)"'
+      echo ''
+      echo '[registry]'
+      echo 'global-credential-providers = ["cargo:token"]'
+    } > "$(Build.SourcesDirectory)/.cargo/config.toml"
+    echo "Wrote $(Build.SourcesDirectory)/.cargo/config.toml"
+  displayName: 'Configure cargo feed isolation (Lotus)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
 # --- Pull manylinux Docker image --------------------------------------------
 - bash: |
     set -e -x
@@ -65,22 +100,23 @@ steps:
   displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-# --- Download ORT from Lotus NuGet feed -------------------------------------
+# --- Download ORT from Lotus NuGet feed (authenticated) ---------------------
 - bash: |
-    set -e -x
+    set -e
     # CUDA Linux uses the GPU ORT package; CPU uses the CPU package.
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       pkg_name='Microsoft.ML.OnnxRuntime.Gpu.Linux'
     else
       pkg_name='Microsoft.ML.OnnxRuntime'
     fi
-    org='aiinfra'
-    proj='2692857e-05ef-43b4-ba9c-ccf1c22c437c'
-    feed='7982ae20-ed19-4a35-a362-a96ac99897b7'
-    url="https://pkgs.dev.azure.com/${org}/${proj}/_apis/packaging/feeds/${feed}/nuget/packages/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
     echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
     mkdir -p ort_home/include ort_home/lib
-    curl --fail --retry 5 --retry-all-errors -L -o ort.zip "$url"
+    # Authenticate with the pipeline build identity. No `set -x` in this step so
+    # the Bearer token is never echoed to the log.
+    curl --fail --retry 5 --retry-all-errors -L \
+      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+      -o ort.zip "$url"
     unzip -o ort.zip -d ort_extracted >/dev/null
     # CUDA headers are under buildTransitive; CPU under build
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
@@ -98,6 +134,38 @@ steps:
     echo "ORT layout:"; ls -la ort_home/include ort_home/lib
   displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
   workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Audit: no public package feeds -----------------------------------------
+# Hard gate (Phase 2c): fail the build if pip or cargo could reach a public feed.
+- bash: |
+    set -e
+    failed=0
+    # pip: PIP_INDEX_URL must be the Lotus index and not pypi.org.
+    # Do NOT print the value — it carries an embedded credential.
+    if [ -z "${PIP_INDEX_URL:-}" ]; then
+      echo "AUDIT FAIL: PIP_INDEX_URL is not set"; failed=1
+    elif ! echo "$PIP_INDEX_URL" | grep -q '_packaging/Lotus/' || echo "$PIP_INDEX_URL" | grep -q 'pypi\.org'; then
+      echo "AUDIT FAIL: PIP_INDEX_URL does not point exclusively at Lotus"; failed=1
+    else
+      echo "AUDIT OK: pip resolves from Lotus only"
+    fi
+    # cargo: crates.io must be replaced with the Lotus source.
+    cfg="$(Build.SourcesDirectory)/.cargo/config.toml"
+    if [ ! -f "$cfg" ]; then
+      echo "AUDIT FAIL: $cfg missing"; failed=1
+    elif ! grep -q 'replace-with = "lotus"' "$cfg" || ! grep -q '_packaging/Lotus/Cargo/' "$cfg"; then
+      echo "AUDIT FAIL: cargo config does not redirect crates.io to Lotus"; failed=1
+    else
+      echo "AUDIT OK: cargo resolves from Lotus only"
+    fi
+    if [ "$failed" -ne 0 ]; then
+      echo "Feed isolation audit failed — a public feed could be reached"; exit 1
+    fi
+    echo "AUDIT OK: no public package feeds configured"
+  displayName: 'Audit: no public package feeds'
+  workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Build core + CPack archive + install CMake package (inside docker) -----
 - bash: |
@@ -107,6 +175,11 @@ steps:
       --rm
       --volume "$(Build.SourcesDirectory):/ort_genai_src"
       -w /ort_genai_src
+      # Forward feed-auth env by NAME only (no =value) so the credentials are
+      # never printed by `set -x`. PIP_INDEX_URL is set by PipAuthenticate;
+      # CARGO_REGISTRIES_LOTUS_TOKEN is set via this step's env: block.
+      -e PIP_INDEX_URL
+      -e CARGO_REGISTRIES_LOTUS_TOKEN
     )
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
@@ -139,9 +212,22 @@ steps:
         --install_dir /ort_genai_src/install \
         --package \
         "${extra_cuda_args[@]}"
+
+      # Probe: configuring + building the committed consumer against the exported
+      # package is the real proof that find_package(onnxruntime-genai) is
+      # consumable. A broken export fails here rather than in a later SDK job.
+      /usr/bin/cmake -S .pipelines/scratch/genai_probe -B /tmp/probe-build \
+        -Donnxruntime-genai_DIR=/ort_genai_src/install/lib/cmake/onnxruntime-genai
+      /usr/bin/cmake --build /tmp/probe-build
+      test -f /tmp/probe-build/genai_probe || { echo "ASSERT FAIL: probe exe missing"; exit 1; }
+      echo "ASSERT OK: find_package(onnxruntime-genai) resolves and links"
     '
   displayName: 'Build core (build.py, inside docker)'
   workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # cargo auth for the Lotus registry, forwarded into the container by name.
+    # ADO masks System.AccessToken in logs.
+    CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
 
 # --- Assert: CMake package installed ----------------------------------------
 - bash: |
@@ -161,16 +247,23 @@ steps:
   displayName: 'Assert: CMake package installed'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-# --- Assert: CPack archive produced -----------------------------------------
+# --- Assert: CPack archive produced + contains expected payload -------------
 - bash: |
     set -e
     pkg_dir='build/core/${{ parameters.build_config }}/package'
-    archives=$(find "$pkg_dir" -name '*.tar.gz' 2>/dev/null | head -n1)
-    if [ -z "$archives" ]; then
+    archive=$(find "$pkg_dir" -name '*.tar.gz' 2>/dev/null | head -n1)
+    if [ -z "$archive" ]; then
       echo "ASSERT FAIL: no CPack .tar.gz found in $pkg_dir"; exit 1
     fi
-    echo "ASSERT OK: CPack archive: $archives"
-  displayName: 'Assert: CPack archive produced'
+    echo "CPack archive: $archive"
+    listing=$(tar -tzf "$archive")
+    # The archive must ship the native library and the public C/C++ headers.
+    for pat in 'libonnxruntime-genai\.so' 'ort_genai_c\.h' 'ort_genai\.h'; do
+      echo "$listing" | grep -Eq "$pat$" || {
+        echo "ASSERT FAIL: archive missing /$pat/"; exit 1; }
+    done
+    echo "ASSERT OK: archive contains native lib + public headers"
+  displayName: 'Assert: CPack archive contents'
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Publish artifacts -------------------------------------------------------

@@ -48,6 +48,15 @@ steps:
     addToPath: true
     architecture: '${{ parameters.arch }}'
 
+# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+# Sets PIP_INDEX_URL to the authenticated Lotus PyPI index (no pypi.org fallback)
+# so every subsequent `pip install` resolves only from Lotus.
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
 - script: python -m pip install requests wheel
   displayName: 'Install build-time Python deps'
 
@@ -62,6 +71,33 @@ steps:
     Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
     rustc --version
   displayName: 'Install Rust toolchain'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Feed isolation: cargo → Lotus (crates.io replaced) ---------------------
+# Writes a repo-root .cargo/config.toml so cargo (invoked when building the
+# llguidance crate) resolves every crate from Lotus instead of crates.io. The
+# credential is supplied at build time via the CARGO_REGISTRIES_LOTUS_TOKEN env
+# var — no secret is written to disk.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $cargoDir = Join-Path '$(Build.SourcesDirectory)' '.cargo'
+    New-Item -ItemType Directory -Force -Path $cargoDir | Out-Null
+    $lines = @(
+      '[source.crates-io]',
+      'replace-with = "lotus"',
+      '',
+      '[source.lotus]',
+      'registry = "$(lotusCargoSparse)"',
+      '',
+      '[registries.lotus]',
+      'index = "$(lotusCargoSparse)"',
+      '',
+      '[registry]',
+      'global-credential-providers = ["cargo:token"]'
+    )
+    Set-Content -Path (Join-Path $cargoDir 'config.toml') -Value $lines -Encoding utf8
+    Write-Host "Wrote $cargoDir\config.toml"
+  displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- LLVM (arm64 only — needed by guidance bindgen) ------------------------
@@ -100,7 +136,7 @@ steps:
       set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
       azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v${{ parameters.cuda_version }}" "cuda_sdk"
 
-# --- ORT download from Lotus feed ------------------------------------------
+# --- ORT download from Lotus feed (authenticated) ---------------------------
 - powershell: |
     $ErrorActionPreference = 'Stop'
     # CUDA x64 uses the GPU ORT package; CPU and CUDA arm64 use the CPU package
@@ -110,13 +146,12 @@ steps:
     } else {
       $pkgName = 'Microsoft.ML.OnnxRuntime'
     }
-    $orgName  = 'aiinfra'
-    $projId   = '2692857e-05ef-43b4-ba9c-ccf1c22c437c'
-    $feedId   = '7982ae20-ed19-4a35-a362-a96ac99897b7'
-    $url = "https://pkgs.dev.azure.com/$orgName/$projId/_apis/packaging/feeds/$feedId/nuget/packages/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    $url = "$(lotusOrtContentBase)/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
     Write-Host "Downloading $pkgName ${{ parameters.ort_version }} from Lotus"
     $zip = "$(Agent.TempDirectory)\ort.zip"
-    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop
+    # Authenticate with the pipeline build identity (do not echo the token).
+    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
+      -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
     Expand-Archive -Path $zip -DestinationPath "$(Agent.TempDirectory)\ort_extracted" -Force
     New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
     # CUDA x64 headers live under buildTransitive; CPU (and CUDA arm64) under build
@@ -130,6 +165,41 @@ steps:
     Copy-Item "$(Agent.TempDirectory)\ort_extracted\runtimes\$platform\native\*" "$(ortHome)\lib\" -Recurse -Force
     Write-Host 'ORT layout:'; Get-ChildItem '$(ortHome)' -Recurse | Select-Object -ExpandProperty FullName
   displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Audit: no public package feeds -----------------------------------------
+# Hard gate (Phase 2c): fail the build if pip or cargo could reach a public
+# feed. Isolation is enforced by construction (PIP_INDEX_URL points only at
+# Lotus; cargo replaces crates.io with Lotus) — this step verifies it.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $failed = $false
+    # pip: PIP_INDEX_URL must be the Lotus index and must not be pypi.org.
+    # Do NOT print the value — it carries an embedded credential.
+    if (-not $env:PIP_INDEX_URL) {
+      Write-Host "AUDIT FAIL: PIP_INDEX_URL is not set"; $failed = $true
+    } elseif ($env:PIP_INDEX_URL -notmatch '_packaging/Lotus/' -or $env:PIP_INDEX_URL -match 'pypi\.org') {
+      Write-Host "AUDIT FAIL: PIP_INDEX_URL does not point exclusively at Lotus"; $failed = $true
+    } else {
+      Write-Host "AUDIT OK: pip resolves from Lotus only"
+    }
+    # cargo: crates.io must be replaced with the Lotus source.
+    $cargoCfg = Join-Path '$(Build.SourcesDirectory)' '.cargo\config.toml'
+    if (-not (Test-Path $cargoCfg)) {
+      Write-Host "AUDIT FAIL: $cargoCfg missing"; $failed = $true
+    } else {
+      $c = Get-Content $cargoCfg -Raw
+      if ($c -notmatch 'replace-with\s*=\s*"lotus"' -or $c -notmatch '_packaging/Lotus/Cargo/') {
+        Write-Host "AUDIT FAIL: cargo config does not redirect crates.io to Lotus"; $failed = $true
+      } else {
+        Write-Host "AUDIT OK: cargo resolves from Lotus only"
+      }
+    }
+    if ($failed) { Write-Error "Feed isolation audit failed — a public feed could be reached"; exit 1 }
+    Write-Host "AUDIT OK: no public package feeds configured"
+  displayName: 'Audit: no public package feeds'
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Build core + CPack archive + install CMake package --------------------
@@ -167,6 +237,10 @@ steps:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   displayName: 'Build core (build.py)'
   workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # cargo auth for the Lotus registry (Bearer token consumed by cargo:token
+    # credential provider). Not echoed — ADO masks System.AccessToken.
+    CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
 
 # --- Assert: CMake package installed ----------------------------------------
 - powershell: |
@@ -185,17 +259,48 @@ steps:
     Write-Host "ASSERT OK: CMake package installed at $(coreInstall)"
   displayName: 'Assert: CMake package installed'
 
-# --- Assert: CPack archive produced -----------------------------------------
+# --- Probe: find_package(onnxruntime-genai) resolves and links --------------
+# Configuring and building the committed consumer probe is the real proof that
+# the exported CMake package is consumable — a broken export (missing target,
+# bad include/link interface) fails here rather than in a later SDK job.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $probeBuild = "$(Agent.TempDirectory)\probe-build"
+    cmake -S "$(Build.SourcesDirectory)\.pipelines\scratch\genai_probe" -B $probeBuild `
+      -Donnxruntime-genai_DIR="$(coreInstall)\lib\cmake\onnxruntime-genai"
+    if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe configure failed"; exit 1 }
+    cmake --build $probeBuild --config ${{ parameters.build_config }}
+    if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe build failed"; exit 1 }
+    if (-not (Test-Path "$probeBuild\${{ parameters.build_config }}\genai_probe.exe")) {
+      Write-Error "ASSERT FAIL: probe exe missing"; exit 1
+    }
+    Write-Host "ASSERT OK: find_package(onnxruntime-genai) resolves and links"
+  displayName: 'Probe: find_package links imported target'
+
+# --- Assert: CPack archive produced + contains expected payload -------------
 - powershell: |
     $ErrorActionPreference = 'Stop'
     $pkgDir = '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\package'
-    $zips = Get-ChildItem -Path $pkgDir -Filter '*.zip' -ErrorAction SilentlyContinue
-    if (-not $zips) {
+    $zip = Get-ChildItem -Path $pkgDir -Filter '*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $zip) {
       Write-Error "ASSERT FAIL: no CPack .zip found in $pkgDir"; exit 1
     }
-    Write-Host "ASSERT OK: CPack archive: $($zips[0].FullName)"
-    Write-Host "Contents:"; $zips | ForEach-Object { Write-Host "  $_" }
-  displayName: 'Assert: CPack archive produced'
+    Write-Host "CPack archive: $($zip.FullName)"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $entries = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
+    # The archive must ship the native library and the public C/C++ headers.
+    $required = @(
+      @{ desc = 'core DLL';      pattern = 'onnxruntime-genai\.dll$' },
+      @{ desc = 'C API header';  pattern = 'ort_genai_c\.h$' },
+      @{ desc = 'C++ API header'; pattern = 'ort_genai\.h$' }
+    )
+    foreach ($r in $required) {
+      if (-not ($entries | Where-Object { $_ -match $r.pattern })) {
+        Write-Error "ASSERT FAIL: archive missing $($r.desc) (/$($r.pattern)/)"; exit 1
+      }
+    }
+    Write-Host "ASSERT OK: archive contains native lib + public headers"
+  displayName: 'Assert: CPack archive contents'
 
 # --- Publish artifacts -------------------------------------------------------
 - task: 1ES.PublishPipelineArtifact@1
