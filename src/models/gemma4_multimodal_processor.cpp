@@ -320,8 +320,15 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   if (payload.images) {
     // The Gemma4ImageTransform pads pixel_values and position_ids to max_patches.
-    // The vision ONNX model expects the actual (unpadded) number of patches.
-    // Trim the tensors to actual_patches = actual_soft_tokens * pooling_kernel_size².
+    //
+    // Standard gemma4: the SigLIP vision ONNX expects the actual (unpadded)
+    // number of teacher patches, so the tensors are trimmed to
+    // actual_patches = actual_soft_tokens * pooling_kernel_size².
+    //
+    // Unified (gemma4_unified): the encoder-free vision graph consumes the full
+    // padded (max_soft_tokens, 6912) tensors and strips padding internally using
+    // position_ids (== -1 marks padding). No trimming is applied; actual_patches
+    // is computed but the trim branches below are gated on !unified_.
     constexpr int64_t kPoolingKernelSize = 3;
     const int64_t actual_patches = static_cast<int64_t>(actual_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
 
