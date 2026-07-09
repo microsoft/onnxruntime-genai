@@ -46,4 +46,11 @@ stages:
     enable_win_x64_cpu: true
     enable_linux_x64_cpu: true
 
+- template: sdk-java-stage.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
+    # Desktop JVM jar for the linux-x64 CPU core.
+    enable_linux_x64_cpu: true
+
+
 

@@ -1,0 +1,45 @@
+# =============================================================================
+# sdk-java-stage.yml — Java SDK (desktop JVM jar) stage (Phase 3).
+#
+# Builds one desktop jar per enabled Linux cell, incrementally against the
+# prebuilt core. Windows/macOS desktop jars and the Android AAR are follow-ups.
+#
+# Display-name convention:
+#   Stage:  SDK · Java
+#   Jobs:   java · <os>-<arch> · <ep>   (set by sdk-java-job.yml)
+# =============================================================================
+
+parameters:
+- name: ort_version
+  type: string
+
+# ---- CPU cell enable toggles (Linux desktop jar) ---------------------------
+- name: enable_linux_x64_cpu
+  type: boolean
+  default: false
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
+
+stages:
+- stage: sdk_java
+  displayName: 'SDK · Java'
+  dependsOn:
+  - core_cpu
+  jobs:
+
+  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
+    - template: jobs/sdk-java-job.yml
+      parameters:
+        os: linux
+        arch: x64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/sdk-java-job.yml
+      parameters:
+        os: linux
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}

@@ -1,0 +1,68 @@
+# =============================================================================
+# sdk-java-job.yml — Reusable Java SDK (desktop JVM jar) build job (Phase 3).
+#
+# Builds the desktop JVM jar incrementally against the prebuilt core. Currently
+# supports Linux; Windows/macOS desktop jars and the Android AAR are follow-ups.
+#
+# Consumes:  core-<os>-<arch>-<ep>-cmake-pkg
+# Publishes: java-<os>-<arch>-<ep>-jar
+# =============================================================================
+
+parameters:
+- name: os
+  type: string
+  values: [linux]
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+
+jobs:
+- job: java_${{ parameters.os }}_${{ parameters.arch }}_${{ parameters.ep }}
+  displayName: 'java · ${{ parameters.os }}-${{ parameters.arch }} · ${{ parameters.ep }}'
+
+  pool:
+    ${{ if eq(parameters.arch, 'arm64') }}:
+      name: 'onnxruntime-linux-ARM64-CPU-2019'
+      hostArchitecture: Arm64
+    ${{ else }}:
+      name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    os: linux
+
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: artifactName
+    value: 'java-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}'
+  - name: coreArtifact
+    value: 'core-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}-cmake-pkg'
+  - name: corePkgDir
+    value: '$(Build.SourcesDirectory)/core_pkg'
+  # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)
+  - name: jsdkBuildDir
+    value: 'build/jsdk'
+
+  steps:
+  - checkout: self
+    submodules: recursive
+    lfs: true
+    clean: true
+
+  - template: steps/sdk-java-linux-step.yml
+    parameters:
+      arch: ${{ parameters.arch }}
+      ep: ${{ parameters.ep }}
+      build_config: ${{ parameters.build_config }}
+      ort_version: ${{ parameters.ort_version }}
+      core_artifact: $(coreArtifact)
+
+  - template: steps/compliant-and-cleanup-step.yml

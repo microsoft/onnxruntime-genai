@@ -30,6 +30,10 @@ variables:
 - name: lotusNuGetFeed
   value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/nuget/v3/index.json'
 
+# Maven feed — org-scoped Lotus (used by gradle for the Java SDK in Phase 3).
+- name: lotusMavenFeed
+  value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/maven/v1'
+
 # Base of the NuGet package *content* API for the ORT download (org-scoped feed).
 # Full URL: <base>/<package>/versions/<version>/content?api-version=6.0-preview.1
 - name: lotusOrtContentBase
