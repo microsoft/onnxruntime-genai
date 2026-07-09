@@ -1551,6 +1551,20 @@ class CAPITests : public ::testing::TestWithParam<StreamingASRModel> {
   size_t ChunkSamples() const { return GetParam().chunk_samples; }
 };
 
+// Helper: a streaming ASR model has VAD enabled by default only when its genai_config.json
+// declares a "vad" section AND the referenced silero_vad.onnx file is present in the model dir.
+static bool ModelHasVad(const std::string& model_path) {
+  const auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    return false;
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return false;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  return std::regex_search(config_json, std::regex(R"("vad"\s*:\s*\{)"));
+}
+
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   if (mel) {
@@ -1706,16 +1720,28 @@ TEST_P(CAPITests, StreamingASRVadSetGetOption) {
   auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // Default: VAD disabled
-  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+  // Checking whether or not the model has the components necessary to run VAD. If not, skip the test.
+  // VAD requires having a "vad" section in the genai_config.json and the silero_vad.onnx file in the model directory.
+  // Even if a model is VAD-capable, VAD is disabled by default in InitializeVadFromConfig.
+  const bool model_has_vad = ModelHasVad(model_path);
 
-  // Set and get threshold
-  processor->SetOption("silence_duration_ms", "1000");
-  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+  if (!model_has_vad) {
+    GTEST_SKIP() << "Streaming ASR model is not set up for VAD, skipping test";
+  }
 
-  // Enable VAD if silero_vad.onnx is available
-  auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
-  if (std::filesystem::exists(vad_path)) {
+  // VAD is enabled by default when possible from InitializeVadFromConfig
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+  // silence_duration_ms round-trips exactly only when it is an integer multiple of the model's
+  // chunk duration (chunk_samples / sample_rate * 1000). Use two chunks' worth: 1000 ms for the
+  // 8000-sample moonshine models (500 ms/chunk) and 1120 ms for the 8960-sample nemotron model
+  // (560 ms/chunk).
+  const char* silence_duration_ms = (GetParam().subdir == "nemotron-speech-streaming") ? "1120" : "1000";
+  processor->SetOption("silence_duration_ms", silence_duration_ms);
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), silence_duration_ms);
+
+  // Enable VAD if the model declares a VAD config
+  if (model_has_vad) {
     processor->SetOption("use_vad", "true");
     ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
 
@@ -1729,34 +1755,115 @@ TEST_P(CAPITests, StreamingASRVadSetGetOption) {
   SUCCEED();
 }
 
-// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
-TEST_P(CAPITests, StreamingASRVadConsecutiveSilence) {
-  const std::string model_path = ModelPath();
+// Test consecutive silence logic for nemotron: VAD keeps silence chunks for context until the
+// consecutive-silence threshold is reached, then drops. This is nemotron-specific; moonshine
+// uses VAD for utterance segmentation instead (see StreamingASRMoonshineVadSegmentation).
+TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
+  const std::string model_path = std::string(MODEL_PATH) + "nemotron-speech-streaming";
   if (!std::filesystem::exists(model_path))
-    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+    GTEST_SKIP() << "Nemotron streaming model not found at " << model_path;
 
-  auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
-  if (!std::filesystem::exists(vad_path))
-    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+  // VAD requires a "vad" section in genai_config.json and the silero_vad.onnx file. Skip if absent.
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Nemotron model is not set up for VAD, skipping test";
 
   auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   processor->SetOption("use_vad", "true");
-  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+  // silence_duration_ms must be an integer multiple of the chunk duration; 1680 ms / 560 ms = 3
+  // chunks, so the first 2 silence chunks are kept and the 3rd dropped.
+  processor->SetOption("silence_duration_ms", "1680");
 
-  const size_t chunk_samples = ChunkSamples();
+  const size_t chunk_samples = 8960;  // nemotron chunk size
   std::vector<float> silence(chunk_samples, 0.0f);
 
-  // First 2 silence chunks should still be processed (not dropped)
+  // First 2 silence chunks are preserved (within the tolerance), the 3rd is dropped.
   auto mel1 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed
 
   auto mel2 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed
 
-  // Third silence chunk should be dropped (> min_silence_chunks)
   auto mel3 = processor->Process(silence.data(), silence.size());
-  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped (>= threshold of 3)
+  SUCCEED();
+}
+
+// Helper: read a numeric field ("key": <number>) from a model's genai_config.json. Returns the
+// fallback if the file can't be read or the key is not found.
+static double ReadConfigNumber(const std::string& model_path, const std::string& key, double fallback) {
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return fallback;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  std::smatch match;
+  if (std::regex_search(config_json, match, std::regex("\"" + key + R"("\s*:\s*([0-9.eE+-]+))")))
+    return std::stod(match[1].str());
+  return fallback;
+}
+
+// Test moonshine's VAD-based utterance segmentation: speech accumulates a segment, a long
+// stretch of silence past min_segment_memory_frames flushes the segment and resets (after which
+// silence is dropped), and subsequent speech starts a new segment. Silero VAD only recognizes
+// real human speech (not synthetic tones), so the "speech" portions are fed with VAD disabled —
+// which routes through the same accumulation path real speech would — while VAD is enabled for
+// the silence portion that drives the segmentation.
+TEST(CAPITests, StreamingASRMoonshineVadSegmentation) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Moonshine model is not set up for VAD, skipping test";
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  // Read the chunking / segmentation parameters straight from the model config.
+  const size_t chunk_samples = static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate = static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const double seconds_per_memory_frame = ReadConfigNumber(model_path, "seconds_per_memory_frame", 0.02);
+  const int min_segment_memory_frames =
+      static_cast<int>(ReadConfigNumber(model_path, "min_segment_memory_frames", 250));
+
+  constexpr float frequency = 440.0f;
+  std::vector<float> speech(chunk_samples);
+  for (size_t i = 0; i < chunk_samples; ++i)
+    speech[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // 1) Initial speech: fed with VAD disabled so the tone accumulates an in-progress utterance.
+  //    Every chunk should be processed (non-null).
+  processor->SetOption("use_vad", "false");
+  for (int i = 0; i < 4; ++i) {
+    auto output = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(output, nullptr) << "Initial speech chunk " << i << " should be processed";
+  }
+
+  // 2) Silence with VAD enabled: mid-segment silence keeps being encoded (non-null) until the
+  //    accumulated frames pass min_segment_memory_frames, which flushes the utterance and resets.
+  processor->SetOption("use_vad", "true");
+
+  // The first silence chunk is still within the active segment -> processed, not dropped.
+  auto first_silence = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(first_silence, nullptr) << "Mid-segment silence should still be processed";
+
+  // Each chunk contributes (chunk_samples / sample_rate) / seconds_per_memory_frame memory frames.
+  // Feeding min_segment_memory_frames / frames_per_chunk + 1 chunks accumulates past the threshold,
+  // which flushes the segment and resets the processor.
+  const int frames_per_chunk =
+      static_cast<int>((static_cast<double>(chunk_samples) / sample_rate) / seconds_per_memory_frame);
+  for (int i = 0; i < min_segment_memory_frames / frames_per_chunk + 1; ++i) {
+    processor->Process(silence.data(), silence.size());
+  }
+
+  // The utterance has now flushed and reset, so further silence is dropped (pre-utterance).
+  ASSERT_EQ(processor->Process(silence.data(), silence.size()), nullptr);
+
+  // 3) New speech after the reset: memory rebuilds, so the chunk is processed again (non-null).
+  processor->SetOption("use_vad", "false");
+  auto output_new = processor->Process(speech.data(), speech.size());
+  ASSERT_NE(output_new, nullptr) << "New speech after the reset should be processed";
   SUCCEED();
 }
 
