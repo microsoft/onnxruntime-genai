@@ -1766,8 +1766,8 @@ TEST_P(CAPITests, StreamingASRVadSetGetOption) {
 
 // Test consecutive silence logic for nemotron: VAD keeps silence chunks for context until the
 // consecutive-silence threshold is reached, then drops. This is nemotron-specific; moonshine
-// uses VAD for utterance segmentation instead (see StreamingASRMoonshineVadSegmentation).
-TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
+// uses VAD for utterance segmentation instead (see MoonshineVadSegmentation).
+TEST(StreamingASRTests, VadConsecutiveSilence) {
   const std::string model_path = std::string(MODEL_PATH) + "nemotron-speech-streaming";
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Nemotron streaming model not found at " << model_path;
@@ -1818,7 +1818,7 @@ static double ReadConfigNumber(const std::string& model_path, const std::string&
 // real human speech (not synthetic tones), so the "speech" portions are fed with VAD disabled —
 // which routes through the same accumulation path real speech would — while VAD is enabled for
 // the silence portion that drives the segmentation.
-TEST(CAPITests, StreamingASRMoonshineVadSegmentation) {
+TEST(StreamingASRTests, MoonshineVadSegmentation) {
   const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
