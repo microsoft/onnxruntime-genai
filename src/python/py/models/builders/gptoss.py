@@ -22,6 +22,7 @@ class GPTOSSModel(Model):
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
         self._mxfp4_weight_map = None
+        self._mxfp4_weight_map_loaded = False
         self._mxfp4_snapshot_dir = None
         self._mxfp4_tensor_cache = {}
 
@@ -50,7 +51,7 @@ class GPTOSSModel(Model):
         return self._mxfp4_snapshot_dir
 
     def _get_mxfp4_weight_map(self):
-        if self._mxfp4_weight_map is not None:
+        if self._mxfp4_weight_map_loaded:
             return self._mxfp4_weight_map
 
         snapshot_dir = self._get_mxfp4_snapshot_dir()
@@ -67,6 +68,7 @@ class GPTOSSModel(Model):
                     f"Could not locate original GPT-OSS MXFP4 safetensors index in {snapshot_dir}."
                 )
             self._mxfp4_weight_map = None
+        self._mxfp4_weight_map_loaded = True
         return self._mxfp4_weight_map
 
     def _load_original_mxfp4_tensor(self, tensor_name):

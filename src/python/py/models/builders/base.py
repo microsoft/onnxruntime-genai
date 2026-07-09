@@ -33,7 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
-                                                                                                                                                                                                                        
+
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2751,9 +2751,8 @@ class Model:
             "softcap": self.attention_attrs["softcap"],
             "do_rotary": self.attention_attrs["use_rope_in_attn"],
             "rotary_interleaved": self.rope_attrs["interleaved"],
+            "qk_norm_epsilon": kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"]),
         }
-        if q_norm_weight:
-            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
