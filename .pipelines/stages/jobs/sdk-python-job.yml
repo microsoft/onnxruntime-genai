@@ -75,6 +75,12 @@ jobs:
   # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)
   - name: pysdkBuildDir
     value: 'build/pysdk'
+  # Scope Guardian's post-build codesign/SARIF analysis to a small staging dir
+  # (matches the in-tree capi-packaging-job) so the injected 'sarifpatternmatcher'
+  # does not scan the whole native/wheel build tree and crash Guardian Post
+  # Analysis. Only relevant on Windows where signing runs.
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/wheel'
 
   steps:
   - checkout: self

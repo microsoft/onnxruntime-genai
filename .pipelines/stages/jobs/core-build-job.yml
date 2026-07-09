@@ -75,6 +75,14 @@ jobs:
   # build.py --build_dir (relative; build.py appends /<config> internally)
   - name: buildDir
     value: 'build/core'
+  # Scope Guardian's post-build codesign/SARIF analysis to a small staging dir
+  # (matches the in-tree capi-packaging-job). Without this, the 1ES-injected
+  # analysis scans the whole native + cargo/guidance build tree and the
+  # 'sarifpatternmatcher' engine emits a driver-less SARIF that crashes Guardian
+  # Post Analysis ("Required property 'driver' not found"). This is only needed on
+  # the Windows native-build+sign jobs.
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
 
   steps:
   - checkout: self
