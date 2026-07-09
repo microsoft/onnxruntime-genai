@@ -838,10 +838,6 @@ class Model:
         placement = {}
         for flag in self.INT8_PLACEMENT_FLAGS:
             placement[flag] = bool(extra_options.get(flag, implied.get(flag, False)))
-        # Optional explicit list of layer indices for `int8_mixed_layers` (overrides the
-        # default llama.cpp selection). Lets a recipe target specific layers, e.g. the
-        # highest-reconstruction-error ones.
-        placement["int8_mixed_layer_ids"] = extra_options.get("int8_mixed_layer_ids")
         return base_method, placement
 
     def make_bit_placement_config(self, placement):
@@ -852,21 +848,15 @@ class Model:
             customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
         if placement.get("int8_mixed_layers"):
-            # Which layers to promote to int8. By default use the llama.cpp mixed-precision
-            # selection (first and last eighth, plus every third layer); a recipe may override
-            # it with an explicit `int8_mixed_layer_ids` list (e.g. the highest-error layers).
+            # Mixed precision from llama.cpp: promote the most quantization-sensitive MatMuls to int8.
             # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-            override_ids = placement.get("int8_mixed_layer_ids")
-            if override_ids:
-                layers_to_upgrade = [int(i) for i in override_ids]
-            else:
-                layers_to_upgrade = [
-                    i
-                    for i in range(self.num_layers)
-                    if i < self.num_layers / 8
-                    or i >= 7 * self.num_layers / 8
-                    or (i - (round)(self.num_layers / 8)) % 3 == 2
-                ]
+            layers_to_upgrade = [
+                i
+                for i in range(self.num_layers)
+                if i < self.num_layers / 8
+                or i >= 7 * self.num_layers / 8
+                or (i - (round)(self.num_layers / 8)) % 3 == 2
+            ]
             for i in layers_to_upgrade:
                 customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
                 customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
