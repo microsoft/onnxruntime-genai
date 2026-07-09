@@ -242,11 +242,16 @@ steps:
     CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
 
 # --- BinSkim on the core native binaries ------------------------------------
-- task: BinSkim@4
-  displayName: 'Run BinSkim (core dll)'
-  inputs:
-    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\**\*genai*.dll'
-  continueOnError: true
+# BISECT (test c): BinSkim temporarily removed to test whether the *presence* of
+# this checked security tool is what activates the 1ES Guardian glass-box
+# analysis (and thus the crashing 'sarifpatternmatcher'). ESRP signing is kept.
+# If this run goes GREEN, BinSkim-presence is the activator. If it still fails,
+# ESRP is the activator (or it's content-driven).
+# - task: BinSkim@4
+#   displayName: 'Run BinSkim (core dll)'
+#   inputs:
+#     AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\**\*genai*.dll'
+#   continueOnError: true
 
 # --- ESRP sign the core native dlls (before packaging) ----------------------
 # build.py's VS build nests the dll under <build_dir>/<config>/<config>/; the ESRP
@@ -352,3 +357,32 @@ steps:
     SearchPattern: 'onnxruntime-genai*.pdb'
     SymbolServerType: teamServices
     SymbolExpirationInDays: 365
+
+# --- DIAG: dump any Guardian .gdn SARIF logs (best-effort) ------------------
+# If the run still crashes, this dumps the offending SARIF (when the source scan
+# ran before this point). If nothing prints, re-run with pipeline variable
+# system.debug=true and read the SARIF from the "Guardian: Post Analysis" log.
+- powershell: |
+    $ErrorActionPreference = 'Continue'
+    $roots = @(
+      "$(Agent.BuildDirectory)\.gdn",
+      "$(Build.SourcesDirectory)\.gdn",
+      "$(Agent.TempDirectory)\.gdn",
+      "$(Agent.WorkFolder)\_gdn",
+      "$(Agent.WorkFolder)\_gdn\gdn"
+    ) | Select-Object -Unique
+    foreach ($r in $roots) {
+      if (Test-Path $r) {
+        Write-Host "=================== .gdn tree under $r ==================="
+        Get-ChildItem -Path $r -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+        Get-ChildItem -Path $r -Recurse -Force -Filter *.sarif -ErrorAction SilentlyContinue | ForEach-Object {
+          Write-Host "===================== SARIF: $($_.FullName) ====================="
+          Get-Content -Path $_.FullName -Raw
+          Write-Host "===================== END SARIF ====================="
+        }
+      } else {
+        Write-Host "No .gdn at $r"
+      }
+    }
+  displayName: 'DIAG: dump Guardian .gdn SARIF logs'
+  condition: always()
