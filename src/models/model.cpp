@@ -33,6 +33,7 @@
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
+#include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
 #include "session_options.h"
 
@@ -403,17 +404,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-// Trivial ONNX model that just returns a single float constant. Used below to create an OrtSession that
-// lets us get a device Ort::Allocator for each device type. This is necessary because the Ort::Allocator
-// needs to persist and is valid for the lifetime of this OrtSession.
-static const uint8_t g_trivial_model[] = {
-    0x08, 0x0a, 0x12, 0x01, 0x61, 0x3a, 0x53, 0x0a, 0x38, 0x12, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65,
-    0x73, 0x22, 0x08, 0x43, 0x6f, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x74, 0x2a, 0x24, 0x0a, 0x05, 0x76,
-    0x61, 0x6c, 0x75, 0x65, 0x2a, 0x18, 0x08, 0x01, 0x10, 0x01, 0x42, 0x0c, 0x63, 0x6f, 0x6e, 0x73,
-    0x74, 0x5f, 0x74, 0x65, 0x6e, 0x73, 0x6f, 0x72, 0x4a, 0x04, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01,
-    0x04, 0x12, 0x01, 0x62, 0x62, 0x14, 0x0a, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x12, 0x0a,
-    0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x04, 0x0a, 0x00, 0x10, 0x15};
-
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
@@ -435,7 +425,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -463,10 +453,11 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
-  allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
+  const auto trivial_model = GetTrivialModel();
+  allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
