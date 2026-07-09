@@ -60,6 +60,15 @@ extends:
       tsa:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      # Disable the SDL-injected credential scanner (the "sarifpatternmatcher"
+      # engine). Adding the ESRP signing task makes 1ES turn on this glass-box
+      # scan on the Windows jobs, and it emits a driver-less SARIF that crashes
+      # Guardian "Post Analysis" (JsonSerializationException: Required property
+      # 'driver' not found). We already run credential scanning explicitly via the
+      # classic CredScan@3 task in compliant-and-cleanup-step.yml, so disabling the
+      # injected duplicate loses no coverage.
+      credscan:
+        enabled: false
     stages:
       - template: stages/packaging-scratch-stage.yml
         parameters:
