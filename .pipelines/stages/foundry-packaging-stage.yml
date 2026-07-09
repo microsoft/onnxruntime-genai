@@ -1,0 +1,78 @@
+# =============================================================================
+# foundry-packaging-stage.yml — .Foundry (custom-ORT) NuGet stage (Phase 4).
+#
+# Repackages the prebuilt core native binaries against a custom ONNX Runtime
+# NuGet package. The whole stage is emitted ONLY when a custom ORT package name
+# is supplied (custom_ort_package_versioned_name != ''), matching the former
+# custom-nuget-packaging behavior.
+#
+# Display-name convention:
+#   Stage:  SDK · .Foundry
+#   Job:    foundry · custom-ort nuget   (set by foundry-packaging-job.yml)
+# =============================================================================
+
+parameters:
+- name: custom_ort_package_versioned_name
+  type: string
+  default: ''
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
+# Per-RID enable + EP flavor (defaults mirror the historical .Foundry mapping:
+# cuda for win-x64/win-arm64/linux-x64, cpu for osx-arm64/linux-arm64).
+- name: enable_win_x64
+  type: boolean
+  default: false
+- name: win_x64_ep
+  type: string
+  default: 'cuda'
+- name: enable_win_arm64
+  type: boolean
+  default: false
+- name: win_arm64_ep
+  type: string
+  default: 'cuda'
+- name: enable_osx_arm64
+  type: boolean
+  default: false
+- name: enable_linux_x64
+  type: boolean
+  default: false
+- name: linux_x64_ep
+  type: string
+  default: 'cuda'
+- name: enable_linux_arm64
+  type: boolean
+  default: false
+- name: linux_arm64_ep
+  type: string
+  default: 'cpu'
+
+stages:
+# Only emit the stage when a custom ORT package is provided.
+- ${{ if ne(parameters.custom_ort_package_versioned_name, '') }}:
+  - stage: sdk_foundry
+    displayName: 'SDK · .Foundry'
+    # Depend on core_cpu always; add core_cuda when any enabled RID is cuda.
+    ${{ if or(and(eq(parameters.enable_win_x64, true), eq(parameters.win_x64_ep, 'cuda')), and(eq(parameters.enable_win_arm64, true), eq(parameters.win_arm64_ep, 'cuda')), and(eq(parameters.enable_linux_x64, true), eq(parameters.linux_x64_ep, 'cuda'))) }}:
+      dependsOn:
+      - core_cpu
+      - core_cuda
+    ${{ else }}:
+      dependsOn:
+      - core_cpu
+    jobs:
+    - template: jobs/foundry-packaging-job.yml
+      parameters:
+        custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+        nuget_version_type: ${{ parameters.nuget_version_type }}
+        enable_win_x64: ${{ parameters.enable_win_x64 }}
+        win_x64_ep: ${{ parameters.win_x64_ep }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+        win_arm64_ep: ${{ parameters.win_arm64_ep }}
+        enable_osx_arm64: ${{ parameters.enable_osx_arm64 }}
+        enable_linux_x64: ${{ parameters.enable_linux_x64 }}
+        linux_x64_ep: ${{ parameters.linux_x64_ep }}
+        enable_linux_arm64: ${{ parameters.enable_linux_arm64 }}
+        linux_arm64_ep: ${{ parameters.linux_arm64_ep }}

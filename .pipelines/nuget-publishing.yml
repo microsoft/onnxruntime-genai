@@ -26,6 +26,11 @@ parameters:
       - '13.1'
       - '12.8'
 
+  - name: custom_ort_package_versioned_name
+    displayName: '.Foundry: custom ORT package (e.g. Microsoft.ML.OnnxRuntime.Foundry.1.26.0.nupkg; empty = skip)'
+    type: string
+    default: ''
+
 resources:
   repositories:
     - repository: 1esPipelines
@@ -60,3 +65,4 @@ extends:
         parameters:
           ort_version: ${{ parameters.ort_version }}
           cuda_version: ${{ parameters.cuda_version }}
+          custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}

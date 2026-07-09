@@ -19,6 +19,9 @@ parameters:
 - name: cuda_version
   type: string
   default: '13.1'
+- name: custom_ort_package_versioned_name
+  type: string
+  default: ''
 
 stages:
 - template: core-packaging-stage.yml
@@ -51,6 +54,18 @@ stages:
     ort_version: ${{ parameters.ort_version }}
     # Desktop JVM jar for the linux-x64 CPU core.
     enable_linux_x64_cpu: true
+
+# .Foundry (custom-ORT) NuGet — only runs when custom_ort_package_versioned_name
+# is provided. Reduced CPU-only RID set (win-x64 + linux-x64) for scratch
+# validation; the full RID×EP mapping is exercised in Phase 5.
+- template: foundry-packaging-stage.yml
+  parameters:
+    custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+    enable_win_x64: true
+    win_x64_ep: 'cpu'
+    enable_linux_x64: true
+    linux_x64_ep: 'cpu'
+
 
 
 
