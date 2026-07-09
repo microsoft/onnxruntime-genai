@@ -301,8 +301,9 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateWebGPUInterface());
       slot = owned_interfaces_.back().get();
       break;
-    case DeviceType::QNN:
-      owned_interfaces_.push_back(CreateQNNInterface());
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
+      owned_interfaces_.push_back(CreateQNNInterface(type));
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::OpenVINO:
@@ -332,7 +333,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGPU";
-    case DeviceType::QNN:
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
