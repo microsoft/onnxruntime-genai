@@ -401,17 +401,6 @@ def test_per_channel_can_emit_full_range_unsigned_offset_storage(bits, weights, 
     assert torch.equal(qweight, expected_qweight)
 
 
-def test_per_channel_env_var_can_use_legacy_15_bucket_unsigned_offset_storage(monkeypatch):
-    monkeypatch.setenv("GENAI_QMOE_UNSIGNED_FULL_RANGE", "0")
-    model = _RealMoEModel("cpu", 0, -1, bits=4)
-    weights = torch.tensor([[-7.0, -3.0, 0.0, 7.0]], dtype=torch.float32)
-
-    qweight, scales = model._symmetric_per_channel_quantize(weights)
-
-    assert torch.equal(scales, torch.tensor([1.0]))
-    assert torch.equal(qweight, torch.tensor([[0x51, 0xF8]], dtype=torch.uint8))
-
-
 @pytest.mark.parametrize(
     "bits,weights,expected_qweight",
     [

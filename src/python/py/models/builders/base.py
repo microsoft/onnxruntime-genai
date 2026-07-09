@@ -33,24 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
-
-# Some environment variables for internal test only and not exposed to user since the default value is best choice.
-def _qmoe_unsigned_full_range(model):
-    raw = os.environ.get("GENAI_QMOE_UNSIGNED_FULL_RANGE", "1")
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-                                                                                                                                                                                                                                        
-def _qmoe_signed_scale(model, default):
-    # Internal test knob: use MLAS-style SIGNED per-block/per-channel QMoE scales.
-    # When GENAI_QMOE_SIGNED_SCALE is unset, use the per-path ``default`` (False for
-    # per-channel, True for blockwise); when set it overrides both.
-    raw = os.environ.get("GENAI_QMOE_SIGNED_SCALE")
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
+                                                                                                                                                                                                                        
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3747,8 +3730,8 @@ class Model:
         return CudaQuantizer.qmoe_symmetric_per_channel_quantize(
             weights,
             bits,
-            unsigned_full_range=_qmoe_unsigned_full_range(self),
-            signed_scale=_qmoe_signed_scale(self, default=False),
+            unsigned_full_range=True,
+            signed_scale=False,
         )
 
     def _cuda_per_channel_quantize(self, weights, prepack):
@@ -3765,8 +3748,8 @@ class Model:
             weights,
             bits,
             prepack,
-            unsigned_full_range=_qmoe_unsigned_full_range(self),
-            signed_scale=_qmoe_signed_scale(self, default=False),
+            unsigned_full_range=True,
+            signed_scale=False,
         )
 
     def _cutlass_prepacked_blockwise_quantize(self, weights):
@@ -3789,8 +3772,8 @@ class Model:
             weights,
             bits,
             block_size,
-            unsigned_full_range=_qmoe_unsigned_full_range(self),
-            signed_scale=_qmoe_signed_scale(self, default=True),
+            unsigned_full_range=True,
+            signed_scale=True,
         )
 
     def _matmulnbits_blockwise_quantize(self, weights):
@@ -3810,8 +3793,8 @@ class Model:
             weights,
             bits,
             block_size,
-            unsigned_full_range=_qmoe_unsigned_full_range(self),
-            signed_scale=_qmoe_signed_scale(self, default=True),
+            unsigned_full_range=True,
+            signed_scale=True,
         )
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
@@ -3820,7 +3803,7 @@ class Model:
             weights,
             bits,
             block_size,
-            unsigned_full_range=_qmoe_unsigned_full_range(self),
+            unsigned_full_range=True,
         )
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):

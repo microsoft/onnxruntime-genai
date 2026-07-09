@@ -136,11 +136,6 @@ The default QMoE export uses the unsigned-offset contract above because ORT CUDA
 QMoE prepack decodes raw int4 as `nibble - 8` and raw int8 as `byte - 128` before
 laying weights out for the CUTLASS MoE GEMM.
 
-For testing, set environment variable `GENAI_QMOE_UNSIGNED_FULL_RANGE=0` to use the
-previous narrower unsigned-offset range: int4 `[-7, 7]` with scale
-`max(abs(w)) / 7`, and int8 `[-127, 127]` with scale `max(abs(w)) / 127`. This is
-not exposed as a model-builder `extra_options` flag.
-
 For now, the QMoE quantizer helper is carried in onnxruntime-genai and mirrored by
 ORT-side QMoE tests. Keep the two copies in sync. Longer term, this helper should
 move into ONNX Runtime quantization tooling so genai can import the shared
