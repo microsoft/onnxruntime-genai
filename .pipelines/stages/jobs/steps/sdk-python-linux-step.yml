@@ -146,7 +146,7 @@ steps:
           echo "$WHL" | grep -q "cuda" || { echo "ASSERT FAIL: CUDA wheel name missing cuda"; exit 1; }
           echo "ASSERT OK: CUDA wheel produced"
         else
-          $PY -m pip install onnxruntime
+          $PY -m pip install onnxruntime==${{ parameters.ort_version }}
           $PY -m pip install --force-reinstall --no-deps "$WHL"
           EXPECTED=$(tr -d "[:space:]" < /ort_genai_src/VERSION_INFO)
           ACTUAL=$($PY -c "import onnxruntime_genai as og; print(og.__version__)" | tr -d "[:space:]")

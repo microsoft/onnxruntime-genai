@@ -162,6 +162,13 @@ jobs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
     continueOnError: true
 
+  # --- ESRP sign the managed assemblies (before packing) --------------------
+  - template: steps/compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)'
+      DisplayName: 'ESRP - sign C# managed dlls'
+      Pattern: '*OnnxRuntimeGenAI*.dll'
+
   # --- Lay out native libraries per-RID from the downloaded core archives ---
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -275,7 +282,12 @@ jobs:
       Write-Host "ASSERT OK: native nupkg contains expected RIDs: $($expectRids -join ', ')"
     displayName: 'Assert: native nupkg contains RIDs'
 
-  # NOTE: ESRP nupkg signing deferred to Phase 4 (plan.md §Phase 4 4c).
+  # --- ESRP sign the NuGet packages -----------------------------------------
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign NuGet packages'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish NuGet ($(nugetArtifactName))'

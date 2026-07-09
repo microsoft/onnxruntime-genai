@@ -118,6 +118,32 @@ steps:
   env:
     ONNXRUNTIME_VERSION: '${{ parameters.ort_version }}'
 
+# --- BinSkim + ESRP sign the extension, then re-pack the signed wheel --------
+# The wheel bundles the pybind extension (.pyd, newly built here) plus the core
+# native dll (already signed at the core stage). We sign the .pyd in the staged
+# wheel dir, then re-run PyPackageBuild to re-zip the wheel with the signed .pyd.
+- task: BinSkim@4
+  displayName: 'Run BinSkim (python extension)'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(pysdkBuildDir)\**\*.pyd'
+  continueOnError: true
+
+- template: compliant/win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)\$(pysdkBuildDir)'
+    DisplayName: 'ESRP - sign python extension'
+    Pattern: '*.pyd'
+
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    # build.py nests the SDK cmake dir at <build_dir>/python/<config>. Re-run the
+    # wheel-pack target so the wheel is re-zipped with the now-signed .pyd.
+    $cmakeDir = "$(Build.SourcesDirectory)\$(pysdkBuildDir)\python\${{ parameters.build_config }}"
+    cmake --build $cmakeDir --config ${{ parameters.build_config }} --target PyPackageBuild
+    if ($LASTEXITCODE -ne 0) { Write-Error "wheel re-pack failed"; exit 1 }
+  displayName: 'Re-pack wheel with signed extension'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
 # --- Assert the wheel is produced (+ imports on CPU) ------------------------
 - powershell: |
     $ErrorActionPreference = 'Stop'
@@ -133,7 +159,7 @@ steps:
       }
       Write-Host "ASSERT OK: CUDA wheel produced ($($whl.Name))"
     } else {
-      python -m pip install onnxruntime
+      python -m pip install onnxruntime==${{ parameters.ort_version }}
       python -m pip install --force-reinstall --no-deps $whl.FullName
       $expected = (Get-Content "$(Build.SourcesDirectory)\VERSION_INFO" -Raw).Trim()
       $actual = (python -c "import onnxruntime_genai as og; print(og.__version__)").Trim()

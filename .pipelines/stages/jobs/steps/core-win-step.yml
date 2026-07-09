@@ -202,9 +202,10 @@ steps:
   displayName: 'Audit: no public package feeds'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-# --- Build core + CPack archive + install CMake package --------------------
-# build.py stages: configure → build → package (CPack) → install (--install_dir).
-# A single call avoids re-running cmake configure on separate CPack/install steps.
+# --- Build core (build only) ------------------------------------------------
+# Signing must happen BEFORE CPack/install so the signed DLL ends up in BOTH the
+# archive and the exported CMake package. So we build first, sign, then package
+# + install via direct cmake (build.py appends /<config> to --build_dir).
 - powershell: |
     $ErrorActionPreference = 'Stop'
     $args = @(
@@ -217,9 +218,7 @@ steps:
       '--use_guidance',
       '--ort_home', '$(ortHome)',
       '--cmake_extra_defines', 'ENABLE_PYTHON=OFF', 'ENABLE_TESTS=OFF',
-      '--build_dir', '$(buildDir)',
-      '--install_dir', '$(coreInstall)',
-      '--package'
+      '--build_dir', '$(buildDir)'
     )
     if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
     if ('${{ parameters.ep }}' -eq 'cuda') {
@@ -241,6 +240,35 @@ steps:
     # cargo auth for the Lotus registry (Bearer token consumed by cargo:token
     # credential provider). Not echoed — ADO masks System.AccessToken.
     CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
+
+# --- BinSkim on the core native binaries ------------------------------------
+- task: BinSkim@4
+  displayName: 'Run BinSkim (core dll)'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\**\*genai*.dll'
+  continueOnError: true
+
+# --- ESRP sign the core native dlls (before packaging) ----------------------
+# build.py's VS build nests the dll under <build_dir>/<config>/<config>/; the ESRP
+# template searches FolderPath recursively so the config sub-dir is covered.
+- template: compliant/win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}'
+    DisplayName: 'ESRP - sign core native dlls'
+    Pattern: '*genai*.dll'
+
+# --- Package (CPack) + install the CMake package with the SIGNED dll --------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    # build.py resolves --build_dir to <build_dir>/<config>; drive CPack + install
+    # directly against that tree so the already-signed dll is what gets packaged.
+    $cmakeBuildDir = "$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}"
+    cmake --build $cmakeBuildDir --config ${{ parameters.build_config }} --target package
+    if ($LASTEXITCODE -ne 0) { Write-Error "CPack failed"; exit 1 }
+    cmake --install $cmakeBuildDir --config ${{ parameters.build_config }} --prefix "$(coreInstall)"
+    if ($LASTEXITCODE -ne 0) { Write-Error "install failed"; exit 1 }
+  displayName: 'Package + install core (signed)'
+  workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Assert: CMake package installed ----------------------------------------
 - powershell: |
@@ -314,3 +342,13 @@ steps:
   inputs:
     artifactName: '$(artifactName)-archive'
     targetPath: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\package'
+
+# --- Publish build symbols (RelWithDebInfo only) ----------------------------
+- task: PublishSymbols@2
+  displayName: 'Publish core build symbols'
+  condition: and(succeeded(), eq('${{ parameters.build_config }}', 'RelWithDebInfo'))
+  inputs:
+    SymbolsFolder: '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}'
+    SearchPattern: 'onnxruntime-genai*.pdb'
+    SymbolServerType: teamServices
+    SymbolExpirationInDays: 365

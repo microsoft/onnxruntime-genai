@@ -89,6 +89,9 @@ steps:
     # Read by src/java/build.gradle as project properties. Token is not echoed.
     ORG_GRADLE_PROJECT_lotusMavenUrl: '$(lotusMavenFeed)'
     ORG_GRADLE_PROJECT_lotusMavenToken: '$(System.AccessToken)'
+    # Pin the jar/POM's onnxruntime Maven dependency to the same ORT the JNI was
+    # built against (build.gradle reads this env var, else defaults to 1.23.0).
+    ONNXRUNTIME_VERSION: '${{ parameters.ort_version }}'
 
 # --- Assert the jar is produced and bundles the native library --------------
 - bash: |
@@ -97,11 +100,15 @@ steps:
       ! -name "*sources*" ! -name "*javadoc*" | head -n1)
     if [ -z "$jar" ]; then echo "ASSERT FAIL: no jar produced"; exit 1; fi
     echo "Jar: $jar"
-    # The desktop jar must bundle the JNI native library.
-    if ! unzip -l "$jar" | grep -Eq 'libonnxruntime-genai(-jni)?\.so'; then
-      echo "ASSERT FAIL: jar does not contain the native library"; exit 1
+    listing=$(unzip -l "$jar")
+    # The desktop jar must bundle BOTH the JNI shim and the core native library.
+    if ! echo "$listing" | grep -Eq 'libonnxruntime-genai-jni\.so'; then
+      echo "ASSERT FAIL: jar does not contain the JNI native library (libonnxruntime-genai-jni.so)"; exit 1
     fi
-    echo "ASSERT OK: jar contains the native library"
+    if ! echo "$listing" | grep -Eq 'libonnxruntime-genai\.so'; then
+      echo "ASSERT FAIL: jar does not contain the core native library (libonnxruntime-genai.so)"; exit 1
+    fi
+    echo "ASSERT OK: jar contains the JNI + core native libraries"
     # Stage the jar(s) to a stable path for publishing.
     mkdir -p "$(Build.SourcesDirectory)/jar_stage"
     find "$(Build.SourcesDirectory)/$(jsdkBuildDir)" -name "onnxruntime-genai*.jar" \
