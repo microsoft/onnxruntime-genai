@@ -47,29 +47,6 @@ def _get_torch():
     return torch
 
 
-def _get_pack_weights_for_cuda_mixed_gemm():
-    """Return the standalone CUDA mixed-GEMM weight packer (parity oracle).
-
-    Production packing uses the PyTorch implementation (``_pack_weights_for_cuda_mixed_gemm``).
-    This standalone packer lives in ``onnxruntime.capi.onnxruntime_cuda_quant_preprocess``, a
-    separate extension module that links the CUDA runtime (built only on non-Windows CUDA
-    builds). It is imported lazily here (never at ``import onnxruntime`` time) and is used by
-    the parity test to validate the PyTorch packer byte-for-byte.
-    """
-    try:
-        from onnxruntime.capi import onnxruntime_cuda_quant_preprocess as _cuda_quant  # noqa: PLC0415
-    except ImportError as e:
-        raise ImportError(
-            "The standalone CUDA weight packer (onnxruntime_cuda_quant_preprocess) is unavailable; "
-            "it is built only on non-Windows onnxruntime-gpu CUDA builds."
-        ) from e
-
-    try:
-        return _cuda_quant.pack_weights_for_cuda_mixed_gemm
-    except AttributeError as e:
-        raise ImportError("onnxruntime_cuda_quant_preprocess is missing pack_weights_for_cuda_mixed_gemm.") from e
-
-
 def has_cuda_weight_prepacking() -> bool:
     """Return True if mixed-GEMM weight prepacking is available.
 

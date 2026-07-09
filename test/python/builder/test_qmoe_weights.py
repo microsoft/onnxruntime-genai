@@ -532,11 +532,6 @@ def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(mon
     weights = torch.randn(17, 16, dtype=torch.float32) * 0.05
     model = _RealMoEModel("cuda", 0, 0, bits=4)
 
-    def fail_if_called():
-        raise AssertionError("raw per-channel quantization should not request CUDA QMoE prepacking")
-
-    monkeypatch.setattr(cuda_quantizer_module, "_get_pack_weights_for_cuda_mixed_gemm", fail_if_called)
-
     qweight, scales = model.make_qmoe_weights(weights)
 
     assert qweight.dtype == torch.uint8
