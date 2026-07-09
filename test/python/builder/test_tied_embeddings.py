@@ -222,96 +222,29 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
     assert model.tied_unquantized_embeddings is expected_tied_unquantized
 
 
+# fmt: off
+_TIED_QUANTIZED_EMBEDDING_WEIGHT_NAME_CASES = [
+    ("default", 32, True, 4, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", ""),
+    ("default", 32, False, 4, "lm_head.MatMul.weight", "", ""),
+    ("rtn", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", ""),
+    ("rtn", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("rtn_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", ""),
+    ("rtn_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_last", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_mixed", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_mixed", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_linear", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+    ("k_quant_linear", 32, False, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
+]
+# fmt: on
+
+
 @pytest.mark.parametrize(
     "int4_algo_config, matmul_block_size, is_symmetric, expected_bits, expected_weight, expected_scale, expected_zp",
-    [
-        ("default", 32, True, 4, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", ""),
-        ("default", 32, False, 4, "lm_head.MatMul.weight", "", ""),
-        ("rtn", 32, True, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", ""),
-        ("rtn", 32, False, 4, "lm_head.MatMul.weight_Q4G32", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"),
-        ("rtn_last", 32, True, 8, "lm_head.MatMul.weight_Q8G32", "lm_head.MatMul.weight_scale", ""),
-        (
-            "rtn_last",
-            32,
-            False,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant",
-            32,
-            True,
-            4,
-            "lm_head.MatMul.weight_Q4G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant",
-            32,
-            False,
-            4,
-            "lm_head.MatMul.weight_Q4G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_last",
-            32,
-            True,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_last",
-            32,
-            False,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_mixed",
-            32,
-            True,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_mixed",
-            32,
-            False,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_linear",
-            32,
-            True,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-        (
-            "k_quant_linear",
-            32,
-            False,
-            8,
-            "lm_head.MatMul.weight_Q8G32",
-            "lm_head.MatMul.weight_scale",
-            "lm_head.MatMul.weight_zp",
-        ),
-    ],
+    _TIED_QUANTIZED_EMBEDDING_WEIGHT_NAME_CASES,
 )
 def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
     int4_algo_config,
