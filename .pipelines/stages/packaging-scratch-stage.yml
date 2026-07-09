@@ -1,18 +1,17 @@
 # =============================================================================
-# Packaging scratch stage (Phase 1 pipeline check)
+# Packaging scratch stage (Phase 3 pipeline check)
 #
-# Validates the Phase 1 core packaging templates on real 1ES pool agents using
-# a reduced matrix (win-x64 CPU + linux-x64 CPU).  Replaces the Phase 0 inline
-# jobs which are now superseded by the reusable core-packaging-stage.yml.
+# Validates the core + Python SDK templates on real 1ES pool agents using a
+# reduced matrix (win-x64 CPU + linux-x64 CPU).
 #
 # What this proves:
-#   1. build.py --use_guidance --install_dir produces the exported CMake package.
-#   2. build.py --package produces the CPack core archive.
-#   3. Both artifacts publish via 1ES.PublishPipelineArtifact.
-#   4. The artifact assertion steps (CMake files + archive) pass on real agents.
+#   1. Core: build.py --use_guidance --install_dir + --package produce the
+#      exported CMake package and CPack archive (Phase 1), feed-isolated (Phase 2).
+#   2. SDK · Python: each wheel builds *incrementally* against the downloaded core
+#      cmake-pkg artifact (core NOT recompiled), imports, and publishes.
 #
-# Phase 2 will add feed isolation; Phase 3 will add SDK stages; Phase 5 will
-# fold everything into packaging.yml and delete this file.
+# Phase 3 will also add C# and Java SDK stages; Phase 5 folds everything into
+# packaging.yml and deletes this file.
 # =============================================================================
 parameters:
 - name: ort_version
@@ -26,7 +25,16 @@ stages:
   parameters:
     ort_version: ${{ parameters.ort_version }}
     cuda_version: ${{ parameters.cuda_version }}
-    # Reduced matrix: win-x64 CPU + linux-x64 CPU for Phase 1 scratch validation.
+    # Reduced matrix: win-x64 CPU + linux-x64 CPU for scratch validation.
     # Expand to the full matrix in Phase 5.
     enable_win_x64_cpu: true
     enable_linux_x64_cpu: true
+
+- template: sdk-python-stage.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
+    cuda_version: ${{ parameters.cuda_version }}
+    # Match the reduced core matrix so each wheel has a core artifact to consume.
+    enable_win_x64_cpu: true
+    enable_linux_x64_cpu: true
+

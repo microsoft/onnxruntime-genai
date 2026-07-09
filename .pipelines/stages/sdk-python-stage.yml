@@ -1,0 +1,132 @@
+# =============================================================================
+# sdk-python-stage.yml — Python SDK (wheel) stage (Phase 3).
+#
+# Builds one wheel per enabled cell, incrementally against the prebuilt core.
+# The stage depends on the core stage(s) so the core CMake-package artifacts are
+# available to download; each job consumes the artifact for its own cell.
+#
+# NOTE on granularity: ADO job dependencies are within a stage, so this SDK stage
+# depends on the whole Core stage (not per-core-job). This keeps the clean
+# Core·/SDK· stage separation at the cost of the SDK stage waiting for all core
+# jobs of that EP to finish. Acceptable for the packaging cadence.
+#
+# Display-name convention:
+#   Stage:  SDK · Python
+#   Jobs:   python · <os>-<arch> · <ep>   (set by sdk-python-job.yml)
+# =============================================================================
+
+parameters:
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: '13.1'
+- name: ort_cuda_version
+  type: string
+  default: ''
+
+# ---- CPU cell enable toggles -----------------------------------------------
+- name: enable_win_x64_cpu
+  type: boolean
+  default: false
+- name: enable_win_arm64_cpu
+  type: boolean
+  default: false
+- name: enable_linux_x64_cpu
+  type: boolean
+  default: false
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
+
+# ---- CUDA cell enable toggles ----------------------------------------------
+- name: enable_win_x64_cuda
+  type: boolean
+  default: false
+- name: enable_win_arm64_cuda
+  type: boolean
+  default: false
+- name: enable_linux_x64_cuda
+  type: boolean
+  default: false
+
+stages:
+- stage: sdk_python
+  displayName: 'SDK · Python'
+  # Depend on the core stage(s) so their cmake-pkg artifacts are published first.
+  ${{ if or(eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true), eq(parameters.enable_linux_x64_cuda, true)) }}:
+    dependsOn:
+    - core_cpu
+    - core_cuda
+  ${{ else }}:
+    dependsOn:
+    - core_cpu
+  jobs:
+
+  - ${{ if eq(parameters.enable_win_x64_cpu, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: win
+        arch: x64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: win
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_linux_x64_cpu, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: linux
+        arch: x64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_linux_arm64_cpu, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: linux
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_win_x64_cuda, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: win
+        arch: x64
+        ep: cuda
+        cuda_version: ${{ parameters.cuda_version }}
+        ${{ if ne(parameters.ort_cuda_version, '') }}:
+          ort_version: ${{ parameters.ort_cuda_version }}
+        ${{ else }}:
+          ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_win_arm64_cuda, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: win
+        arch: arm64
+        ep: cuda
+        cuda_version: ${{ parameters.cuda_version }}
+        ${{ if ne(parameters.ort_cuda_version, '') }}:
+          ort_version: ${{ parameters.ort_cuda_version }}
+        ${{ else }}:
+          ort_version: ${{ parameters.ort_version }}
+
+  - ${{ if eq(parameters.enable_linux_x64_cuda, true) }}:
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: linux
+        arch: x64
+        ep: cuda
+        cuda_version: ${{ parameters.cuda_version }}
+        ${{ if ne(parameters.ort_cuda_version, '') }}:
+          ort_version: ${{ parameters.ort_cuda_version }}
+        ${{ else }}:
+          ort_version: ${{ parameters.ort_version }}
