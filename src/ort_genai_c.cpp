@@ -18,6 +18,7 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "dll_load_error.h"
 
 namespace Generators {
 
@@ -1113,9 +1114,31 @@ void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4297: this extern "C" entry point is assumed non-throwing under /EHc, but it intentionally
+// throws to report a registration failure to the caller -- exactly as the ORT registration call it
+// wraps already does (that throw is simply not visible to the compiler because it is in another
+// translation unit). The exception propagates and is caught by callers as before.
+#pragma warning(disable : 4297)
+#endif
 void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
+  // Pre-flight the provider library before registering it. A failed ORT registration (e.g. a
+  // hardware EP whose native runtime cannot initialize because the GPU was removed or disabled) can
+  // leave ONNX Runtime with a half-registered library that crashes at environment teardown. By
+  // verifying the library and its native dependencies load first, a broken EP fails cleanly here
+  // with a descriptive error instead of destabilizing the process (see CanLoadLibrary).
+  if (!CanLoadLibrary(library_path))
+    throw std::runtime_error("Failed to register execution provider library '" + std::string(registration_name) +
+                             "'. " + DetermineLoadLibraryError(library_path) +
+                             " The required hardware or driver may be unavailable (for example, a GPU that has been "
+                             "removed or disabled).");
+
   Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
 }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);

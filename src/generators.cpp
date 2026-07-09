@@ -283,6 +283,18 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
 
 DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
   std::scoped_lock lock{device_interfaces_mutex_};
+
+#if USE_DML
+  // DML is deliberately NOT cached in device_interfaces_. Its interface (g_dml_device) is created
+  // lazily by dml/session_options.cpp (it needs the LUID / device_index from the model's provider
+  // options) and destroyed per-Model in Model::~Model via CloseDmlInterface() to release DML's
+  // background-thread hardware resources promptly. Caching the pointer here would dangle after a
+  // DML model is freed (a later DML model would get the stale pointer), so always fetch the current
+  // instance instead. See docs/PluginEPSharedAllocator.md §13 (DML).
+  if (type == DeviceType::DML)
+    return GetDmlInterface();
+#endif
+
   auto& slot = device_interfaces_[type];
   if (slot)
     return slot;
@@ -292,11 +304,6 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
     case DeviceType::NvTensorRtRtx:
       slot = LoadCudaInterface(type);  // Non-owning; the interface is owned by cuda_library_.
       break;
-#if USE_DML
-    case DeviceType::DML:
-      slot = GetDmlInterface();  // Owned by the DML module (migrated to this model in a later stage).
-      break;
-#endif
     case DeviceType::WEBGPU:
       owned_interfaces_.push_back(CreateWebGPUInterface());
       slot = owned_interfaces_.back().get();

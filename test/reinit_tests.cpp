@@ -20,6 +20,9 @@
 
 #include "ort_genai.h"
 #include "generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
+#if USE_DML
+#include "dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
+#endif
 
 #include <gtest/gtest.h>
 
@@ -61,6 +64,28 @@ void RunCpuWorkload() {
     EXPECT_TRUE(0 == std::memcmp(&expected_output[i * max_length], sequence_data,
                                  sequence_length * sizeof(int32_t)));
   }
+}
+
+// Loads the tiny model (optionally forced onto `provider` via the genai config) and runs a short
+// generate, destroying every GenAI object before returning. `provider` empty => the model's
+// configured default (CPU for the test model). Throws if the provider is not built in / unavailable.
+void RunGenerateOnce(const char* provider) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  if (provider && *provider) {
+    config->ClearProviders();
+    config->AppendProvider(provider);
+  }
+
+  std::vector<int32_t> input_ids{0, 0, 0, 52};
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("batch_size", 1);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone())
+    generator->GenerateNextToken();
+  ASSERT_GT(generator->GetSequenceCount(0), 0u);
 }
 
 // Forces creation of the DeviceInterface for `provider` directly via genai's internal
@@ -121,6 +146,62 @@ TEST(ReInitTests, ShutdownReInitCycle) {
     OgaShutdown();  // full teardown: env + all created device interfaces + add-on libraries
   }
 }
+
+// Regression guard for the DeviceInterface cache in OrtGlobals::GetDeviceInterface. Creating a
+// model, destroying it, then creating another model within the SAME env cycle (no OgaShutdown
+// between) must hand the second model a live DeviceInterface, not a dangling one.
+//
+// The CPU path exercises the real model create -> free -> create seam on every build. DML is the
+// case that actually motivated the OrtGlobals no-cache fix, but the tiny CPU test model cannot run
+// on DML (DML forces graph capture, which requires full DML partitioning), so DML is validated
+// directly at the interface level in the DmlInterfaceNotCachedAcrossReload test below.
+TEST(ReInitTests, SequentialModelLoads) {
+  RunGenerateOnce("");  // first load (default provider == CPU for the test model)
+  RunGenerateOnce("");  // second load after the first was fully destroyed -- must not dangle
+
+  OgaShutdown();  // leave process-global state clean for any following test
+}
+
+#if USE_DML
+// Deterministic white-box guard for the DML branch of OrtGlobals::GetDeviceInterface. DML's
+// interface (g_dml_device) is destroyed per-Model in Model::~Model via CloseDmlInterface(), so
+// OrtGlobals must NOT cache the DML interface pointer -- a cached pointer would dangle after the
+// first DML model is freed and be handed to the next DML model (use-after-free). This drives the
+// same lifecycle directly (create -> GetDeviceInterface -> CloseDmlInterface -> recreate) with no
+// ORT session/model, so it needs only a D3D12 device (not a DML-partitionable model). See
+// generators.cpp OrtGlobals::GetDeviceInterface and docs/PluginEPSharedAllocator.md §13 (DML).
+TEST(ReInitTests, DmlInterfaceNotCachedAcrossReload) {
+  // First "model load": create the DML interface. Skips if no DML/D3D12 device is available.
+  try {
+    Generators::InitDmlInterface(nullptr, nullptr);
+  } catch (const std::exception& e) {
+    GTEST_SKIP() << "DML device not available: " << e.what();
+  }
+
+  // Populate the OrtGlobals DeviceInterface lookup for DML (this is where the buggy version would
+  // memoize the pointer).
+  Generators::DeviceInterface* dml_first = Generators::GetDeviceInterface(Generators::DeviceType::DML);
+  ASSERT_NE(dml_first, nullptr);
+  ASSERT_EQ(dml_first, Generators::GetDmlInterface());
+
+  // First "model free": Model::~Model calls CloseDmlInterface(), destroying the interface.
+  Generators::CloseDmlInterface();
+  ASSERT_EQ(Generators::GetDmlInterface(), nullptr);
+
+  // Second "model load": a fresh DML interface is created.
+  Generators::InitDmlInterface(nullptr, nullptr);
+  Generators::DeviceInterface* live = Generators::GetDmlInterface();
+  ASSERT_NE(live, nullptr);
+
+  // The guard: GetDeviceInterface(DML) must return the LIVE interface, not the freed first one.
+  // Without the no-cache fix it returns the stale memoized pointer (which differs from the live
+  // GetDmlInterface()), so this comparison fails.
+  ASSERT_EQ(Generators::GetDeviceInterface(Generators::DeviceType::DML), live);
+
+  Generators::CloseDmlInterface();
+  OgaShutdown();  // reset process-global state for isolation
+}
+#endif  // USE_DML
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);

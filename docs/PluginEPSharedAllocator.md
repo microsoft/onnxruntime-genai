@@ -491,22 +491,37 @@ Files: [`cuda/interface.cpp`](../src/cuda/interface.cpp),
 All EPs are in scope (staged in §14). Per-EP specifics:
 
 - **WebGPU, CUDA / NvTensorRtRtx.** First migrations; detailed in §12.
-- **DML.** Currently on the trivial-session + `g_dml_device` +
-  `CloseDmlInterface` path, with a `GetDmlInterface()` free-function accessor
-  (the only `GetXInterface()` wrapper still remaining — all others were removed
-  in Stage 0 in favour of `GetDeviceInterface(DeviceType::X)`). Migrating DML
-  follows the same pattern already applied to every other EP:
-  1. Add `CreateDmlInterface()` factory (replacing the `InitDmlInterface` +
-     `g_dml_device` static ownership pattern).
-  2. Remove `GetDmlInterface()` and `CloseDmlInterface()`; DML teardown folds
-     into `~OrtGlobals` (owned via `OrtGlobals::owned_interfaces_`).
-  3. Update the `#if USE_DML` arm of `OrtGlobals::GetDeviceInterface` to call
-     `CreateDmlInterface()` instead of `GetDmlInterface()`.
-  4. Update `dml/session_options.cpp`: replace the `!GetDmlInterface()` guard
-     (which triggered lazy `InitDmlInterface`) with `GetDeviceInterface`;
-     `InitDmlInterface` is absorbed into `CreateDmlInterface`.
-  5. Wire onto the §6 `GetEpDevices`-based shared-allocator path (same as
-     WebGPU/CUDA).
+- **DML.** DML is a **deliberate exception** to the Stage 0 factory/ownership
+  pattern and stays on its trivial-session + `g_dml_device` +
+  `InitDmlInterface` / `CloseDmlInterface` / `GetDmlInterface` path (the only
+  `GetXInterface()` accessor still remaining). Two DML-specific constraints
+  make the generic pattern a poor fit:
+  1. **Construction needs runtime parameters.** The DML interface is built from
+     the model's `luid` / `device_index` provider options, parsed in
+     [`dml/session_options.cpp`](../src/dml/session_options.cpp) and passed to
+     `InitDmlInterface(luid, index)`. The generic
+     `OrtGlobals::GetDeviceInterface(DeviceType::DML)` has no way to supply
+     these, so DML must be created explicitly at session-options time rather
+     than lazily by the generic accessor.
+  2. **Per-`Model` teardown, not per-shutdown.** DML objects launch background
+     threads that retain hardware resources; leaving them alive past a `Model`
+     can block driver threads and deadlock. So `Model::~Model` calls
+     `CloseDmlInterface()` to destroy the DML interface and its `Dml::` statics
+     when a DML model is freed (recreated on the next DML model). Folding DML
+     teardown into `~OrtGlobals` (shutdown-only) would regress this and is
+     **not** done.
+
+  Because DML is torn down per-`Model`, **`OrtGlobals::GetDeviceInterface` must
+  not cache the DML interface** — a cached pointer would dangle after the first
+  DML model is freed and be handed to a later DML model (use-after-free). The
+  `#if USE_DML` arm therefore early-returns the live `GetDmlInterface()` instead
+  of memoizing it in `device_interfaces_` (all other EPs, which live for the env
+  cycle, are still cached). DML is already re-init-safe via this per-`Model`
+  teardown: after the last DML model is destroyed no `g_dml_device` / `Dml::`
+  static survives into the next env cycle. A future migration onto the §6
+  shared-allocator path (deferred with the rest of the allocator work) would
+  revisit this, but the ownership/teardown model above is intentional and stays.
+
 - **QNN.** A natural fit for the generic host-accessible-as-device policy
   (§6/§11): the QNN plugin EP advertises **no** `DEFAULT` allocator and only a
   `HOST_ACCESSIBLE` allocator (`QnnHtpShared`), which the generic policy
@@ -559,8 +574,9 @@ All EPs are in scope (staged in §14). Per-EP specifics:
   until then.
 - **`GetXInterface()` wrappers (all EPs except DML).** Removed in Stage 0.
   Every caller now uses `GetDeviceInterface(DeviceType::X)` directly. The
-  only remaining wrapper is `GetDmlInterface()`, which is removed as part of
-  the DML Stage 4 migration above.
+  only remaining wrapper is `GetDmlInterface()`, which is **retained** — DML
+  keeps its explicit-init + per-`Model`-teardown pattern (see the DML note
+  above), so it is not folded into `OrtGlobals` ownership.
 
 Non-goals:
 
