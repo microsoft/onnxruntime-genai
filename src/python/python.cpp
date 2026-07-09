@@ -316,6 +316,7 @@ struct PyGenerator {
     d["draft_tokens_accepted"] = stats.draft_tokens_accepted;
     d["correction_tokens"] = stats.correction_tokens;
     d["bonus_tokens"] = stats.bonus_tokens;
+    d["target_forward_passes"] = stats.target_forward_passes;
     d["avg_draft_ms_per_token"] = stats.avg_draft_ms_per_token;
     d["avg_target_ms_per_token"] = stats.avg_target_ms_per_token;
     d["acceptance_rate"] = stats.acceptance_rate;

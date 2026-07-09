@@ -57,6 +57,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   std::size_t draft_accepted_{};
   std::size_t corrections_{};
   std::size_t bonuses_{};
+  std::size_t target_runs_{};
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
@@ -68,6 +69,10 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Shared RNG for draft sampling + accept/correction/bonus draws.
   std::mt19937 rng_;
   bool rng_seeded_{false};
+
+  // Grammar-forced tokens carried from a prior guidance round, read by Propose so it can place them
+  // first in the verify batch (the grammar is already advanced past them).
+  const std::deque<int32_t>& GuidanceFFCarry() const { return ff_carry_; }
 
  private:
   // Each Step emits one token. RunRound does a whole round's compute up front and buffers the
@@ -107,6 +112,18 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Guidance round context - the committed token set (accepted prefix + correction + fast-forward
   // tokens), saved so FinalizeGuidanceRound can re-anchor the caches.
   std::vector<int32_t> saved_committed_;
+
+  // Grammar-forced tokens the round could not fit in its K budget, carried to the next round and
+  // emitted first (the grammar is already advanced past them).
+  std::deque<int32_t> ff_carry_;
+
+  // How many leading committed tokens were part of the target verify batch (so their KV is already
+  // built). FinalizeGuidanceRound only replays committed tokens past this point.
+  int saved_verify_prefix_{};
+
+  // The last verify row for the committed prefix, reused as the next round's pos0 when nothing needs
+  // replaying (avoids an extra target pass).
+  std::vector<float> saved_last_row_;
 
   // Set while a round has left the inner KV caches out of sync with the committed sequence (mid round/deferred fold).
   bool round_dirty_{false};

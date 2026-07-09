@@ -650,6 +650,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* gen
   out_stats->draft_tokens_accepted = stats.draft_tokens_accepted;
   out_stats->correction_tokens = stats.correction_tokens;
   out_stats->bonus_tokens = stats.bonus_tokens;
+  out_stats->target_forward_passes = stats.target_forward_passes;
   out_stats->avg_draft_ms_per_token = stats.avg_draft_ms_per_token;
   out_stats->avg_target_ms_per_token = stats.avg_target_ms_per_token;
   out_stats->acceptance_rate = stats.acceptance_rate;
