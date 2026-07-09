@@ -30,6 +30,7 @@ struct SpeculativeStats {
   size_t draft_tokens_accepted{};
   size_t correction_tokens{};
   size_t bonus_tokens{};
+  size_t target_forward_passes{};
   float avg_draft_ms_per_token{};
   float avg_target_ms_per_token{};
   float acceptance_rate{};

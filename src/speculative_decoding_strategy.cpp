@@ -57,6 +57,7 @@ void SpeculativeDecodingStrategy::Reset() {
   pending_anchor_token_.reset();
   round_dirty_ = false;
   guidance_round_ = false;
+  ff_carry_.clear();
 }
 
 // Continuous decoding via a mid-generation AppendTokens. A buffered round can leave the inner
@@ -82,6 +83,7 @@ void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
   pending_anchor_token_.reset();
   round_dirty_ = false;
   guidance_round_ = false;
+  ff_carry_.clear();
 
   if (floor >= g.search_->GetSequenceLength())
     return;
@@ -280,6 +282,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 
   auto t_target_start = clock::now();
   spec_state->target_state().Run(seed_length + K, target_input, {});
+  target_runs_++;
   auto t_target_end = clock::now();
 
   // K target distributions.
@@ -355,6 +358,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       single_buf.CpuSpan()[0] = proposal.tokens[i];
       single_buf.CopyCpuToDevice();
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single_buf, {});
+      target_runs_++;
       auto cpu = lgt.CopyDeviceToCpu();
       if (penalties_active) dist_prefix.push_back(proposal.tokens[i]);
       store_row(i, {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i + 1, dist_prefix);
@@ -532,6 +536,7 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
     const int next_len = saved_seed_length_ + saved_n_direct_ + 1;
     auto t_target_start = clock::now();
     auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
+    target_runs_++;
     auto t_target_end = clock::now();
     // One single-token target run, which is exactly the baseline cost per token (T_target).
     // We track it separately from the K-token verify for the speedup formula in GetStats.
@@ -601,6 +606,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
 
   auto t_target_start = clock::now();
   spec_state->target_state().Run(seed_length + K, target_input, {});
+  target_runs_++;
   auto t_target_end = clock::now();
 
   // Read the K target rows (device-agnostic, mirrors the non-guidance verify read).
@@ -636,6 +642,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       single.CpuSpan()[0] = proposal.tokens[i];
       single.CopyCpuToDevice();
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single, {});
+      target_runs_++;
       auto cpu = lgt.CopyDeviceToCpu();
       rows[static_cast<size_t>(i)].assign(cpu.data(), cpu.data() + vocab_size);
     }
@@ -669,45 +676,64 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   std::uniform_real_distribution<float> uni(0.f, 1.f);
   std::vector<float> correction_buf;  // sampling reject scratch
 
+  // Forced tokens the grammar has already decided - prior round's overflow (ff_carry_) + each
+  // accepted token's fast-forward span. A position filled from here is auto-accepted; it is in the
+  // verify batch and the grammar is already advanced past it.
+  std::deque<int32_t> pending_forced(ff_carry_.begin(), ff_carry_.end());
+
   std::vector<int32_t> committed;
+  // accepted draft tokens (excludes forced tokens and corrections)
   int n_direct = 0;
-  bool completed_all = true;  // false once we break early (EOS / fast-forward / reject)
-  std::vector<int32_t> dist_prefix;  // grows with accepted tokens (repetition-penalty context)
+  // leading committed tokens that came from the verify batch
+  int verify_prefix = 0;  
+  bool eos_hit = false, rejected = false;
+  // repetition-penalty context, grows with committed tokens
+  std::vector<int32_t> dist_prefix; 
   if (penalties_active) dist_prefix = seed_prefix;
-  for (int i = 0; i < K; i++) {
-    // Logits that judge position i - pos0 for the first token, else verify row i-1. Row i-1 applies
-    // only because every earlier token was accepted with no fast-forward.
+
+  int i = 0;
+  for (; i < K; i++) {
+    if (!pending_forced.empty()) {
+      // Forced position - auto-accept (verified in the batch, grammar already past it).
+      const int32_t f = proposal.tokens[i];
+      pending_forced.pop_front();
+      committed.push_back(f);
+      verify_prefix++;
+      if (penalties_active) dist_prefix.push_back(f);
+      if (is_eos(f)) { eos_hit = true; break; }
+      continue;
+    }
+
+    // Free position - judge with pos0 (first token) or the batched verify row i-1.
     const std::vector<float>& judge = (i == 0) ? pos0 : rows[static_cast<size_t>(i - 1)];
     const std::vector<float> masked = masked_logits(judge, seed_length + i, dist_prefix);
 
     if (!sampling) {
-      // Greedy - accept if the draft token matches the target's masked argmax, and commit the draft's
-      // own token (not a batched verify row), so the output matches a regular decode.
+      // Greedy - accept the draft token if it matches the target's masked argmax; commit the draft's
+      // own token (not a batched row).
       const int32_t ttok = RowArgmax({masked.data(), static_cast<size_t>(vocab_size)});
       if (proposal.tokens[i] == ttok) {
         committed.push_back(proposal.tokens[i]);
+        verify_prefix++;
         n_direct++;
-        if (is_eos(proposal.tokens[i])) { completed_all = false; break; }
-        auto ff = commit_and_ff(proposal.tokens[i]);
-        for (int32_t f : ff) committed.push_back(f);
-        if (!ff.empty()) { completed_all = false; break; }
         if (penalties_active) dist_prefix.push_back(proposal.tokens[i]);
+        if (is_eos(proposal.tokens[i])) { eos_hit = true; break; }
+        for (int32_t fwd : commit_and_ff(proposal.tokens[i])) pending_forced.push_back(fwd);
       } else {
-        // Reject. Only commit at the first position, where the judge is pos0 (a single-token
-        // result); later positions use a batched row, so we stop and let the next round redo it.
+        // Reject - only commit a correction at the first position, where pos0 is a single-token
+        // result; later positions defer to the next round's per-token pos0.
+        rejected = true;
         if (i == 0) {
           committed.push_back(ttok);
           corrections_++;
           if (!is_eos(ttok))
-            for (int32_t f : commit_and_ff(ttok)) committed.push_back(f);
+            for (int32_t fwd : commit_and_ff(ttok)) committed.push_back(fwd);
         }
-        completed_all = false;
         break;
       }
     } else {
-      // Sampling - speculative sampling on the masked distributions (the draft's were masked in
-      // Propose). Accept with min(1, p_t/p_d), else draw from the leftover max(0, p_t - p_d). Same
-      // helpers as the non-guidance path, so it's a fair sample from the masked target.
+      // Sampling - speculative sampling on the masked distributions. Accept with min(1, p_t/p_d), else
+      // draw the correction from the leftover max(0, p_t - p_d).
       SampledCategorical tsc;
       ComputeSampledCategorical({masked.data(), static_cast<size_t>(vocab_size)},
                                 search.top_k, search.top_p, search.temperature, tsc);
@@ -717,13 +743,13 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
                                                proposal.probs[i][static_cast<size_t>(dtok)]);
       if (uni(rng_) < accept_p) {
         committed.push_back(dtok);
+        verify_prefix++;
         n_direct++;
-        if (is_eos(dtok)) { completed_all = false; break; }
-        auto ff = commit_and_ff(dtok);
-        for (int32_t f : ff) committed.push_back(f);
-        if (!ff.empty()) { completed_all = false; break; }
         if (penalties_active) dist_prefix.push_back(dtok);
+        if (is_eos(dtok)) { eos_hit = true; break; }
+        for (int32_t fwd : commit_and_ff(dtok)) pending_forced.push_back(fwd);
       } else {
+        rejected = true;
         if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
         BuildCorrectionDistribution({p_t.data(), static_cast<size_t>(vocab_size)},
                                     {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
@@ -733,34 +759,28 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         committed.push_back(ctok);
         corrections_++;
         if (!is_eos(ctok))
-          for (int32_t f : commit_and_ff(ctok)) committed.push_back(f);
-        completed_all = false;
+          for (int32_t fwd : commit_and_ff(ctok)) committed.push_back(fwd);
         break;
       }
     }
   }
-  // All K accepted, no fast-forward or EOS. Greedy leaves the next position for the following round;
-  // sampling draws one bonus token from the masked last row (a random draw can't be deferred).
-  if (completed_all && n_direct == K && sampling) {
-    const std::vector<float> masked = masked_logits(rows[static_cast<size_t>(K - 1)],
-                                                    seed_length + K, dist_prefix);
-    SampledCategorical bsc;
-    ComputeSampledCategorical({masked.data(), static_cast<size_t>(vocab_size)},
-                              search.top_k, search.top_p, search.temperature, bsc);
-    const std::vector<float> p_last = ScatterToFullVocab(bsc, vocab_size);
-    std::discrete_distribution<int> dist(p_last.begin(), p_last.end());
-    const int32_t bonus = static_cast<int32_t>(dist(rng_));
-    committed.push_back(bonus);
-    bonuses_++;
-    if (!is_eos(bonus))
-      for (int32_t f : commit_and_ff(bonus)) committed.push_back(f);
-  }
+
+  // Forced tokens that didn't fit this round's K budget carry to the next round - the grammar is
+  // already past them. Only when we reached K cleanly - EOS ends generation and a reject leaves
+  // nothing pending.
+  ff_carry_.clear();
+  if (!eos_hit && !rejected)
+    ff_carry_.assign(pending_forced.begin(), pending_forced.end());
 
   for (int32_t t : committed) pending_.push_back(t);
   saved_seed_length_ = seed_length;
   saved_K_ = K;
   saved_n_direct_ = n_direct;
+  saved_verify_prefix_ = verify_prefix;
   saved_committed_ = committed;
+  saved_last_row_.clear();
+  if (verify_prefix >= 1)
+    saved_last_row_ = rows[static_cast<size_t>(verify_prefix - 1)];
   reanchor_pending_ = true;
   guidance_round_ = true;
   round_dirty_ = true;
@@ -799,24 +819,27 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
   auto dcpu = draft_logits.CopyDeviceToCpu();
   spec_state->assign_draft_pending_logits(dcpu.data(), static_cast<size_t>(vocab_size));
 
-  // Target - keep the accepted tokens the verify already added, then feed the rest one at a time. If
-  // none are left, step back one and re-run the last token (single-token pass).
+  // Target - the verify batch already built KV for the first verify_prefix committed tokens. Trim to
+  // there and replay only the tail (a reject correction + its fast-forward tokens), which was never
+  // in the batch. When there is no tail, reuse the saved verify row as pos0.
   const int target_kv_len = seed + saved_K_;
-  int rewind_to, replay_start;
-  if (C > saved_n_direct_) {
-    rewind_to = seed + saved_n_direct_;
-    replay_start = saved_n_direct_;
-  } else {
-    rewind_to = seed + saved_n_direct_ - 1;
-    replay_start = saved_n_direct_ - 1;
+  const int vp = saved_verify_prefix_;
+  if (C == vp && !saved_last_row_.empty()) {
+    if (vp < saved_K_)
+      spec_state->target_state().RewindTo(static_cast<size_t>(seed + vp));
+    auto out = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
+    std::copy(saved_last_row_.begin(), saved_last_row_.end(), out.CpuSpan().begin());
+    out.CopyCpuToDevice();
+    return out;
   }
-  if (rewind_to < target_kv_len)
-    spec_state->target_state().RewindTo(static_cast<size_t>(rewind_to));
+  if (seed + vp < target_kv_len)
+    spec_state->target_state().RewindTo(static_cast<size_t>(seed + vp));
   DeviceSpan<float> target_logits;
-  for (int p = replay_start; p < C; p++) {
+  for (int p = vp; p < C; p++) {
     single.CpuSpan()[0] = saved_committed_[static_cast<size_t>(p)];
     single.CopyCpuToDevice();
     target_logits = spec_state->target_state().Run(seed + p + 1, single, {});
+    target_runs_++;
   }
   return target_logits;
 }
@@ -835,6 +858,7 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
   s.draft_tokens_accepted = draft_accepted_;
   s.correction_tokens = corrections_;
   s.bonus_tokens = bonuses_;
+  s.target_forward_passes = target_runs_;
   if (draft_proposed_ > 0) {
     s.avg_draft_ms_per_token = total_propose_ms_ / static_cast<float>(draft_proposed_);
     s.avg_target_ms_per_token = total_target_ms_ / static_cast<float>(draft_proposed_);

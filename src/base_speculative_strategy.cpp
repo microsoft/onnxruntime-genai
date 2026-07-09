@@ -3,6 +3,7 @@
 #include "base_speculative_strategy.h"
 
 #include <algorithm>
+#include <deque>
 #include <stdexcept>
 #include <vector>
 
@@ -63,13 +64,11 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     prefix.assign(seed.begin(), seed.end());
   }
 
-  // Grammar-mask the draft proposals - clone the main cursor and walk it over the K tokens (the
-  // verify cursor is untouched). Masking makes the draft propose only grammar-valid tokens, so the
-  // masked target accepts them. A fast-forward or EOS ends the walk.
+  // Guidance - clone the grammar cursor so we can look ahead over K positions
+  // without disturbing the verify cursor.
   const bool guidance_active = (g.guidance_logits_processor_ != nullptr);
   std::unique_ptr<ConstrainedLogitsProcessor> draft_grammar;
   DeviceSpan<float> guidance_buf;
-  bool grammar_walk_active = guidance_active;
   if (guidance_active) {
     draft_grammar = g.guidance_logits_processor_->Clone();
     guidance_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
@@ -93,26 +92,17 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
 
   SampledCategorical sampled;
 
-  // Turn one draft logits row (predicting sequence index current_length) into a token, applying
-  // the shared penalties first. Fills proposal.probs[idx] with the truncated dist in the sampling path.
-  auto emit_from_logits = [&](std::span<const float> logits, int idx, int current_length) {
-    std::span<const float> row = logits;
-    if (penalties_active) {
-      std::copy(logits.begin(), logits.end(), row_buf.begin());
-      ApplyMinLengthToLogits({row_buf.data(), row_buf.size()}, current_length, min_length, eos_ids);
-      ApplyRepetitionPenaltyToLogits({row_buf.data(), row_buf.size()}, prefix, repetition_penalty, rep_visited);
-      row = {row_buf.data(), row_buf.size()};
-    }
-    if (grammar_walk_active) {
-      // Mask this row with the draft cursor's grammar state (same ProcessLogits verify uses).
-      auto gb = guidance_buf.CpuSpan();
-      std::copy(row.begin(), row.end(), gb.begin());
-      guidance_buf.CopyCpuToDevice();
-      draft_grammar->ProcessLogits(guidance_buf);
-      auto masked = guidance_buf.CopyDeviceToCpu();
-      std::copy(masked.begin(), masked.begin() + vocab_size, row_buf.begin());
-      row = {row_buf.data(), static_cast<size_t>(vocab_size)};
-    }
+  // Apply the shared penalties to a draft row in place.
+  auto penalize = [&](std::span<const float> logits, int current_length) -> std::span<const float> {
+    if (!penalties_active) return logits;
+    std::copy(logits.begin(), logits.end(), row_buf.begin());
+    ApplyMinLengthToLogits({row_buf.data(), row_buf.size()}, current_length, min_length, eos_ids);
+    ApplyRepetitionPenaltyToLogits({row_buf.data(), row_buf.size()}, prefix, repetition_penalty, rep_visited);
+    return {row_buf.data(), row_buf.size()};
+  };
+
+  // Turn one (penalized) draft row into a token, filling probs[idx] in the sampling path.
+  auto pick = [&](std::span<const float> row, int idx) {
     if (greedy) {
       proposal.tokens[idx] = argmax(row);
     } else {
@@ -121,25 +111,55 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
       std::discrete_distribution<int> dist(proposal.probs[idx].begin(), proposal.probs[idx].end());
       proposal.tokens[idx] = static_cast<int32_t>(dist(rng_));
     }
-    if (grammar_walk_active) {
-      // Advance the draft cursor for the next position; EOS or fast-forward ends the walk.
-      const int32_t chosen = proposal.tokens[idx];
-      if (is_eos(chosen)) {
-        grammar_walk_active = false;
-      } else {
-        int32_t committed = chosen;
-        draft_grammar->CommitTokens({&committed, 1});
-        if (!draft_grammar->GetFFTokens(0).empty())
-          grammar_walk_active = false;
-      }
-    }
   };
 
-  // d_0 from the carried-over pending draft logits; context = committed sequence (len seed_length).
-  emit_from_logits(spec_state_.draft_pending_logits(), 0, seed_length);
-
-  // d_1..d_{K-1}: feed the previous draft token through the draft model; context grows by one.
   auto single_buf = params.p_device->Allocate<int32_t>(1);
+
+  if (guidance_active) {
+    // Walk the clone forward over K positions. At each free position the draft
+    // predicts a grammar-masked token; committing it may force a span of fast-forward tokens, which
+    // we inject straight into the proposal (counted in K) so the target verifies them in the same
+    // batched pass. Anything past K carries to the next round. 
+    std::deque<int32_t> ff_queue(GuidanceFFCarry().begin(), GuidanceFFCarry().end());
+    // logits for position 0
+    std::vector<float> pending(spec_state_.draft_pending_logits().begin(),
+                               spec_state_.draft_pending_logits().end());
+    for (int i = 0; i < K; i++) {
+      if (!ff_queue.empty()) {
+        // forced token: no draft prediction, no distribution
+        proposal.tokens[i] = ff_queue.front();
+        ff_queue.pop_front();
+        if (!greedy) proposal.probs[i].clear();
+      } else {
+        auto row = penalize({pending.data(), pending.size()}, seed_length + i);
+        auto gb = guidance_buf.CpuSpan();
+        std::copy(row.begin(), row.end(), gb.begin());
+        guidance_buf.CopyCpuToDevice();
+        draft_grammar->ProcessLogits(guidance_buf);
+        auto masked = guidance_buf.CopyDeviceToCpu();
+        pick({masked.data(), static_cast<size_t>(vocab_size)}, i);
+        const int32_t chosen = proposal.tokens[i];
+        if (!is_eos(chosen)) {
+          int32_t c = chosen;
+          draft_grammar->CommitTokens({&c, 1});
+          for (int32_t f : draft_grammar->GetFFTokens(0)) ff_queue.push_back(f);
+        }
+      }
+      if (penalties_active) prefix.push_back(proposal.tokens[i]);
+      // Advance the draft over this token so the next free position is predicted in context.
+      if (i + 1 < K) {
+        single_buf.CpuSpan()[0] = proposal.tokens[i];
+        single_buf.CopyCpuToDevice();
+        auto lgt = spec_state_.draft_state().Run(seed_length + i + 1, single_buf, {});
+        auto cpu = lgt.CopyDeviceToCpu();
+        pending.assign(cpu.data(), cpu.data() + vocab_size);
+      }
+    }
+    return proposal;
+  }
+
+  // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
+  pick(penalize(spec_state_.draft_pending_logits(), seed_length), 0);
   for (int i = 1; i < K; i++) {
     if (penalties_active)
       prefix.push_back(proposal.tokens[i - 1]);
@@ -147,7 +167,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     single_buf.CopyCpuToDevice();
     auto lgt = spec_state_.draft_state().Run(seed_length + i, single_buf, {});
     auto cpu = lgt.CopyDeviceToCpu();
-    emit_from_logits({cpu.data(), static_cast<size_t>(vocab_size)}, i, seed_length + i);
+    pick(penalize({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i), i);
   }
 
   return proposal;
