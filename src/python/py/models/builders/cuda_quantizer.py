@@ -215,7 +215,12 @@ class CudaQuantizer:
         unsigned_full_range: bool,
         signed_scale: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Quantize ``weights`` with MatMulNBits pybinds and return unflattened storage."""
+        """Blockwise-quantize ``weights`` and return unflattened storage.
+
+        The symmetric path uses a local NumPy MLAS-style implementation (so it can
+        keep signed per-block scales); the asymmetric path delegates to the
+        MatMulNBits ORT pybinds (``quantize_matmul_4bits``/``8bits``).
+        """
         torch = _get_torch()
 
         bits = int(bits)

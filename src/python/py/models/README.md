@@ -32,6 +32,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [MatMul Block Size](#matmul-block-size)
       - [QMoE Block Size](#qmoe-block-size)
       - [QMoE Weights Prepacked](#qmoe-weights-prepacked)
+      - [MatMulNBits Weights Prepacked](#matmulnbits-weights-prepacked)
       - [Is Symmetric](#is-symmetric)
       - [Op Types To Quantize](#op-types-to-quantize)
       - [Nodes To Exclude](#nodes-to-exclude)
@@ -39,6 +40,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Int8 Bit Placement](#int8-bit-placement)
       - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
       - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
+      - [Use FP4 Quantization in QMoE](#use-fp4-quantization-in-qmoe)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
     - [LoRA Models](#lora-models)
@@ -523,6 +525,18 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+```
+
+##### Use FP4 Quantization in QMoE
+
+This scenario is for when you want to use FP4 (MXFP4) quantization for MoE layers on the CUDA EP. Default is false. When enabled, the QMoE op uses MXFP4 weights (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. This requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, only applies to the CUDA EP, and is mutually exclusive with `use_8bits_moe`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_fp4_moe=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_fp4_moe=true
 ```
 
 #### FP32 I/O for WebGPU EP

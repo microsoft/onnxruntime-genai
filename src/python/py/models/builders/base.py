@@ -882,7 +882,8 @@ class Model:
         placement is supplied via `customized_weight_config`. The "default" method
         returns ``None`` (MatMulNBitsQuantizer's built-in DEFAULT quantizer), which
         cannot apply per-node bits in a single pass; `to_nbits` performs a second
-        RTN pass to honor any int8 placement for that method.
+        DEFAULT int8 pass (``algo_config=None``, ``bits=8``) to honor any int8
+        placement for that method.
         """
         customized_weight_config = customized_weight_config or {}
 

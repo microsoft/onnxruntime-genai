@@ -704,6 +704,11 @@ class GPTOSSModel(Model):
         gate_up_proj_global_scales = ""
         down_proj_global_scales = ""
 
+        # Per-expert quantized weight lists are only populated on the non-Quark QMoE
+        # path below; initialize them so the shape helper never sees an undefined name.
+        gate_up_proj_qweight_list = None
+        down_proj_qweight_list = None
+
         # HF GptOssExperts stores the expert weights input-major:
         #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
         # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
