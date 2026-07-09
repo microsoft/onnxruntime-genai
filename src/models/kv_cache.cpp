@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "../generators.h"
 #include "model.h"
@@ -737,10 +738,41 @@ LFM2Cache::LFM2Cache(State& state)
     }
 
     kv_type_ = model_.session_info_.GetInputDataType(kv_input_name_strings_[0]);
-    kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
 
-    for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-      kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+    // Shared KV cache: same policy as DefaultKeyValueCache. Start from the genai
+    // search option, then let DetectAndConfigureFixedKvShape force share-buffer when
+    // the ONNX graph fixes the kv seq_len (e.g. RyzenAI fusion). The buffer is sized
+    // to that fixed dim when present, otherwise to search.max_length for symbolic
+    // graphs. (LFM2 attention on the NPU/GQO requires past==present shared buffer.)
+    kv_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+    const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
+        model_.session_info_, kv_input_name_strings_, kv_layer_count_,
+        state_.params_->search, kv_share_buffer_);
+    if (g_log.enabled && g_log.warning && kv_share_buffer_ != state_.params_->search.past_present_share_buffer)
+      Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
+
+    if (kv_share_buffer_) {
+      const int64_t seq_cap = fixed_kv_seq_len > 0
+                                  ? fixed_kv_seq_len
+                                  : static_cast<int64_t>(state_.params_->search.max_length);
+      if (seq_cap <= 0) {
+        throw std::runtime_error(
+            "LFM2Cache: past_present_share_buffer requires a fixed kv seq_len in the "
+            "model or search.max_length > 0 (set max_length or model.context_length "
+            "in genai_config.json).");
+      }
+      kv_shape_[2] = seq_cap;
+      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+        if (Device().GetType() != DeviceType::WEBGPU) {
+          ByteWrapTensor(Device(), *kv_presents_.back()).Zero();
+        }
+      }
+    } else {
+      kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+      }
     }
   }
 
@@ -779,10 +811,11 @@ LFM2Cache::LFM2Cache(State& state)
 }
 
 void LFM2Cache::Add() {
-  // Add KV cache inputs/outputs
+  // Add KV cache inputs/outputs. In shared-buffer mode past == present (same fixed
+  // buffer), so the input is bound to the present tensor and never changes.
   kv_input_index_ = state_.inputs_.size();
   for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(kv_empty_past_.get());
+    state_.inputs_.push_back(kv_share_buffer_ ? kv_presents_[i].get() : kv_empty_past_.get());
     state_.input_names_.push_back(kv_input_name_strings_[i].c_str());
   }
   kv_output_index_ = state_.outputs_.size();
@@ -806,23 +839,28 @@ void LFM2Cache::Add() {
 
 void LFM2Cache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // --- Update KV cache (attention layers) ---
-  if (!kv_is_first_update_) {
-    for (int i = 0; i < kv_layer_count_ * 2; i++) {
-      if (beam_indices.empty()) {
-        kv_pasts_[i] = std::move(kv_presents_[i]);
-      } else {
-        PickPastState(beam_indices, i);
+  // In shared-buffer mode the past/present KV buffers are fixed and reused in place
+  // (the session writes new tokens into the same buffer), so there is nothing to
+  // grow or swap here. Only the dynamic/growing path needs updating.
+  if (!kv_share_buffer_) {
+    if (!kv_is_first_update_) {
+      for (int i = 0; i < kv_layer_count_ * 2; i++) {
+        if (beam_indices.empty()) {
+          kv_pasts_[i] = std::move(kv_presents_[i]);
+        } else {
+          PickPastState(beam_indices, i);
+        }
+        state_.inputs_[kv_input_index_ + i] = kv_pasts_[i].get();
       }
-      state_.inputs_[kv_input_index_ + i] = kv_pasts_[i].get();
     }
-  }
 
-  kv_shape_[2] = total_length;
-  for (int i = 0; i < kv_layer_count_ * 2; i++) {
-    kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
-    state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+    kv_shape_[2] = total_length;
+    for (int i = 0; i < kv_layer_count_ * 2; i++) {
+      kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+      state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+    }
+    kv_is_first_update_ = false;
   }
-  kv_is_first_update_ = false;
 
   // --- Update conv state cache ---
   if (!conv_is_first_update_) {

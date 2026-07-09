@@ -2,6 +2,7 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
+# Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
 import json
 import os
@@ -275,8 +276,9 @@ class LFM2Model(Model):
         decoder["inputs"]["past_conv_names"] = "past_conv.%d"
         decoder["outputs"]["present_conv_names"] = "present_conv.%d"
 
-        # Hybrid models don't support shared past/present buffer
-        genai_config["search"]["past_present_share_buffer"] = False
+        # past_present_share_buffer: LFM2Cache pre-allocates KV to search.max_length when
+        # IsPastPresentShareBufferEnabled is true. Do not force the flag off here — the base
+        # class sets it from model layout; overriding broke shared-KV execution paths.
 
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)
