@@ -64,8 +64,8 @@ void RunCpuWorkload() {
 }
 
 // Forces creation of the DeviceInterface for `provider` directly via genai's internal
-// GetDeviceInterface (no model load), then fetches its allocator to drive the plugin-EP
-// shared-allocator lookup.
+// GetDeviceInterface (no model load), so the create -> teardown -> recreate path is exercised across
+// re-init cycles (for the CUDA add-on this also loads and later unloads the add-on library).
 // The created interface is owned by OrtGlobals, so the subsequent OgaShutdown() tears it down.
 void ExerciseDeviceInterface(const std::string& provider) {
   Generators::DeviceType device_type;
@@ -81,11 +81,10 @@ void ExerciseDeviceInterface(const std::string& provider) {
     return;  // no genai DeviceInterface mapping for this provider
   }
 
-  // Creating the interface registers it with OrtGlobals (so OgaShutdown tears it down); fetching the
-  // allocator drives the plugin-EP shared-allocator lookup. Either may throw if the EP/add-on is not
-  // usable on this machine (e.g. the CUDA add-on library is absent), which the caller treats as skip.
-  Generators::DeviceInterface* device = Generators::GetDeviceInterface(device_type);
-  device->GetAllocator();
+  // Creating the interface registers it with OrtGlobals (so OgaShutdown tears it down / unloads the
+  // CUDA add-on). It may throw if the EP/add-on is not usable on this machine (e.g. the CUDA add-on
+  // library is absent), which the caller treats as skip.
+  Generators::GetDeviceInterface(device_type);
 }
 
 }  // namespace

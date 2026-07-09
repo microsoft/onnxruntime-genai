@@ -334,20 +334,6 @@ std::vector<std::string> GetAvailableProviders();
 /// This is a C++ wrapper for OrtApi::GetEpDevices() to get execution provider devices.
 void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices);
 
-// Forward declaration (full definition below with OrtAllocator methods).
-struct Allocator;
-
-/// This is a C++ wrapper for OrtApi::EpDevice_MemoryInfo() to get the OrtMemoryInfo an execution
-/// provider device advertises for a given memory type (e.g. OrtDeviceMemoryType_DEFAULT for
-/// device-local memory, OrtDeviceMemoryType_HOST_ACCESSIBLE for pinned host memory). Returns a
-/// non-owning pointer owned by the OrtEpDevice (nullptr if the device advertises no such memory).
-const OrtMemoryInfo* GetMemoryInfo(const OrtEpDevice* ep_device, OrtDeviceMemoryType memory_type);
-
-/// This is a C++ wrapper for OrtApi::GetSharedAllocator() to get the env's shared allocator for a
-/// memory info. Returns a non-owning Allocator* owned by the env; it is valid for exactly the
-/// window the corresponding execution provider is registered on the env.
-Allocator* GetSharedAllocator(OrtEnv* env, const OrtMemoryInfo* mem_info);
-
 /// This is a C++ wrapper for OrtApi::EpDevice_EpMetadata() to get execution provider metadata.
 const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device);
 

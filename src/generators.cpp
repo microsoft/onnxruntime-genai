@@ -232,31 +232,29 @@ struct LibraryHandle {
 
 OrtGlobals::~OrtGlobals() {
   // Teardown is the reverse of construction: destroy everything that uses env-owned resources
-  // (shared allocators and registered EP libraries) BEFORE the env that owns them. Ending all
-  // shared-allocator usage before the env clears them keeps this correct even if a future
+  // (the trivial-session allocators and registered EP libraries) BEFORE the env that owns them.
+  // Ending all allocator usage before the env is destroyed keeps this correct even if a future
   // interface or buffer dereferences a cached allocator during its own destruction — we do not
   // rely on "nothing happens to deref it today". Shutdown is single-threaded, so no locks.
 
   // 1. Sessions that hold env / EP state directly. Models (which own these indirectly) are already
-  //    gone per the §5 lifetime contract; drop the genai-side session caches here.
+  //    gone per the lifetime contract; drop the genai-side session caches here.
   graph_session_cache_.sessions_.clear();
 
-  // 2. Device interfaces + the CUDA add-on library. Interfaces cache env-owned shared allocators
-  //    (plugin mode) or the legacy trivial-session allocator (device_allocators_), and the CUDA
-  //    add-on interface lives inside cuda_library_. Destroy them here so all shared-allocator
-  //    usage ends before the env. device_interfaces_ is only a non-owning index (cleared first);
-  //    owned_interfaces_ and cuda_library_ are the real owners.
+  // 2. Device interfaces + the CUDA add-on library. Interfaces cache the trivial-session allocator
+  //    (via device_allocators_), and the CUDA add-on interface lives inside cuda_library_. Destroy
+  //    them here so all allocator usage ends before the env. device_interfaces_ is only a
+  //    non-owning index (cleared first); owned_interfaces_ and cuda_library_ are the real owners.
   device_interfaces_.clear();
   owned_interfaces_.clear();
   cuda_library_.reset();
 
-  // 3. Legacy (trivial-session) env-derived allocators, now unreferenced by any interface. Within
-  //    each entry session_ is declared before allocator_, so ~allocator_ runs first.
+  // 3. The trivial-session env-derived allocators, now unreferenced by any interface. Within each
+  //    entry session_ is declared before allocator_, so ~allocator_ runs first.
   for (auto& a : device_allocators_) a = {};
 
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
-  //    clearing shared allocators and unregistering / unloading any still-registered EP libraries
-  //    — by now nothing references them.
+  //    unregistering / unloading any still-registered EP libraries — by now nothing references them.
   env_.reset();
 }
 
@@ -275,9 +273,9 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const OrtApi* ort_api, OrtEnv* ort_env, const char* deviceType);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
     return reinterpret_cast<decltype(&GetInterface)>(
-        cuda_library_->GetSymbol("GetInterface"))(&g_genai, Ort::api, env_.get(), to_string(type).c_str());
+        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }
@@ -300,15 +298,15 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       break;
 #endif
     case DeviceType::WEBGPU:
-      owned_interfaces_.push_back(CreateWebGPUInterface(*env_));
+      owned_interfaces_.push_back(CreateWebGPUInterface());
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::QNN:
-      owned_interfaces_.push_back(CreateQNNInterface(*env_));
+      owned_interfaces_.push_back(CreateQNNInterface());
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::OpenVINO:
-      owned_interfaces_.push_back(CreateOpenVINOInterface(*env_));
+      owned_interfaces_.push_back(CreateOpenVINOInterface());
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::RyzenAI:
@@ -317,7 +315,7 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       break;
     case DeviceType::CPU:
     default:
-      owned_interfaces_.push_back(CreateCpuInterface(*env_));
+      owned_interfaces_.push_back(CreateCpuInterface());
       slot = owned_interfaces_.back().get();
       break;
   }

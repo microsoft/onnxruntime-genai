@@ -139,16 +139,6 @@ inline void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, si
   ThrowOnError(api->GetEpDevices(env, device_ptrs, num_devices));
 }
 
-inline const OrtMemoryInfo* GetMemoryInfo(const OrtEpDevice* ep_device, OrtDeviceMemoryType memory_type) {
-  return api->EpDevice_MemoryInfo(ep_device, memory_type);
-}
-
-inline Allocator* GetSharedAllocator(OrtEnv* env, const OrtMemoryInfo* mem_info) {
-  OrtAllocator* p;
-  ThrowOnError(api->GetSharedAllocator(env, mem_info, &p));
-  return static_cast<Allocator*>(p);
-}
-
 inline const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device) {
   return api->EpDevice_EpMetadata(device);
 }

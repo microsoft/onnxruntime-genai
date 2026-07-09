@@ -6,9 +6,7 @@
 namespace Generators {
 
 // Creates a fresh OpenVINO DeviceInterface instance. Ownership is taken by OrtGlobals.
-// `env` is the OrtGlobals env this interface belongs to (created before the interface and
-// destroyed after it, per the reverse-order teardown), passed for signature consistency across EPs.
-std::unique_ptr<DeviceInterface> CreateOpenVINOInterface(OrtEnv& env);
+std::unique_ptr<DeviceInterface> CreateOpenVINOInterface();
 
 struct Model;
 bool IsOpenVINOStatefulModel(const Model& model);

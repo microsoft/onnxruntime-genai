@@ -1175,9 +1175,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, b
  * \param registration_name name for registration.
  * \param path provider path.
  *
- * \note Registration may happen at any time, including after GenAI is already in use: when a model that needs an EP is
- *       created, GenAI discovers the EP's shared allocator lazily, so there is no "register before first use"
- *       requirement.
  */
 OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path);
 
@@ -1185,13 +1182,6 @@ OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* reg
  * \brief Unregisters an execution provider library with ONNXRuntime API.
  * \param registration_name name for registration.
  *
- * \note Ordering: unregister an EP only after every object holding device memory allocated by it has been destroyed;
- *       otherwise the env's shared allocator is dropped out from under live buffers (dangling free). This call uses
- *       GenAI's internal OrtEnv reference, which is dropped by OgaShutdown(), so it must be called BEFORE OgaShutdown().
- *       It is optional -- if skipped, OgaShutdown() (and env destruction) unregisters the remaining EP libraries.
- *
- * \note Pick one registration method per EP: either register/unregister directly on your own OrtEnv reference, or use
- *       OgaRegisterExecutionProviderLibrary / OgaUnregisterExecutionProviderLibrary. Do not mix both for one EP.
  */
 OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
 

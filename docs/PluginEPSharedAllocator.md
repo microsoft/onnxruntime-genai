@@ -1,9 +1,24 @@
 # Plan: Plugin-EP shared allocators, clean `OgaShutdown`, and re-initialization
 
+> **Status (fork): this branch delivers only the clean-shutdown / re-init
+> foundation (Stage 0 in §14).** The work has been split into two parts. The
+> shared-allocator plumbing and per-EP plugin migrations (§4–§13 and Stages 1–4
+> of §14) are **deferred to a separate change** because several allocator
+> nuances still need design work. Until then genai continues to bootstrap every
+> non-CPU device allocator via the dummy trivial-`OrtSession`
+> (`EnsureDeviceOrtInit`) for **all** EPs — i.e. no plugin-EP shared allocators.
+> The remainder of this document is retained as the design reference for that
+> deferred allocator work; sections describing shared allocators, plugin-vs-legacy
+> mode detection, `GetEpDevices` allocator lookup, `FindMyEpDevices`,
+> `GetHostAccessibleAllocator`, and per-EP plugin migrations do **not** reflect
+> the current state of this branch.
+
 Status: Draft for review. Two related changes: (a) let genai use plugin-EP
 shared allocators instead of the dummy-`OrtSession` allocator bootstrap, and
 (b) make `OgaShutdown` a clean teardown so genai can be re-initialized
 in-process without a restart (the Foundry Local `Manager` recreate scenario).
+**Only (b), plus the EP-agnostic ownership refactor it depends on, is
+implemented on this branch; (a) is deferred (see the status note above).**
 
 Scope is **all changes required to make this work for every EP** — WebGPU,
 CUDA / NvTensorRtRtx, DML, QNN, OpenVINO, RyzenAI, VitisAI. The work is

@@ -15,14 +15,14 @@ const char* label_cpu = "cpu";
 }  // namespace
 
 struct WebGPUMemory final : DeviceBuffer {
-  WebGPUMemory(size_t size, Ort::Allocator& allocator, const OrtMemoryInfo& memory_info)
-      : owned_{true}, ort_allocator_{&allocator}, ort_memory_info_{&memory_info} {
+  WebGPUMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
+      : owned_{true}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
   }
 
-  WebGPUMemory(void* p, size_t size, Ort::Allocator& allocator, const OrtMemoryInfo& memory_info)
-      : owned_{false}, ort_allocator_{&allocator}, ort_memory_info_{&memory_info} {
+  WebGPUMemory(void* p, size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
+      : owned_{false}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
     size_in_bytes_ = size;
     p_device_ = static_cast<uint8_t*>(p);
   }
@@ -42,6 +42,10 @@ struct WebGPUMemory final : DeviceBuffer {
   }
 
   void CopyDeviceToCpu() override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
     AllocateCpu();
 
     // Create source tensor (WebGPU device memory) - treat as 1D uint8 array
@@ -60,6 +64,9 @@ struct WebGPUMemory final : DeviceBuffer {
   }
 
   void CopyCpuToDevice() override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
     assert(p_cpu_);
 
     // Create source tensor (CPU memory) - treat as 1D uint8 array
@@ -78,6 +85,10 @@ struct WebGPUMemory final : DeviceBuffer {
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
     // Fast path: WebGPU-to-WebGPU copy with zero offsets
     // NOTE: p_device_ is a WGPUBuffer handle (cast to uint8_t*), not a memory pointer.
     // We cannot use pointer arithmetic (p_device_ + offset) to create sub-buffer views.
@@ -117,6 +128,10 @@ struct WebGPUMemory final : DeviceBuffer {
   }
 
   void Zero() override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
     // Allocate zeroed CPU memory
     std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
 
@@ -141,69 +156,21 @@ struct WebGPUMemory final : DeviceBuffer {
 };
 
 struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl(OrtEnv& env) : env_{env} {
+  InterfaceImpl() {
   }
 
   DeviceType GetType() const override { return DeviceType::WEBGPU; }
 
-  // Plugin-mode detection. In general the presence of a matching OrtEpDevice signals a plugin EP
-  // (a shared allocator is a separate concern). WebGPU is the exception: ORT registers a built-in
-  // ("internal") WebGPU plugin EP that creates an OrtEpDevice but provides NO shared allocator, and
-  // genai must run that through the legacy trivial-session path rather than plugin mode. So WebGPU
-  // — and only WebGPU — additionally requires a device-local shared allocator to be present.
-  std::vector<const OrtEpDevice*> FindMyEpDevices() const override {
-    auto [devices, shared] = ResolveEp();
-    return shared.HasDeviceAllocator() ? devices : std::vector<const OrtEpDevice*>{};
-  }
-
-  // §12.1 legacy path: called by EnsureDeviceOrtInit when WebGPU is not a plugin EP.
-  // Sets ort_allocator_ so EnsureAllocator() is a no-op in legacy mode.
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
     // Cache the memory info to avoid repeated GetInfo calls
     ort_memory_info_ = &ort_allocator_->GetInfo();
-    if (g_log.enabled)
-      Log("webgpu", "Using legacy internal WebGPU EP");
   }
 
  private:
-  // The env this interface belongs to (created before it, destroyed after it per the reverse-order
-  // teardown), so the reference is valid for the interface's whole lifetime.
-  OrtEnv& env_;
-  // Lazily fetched on first use via EnsureAllocator(); memoized for the env cycle.
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
-
-  // Find this EP's plugin devices and resolve their shared allocators in one place (used by both
-  // FindMyEpDevices and EnsureAllocator).
-  struct ResolvedEp {
-    std::vector<const OrtEpDevice*> devices;
-    EpSharedAllocators shared;
-  };
-
-  ResolvedEp ResolveEp() const {
-    static constexpr const char* kEpNames[] = {"WebGpuExecutionProvider"};
-    auto devices = FindEpDevicesByName(env_, kEpNames);
-    auto shared = ResolveEpSharedAllocators(env_, devices);
-    return {std::move(devices), std::move(shared)};
-  }
-
-  // §6/§12.1: Ensure ort_allocator_ is set before use.
-  // - Legacy path (V1): InitOrt() already set ort_allocator_; returns immediately.
-  // - Plugin path (V2): fetches the env's device-local shared allocator on first call.
-  void EnsureAllocator() {
-    if (ort_allocator_) return;  // Set by InitOrt() in legacy mode, or by a prior plugin-mode call.
-    auto shared = ResolveEp().shared;
-    if (!shared.HasDeviceAllocator())
-      throw std::runtime_error(
-          "WebGPU EP does not provide a device-local shared allocator. "
-          "Call OgaRegisterExecutionProviderLibrary with the WebGPU plugin EP before loading models.");
-    ort_allocator_ = shared.device_allocator;
-    ort_memory_info_ = shared.device_mem_info;
-    if (g_log.enabled)
-      Log("webgpu", "Using plugin-EP WebGPU EP shared allocator");
-  }
   // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
   // Content is always all 1s so sharing across generators is safe; only upload_bytes
   // worth of data is copied each call, regardless of buffer capacity.
@@ -212,18 +179,15 @@ struct InterfaceImpl : DeviceInterface {
 
  public:
   Ort::Allocator& GetAllocator() override {
-    EnsureAllocator();
     return *ort_allocator_;
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    EnsureAllocator();
-    return std::make_shared<WebGPUMemory>(size, *ort_allocator_, *ort_memory_info_);
+    return std::make_shared<WebGPUMemory>(size, ort_allocator_, ort_memory_info_);
   }
 
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
-    EnsureAllocator();
-    return std::make_shared<WebGPUMemory>(p, size, *ort_allocator_, *ort_memory_info_);
+    return std::make_shared<WebGPUMemory>(p, size, ort_allocator_, ort_memory_info_);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
@@ -232,7 +196,6 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {
-    EnsureAllocator();
     if (batch_beam_size != 1 || !update_only) {
       return false;  // Fall back to CPU for multi-beam or non-static mask
     }
@@ -274,7 +237,9 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
-    EnsureAllocator();
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
 
     // WebGPU-specific session configuration
     static const char* webgpu_config_key = "ep.webgpuexecutionprovider.enableInt64";
@@ -335,8 +300,8 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace WebGPU
 
-std::unique_ptr<DeviceInterface> CreateWebGPUInterface(OrtEnv& env) {
-  return std::make_unique<WebGPU::InterfaceImpl>(env);
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface() {
+  return std::make_unique<WebGPU::InterfaceImpl>();
 }
 
 }  // namespace Generators

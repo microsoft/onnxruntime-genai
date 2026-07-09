@@ -6,7 +6,6 @@
 #include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
-#include <cstring>  // for std::strcmp
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
 #include "span.h"
@@ -102,116 +101,12 @@ enum struct DeviceType {
   MAX
 };
 
-// §6: Step 1 — find the OrtEpDevice entries on `env` whose EP name matches one of `ep_names`. This
-// is pure name filtering and is independent of allocators: a non-empty result means the EP is
-// registered as a plugin EP (the presence of an OrtEpDevice is the plugin-EP signal). `env` is the
-// caller's own env (in-process EPs pass GetOrtEnv(); the CUDA add-on passes the env handed to it at
-// load). Defined inline so the CUDA add-on library (which links neither onnxruntime nor genai core,
-// only Ort::api-based inline wrappers) can use it too.
-inline std::vector<const OrtEpDevice*> FindEpDevicesByName(OrtEnv& env, std::span<const char* const> ep_names) {
-  std::vector<const OrtEpDevice*> devices;
-  const OrtEpDevice* const* device_ptrs = nullptr;
-  size_t num_devices = 0;
-  Ort::GetEpDevices(&env, &device_ptrs, &num_devices);
-  for (const auto* device : std::span{device_ptrs, num_devices}) {
-    const char* dev_name = Ort::api->EpDevice_EpName(device);
-    for (const char* n : ep_names)
-      if (std::strcmp(dev_name, n) == 0) {
-        devices.push_back(device);
-        break;
-      }
-  }
-  return devices;
-}
-
-// §6/§11: The shared allocators an execution provider exposes on an OrtEnv, resolved (step 2) from a
-// device list produced by FindEpDevicesByName (step 1). "Availability" is decided by whether
-// Ort::GetSharedAllocator returns an allocator (not by whether EpDevice_MemoryInfo returns a
-// mem-info).
-//
-// Generic allocator policy — one model for every plugin EP:
-//   * device_allocator is the allocator genai uses for a DeviceBuffer's device memory. It is the
-//     EP's DEFAULT (device-local) shared allocator when it advertises one (e.g. CUDA, real WebGPU);
-//     otherwise it is the HOST_ACCESSIBLE shared allocator. EPs that do not allocate separate
-//     device memory (e.g. QNN's QnnHtpShared, OpenVINO) expose only CPU-accessible shared memory
-//     that serves as both device and host memory (a DeviceBuffer then has p_device_ == p_cpu_).
-//   * host_allocator is the EP's HOST_ACCESSIBLE (pinned / mappable) shared allocator, reported
-//     whenever the EP advertises one — independent of whether a DEFAULT allocator also exists. It
-//     is used for host-side staging (e.g. copying a CPU input into EP-visible memory). When the EP
-//     has no DEFAULT allocator, device_allocator is set to this same host-accessible allocator (so
-//     device == host) but host_allocator still reports it, so callers that specifically need
-//     host-accessible memory behave the same regardless of whether a DEFAULT allocator exists.
-struct EpSharedAllocators {
-  Ort::Allocator* device_allocator{};      // Device-memory allocator: DEFAULT, or HOST_ACCESSIBLE when no DEFAULT exists.
-  const OrtMemoryInfo* device_mem_info{};  // Its mem-info, or null.
-  Ort::Allocator* host_allocator{};        // HOST_ACCESSIBLE staging allocator, whenever the EP advertises one, else null.
-  const OrtMemoryInfo* host_mem_info{};    // Its mem-info, or null.
-
-  bool HasDeviceAllocator() const { return device_allocator != nullptr; }
-  bool HasHostAccessibleAllocator() const { return host_allocator != nullptr; }
-};
-
-// §6/§11: Step 2 — resolve the shared allocators the given `devices` (from FindEpDevicesByName)
-// expose on `env`.
-inline EpSharedAllocators ResolveEpSharedAllocators(OrtEnv& env, std::span<const OrtEpDevice* const> devices) {
-  EpSharedAllocators result;
-  for (const auto* device : devices) {
-    // Device-local (DEFAULT) allocator. Signal = a shared allocator is actually available.
-    if (!result.device_allocator) {
-      if (const OrtMemoryInfo* mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_DEFAULT)) {
-        if (Ort::Allocator* a = Ort::GetSharedAllocator(&env, mi)) {
-          result.device_allocator = a;
-          result.device_mem_info = mi;
-        }
-      }
-    }
-
-    // Host-accessible allocator, usable only when this device is non-CPU (§11 gate): a CPU device
-    // needs no special host-accessible allocator (plain CPU memory suffices).
-    if (!result.host_allocator) {
-      const OrtHardwareDevice* hw = Ort::api->EpDevice_Device(device);
-      if (hw && Ort::api->HardwareDevice_Type(hw) != OrtHardwareDeviceType_CPU) {
-        if (const OrtMemoryInfo* mi = Ort::GetMemoryInfo(device, OrtDeviceMemoryType_HOST_ACCESSIBLE)) {
-          if (Ort::Allocator* a = Ort::GetSharedAllocator(&env, mi)) {
-            result.host_allocator = a;
-            result.host_mem_info = mi;
-          }
-        }
-      }
-    }
-  }
-
-  // Generic policy: if the EP advertises no DEFAULT device allocator, use its HOST_ACCESSIBLE
-  // allocator as the device allocator — device memory is host-accessible shared memory (QNN,
-  // OpenVINO). host_allocator is left populated so GetHostAccessibleAllocator() still returns it:
-  // code that specifically needs host-accessible memory (e.g. staging a CPU input for the EP)
-  // behaves the same whether or not the EP also advertised a DEFAULT allocator.
-  if (!result.device_allocator && result.host_allocator) {
-    result.device_allocator = result.host_allocator;
-    result.device_mem_info = result.host_mem_info;
-  }
-
-  return result;
-}
-
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
-
-  // §11 host-accessible allocator. EPs that expose a pinned / mappable host allocator (e.g. CUDA
-  // host-pinned staging) return the env's shared allocator for their HOST_ACCESSIBLE mem-info.
-  // Default nullptr => callers take the EP-agnostic fallback (a plain host staging buffer with
-  // device<->CPU copies).
-  virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
-
-  // §6: Returns the OrtEpDevice entries for this interface's EP on genai's env.
-  // Non-empty => plugin mode (shared allocator fetched on demand).
-  // Empty => legacy mode (EnsureDeviceOrtInit bootstrap).
-  // Default returns empty (most EPs have no plugin path yet).
-  virtual std::vector<const OrtEpDevice*> FindMyEpDevices() const { return {}; }
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
