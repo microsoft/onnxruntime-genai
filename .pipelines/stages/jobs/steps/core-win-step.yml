@@ -352,3 +352,34 @@ steps:
     SearchPattern: 'onnxruntime-genai*.pdb'
     SymbolServerType: teamServices
     SymbolExpirationInDays: 365
+
+# --- DIAG: dump any Guardian .gdn SARIF logs (best-effort) ------------------
+# The injected credential scanner ("sarifpatternmatcher") emits its raw log into
+# the agent's .gdn folder. If the source scan runs before this point, this dumps
+# the offending SARIF so we can see exactly what it flagged. If nothing prints,
+# re-run with pipeline variable system.debug=true and read the SARIF path/content
+# from the "Guardian: Post Analysis" step log.
+- powershell: |
+    $ErrorActionPreference = 'Continue'
+    $roots = @(
+      "$(Agent.BuildDirectory)\.gdn",
+      "$(Build.SourcesDirectory)\.gdn",
+      "$(Agent.TempDirectory)\.gdn",
+      "$(Agent.WorkFolder)\_gdn",
+      "$(Agent.WorkFolder)\_gdn\gdn"
+    ) | Select-Object -Unique
+    foreach ($r in $roots) {
+      if (Test-Path $r) {
+        Write-Host "=================== .gdn tree under $r ==================="
+        Get-ChildItem -Path $r -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+        Get-ChildItem -Path $r -Recurse -Force -Filter *.sarif -ErrorAction SilentlyContinue | ForEach-Object {
+          Write-Host "===================== SARIF: $($_.FullName) ====================="
+          Get-Content -Path $_.FullName -Raw
+          Write-Host "===================== END SARIF ====================="
+        }
+      } else {
+        Write-Host "No .gdn at $r"
+      }
+    }
+  displayName: 'DIAG: dump Guardian .gdn SARIF logs'
+  condition: always()

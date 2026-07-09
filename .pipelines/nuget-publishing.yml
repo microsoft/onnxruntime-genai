@@ -60,6 +60,14 @@ extends:
       tsa:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      # TEST (option a): point the injected credential scanner at a suppressions
+      # file that excludes our feed-isolation pipeline files (which reference the
+      # ADO $(System.AccessToken) variable, not real secrets). NOTE: the observed
+      # failure is a crash during Guardian's SARIF *conversion*, which happens
+      # before suppressions/baselines are applied — so this may not prevent the
+      # crash. Testing to confirm/deny.
+      credscan:
+        suppressionsFile: '$(Build.SourcesDirectory)\.config\CredScanSuppressions.json'
     stages:
       - template: stages/packaging-scratch-stage.yml
         parameters:

@@ -1,0 +1,16 @@
+{
+  "tool": "Credscan",
+  "suppressions": [
+    {
+      "file": [
+        "/.pipelines/lotus-feed-variables.yml",
+        "/.pipelines/stages/jobs/steps/core-win-step.yml",
+        "/.pipelines/stages/jobs/steps/core-linux-step.yml",
+        "/.pipelines/stages/jobs/steps/sdk-python-win-step.yml",
+        "/.pipelines/stages/jobs/steps/sdk-python-linux-step.yml",
+        "/.pipelines/stages/jobs/steps/sdk-java-linux-step.yml"
+      ],
+      "_justification": "These packaging pipeline files reference the ADO pipeline identity token via $(System.AccessToken) / $env:SYSTEM_ACCESSTOKEN inside Authorization headers and cargo/pip auth. They are ADO build-time variable references, NOT hard-coded credentials, so they are safe to exclude from credential scanning."
+    }
+  ]
+}
