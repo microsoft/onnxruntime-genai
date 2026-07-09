@@ -86,6 +86,9 @@ def check_extra_options(kv_pairs, execution_provider):
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
+    if "hf_token" in kv_pairs:
+        kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
+
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
@@ -192,7 +195,7 @@ def create_model(
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+    hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", True)
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
@@ -427,17 +430,13 @@ def get_args():
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
                     Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
-                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
                     rtn = RTN algorithm for int4 quantization.
                     rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                     k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                     k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
-                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
-                    Use this option to share weights and reduce model size by eliminating duplicate weights.
-                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.
-                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
@@ -457,28 +456,33 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
+                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
+                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
+                    Use this option to share weights and reduce model size by eliminating duplicate weights.
+                    Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
-                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
-                    If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
+                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
-                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
-                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
             """),
     )
 
