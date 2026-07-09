@@ -1541,9 +1541,11 @@ inline const ModelPackageApi& GetModelPackageApi() {
     if (api == nullptr) {
       return f;
     }
-    // Local resolver for experimental function pointers. Kept inline here so we don't have
-    // to include onnxruntime_experimental_cxx_api.h (which transitively includes
-    // onnxruntime_cxx_api.h and conflicts with genai's vendored Ort wrappers).
+    // Resolve OrtModelPackageApi entries via the C API to avoid including
+    // onnxruntime_experimental_cxx_api.h. That header defines the
+    // Ort::Experimental::Get_OrtModelPackageApi_*_SinceV28_Fn accessors but transitively
+    // pulls in onnxruntime_cxx_api.h, which redefines the Ort:: types that genai has
+    // vendored in onnxruntime_api.h.
 #define GENAI_MP_V28_FN(NAME)                                                \
   reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
       api->GetExperimentalFunction(                                          \
