@@ -1655,6 +1655,11 @@ TEST_P(CAPITests, StreamingASRSineWave) {
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
+  // Silero VAD does not recognize a synthetic tone as speech, so with VAD enabled the tone would
+  // be dropped as silence. Disable VAD to exercise the audio->tensor->decode pipeline itself
+  // (VAD behavior is covered by the dedicated StreamingASRVad* tests).
+  processor->SetOption("use_vad", "false");
+
   const size_t chunk_samples = ChunkSamples();
   constexpr float sample_rate = 16000.0f;
   constexpr float frequency = 440.0f;
@@ -1687,6 +1692,10 @@ TEST_P(CAPITests, StreamingASRRawCAPI) {
   OgaStreamingProcessor* processor = nullptr;
   ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
   ASSERT_NE(processor, nullptr);
+
+  // Disable VAD so the synthetic silence flows through the pipeline instead of being dropped
+  // (Silero VAD treats it as non-speech). VAD behavior is covered by the StreamingASRVad* tests.
+  ASSERT_EQ(OgaStreamingProcessorSetOption(processor, "use_vad", "false"), nullptr);
 
   OgaGeneratorParams* params = nullptr;
   ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
