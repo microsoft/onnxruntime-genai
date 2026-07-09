@@ -741,9 +741,8 @@ LFM2Cache::LFM2Cache(State& state)
 
     // Shared KV cache: same policy as DefaultKeyValueCache. Start from the genai
     // search option, then let DetectAndConfigureFixedKvShape force share-buffer when
-    // the ONNX graph fixes the kv seq_len (e.g. RyzenAI fusion). The buffer is sized
-    // to that fixed dim when present, otherwise to search.max_length for symbolic
-    // graphs. (LFM2 attention on the NPU/GQO requires past==present shared buffer.)
+    // the ONNX graph fixes the kv seq_len. The buffer is sized to that fixed dim when
+    // present, otherwise to search.max_length for symbolic graphs.
     kv_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
     const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
         model_.session_info_, kv_input_name_strings_, kv_layer_count_,
