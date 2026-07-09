@@ -63,7 +63,7 @@ struct ModelType {
 
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
-    static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
+    static constexpr std::array<std::string_view, 3> MMM = {"gemma4", "gemma4_unified", "phi4mm"};
     return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
   }
 
