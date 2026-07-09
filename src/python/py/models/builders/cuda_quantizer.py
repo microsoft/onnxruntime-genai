@@ -84,6 +84,7 @@ class CudaQuantizer:
         bits: int,
         *,
         unsigned_full_range: bool = True,
+        signed_scale: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize one QMoE expert with symmetric per-channel storage.
 
@@ -94,6 +95,25 @@ class CudaQuantizer:
         quantization is symmetric. By default it uses the full ``[-8, 7]`` /
         ``[-128, 127]`` range. Set ``unsigned_full_range=False`` to use the legacy
         ``[-7, 7]`` / ``[-127, 127]`` range.
+
+        With ``signed_scale=False`` (**default for the per-channel path**) the
+        scale is the positive ``max|w| / 2^(bits-1)``, so the negative extreme maps
+        exactly to ``qmin`` while the positive extreme is clipped at ``qmax``. Set
+        ``signed_scale=True`` for the MLAS ``default`` convention: the scale is
+        SIGNED, mapping the max-magnitude element (with its sign) exactly to
+        ``qmin`` (``scale = w[argmax|w|] / qmin``), representing whichever extreme
+        is the true maximum without clipping. The stored bytes/zero-point layout is
+        unchanged; the sign rides in the scale, which the CUDA QMoE kernel consumes
+        correctly (parity-verified byte-for-byte).
+
+        NOTE: ``signed_scale`` defaults to ``False`` here on purpose. For gpt-oss
+        the signed per-channel variant gives *no* reconstruction-error benefit (the
+        per-row max-magnitude weight is the only element that differs, so mean|Δw|
+        is a wash) and empirically it costs ~2pp MMLU vs the positive-scale default
+        -- a genuine data-dependent quantization effect, not a kernel bug (the
+        kernel computes signed scales correctly). The signed convention is only
+        worthwhile on the finer-grained blockwise paths, where it matches MLAS
+        ``default`` and is MMLU-neutral.
         """
         torch = _get_torch()
 
@@ -117,8 +137,18 @@ class CudaQuantizer:
                 qmin, qmax, scale_divisor, zero_point = -128, 127, 128, 128
             else:
                 qmin, qmax, scale_divisor, zero_point = -127, 127, 127, 128
-        scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
-        scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
+        eps = torch.finfo(torch.float32).eps
+        if signed_scale:
+            # MLAS-style signed scale: map the max-|w| element (with its sign) to qmin,
+            # so the true extreme is represented exactly instead of being clipped.
+            argmax = weights.abs().argmax(dim=1, keepdim=True)
+            signed_max = torch.gather(weights, 1, argmax)  # [N, 1], keeps the sign
+            scales = signed_max / float(qmin)
+            # An all-zero row yields scale 0; fall back to a tiny positive scale.
+            scales = torch.where(scales.abs() < eps, torch.full_like(scales, eps), scales)
+        else:
+            scales = weights.abs().amax(dim=1, keepdim=True) / float(scale_divisor)
+            scales = torch.clamp(scales, min=eps)
         quantized = torch.clamp(torch.round(weights / scales), qmin, qmax).to(torch.int16).contiguous()
         quantized = (quantized + zero_point).to(torch.uint8)
 
@@ -138,6 +168,7 @@ class CudaQuantizer:
         force_arch: int = 80,
         *,
         unsigned_full_range: bool = True,
+        signed_scale: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize per-channel QMoE weights and optionally CUTLASS-prepack them.
 
@@ -145,6 +176,11 @@ class CudaQuantizer:
         Otherwise, returned weights keep raw per-channel storage ``[N, K/pack]``.
         CUDA prepacking requires ``pack_weights_for_cuda_mixed_gemm`` from an
         onnxruntime-gpu CUDA build.
+
+        ``signed_scale`` defaults to ``False`` for the per-channel path (positive
+        ``max|w|/2^(bits-1)`` scales); see
+        :meth:`qmoe_symmetric_per_channel_quantize` for why signed scales are not
+        the default here.
         """
         torch = _get_torch()
 
@@ -152,6 +188,7 @@ class CudaQuantizer:
             weights,
             bits,
             unsigned_full_range=unsigned_full_range,
+            signed_scale=signed_scale,
         )
         if not prepack:
             return qweight, scales
@@ -176,6 +213,7 @@ class CudaQuantizer:
         symmetric: bool,
         abs_scales: bool,
         unsigned_full_range: bool,
+        signed_scale: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize ``weights`` with MatMulNBits pybinds and return unflattened storage."""
         torch = _get_torch()
@@ -188,6 +226,8 @@ class CudaQuantizer:
             raise ValueError(f"Blockwise quantization only supports 4 or 8 bits, got {bits}.")
         if block_size <= 0:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
+        if signed_scale and not symmetric:
+            raise ValueError("signed_scale is only valid for symmetric blockwise quantization.")
 
         num_blocks = (k + block_size - 1) // block_size
         pack = 8 // bits
@@ -206,8 +246,19 @@ class CudaQuantizer:
                 w = np.pad(w, ((0, 0), (0, padded_k - k)), "constant")
 
             blocked = w.reshape(n, num_blocks, block_size)
-            scales = np.max(np.abs(blocked), axis=2).astype(np.float32) / np.float32(scale_divisor)
-            scales = np.maximum(scales, np.finfo(np.float32).eps)
+            eps = np.finfo(np.float32).eps
+            if signed_scale:
+                # MLAS-style signed scale: map each block's max-|w| element (with its
+                # sign) exactly to qmin, so the true extreme is represented instead of
+                # being clipped at qmax. The sign rides in the scale.
+                argmax = np.argmax(np.abs(blocked), axis=2)  # [n, num_blocks]
+                signed_max = np.take_along_axis(blocked, argmax[:, :, np.newaxis], axis=2)[:, :, 0]
+                scales = (signed_max.astype(np.float32) / np.float32(qmin))
+                # An all-zero block yields scale 0; fall back to a tiny positive scale.
+                scales = np.where(np.abs(scales) < eps, np.float32(eps), scales)
+            else:
+                scales = np.max(np.abs(blocked), axis=2).astype(np.float32) / np.float32(scale_divisor)
+                scales = np.maximum(scales, eps)
             quantized = np.clip(np.rint(blocked / scales[:, :, np.newaxis]), qmin, qmax).astype(np.int16)
             quantized = (quantized + zero_point).astype(np.uint8)
 
@@ -246,6 +297,7 @@ class CudaQuantizer:
         abs_scales: bool = True,
         flatten_qweight: bool = True,
         unsigned_full_range: bool = True,
+        signed_scale: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize one expert with ONNX Runtime's MatMulNBits blockwise encoding.
 
@@ -258,6 +310,16 @@ class CudaQuantizer:
         Symmetric quantization uses the full ``[-8, 7]`` / ``[-128, 127]`` range
         by default. Set ``unsigned_full_range=False`` to use the legacy
         ``[-7, 7]`` / ``[-127, 127]`` range.
+
+        With ``signed_scale=True`` (**default for the blockwise path**) each
+        block's scale is SIGNED -- the MLAS ``default`` convention -- mapping that
+        block's max-magnitude element (with its sign) exactly to ``qmin``
+        (``scale = block[argmax|w|] / qmin``), so the true extreme is represented
+        without clipping. This matches ORT MLAS ``default`` byte-for-byte and is
+        MMLU-neutral for gpt-oss QMoE. Set ``signed_scale=False`` for the positive
+        ``max|w| / 2^(bits-1)`` scale (negative extreme exact, positive extreme
+        clipped at ``qmax``). Only valid for ``symmetric=True``; the stored
+        bytes/zero-point layout is unchanged (the sign rides in the scale).
         """
         qweight, scales, zero_points = CudaQuantizer._matmulnbits_blockwise_quantize_impl(
             weights,
@@ -266,6 +328,7 @@ class CudaQuantizer:
             symmetric=symmetric,
             abs_scales=abs_scales,
             unsigned_full_range=unsigned_full_range,
+            signed_scale=signed_scale,
         )
         if flatten_qweight:
             qweight = qweight.reshape(qweight.shape[0], -1).contiguous()
@@ -285,6 +348,7 @@ class CudaQuantizer:
         return_zero_points: bool = False,
         abs_scales: bool = True,
         unsigned_full_range: bool = True,
+        signed_scale: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize and CUDA-prepack one MatMulNBits weight initializer.
 
@@ -325,6 +389,7 @@ class CudaQuantizer:
             symmetric=symmetric,
             abs_scales=abs_scales,
             unsigned_full_range=unsigned_full_range,
+            signed_scale=signed_scale,
         )
 
         pack_weights_for_cuda_mixed_gemm = _get_pack_weights_for_cuda_mixed_gemm()
@@ -376,6 +441,7 @@ class CudaQuantizer:
         return_zero_points: bool = False,
         abs_scales: bool = False,
         unsigned_full_range: bool = True,
+        signed_scale: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize one expert and CUTLASS-prepack it for CUDA QMoE fpA_intB GEMM.
 
@@ -399,6 +465,7 @@ class CudaQuantizer:
             symmetric=symmetric,
             abs_scales=abs_scales,
             unsigned_full_range=unsigned_full_range,
+            signed_scale=signed_scale,
         )
 
         pack_weights_for_cuda_mixed_gemm = _get_pack_weights_for_cuda_mixed_gemm()

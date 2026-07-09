@@ -41,6 +41,16 @@ def _qmoe_unsigned_full_range(model):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+                                                                                                                                                                                                                                        
+def _qmoe_signed_scale(model, default):
+    # Internal test knob: use MLAS-style SIGNED per-block/per-channel QMoE scales.
+    # When GENAI_QMOE_SIGNED_SCALE is unset, use the per-path ``default`` (False for
+    # per-channel, True for blockwise); when set it overrides both.
+    raw = os.environ.get("GENAI_QMOE_SIGNED_SCALE")
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -828,6 +838,10 @@ class Model:
         placement = {}
         for flag in self.INT8_PLACEMENT_FLAGS:
             placement[flag] = bool(extra_options.get(flag, implied.get(flag, False)))
+        # Optional explicit list of layer indices for `int8_mixed_layers` (overrides the
+        # default llama.cpp selection). Lets a recipe target specific layers, e.g. the
+        # highest-reconstruction-error ones.
+        placement["int8_mixed_layer_ids"] = extra_options.get("int8_mixed_layer_ids")
         return base_method, placement
 
     def make_bit_placement_config(self, placement):
@@ -838,15 +852,21 @@ class Model:
             customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
         if placement.get("int8_mixed_layers"):
-            # Mixed precision from llama.cpp: promote the most quantization-sensitive MatMuls to int8.
+            # Which layers to promote to int8. By default use the llama.cpp mixed-precision
+            # selection (first and last eighth, plus every third layer); a recipe may override
+            # it with an explicit `int8_mixed_layer_ids` list (e.g. the highest-error layers).
             # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-            layers_to_upgrade = [
-                i
-                for i in range(self.num_layers)
-                if i < self.num_layers / 8
-                or i >= 7 * self.num_layers / 8
-                or (i - (round)(self.num_layers / 8)) % 3 == 2
-            ]
+            override_ids = placement.get("int8_mixed_layer_ids")
+            if override_ids:
+                layers_to_upgrade = [int(i) for i in override_ids]
+            else:
+                layers_to_upgrade = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8
+                    or i >= 7 * self.num_layers / 8
+                    or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
             for i in layers_to_upgrade:
                 customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
                 customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
@@ -3737,6 +3757,7 @@ class Model:
             weights,
             bits,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
+            signed_scale=_qmoe_signed_scale(self, default=False),
         )
 
     def _cuda_per_channel_quantize(self, weights, prepack):
@@ -3754,6 +3775,7 @@ class Model:
             bits,
             prepack,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
+            signed_scale=_qmoe_signed_scale(self, default=False),
         )
 
     def _cutlass_prepacked_blockwise_quantize(self, weights):
@@ -3777,6 +3799,7 @@ class Model:
             bits,
             block_size,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
+            signed_scale=_qmoe_signed_scale(self, default=True),
         )
 
     def _matmulnbits_blockwise_quantize(self, weights):
@@ -3786,8 +3809,9 @@ class Model:
         ``weights`` is a single expert's weight of logical shape ``[N, K]``
         (quantized along the last/``K`` axis). Returns ``(qweight, scales)`` where
         ``qweight`` is ``[N, K/pack]`` uint8 (2 INT4 elements per byte; INT8 is
-        one element per byte) and ``scales`` is ``[N, K/block_size]`` positive
-        float scales — the same layout produced by ``quantize_matmul_{4,8}bits``.
+        one element per byte) and ``scales`` is ``[N, K/block_size]`` float scales
+        (SIGNED by default on this blockwise path — the MLAS ``default``
+        convention). Layout matches ``quantize_matmul_{4,8}bits``.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.qmoe_block_size
@@ -3796,6 +3820,7 @@ class Model:
             bits,
             block_size,
             unsigned_full_range=_qmoe_unsigned_full_range(self),
+            signed_scale=_qmoe_signed_scale(self, default=True),
         )
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
