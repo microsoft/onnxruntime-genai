@@ -1,0 +1,89 @@
+# =============================================================================
+# sdk-csharp-stage.yml — C# NuGet SDK stage (Phase 3).
+#
+# One combine job per EP flavor (cpu, cuda). Each job depends on the core stage
+# for that EP and combines all enabled RID core archives into the native +
+# managed NuGet packages.
+#
+# Display-name convention:
+#   Stage:  SDK · C#
+#   Jobs:   csharp · nuget · <ep>   (set by sdk-csharp-job.yml)
+# =============================================================================
+
+parameters:
+- name: ort_version
+  type: string
+- name: ort_cuda_version
+  type: string
+  default: ''
+- name: build_config
+  type: string
+  default: Release
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
+# ---- CPU cell enable toggles -----------------------------------------------
+- name: enable_win_x64_cpu
+  type: boolean
+  default: false
+- name: enable_win_arm64_cpu
+  type: boolean
+  default: false
+- name: enable_linux_x64_cpu
+  type: boolean
+  default: false
+- name: enable_linux_arm64_cpu
+  type: boolean
+  default: false
+
+# ---- CUDA cell enable toggles ----------------------------------------------
+- name: enable_win_x64_cuda
+  type: boolean
+  default: false
+- name: enable_win_arm64_cuda
+  type: boolean
+  default: false
+- name: enable_linux_x64_cuda
+  type: boolean
+  default: false
+
+stages:
+- stage: sdk_csharp
+  displayName: 'SDK · C#'
+  ${{ if or(eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true), eq(parameters.enable_linux_x64_cuda, true)) }}:
+    dependsOn:
+    - core_cpu
+    - core_cuda
+  ${{ else }}:
+    dependsOn:
+    - core_cpu
+  jobs:
+
+  # ---- CPU combine job (only if any CPU cell is enabled) -------------------
+  - ${{ if or(eq(parameters.enable_win_x64_cpu, true), eq(parameters.enable_win_arm64_cpu, true), eq(parameters.enable_linux_x64_cpu, true), eq(parameters.enable_linux_arm64_cpu, true)) }}:
+    - template: jobs/sdk-csharp-job.yml
+      parameters:
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+        build_config: ${{ parameters.build_config }}
+        nuget_version_type: ${{ parameters.nuget_version_type }}
+        enable_win_x64: ${{ parameters.enable_win_x64_cpu }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64_cpu }}
+        enable_linux_x64: ${{ parameters.enable_linux_x64_cpu }}
+        enable_linux_arm64: ${{ parameters.enable_linux_arm64_cpu }}
+
+  # ---- CUDA combine job (only if any CUDA cell is enabled) -----------------
+  - ${{ if or(eq(parameters.enable_win_x64_cuda, true), eq(parameters.enable_win_arm64_cuda, true), eq(parameters.enable_linux_x64_cuda, true)) }}:
+    - template: jobs/sdk-csharp-job.yml
+      parameters:
+        ep: cuda
+        build_config: ${{ parameters.build_config }}
+        nuget_version_type: ${{ parameters.nuget_version_type }}
+        enable_win_x64: ${{ parameters.enable_win_x64_cuda }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64_cuda }}
+        enable_linux_x64: ${{ parameters.enable_linux_x64_cuda }}
+        ${{ if ne(parameters.ort_cuda_version, '') }}:
+          ort_version: ${{ parameters.ort_cuda_version }}
+        ${{ else }}:
+          ort_version: ${{ parameters.ort_version }}

@@ -38,3 +38,12 @@ stages:
     enable_win_x64_cpu: true
     enable_linux_x64_cpu: true
 
+- template: sdk-csharp-stage.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
+    # Combine the reduced-matrix core CPU archives (win-x64 + linux-x64) into the
+    # native + managed NuGet packages.
+    enable_win_x64_cpu: true
+    enable_linux_x64_cpu: true
+
+
