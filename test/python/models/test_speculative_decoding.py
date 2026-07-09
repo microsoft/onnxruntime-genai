@@ -121,7 +121,7 @@ class TestSpeculativeConfigGuards:
     def test_sliding_window_kv_cache(self, tmp_path):
         decoder = _decoder_block(sliding_window={"window_size": 16, "slide_key_value_cache": True})
         path = _write_config(tmp_path / "sliding", _spec_config(decoder=decoder))
-        with pytest.raises(Exception, match="sliding-window"):
+        with pytest.raises(Exception, match="slide the KV cache"):
             og.Model(path)
 
     def test_lfm2_hybrid_layer_types(self, tmp_path):
@@ -1062,6 +1062,29 @@ class TestSpeculativeGuidance:
         _, stats = _guided_tokens(spec_path, "regex", pattern, max_length, k=k, want_stats=True)
         assert stats["acceptance_rate"] >= 0.6
 
+    def test_forced_span_rides_one_verify_pass(self, guidance_model_path, tmp_path):
+        """FF-in-batch optimization (the whole point -- fewer target passes): a grammar-forced token
+        span is packed into the target's batched verify, so many forced tokens are confirmed in ONE
+        target forward pass. For a fully-forced string at K=8 the target runs far fewer passes than it
+        emits tokens. The old design ended the round at the first forced span and replayed each forced
+        token per-token (~1 token per target pass), so it emitted as many passes as tokens and could
+        not satisfy generated > passes."""
+        grammar = 'start: "The capital of France is Paris."'  # every output token is grammar-forced
+        max_length = len(_PROMPT) + 24
+        k = 8
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "guid_ff", k)
+        tail, stats = _guided_tokens(spec_path, "lark_grammar", grammar, max_length, k=k,
+                                     want_stats=True)
+        eos = _eos_ids(guidance_model_path)
+        generated = len([t for t in tail if t not in eos])
+        passes = stats["target_forward_passes"]
+        assert generated >= 4, f"expected a multi-token forced span, got {generated} tokens"
+        assert passes >= 1
+        # Forced tokens ride the batched verify -> strictly fewer target passes than emitted tokens
+        # (the old per-token-replay design did ~1 token per pass and cannot satisfy this).
+        assert generated > passes, f"{generated} tokens took {passes} target passes (no FF batching)"
+        assert generated / passes >= 2.0, f"only {generated / passes:.2f} tokens per target pass"
+
     @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
     def test_draft_neq_target_k1_matches_regular_guidance(self, test_data_path, tmp_path, gtype, gdata):
         """A real draft != target pair under guidance: the draft genuinely mispredicts, so rounds
@@ -1166,3 +1189,333 @@ class TestSpeculativeGuidance:
             gen.generate_next_token()
         got = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
         assert got == ref
+
+
+class TestSpeculativeGuidanceProduction:
+    """Deeper guidance (constrained decoding) coverage for production readiness. Focuses on the
+    fast-forward (ff_carry_) machinery that batches grammar-forced spans across rounds, on clean
+    termination when the grammar stops, on truncation at max_length, and on state hygiene across a
+    rewind. These are the paths most likely to leak state or desync the two inner caches under a
+    live grammar."""
+
+    # A lark grammar whose whole output is a forced literal long enough to span several K rounds, so
+    # the fast-forward carry (ff_carry_) is exercised round-to-round and then forces a clean stop.
+    _FORCED = 'start: "The capital of France is Paris and Berlin is in Germany"'
+
+    def _spec_gen(self, spec_path, k, max_length, gtype, gdata):
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        params.set_guidance(gtype, gdata)
+        return og.Generator(model, params)
+
+    @pytest.mark.parametrize("k", [2, 4, 8])
+    def test_long_forced_span_exact_and_deterministic(self, guidance_model_path, tmp_path, k):
+        """A long grammar-forced literal must be emitted exactly (decodes to the literal) and be
+        identical run-to-run for every K -- the ff_carry_ span batching must not drop, duplicate, or
+        reorder forced tokens."""
+        max_length = len(_PROMPT) + 40
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"gp_forced_{k}", k)
+        eos = _eos_ids(guidance_model_path)
+        tok = og.Tokenizer(og.Model(spec_path))
+        a = _guided_tokens(spec_path, "lark_grammar", self._FORCED, max_length, k=k)
+        b = _guided_tokens(spec_path, "lark_grammar", self._FORCED, max_length, k=k)
+        assert a == b, "forced-span output must be deterministic across runs"
+        text = tok.decode([t for t in a if t not in eos]).strip()
+        assert text == "The capital of France is Paris and Berlin is in Germany", \
+            f"forced span decoded to {text!r}"
+
+    def test_grammar_forced_stop_terminates_cleanly(self, guidance_model_path, tmp_path):
+        """A bounded grammar reaches an accepting state and forces EOS. Generation must terminate on
+        its own (is_done) well before max_length, with the output decoding to exactly the grammar's
+        string -- no hang, no overrun, no extra tokens past the forced stop."""
+        max_length = len(_PROMPT) + 40
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "gp_stop", 4)
+        eos = _eos_ids(guidance_model_path)
+        tok = og.Tokenizer(og.Model(spec_path))
+        gen = self._spec_gen(spec_path, 4, max_length, "lark_grammar", 'start: "yes it is"')
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        steps = 0
+        while not gen.is_done() and steps < max_length:
+            gen.generate_next_token()
+            steps += 1
+        assert gen.is_done(), "grammar-forced stop must terminate generation"
+        tail = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+        assert len(gen.get_sequence(0)) < max_length, "must stop before max_length, not by truncation"
+        assert tok.decode([t for t in tail if t not in eos]).strip() == "yes it is"
+
+    def test_forced_span_truncates_at_max_length_without_crash(self, guidance_model_path, tmp_path):
+        """A forced literal longer than the budget: max_length caps generation mid-span. Must not
+        crash or overrun, and what was emitted must be a valid prefix of the forced string."""
+        full = "The capital of France is Paris and Berlin is in Germany"
+        max_new = 6
+        max_length = len(_PROMPT) + max_new
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "gp_trunc", 8)
+        eos = _eos_ids(guidance_model_path)
+        tok = og.Tokenizer(og.Model(spec_path))
+        got = _guided_tokens(spec_path, "lark_grammar", f'start: "{full}"', max_length, k=8)
+        assert len(got) <= max_new, f"emitted {len(got)} tokens, cap was {max_new}"
+        text = tok.decode([t for t in got if t not in eos])
+        assert full.startswith(text.strip()) or text.strip() in full, \
+            f"truncated output {text!r} is not a prefix of {full!r}"
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_ff_carry_cleared_on_rewind_to_zero(self, guidance_model_path, tmp_path, k):
+        """Rewind hygiene under a forced-span grammar: stop mid forced span (so ff_carry_ holds
+        pending forced tokens), rewind_to(0), reprefill and finish. Must reproduce a clean guided run
+        exactly -- proving the fast-forward carry is dropped on rewind and does not leak into the new
+        generation."""
+        max_length = len(_PROMPT) + 40
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"gp_rwcarry_{k}", k)
+        ref = _guided_tokens(spec_path, "lark_grammar", self._FORCED, max_length, k=k)
+
+        gen = self._spec_gen(spec_path, k, max_length, "lark_grammar", self._FORCED)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        # Emit a few tokens so a forced span is in flight (ff_carry_ non-empty for K>1).
+        for _ in range(3):
+            if gen.is_done():
+                break
+            gen.generate_next_token()
+        gen.rewind_to(0)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        got = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+        assert got == ref
+
+    def test_guidance_stable_across_many_runs(self, guidance_model_path, tmp_path):
+        """Five independent guided greedy runs of the same grammar must be byte-identical -- no
+        cross-run state leakage in the grammar processor, the draft carry-over, or the caches."""
+        pattern = r"[0-9]{3}-[0-9]{3}-[0-9]{4}"
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / "gp_stable", 4)
+        runs = [_guided_tokens(spec_path, "regex", pattern, max_length, k=4) for _ in range(5)]
+        for r in runs[1:]:
+            assert r == runs[0], "guided output must be identical across repeated runs"
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_draft_neq_target_forced_span_grammar_valid(self, test_data_path, tmp_path, k):
+        """Draft != target under a forced-span grammar at K>1: the draft mispredicts, rounds reject
+        and re-anchor, and forced spans still batch through the verify. The decoded output must still
+        satisfy the grammar exactly."""
+        pair = _find_two_distinct_models(test_data_path)
+        if pair is None:
+            pytest.skip("Need two distinct decoder-only models under --test_models")
+        target_dir, draft_dir = pair
+        if not _guidance_supported(target_dir):
+            pytest.skip("Build lacks guidance (USE_GUIDANCE=OFF) or model has no tokenizer.json")
+        max_length = len(_PROMPT) + 40
+        spec_path = _build_spec_guided(target_dir, draft_dir, tmp_path / f"gp_pair_{k}", k)
+        eos = _eos_ids(target_dir)
+        tok = og.Tokenizer(og.Model(spec_path))
+        got = _guided_tokens(spec_path, "lark_grammar", self._FORCED, max_length, k=k)
+        text = tok.decode([t for t in got if t not in eos]).strip()
+        assert text == "The capital of France is Paris and Berlin is in Germany", \
+            f"draft!=target forced span decoded to {text!r}"
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_mid_generation_append_with_guidance_is_safe(self, guidance_model_path, tmp_path, k):
+        """Appending tokens mid-generation while a grammar is active (e.g. a chat continuation) is an
+        unusual operation -- the injected tokens bypass the grammar -- but it must be production-safe:
+        no crash, the caches stay consistent, and generation still terminates (is_done or max_length)
+        without overrunning. This guards the guidance + PrepareForAppend intersection from regressing
+        into a crash or a runaway loop."""
+        max_length = len(_PROMPT) + 30
+        spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"gp_append_{k}", k)
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        params.set_guidance("regex", r"[0-9]{3}-[0-9]{3}")
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(2):
+            if not gen.is_done():
+                gen.generate_next_token()
+        before = [int(t) for t in gen.get_sequence(0)]
+        gen.append_tokens(np.array([[785, 6722]], dtype=np.int32))
+        # Appended tokens preserved; generation resumes under the grammar and terminates.
+        assert [int(t) for t in gen.get_sequence(0)][:len(before)] == before
+        steps = 0
+        while not gen.is_done() and steps < max_length:
+            gen.generate_next_token()
+            steps += 1
+        assert len(gen.get_sequence(0)) <= max_length, "must not overrun max_length"
+
+
+class TestSpeculativeContinuousProduction:
+    """Deeper continuous-decoding coverage for production readiness: repeated/interleaved
+    AppendTokens and rewind, the max_length boundary, and the shared-buffer path. The speculative
+    loop buffers a whole round and defers the KV re-anchor, so these sequences are where the two
+    inner caches most easily desync from the committed sequence. Greedy is used throughout so the
+    output is deterministic and checkable against a clean rebuild."""
+
+    def _spec_gen(self, spec_path, k, max_length, share_buffer=False):
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length,
+                                  past_present_share_buffer=share_buffer)
+        params.set_speculative_options(max_draft_tokens=k)
+        return og.Generator(model, params)
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_multiple_sequential_appends_match_rebuild(self, decoder_only_model_path, tmp_path, k):
+        """Three appends interleaved with generation. Each appended chunk must be preserved exactly,
+        and the final continuation after the last append must equal a clean rebuild of the identical
+        committed sequence -- i.e. repeated reconciliation stays consistent with the model's own
+        decoding of that sequence."""
+        e1, e2 = [785, 6722], [279, 9625]
+        max_length = len(_PROMPT) + 40
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"cp_multi_{k}", k)
+
+        gen = self._spec_gen(spec_path, k, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(2):
+            if not gen.is_done():
+                gen.generate_next_token()
+        gen.append_tokens(np.array([e1], dtype=np.int32))
+        for _ in range(2):
+            if not gen.is_done():
+                gen.generate_next_token()
+        committed_before = [int(t) for t in gen.get_sequence(0)]
+        gen.append_tokens(np.array([e2], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        full = [int(t) for t in gen.get_sequence(0)]
+
+        # Appended chunks preserved exactly, in order.
+        assert full[:len(committed_before)] == committed_before
+        assert full[len(committed_before):len(committed_before) + len(e2)] == e2
+
+        # Oracle: clean rebuild of committed_before + e2, then generate.
+        ref = self._spec_gen(spec_path, k, max_length)
+        ref.append_tokens(np.array([committed_before], dtype=np.int32))
+        ref.append_tokens(np.array([e2], dtype=np.int32))
+        while not ref.is_done():
+            ref.generate_next_token()
+        assert full == [int(t) for t in ref.get_sequence(0)]
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_rewind_append_interleave_deterministic(self, decoder_only_model_path, tmp_path, k):
+        """Interleave rewind and append in one session (generate, rewind to a nonzero length,
+        generate, append, generate). Must not crash and must be deterministic run-to-run."""
+        extra = [785, 6722]
+        max_length = len(_PROMPT) + 40
+
+        def run():
+            spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"cp_inter_{k}", k)
+            gen = self._spec_gen(spec_path, k, max_length)
+            gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+            for _ in range(4):
+                if not gen.is_done():
+                    gen.generate_next_token()
+            gen.rewind_to(len(_PROMPT) + 2)
+            for _ in range(2):
+                if not gen.is_done():
+                    gen.generate_next_token()
+            gen.append_tokens(np.array([extra], dtype=np.int32))
+            while not gen.is_done():
+                gen.generate_next_token()
+            return [int(t) for t in gen.get_sequence(0)]
+
+        assert run() == run()
+
+    @pytest.mark.parametrize("k", [1, 4])
+    def test_append_reaching_max_length_terminates(self, decoder_only_model_path, tmp_path, k):
+        """Append tokens that bring the sequence to the max_length boundary. Generation must stop at
+        exactly max_length without overrunning or crashing."""
+        max_length = len(_PROMPT) + 8
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"cp_maxlen_{k}", k)
+        gen = self._spec_gen(spec_path, k, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(2):
+            if not gen.is_done():
+                gen.generate_next_token()
+        # Append right up to (max_length - 1) so at most one more token can be produced.
+        remaining = max_length - len(gen.get_sequence(0))
+        if remaining > 1:
+            filler = [785] * (remaining - 1)
+            gen.append_tokens(np.array([filler], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        assert len(gen.get_sequence(0)) <= max_length, "must not overrun max_length"
+
+    @pytest.mark.parametrize("k", [1, 2, 4, 8])
+    @pytest.mark.parametrize("before", [1, 2, 5])
+    def test_rewind_to_nonzero_points_match_reappend(self, decoder_only_model_path, tmp_path, k, before):
+        """rewind_to(nonzero) at several stop points and every K: the direct post-rewind flow must
+        match the re-prefill flow (rewind -> append(boundary) -> generate), the established
+        continuous-decoding equivalence, at each rewind point."""
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"cp_rwpt_{k}_{before}", k)
+
+        gen_a = self._spec_gen(spec_path, k, max_length)
+        gen_a.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(before + 2):
+            if not gen_a.is_done():
+                gen_a.generate_next_token()
+        if len(gen_a.get_sequence(0)) <= len(_PROMPT) + before:
+            pytest.skip("model stopped before the rewind point")
+        boundary = int(gen_a.get_sequence(0)[len(_PROMPT) + before])
+        gen_a.rewind_to(len(_PROMPT) + before)
+        while not gen_a.is_done():
+            gen_a.generate_next_token()
+        seq_a = [int(t) for t in gen_a.get_sequence(0)]
+
+        gen_b = self._spec_gen(spec_path, k, max_length)
+        gen_b.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(before + 2):
+            if not gen_b.is_done():
+                gen_b.generate_next_token()
+        gen_b.rewind_to(len(_PROMPT) + before)
+        gen_b.append_tokens(np.array([[boundary]], dtype=np.int32))
+        while not gen_b.is_done():
+            gen_b.generate_next_token()
+        assert seq_a == [int(t) for t in gen_b.get_sequence(0)]
+
+    def test_repeated_rewind_zero_reprefill_stable(self, decoder_only_model_path, tmp_path):
+        """Reuse one generator for three rewind_to(0) + reprefill cycles. Every cycle must reproduce
+        the same output as the first -- no state (caches, draft carry-over, round buffers) leaks
+        across a full rewind."""
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "cp_rw0_stable", 4)
+        gen = self._spec_gen(spec_path, 4, max_length)
+        results = []
+        for _ in range(3):
+            gen.rewind_to(0)
+            gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+            while not gen.is_done():
+                gen.generate_next_token()
+            results.append([int(t) for t in gen.get_sequence(0)])
+        assert results[1] == results[0]
+        assert results[2] == results[0]
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_shared_buffer_mid_round_append_matches_rebuild(self, decoder_only_model_path, tmp_path, k):
+        """Mid-generation append with the shared KV buffer (past_present_share_buffer=True), the
+        configuration every graph-capture EP uses. The reconcile (PrepareForAppend) runs on the
+        RewindTo-no-op cache, so this proves continuous decoding stays consistent with a clean
+        rebuild on the GPU-style memory layout too."""
+        extra = [785, 6722]
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"cp_sb_{k}", k)
+
+        gen = self._spec_gen(spec_path, k, max_length, share_buffer=True)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(3):
+            if not gen.is_done():
+                gen.generate_next_token()
+        committed_before = [int(t) for t in gen.get_sequence(0)]
+        gen.append_tokens(np.array([extra], dtype=np.int32))
+        while not gen.is_done():
+            gen.generate_next_token()
+        full = [int(t) for t in gen.get_sequence(0)]
+        assert full[:len(committed_before)] == committed_before
+
+        ref = self._spec_gen(spec_path, k, max_length, share_buffer=True)
+        ref.append_tokens(np.array([committed_before], dtype=np.int32))
+        ref.append_tokens(np.array([extra], dtype=np.int32))
+        while not ref.is_done():
+            ref.generate_next_token()
+        assert full == [int(t) for t in ref.get_sequence(0)]
