@@ -1531,7 +1531,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
-#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#if ORT_GENAI_HAS_MODEL_PACKAGE
 
 namespace Ort {
 
@@ -1541,30 +1541,31 @@ inline const ModelPackageApi& GetModelPackageApi() {
     if (api == nullptr) {
       return f;
     }
-    f.CreateModelPackageOptionsFromSessionOptions =
-        Experimental::Get_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn(api);
-    f.ReleaseModelPackageOptions =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn(api);
-    f.CreateModelPackageContext =
-        Experimental::Get_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn(api);
-    f.ReleaseModelPackageContext =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn(api);
-    f.ModelPackage_GetComponentCount =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn(api);
-    f.ModelPackage_GetComponentNames =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantCount =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantNames =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn(api);
-    f.ModelPackage_GetVariantEpName =
-        Experimental::Get_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn(api);
-    f.SelectComponent =
-        Experimental::Get_OrtModelPackageApi_SelectComponent_SinceV28_Fn(api);
-    f.ReleaseModelPackageComponentContext =
-        Experimental::Get_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn(api);
+    // Resolve OrtModelPackageApi entries via the C API to avoid including
+    // onnxruntime_experimental_cxx_api.h. That header defines the
+    // Ort::Experimental::Get_OrtModelPackageApi_*_SinceV28_Fn accessors but transitively
+    // pulls in onnxruntime_cxx_api.h, which redefines the Ort:: types that genai has
+    // vendored in onnxruntime_api.h.
+#define GENAI_MP_V28_FN(NAME)                                                \
+  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
+      api->GetExperimentalFunction(                                          \
+          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
+
+    f.CreateModelPackageOptionsFromSessionOptions = GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
+    f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
+    f.CreateModelPackageContext = GENAI_MP_V28_FN(CreateModelPackageContext);
+    f.ReleaseModelPackageContext = GENAI_MP_V28_FN(ReleaseModelPackageContext);
+    f.ModelPackage_GetComponentCount = GENAI_MP_V28_FN(ModelPackage_GetComponentCount);
+    f.ModelPackage_GetComponentNames = GENAI_MP_V28_FN(ModelPackage_GetComponentNames);
+    f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
+    f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
+    f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
+    f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
+    f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
     f.ModelPackageComponent_GetSelectedVariantFolderPath =
-        Experimental::Get_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn(api);
+        GENAI_MP_V28_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
+
+#undef GENAI_MP_V28_FN
     return f;
   }();
   if (fns.CreateModelPackageContext == nullptr) {
@@ -1634,4 +1635,4 @@ inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelected
   return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
 }
 
-#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE
