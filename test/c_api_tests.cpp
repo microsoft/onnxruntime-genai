@@ -1575,6 +1575,15 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   }
 }
 
+// Helper: generate a synthetic sine wave of num_samples at the given frequency and sample rate.
+// Uses frequency and sample_rate to produce the minimum length of speech detectable by the model.
+static std::vector<float> GenerateSineWave(size_t num_samples, float frequency, float sample_rate) {
+  std::vector<float> samples(num_samples);
+  for (size_t i = 0; i < num_samples; ++i)
+    samples[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  return samples;
+}
+
 // Test creating a Generator + StreamingProcessor from a streaming ASR model
 TEST_P(CAPITests, StreamingASRCreate) {
   const std::string model_path = ModelPath();
@@ -1664,10 +1673,7 @@ TEST_P(CAPITests, StreamingASRSineWave) {
   constexpr float sample_rate = 16000.0f;
   constexpr float frequency = 440.0f;
 
-  std::vector<float> audio(chunk_samples);
-  for (size_t i = 0; i < chunk_samples; ++i) {
-    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
-  }
+  std::vector<float> audio = GenerateSineWave(chunk_samples, frequency, sample_rate);
 
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
@@ -1836,9 +1842,7 @@ TEST(StreamingASRTests, MoonshineVadSegmentation) {
       static_cast<int>(ReadConfigNumber(model_path, "min_segment_memory_frames", 250));
 
   constexpr float frequency = 440.0f;
-  std::vector<float> speech(chunk_samples);
-  for (size_t i = 0; i < chunk_samples; ++i)
-    speech[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  std::vector<float> speech = GenerateSineWave(chunk_samples, frequency, sample_rate);
   std::vector<float> silence(chunk_samples, 0.0f);
 
   // 1) Initial speech: fed with VAD disabled so the tone accumulates an in-progress utterance.
