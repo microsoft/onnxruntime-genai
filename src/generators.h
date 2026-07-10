@@ -75,8 +75,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   // Co-owns the model so the aliased Config below cannot be freed while this
   // params object is alive. Null for the benchmark-only Config constructor.
-  std::shared_ptr<const Model> model_owner_;
-  const Config& config;                  // Aliases model-owned Config; kept alive by model_owner_
+  std::shared_ptr<const Model> model_;
+  const Config& config;                  // Aliases model-owned Config; kept alive by model_
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   // Query the params to get the value set for a param
