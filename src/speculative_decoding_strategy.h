@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -55,14 +56,22 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Stats accumulators.
   std::size_t rounds_{};
+  std::size_t completed_rounds_{};
+  std::size_t interrupted_rounds_{};
   std::size_t draft_proposed_{};
+  std::size_t draft_evaluated_{};
   std::size_t draft_accepted_{};
   std::size_t corrections_{};
   std::size_t bonuses_{};
+  std::size_t tokens_queued_{};
+  std::size_t tokens_emitted_{};
+  std::size_t tokens_discarded_{};
+  std::size_t draft_runs_{};
   std::size_t target_runs_{};
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
+  float total_reconciliation_ms_{};
   std::size_t reanchor_runs_{};
 
   // Runtime vocab-size sanity check.
@@ -83,7 +92,10 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void RunRound(Generator& g);
   void DrainOne(Generator& g);
   void FinalizeRound(Generator& g);
-  void EmitToken(Generator& g, int32_t tok);
+  bool EmitToken(Generator& g, int32_t tok);
+  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported);
+  void FinishRound();
+  void DiscardPendingTokens();
   void ClearPendingExternalLogits();
 
   // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
@@ -99,10 +111,17 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Rewinds both inner caches to floor and replays the committed tokens from there to the current
   // length; lines both caches back up with the committed sequence. Used when AppendTokens resumes.
-  DeviceSpan<float> ReplayCommittedTail(Generator& g, int floor);
+  DeviceSpan<float> ReplayCommittedTail(Generator& g, int floor, bool record_stats = true);
+  void PrepareForSetLogits(Generator& g, bool record_stats);
 
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
+  bool round_active_{};
+  bool active_round_discarded_{};
+
+  // K histogram for rounds that follow the standard geometric acceptance formula.
+  std::array<std::size_t, 17> formula_k_counts_{};
+  std::size_t formula_rounds_{};
 
   // Raw target rows corresponding to accepted tokens in pending_. These let get_logits inspect the
   // next-token logits without discarding speculative lookahead or advancing RNG/model state.

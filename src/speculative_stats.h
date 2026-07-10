@@ -6,36 +6,38 @@
 
 namespace Generators {
 
-// Instrumentation snapshot returned by Generator::GetSpeculativeStats().
-// All fields are zero for non-speculative models.
-//
-// Definitions. A "round" is one propose -> verify -> accept/correct/bonus cycle. Each round
-// proposes K draft tokens, accepts the first n_direct of them, and then commits exactly one more
-// token: a correction token (on the first rejection) or a bonus token (when all K are accepted).
-// So every round commits n_direct + 1 tokens and increments either correction_tokens or
-// bonus_tokens (correction_tokens + bonus_tokens == rounds).
-//
-// Derived fields (computed in SpeculativeDecodingStrategy::GetStats; zero when undefined):
-//   acceptance_rate        = draft_tokens_accepted / draft_tokens_proposed
-//   avg_draft_ms_per_token = total_propose_ms / draft_tokens_proposed
-//   avg_target_ms_per_token= total_target_ms  / draft_tokens_proposed
-//   mean_accepted_tokens   = committed / rounds,
-//                            where committed = draft_tokens_accepted + correction_tokens + bonus_tokens
-//   effective_speedup      = committed * t_target / (total_propose_ms + total_target_ms + total_reanchor_ms),
-//                            where t_target = total_reanchor_ms / reanchor_runs (a single-token target
-//                            forward); 0 until a non-fold re-anchor has measured a target step.
+// Separates draft work from output delivery and exposes the speedup formula terms.
+// Target-dependent formula fields are zero without a baseline or when guidance is active.
 struct SpeculativeStats {
   size_t rounds{};
+  size_t completed_rounds{};
+  size_t interrupted_rounds{};
+  size_t active_rounds{};
   size_t draft_tokens_proposed{};
+  size_t draft_tokens_evaluated{};
   size_t draft_tokens_accepted{};
   size_t correction_tokens{};
   size_t bonus_tokens{};
+  size_t tokens_queued{};
+  size_t tokens_emitted{};
+  size_t tokens_discarded{};
+  size_t tokens_buffered{};
+  size_t draft_forward_passes{};
   size_t target_forward_passes{};
+  size_t formula_supported{};
+  float total_draft_ms{};
+  float total_target_ms{};
+  float total_reconciliation_ms{};
   float avg_draft_ms_per_token{};
-  float avg_target_ms_per_token{};
   float acceptance_rate{};
-  float mean_accepted_tokens{};
-  float effective_speedup{};
+  float avg_draft_tokens_per_round{};
+  float mean_emitted_tokens_per_round{};
+  float expected_tokens_per_round{};
+  float avg_target_ms_per_round{};
+  float target_baseline_ms_per_token{};
+  float target_overhead_ratio{};
+  float estimated_speedup{};
+  float observed_speedup{};
 };
 
 }  // namespace Generators

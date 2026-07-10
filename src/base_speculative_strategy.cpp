@@ -151,6 +151,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         single_buf.CpuSpan()[0] = proposal.tokens[i];
         single_buf.CopyCpuToDevice();
         auto lgt = spec_state_.draft_state().Run(seed_length + i + 1, single_buf, {});
+        draft_runs_++;
         auto cpu = lgt.CopyDeviceToCpu();
         pending.assign(cpu.data(), cpu.data() + vocab_size);
       }
@@ -166,6 +167,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     single_buf.CpuSpan()[0] = proposal.tokens[i - 1];
     single_buf.CopyCpuToDevice();
     auto lgt = spec_state_.draft_state().Run(seed_length + i, single_buf, {});
+    draft_runs_++;
     auto cpu = lgt.CopyDeviceToCpu();
     pick(penalize({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i), i);
   }
@@ -198,6 +200,7 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
     single_buf.CpuSpan()[0] = proposal.tokens[K - 1];
     single_buf.CopyCpuToDevice();
     spec_state_.draft_state().Run(seed_length + K, single_buf, {});
+    draft_runs_++;
     draft_kv_len = seed_length + K;
   }
 
@@ -208,6 +211,7 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   single_buf.CpuSpan()[0] = final_token;
   single_buf.CopyCpuToDevice();
   auto draft_lgt = spec_state_.draft_state().Run(seed_length + n_direct + 1, single_buf, {});
+  draft_runs_++;
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
   // Reuse the pending-logits buffer instead of allocating a fresh vocab-sized vector each round.
   spec_state_.assign_draft_pending_logits(cpu_draft.data(), static_cast<size_t>(vocab_size));

@@ -653,18 +653,36 @@ const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* gen
 
 OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats) {
   OGA_TRY
-  auto stats = generator->GetSpeculativeStats();
+  const auto stats = generator->GetSpeculativeStats();
   out_stats->rounds = stats.rounds;
+  out_stats->completed_rounds = stats.completed_rounds;
+  out_stats->interrupted_rounds = stats.interrupted_rounds;
+  out_stats->active_rounds = stats.active_rounds;
   out_stats->draft_tokens_proposed = stats.draft_tokens_proposed;
+  out_stats->draft_tokens_evaluated = stats.draft_tokens_evaluated;
   out_stats->draft_tokens_accepted = stats.draft_tokens_accepted;
   out_stats->correction_tokens = stats.correction_tokens;
   out_stats->bonus_tokens = stats.bonus_tokens;
+  out_stats->tokens_queued = stats.tokens_queued;
+  out_stats->tokens_emitted = stats.tokens_emitted;
+  out_stats->tokens_discarded = stats.tokens_discarded;
+  out_stats->tokens_buffered = stats.tokens_buffered;
+  out_stats->draft_forward_passes = stats.draft_forward_passes;
   out_stats->target_forward_passes = stats.target_forward_passes;
+  out_stats->formula_supported = stats.formula_supported;
+  out_stats->total_draft_ms = stats.total_draft_ms;
+  out_stats->total_target_ms = stats.total_target_ms;
+  out_stats->total_reconciliation_ms = stats.total_reconciliation_ms;
   out_stats->avg_draft_ms_per_token = stats.avg_draft_ms_per_token;
-  out_stats->avg_target_ms_per_token = stats.avg_target_ms_per_token;
   out_stats->acceptance_rate = stats.acceptance_rate;
-  out_stats->mean_accepted_tokens = stats.mean_accepted_tokens;
-  out_stats->effective_speedup = stats.effective_speedup;
+  out_stats->avg_draft_tokens_per_round = stats.avg_draft_tokens_per_round;
+  out_stats->mean_emitted_tokens_per_round = stats.mean_emitted_tokens_per_round;
+  out_stats->expected_tokens_per_round = stats.expected_tokens_per_round;
+  out_stats->avg_target_ms_per_round = stats.avg_target_ms_per_round;
+  out_stats->target_baseline_ms_per_token = stats.target_baseline_ms_per_token;
+  out_stats->target_overhead_ratio = stats.target_overhead_ratio;
+  out_stats->estimated_speedup = stats.estimated_speedup;
+  out_stats->observed_speedup = stats.observed_speedup;
   return nullptr;
   OGA_CATCH
 }

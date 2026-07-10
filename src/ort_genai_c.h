@@ -666,31 +666,41 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
 
-/**
- * \brief POD struct holding speculative-decoding instrumentation.
- *        All fields are zero for non-speculative generators.
- */
+/** \brief Speculative-decoding work, delivery, timing, and speedup statistics.
+ *  Speedup fields are zero without a target baseline or when guidance is active. */
 typedef struct OgaSpeculativeStats {
   size_t rounds;
+  size_t completed_rounds;
+  size_t interrupted_rounds;
+  size_t active_rounds;
   size_t draft_tokens_proposed;
+  size_t draft_tokens_evaluated;
   size_t draft_tokens_accepted;
   size_t correction_tokens;
   size_t bonus_tokens;
+  size_t tokens_queued;
+  size_t tokens_emitted;
+  size_t tokens_discarded;
+  size_t tokens_buffered;
+  size_t draft_forward_passes;
   size_t target_forward_passes;
+  size_t formula_supported;
+  float total_draft_ms;
+  float total_target_ms;
+  float total_reconciliation_ms;
   float avg_draft_ms_per_token;
-  float avg_target_ms_per_token;
   float acceptance_rate;
-  float mean_accepted_tokens;
-  float effective_speedup;
+  float avg_draft_tokens_per_round;
+  float mean_emitted_tokens_per_round;
+  float expected_tokens_per_round;
+  float avg_target_ms_per_round;
+  float target_baseline_ms_per_token;
+  float target_overhead_ratio;
+  float estimated_speedup;
+  float observed_speedup;
 } OgaSpeculativeStats;
 
-/**
- * \brief Fill *out_stats with the accumulated speculative-decoding statistics.
- *        All fields are zero for non-speculative generators.
- * \param[in]  generator The generator to query.
- * \param[out] out_stats Caller-allocated struct to fill.
- * \return OgaResult containing the error message on failure, nullptr on success.
- */
+/** \brief Fills out_stats with accumulated statistics; fields are zero for non-speculative models. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);

@@ -312,16 +312,34 @@ struct PyGenerator {
     auto stats = generator_->GetSpeculativeStats();
     pybind11::dict d;
     d["rounds"] = stats.rounds;
+    d["completed_rounds"] = stats.completed_rounds;
+    d["interrupted_rounds"] = stats.interrupted_rounds;
+    d["active_rounds"] = stats.active_rounds;
     d["draft_tokens_proposed"] = stats.draft_tokens_proposed;
+    d["draft_tokens_evaluated"] = stats.draft_tokens_evaluated;
     d["draft_tokens_accepted"] = stats.draft_tokens_accepted;
     d["correction_tokens"] = stats.correction_tokens;
     d["bonus_tokens"] = stats.bonus_tokens;
+    d["tokens_queued"] = stats.tokens_queued;
+    d["tokens_emitted"] = stats.tokens_emitted;
+    d["tokens_discarded"] = stats.tokens_discarded;
+    d["tokens_buffered"] = stats.tokens_buffered;
+    d["draft_forward_passes"] = stats.draft_forward_passes;
     d["target_forward_passes"] = stats.target_forward_passes;
+    d["formula_supported"] = stats.formula_supported != 0;
+    d["total_draft_ms"] = stats.total_draft_ms;
+    d["total_target_ms"] = stats.total_target_ms;
+    d["total_reconciliation_ms"] = stats.total_reconciliation_ms;
     d["avg_draft_ms_per_token"] = stats.avg_draft_ms_per_token;
-    d["avg_target_ms_per_token"] = stats.avg_target_ms_per_token;
     d["acceptance_rate"] = stats.acceptance_rate;
-    d["mean_accepted_tokens"] = stats.mean_accepted_tokens;
-    d["effective_speedup"] = stats.effective_speedup;
+    d["avg_draft_tokens_per_round"] = stats.avg_draft_tokens_per_round;
+    d["mean_emitted_tokens_per_round"] = stats.mean_emitted_tokens_per_round;
+    d["expected_tokens_per_round"] = stats.expected_tokens_per_round;
+    d["avg_target_ms_per_round"] = stats.avg_target_ms_per_round;
+    d["target_baseline_ms_per_token"] = stats.target_baseline_ms_per_token;
+    d["target_overhead_ratio"] = stats.target_overhead_ratio;
+    d["estimated_speedup"] = stats.estimated_speedup;
+    d["observed_speedup"] = stats.observed_speedup;
     return d;
   }
 

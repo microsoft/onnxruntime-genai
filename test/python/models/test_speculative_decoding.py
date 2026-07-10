@@ -461,9 +461,14 @@ class TestSpeculativeGeneration:
         spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "selfspec_stats", 4)
         _, s = _greedy(spec_path, _PROMPT, max_length, k=4)
         assert s["rounds"] > 0
-        assert s["draft_tokens_accepted"] <= s["draft_tokens_proposed"]
+        assert s["draft_tokens_accepted"] <= s["draft_tokens_evaluated"]
+        assert s["draft_tokens_evaluated"] <= s["draft_tokens_proposed"]
         # Every round commits exactly one correction or bonus token.
         assert s["correction_tokens"] + s["bonus_tokens"] == s["rounds"]
+        assert s["rounds"] == (
+            s["completed_rounds"] + s["interrupted_rounds"] + s["active_rounds"])
+        assert s["tokens_queued"] == (
+            s["tokens_emitted"] + s["tokens_discarded"] + s["tokens_buffered"])
         assert 0.0 <= s["acceptance_rate"] <= 1.0
 
     def test_draft_token_count_clamped_to_range(self, decoder_only_model_path, tmp_path):
@@ -539,39 +544,166 @@ class TestSpeculativeKVReanchor:
         assert spec == ref
         # A genuine draft/target mismatch must reject at least once (correction path exercised).
         assert stats["correction_tokens"] > 0
+        assert stats["draft_tokens_accepted"] <= stats["draft_tokens_evaluated"]
+        assert stats["draft_tokens_evaluated"] <= stats["draft_tokens_proposed"]
+        assert stats["acceptance_rate"] == pytest.approx(
+            stats["draft_tokens_accepted"] / stats["draft_tokens_evaluated"], abs=1e-6)
 
 
 class TestSpeculativeStatsContract:
-    """Pin the documented stats formulas (see speculative_stats.h) on a deterministic scenario."""
+    """Pin formula terms and delivery accounting on deterministic self-speculative runs."""
 
-    def test_self_spec_greedy_stats_formulas(self, decoder_only_model_path, tmp_path):
+    @staticmethod
+    def _generator(spec_path, k, max_length):
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        generator = og.Generator(model, params)
+        generator.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        return generator
+
+    @staticmethod
+    def _assert_accounting(s):
+        assert s["rounds"] == (
+            s["completed_rounds"] + s["interrupted_rounds"] + s["active_rounds"])
+        assert s["tokens_queued"] == (
+            s["tokens_emitted"] + s["tokens_discarded"] + s["tokens_buffered"])
+        assert s["draft_tokens_accepted"] <= s["draft_tokens_evaluated"]
+        assert s["draft_tokens_evaluated"] <= s["draft_tokens_proposed"]
+        if s["draft_tokens_evaluated"]:
+            assert s["acceptance_rate"] == pytest.approx(
+                s["draft_tokens_accepted"] / s["draft_tokens_evaluated"], abs=1e-6)
+        if s["rounds"]:
+            assert s["avg_draft_tokens_per_round"] == pytest.approx(
+                s["draft_tokens_proposed"] / s["rounds"], abs=1e-6)
+            assert s["mean_emitted_tokens_per_round"] == pytest.approx(
+                s["tokens_emitted"] / s["rounds"], abs=1e-6)
+
+    def test_geometric_expectation_and_live_round_accounting(
+            self, decoder_only_model_path, tmp_path):
         k = 4
-        max_length = len(_PROMPT) + 16
-        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "stats_contract", k)
-        _, s = _greedy(spec_path, _PROMPT, max_length, k=k)
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "stats_expectation", k)
+        gen = self._generator(spec_path, k, len(_PROMPT) + 20)
+        initial = gen.get_speculative_stats()
+        assert initial["rounds"] == 0
+        assert not initial["formula_supported"]
+        gen.generate_next_token()
+        s = gen.get_speculative_stats()
 
-        rounds = s["rounds"]
-        proposed = s["draft_tokens_proposed"]
-        accepted = s["draft_tokens_accepted"]
-        corrections = s["correction_tokens"]
-        bonuses = s["bonus_tokens"]
-        assert rounds > 0 and proposed > 0
-
-        # Round contract: each round commits exactly one correction or bonus token.
-        assert corrections + bonuses == rounds
-        # Self-spec greedy accepts everything: no corrections, one bonus per round, all accepted.
-        assert corrections == 0
-        assert bonuses == rounds
-        assert accepted == proposed
-        # acceptance_rate = accepted / proposed.
-        assert s["acceptance_rate"] == pytest.approx(accepted / proposed, abs=1e-6)
+        self._assert_accounting(s)
+        assert s["rounds"] == 1
+        assert s["active_rounds"] == 1
+        assert s["draft_tokens_proposed"] == k
+        assert s["draft_tokens_evaluated"] == k
+        assert s["draft_tokens_accepted"] == k
         assert s["acceptance_rate"] == pytest.approx(1.0, abs=1e-6)
-        # mean_accepted_tokens = committed / rounds, committed = accepted + corrections + bonuses.
-        committed = accepted + corrections + bonuses
-        assert s["mean_accepted_tokens"] == pytest.approx(committed / rounds, abs=1e-4)
-        # Timing averages are per proposed token and non-negative.
-        assert s["avg_draft_ms_per_token"] >= 0.0
-        assert s["avg_target_ms_per_token"] >= 0.0
+        assert s["tokens_queued"] == k + 1
+        assert s["tokens_emitted"] == 1
+        assert s["tokens_buffered"] == k
+        assert s["tokens_discarded"] == 0
+        # At a=1, 1 + a + ... + a^K is K+1 without a division-by-zero special case.
+        assert s["expected_tokens_per_round"] == pytest.approx(k + 1, abs=1e-6)
+        assert s["formula_supported"]
+        # K>=2 uses the folded target path, which deliberately performs no calibration run.
+        assert s["target_baseline_ms_per_token"] == 0.0
+        assert s["estimated_speedup"] == 0.0
+
+    def test_speedup_formula_with_measured_target_baseline(
+            self, decoder_only_model_path, tmp_path):
+        k = 1
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "stats_speedup", k)
+        gen = self._generator(spec_path, k, len(_PROMPT) + 8)
+        gen.generate_next_token()
+        gen.generate_next_token()
+        s = gen.get_speculative_stats()
+
+        self._assert_accounting(s)
+        assert s["rounds"] == 1
+        assert s["completed_rounds"] == 1
+        assert s["active_rounds"] == 0
+        assert s["expected_tokens_per_round"] == pytest.approx(2.0, abs=1e-6)
+        assert s["target_baseline_ms_per_token"] > 0.0
+
+        denominator = (
+            1.0
+            + s["avg_draft_tokens_per_round"]
+            * s["avg_draft_ms_per_token"] / s["target_baseline_ms_per_token"]
+            + s["target_overhead_ratio"])
+        assert s["estimated_speedup"] == pytest.approx(
+            s["expected_tokens_per_round"] / denominator, rel=1e-5)
+        assert s["observed_speedup"] == pytest.approx(
+            s["mean_emitted_tokens_per_round"] / denominator, rel=1e-5)
+
+    def test_max_length_discards_unemitted_lookahead(
+            self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "stats_max_length", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 1)
+        gen.generate_next_token()
+        assert gen.is_done()
+        s = gen.get_speculative_stats()
+
+        self._assert_accounting(s)
+        assert s["rounds"] == 1
+        assert s["interrupted_rounds"] == 1
+        assert s["active_rounds"] == 0
+        assert s["tokens_emitted"] == 1
+        assert s["tokens_discarded"] == 1
+        assert s["tokens_buffered"] == 0
+
+    @pytest.mark.parametrize("operation", ["append", "rewind", "set_logits"])
+    def test_external_operation_discards_only_buffered_lookahead(
+            self, decoder_only_model_path, tmp_path, operation):
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / f"stats_interrupt_{operation}", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 20)
+        gen.generate_next_token()
+        before = gen.get_speculative_stats()
+        assert before["tokens_buffered"] > 0
+
+        if operation == "append":
+            gen.append_tokens(np.array([[_PROMPT[0]]], dtype=np.int32))
+        elif operation == "rewind":
+            gen.rewind_to(len(_PROMPT))
+        else:
+            gen.set_logits(gen.get_logits().copy())
+
+        after = gen.get_speculative_stats()
+        self._assert_accounting(after)
+        assert after["active_rounds"] == 0
+        assert after["interrupted_rounds"] == 1
+        assert after["tokens_emitted"] == before["tokens_emitted"]
+        assert after["tokens_discarded"] == before["tokens_buffered"]
+        assert after["tokens_buffered"] == 0
+        if operation in ("append", "set_logits"):
+            assert after["target_forward_passes"] > before["target_forward_passes"]
+            assert after["total_reconciliation_ms"] >= before["total_reconciliation_ms"]
+
+    def test_eos_decision_is_not_counted_as_emitted(
+            self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "stats_eos", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 20)
+        eos_id = next(iter(_eos_ids(decoder_only_model_path)))
+        forced_logits = np.full(
+            (1, 1, _vocab_size(decoder_only_model_path)), -1e9, dtype=np.float32)
+        forced_logits[0, 0, eos_id] = 1e9
+        length_before = len(gen.get_sequence(0))
+
+        gen.set_logits(forced_logits)
+        gen.generate_next_token()
+        assert gen.is_done()
+        assert len(gen.get_sequence(0)) == length_before
+        s = gen.get_speculative_stats()
+
+        self._assert_accounting(s)
+        assert s["interrupted_rounds"] == 1
+        assert s["tokens_emitted"] == 0
+        assert s["tokens_discarded"] == s["tokens_queued"]
+        assert s["tokens_buffered"] == 0
 
 
 class TestSpeculativePenalties:
@@ -1126,8 +1258,11 @@ class TestSpeculativeExternalApis:
             counters = {
                 key: stats[key]
                 for key in (
-                    "rounds", "draft_tokens_proposed", "draft_tokens_accepted",
-                    "correction_tokens", "bonus_tokens", "target_forward_passes")
+                    "rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+                    "draft_tokens_proposed", "draft_tokens_evaluated",
+                    "draft_tokens_accepted", "correction_tokens", "bonus_tokens",
+                    "tokens_queued", "tokens_emitted", "tokens_discarded",
+                    "tokens_buffered", "draft_forward_passes", "target_forward_passes")
             }
             return sequence, counters
 
@@ -1421,6 +1556,9 @@ class TestSpeculativeGuidance:
         spec_path = _build_self_spec_guided(guidance_model_path, tmp_path / f"guid_acc_{k}", k)
         _, stats = _guided_tokens(spec_path, "regex", pattern, max_length, k=k, want_stats=True)
         assert stats["acceptance_rate"] >= 0.6
+        assert not stats["formula_supported"]
+        assert stats["expected_tokens_per_round"] == 0.0
+        assert stats["estimated_speedup"] == 0.0
 
     def test_forced_span_rides_one_verify_pass(self, guidance_model_path, tmp_path):
         """FF-in-batch optimization (the whole point -- fewer target passes): a grammar-forced token
