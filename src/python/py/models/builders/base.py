@@ -2751,8 +2751,9 @@ class Model:
             "softcap": self.attention_attrs["softcap"],
             "do_rotary": self.attention_attrs["use_rope_in_attn"],
             "rotary_interleaved": self.rope_attrs["interleaved"],
-            "qk_norm_epsilon": kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"]),
         }
+        if q_norm_weight:
+            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
