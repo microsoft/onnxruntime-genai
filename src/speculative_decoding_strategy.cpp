@@ -53,6 +53,7 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
 
 void SpeculativeDecodingStrategy::Reset() {
   pending_.clear();
+  ClearPendingExternalLogits();
   reanchor_pending_ = false;
   pending_anchor_token_.reset();
   round_dirty_ = false;
@@ -79,6 +80,7 @@ void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
 
   // Drop the interrupted round's tokens.
   pending_.clear();
+  ClearPendingExternalLogits();
   reanchor_pending_ = false;
   pending_anchor_token_.reset();
   round_dirty_ = false;
@@ -89,6 +91,76 @@ void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
     return;
 
   ReplayCommittedTail(g, floor);
+}
+
+bool SpeculativeDecodingStrategy::TryGetExternalLogits(Generator& g, DeviceSpan<float>& logits) {
+  if (g.search_->IsDone())
+    throw std::runtime_error("Speculative decoding logits are unavailable after generation is complete.");
+
+  if (round_dirty_ && !pending_.empty()) {
+    if (g.guidance_logits_processor_)
+      throw std::runtime_error("Speculative decoding logits cannot be accessed while a guided round has buffered tokens.");
+
+    const int vocab_size = g.search_->params_->config.model.vocab_size;
+    if (current_target_logits_row_ < 0 ||
+        current_target_logits_row_ < pending_target_logits_row0_ ||
+        current_target_logits_row_ >= pending_target_logits_row0_ + cached_direct_tokens_) {
+      throw std::runtime_error("Speculative decoding has no target logits for the current committed sequence.");
+    }
+
+    const size_t offset = static_cast<size_t>(current_target_logits_row_) *
+                          static_cast<size_t>(vocab_size);
+    if (offset + static_cast<size_t>(vocab_size) > pending_target_logits_.size())
+      throw std::runtime_error("Speculative decoding cached target logits are incomplete.");
+
+    logits = pending_target_logits_.subspan(offset, static_cast<size_t>(vocab_size));
+    return true;
+  }
+
+  // A deferred fold has no buffered tokens, so materializing its boundary logits cannot change
+  // token or RNG state. Reconcile it once and use the regular computed-logits path below.
+  if (round_dirty_ || !g.computed_logits_)
+    PrepareForSetLogits(g);
+
+  return false;
+}
+
+void SpeculativeDecodingStrategy::PrepareForSetLogits(Generator& g) {
+  if (g.search_->IsDone())
+    throw std::runtime_error("Speculative decoding logits are unavailable after generation is complete.");
+
+  if (round_dirty_) {
+    if (g.guidance_logits_processor_)
+      throw std::runtime_error("Speculative decoding logits cannot be replaced while a guided round has buffered tokens.");
+
+    int floor = std::max(saved_seed_length_ - 1, 0);
+    if (floor >= g.search_->GetSequenceLength())
+      throw std::runtime_error("Speculative decoding cannot reconcile logits with the committed sequence.");
+
+    Reset();
+    g.SetLogits(ReplayCommittedTail(g, floor));
+    g.last_action_ = Generator::Action::standard;
+    return;
+  }
+
+  if (g.computed_logits_)
+    return;
+  if (g.search_->GetSequenceLength() == 0)
+    throw std::runtime_error("Speculative decoding logits require prior input tokens.");
+  if (g.last_action_ != Generator::Action::rewound)
+    throw std::runtime_error("Speculative decoding logits are not available at the current generation state.");
+
+  auto next_tokens = g.search_->GetNextTokens();
+  g.search_->AppendTokens(next_tokens);
+  g.ComputeLogits(next_tokens);
+}
+
+void SpeculativeDecodingStrategy::ClearPendingExternalLogits() {
+  pending_target_logits_ = {};
+  pending_target_logits_row0_ = 0;
+  current_target_logits_row_ = -1;
+  emitted_direct_tokens_ = 0;
+  cached_direct_tokens_ = 0;
 }
 
 // Rewinds both inner caches to floor and replays the committed tokens back to the current length,
@@ -134,6 +206,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   const int seed_length = g.search_->GetSequenceLength();
   const int vocab_size = params.config.model.vocab_size;
   const int max_length = params.search.max_length;
+  ClearPendingExternalLogits();
 
   int K = params.speculative.max_draft_tokens;
   if (K < 1 || K > 16)
@@ -338,6 +411,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       prop_row0 = 1;
       store_pos0(row(0), seed_length, seed_prefix);
     }
+    pending_target_logits_ = verify_logits;
+    pending_target_logits_row0_ = prop_row0;
+
     std::vector<int32_t> dist_prefix;
     if (penalties_active) dist_prefix = seed_prefix;
     for (int i = 0; i < K; i++) {
@@ -352,6 +428,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
           "path. The fold must only engage for targets that return one logits row per token.");
     spec_state->target_state().RewindTo(seed_length);
     auto single_buf = params.p_device->Allocate<int32_t>(1);
+    pending_target_logits_ =
+        params.p_device->Allocate<float>(static_cast<size_t>(K) * static_cast<size_t>(vocab_size));
+    auto cached_rows = pending_target_logits_.CpuSpan();
+    pending_target_logits_row0_ = 0;
     std::vector<int32_t> dist_prefix;
     if (penalties_active) dist_prefix = seed_prefix;
     for (int i = 0; i < K; i++) {
@@ -360,9 +440,12 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single_buf, {});
       target_runs_++;
       auto cpu = lgt.CopyDeviceToCpu();
+      std::copy_n(cpu.data(), static_cast<size_t>(vocab_size),
+                  cached_rows.data() + static_cast<ptrdiff_t>(i) * vocab_size);
       if (penalties_active) dist_prefix.push_back(proposal.tokens[i]);
       store_row(i, {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i + 1, dist_prefix);
     }
+    pending_target_logits_.CopyCpuToDevice();
   }
 
   // Decide accept/reject for each token in order. The target prediction that judges tokens[0] is
@@ -445,6 +528,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   saved_seed_length_ = seed_length;
   saved_K_ = K;
   saved_proposal_ = std::move(proposal);
+  cached_direct_tokens_ = n_direct;
   reanchor_pending_ = true;
   // Verify moved the inner caches past the committed sequence; FinalizeRound/PrepareForAppend re-sync.
   round_dirty_ = true;
@@ -466,6 +550,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   // If we can't emit (done / at max_length), drop the rest of the round and skip the re-anchor.
   if (g.search_->IsDone() || g.search_->GetSequenceLength() >= max_length) {
     pending_.clear();
+    ClearPendingExternalLogits();
     reanchor_pending_ = false;
     g.computed_logits_ = false;
     return;
@@ -476,10 +561,19 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   EmitToken(g, tok);
   g.computed_logits_ = false;
 
+  if (!pending_.empty() && !guidance_round_) {
+    if (emitted_direct_tokens_ >= cached_direct_tokens_)
+      throw std::runtime_error("Speculative decoding has buffered tokens without matching target logits.");
+    current_target_logits_row_ = pending_target_logits_row0_ + emitted_direct_tokens_;
+    emitted_direct_tokens_++;
+  }
+
   // Last token of the round just went out: re-anchor now. (Deferring it to here means an EOS
   // partway through the round skips the re-anchor and its wasted target pass.)
-  if (pending_.empty() && reanchor_pending_)
+  if (pending_.empty() && reanchor_pending_) {
+    ClearPendingExternalLogits();
     FinalizeRound(g);
+  }
 }
 
 // Tidy up after a round and get ready for the next one. Verify ran all the proposed tokens, but

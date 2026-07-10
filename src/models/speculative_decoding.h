@@ -38,6 +38,11 @@ struct SpeculativeDecodingState : State {
                         DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
+  OrtValue* GetInput(const char* name) override;
+  OrtValue* GetOutput(const char* name) override;
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) override;
+  void SetRunOption(const char* key, const char* value) override;
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
   // Accessors for the strategy layer.
   const SpeculativeDecodingModel& spec_model() const { return model_; }
@@ -70,4 +75,3 @@ struct SpeculativeDecodingState : State {
 };
 
 }  // namespace Generators
-

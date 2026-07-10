@@ -172,4 +172,50 @@ void SpeculativeDecodingState::RewindTo(size_t index) {
   draft_pending_valid_ = false;
 }
 
+OrtValue* SpeculativeDecodingState::GetInput(const char* name) {
+  if (auto* input = target_state_->GetInput(name))
+    return input;
+  return draft_state_->GetInput(name);
+}
+
+OrtValue* SpeculativeDecodingState::GetOutput(const char* name) {
+  if (auto* output = target_state_->GetOutput(name))
+    return output;
+  return draft_state_->GetOutput(name);
+}
+
+void SpeculativeDecodingState::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  // Apply the adapter only to the target; the draft may be a different, incompatible model.
+  target_state_->SetActiveAdapter(adapters, adapter_name);
+}
+
+void SpeculativeDecodingState::SetRunOption(const char* key, const char* value) {
+  if (key == nullptr || value == nullptr)
+    throw std::runtime_error("Speculative decoding runtime option key and value must not be null.");
+
+  const bool terminate = std::strcmp(key, "terminate_session") == 0;
+  if (terminate && std::strcmp(value, "1") == 0)
+    State::SetRunOption(key, value);
+
+  target_state_->SetRunOption(key, value);
+  draft_state_->SetRunOption(key, value);
+
+  if (terminate && std::strcmp(value, "0") == 0)
+    State::SetRunOption(key, value);
+}
+
+void SpeculativeDecodingState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  const auto target_names = model_.target_model().session_info_.GetInputNames();
+  const auto draft_names = model_.draft_model().session_info_.GetInputNames();
+  for (const auto& extra_input : extra_inputs) {
+    const bool target_has_input = std::find(target_names.begin(), target_names.end(), extra_input.name) != target_names.end();
+    const bool draft_has_input = std::find(draft_names.begin(), draft_names.end(), extra_input.name) != draft_names.end();
+    if (!target_has_input && !draft_has_input)
+      throw std::runtime_error("Speculative decoding model input '" + extra_input.name + "' was not found in the target or draft model.");
+  }
+
+  target_state_->SetExtraInputs(extra_inputs);
+  draft_state_->SetExtraInputs(extra_inputs);
+}
+
 }  // namespace Generators

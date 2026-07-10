@@ -563,6 +563,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_gene
   OGA_TRY
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
+  if (ortvalue == nullptr)
+    throw std::runtime_error(std::string("Generator ") + (is_input ? "input '" : "output '") + name + "' was not found.");
+
   auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
   auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
 
@@ -593,6 +596,11 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* generator, OgaTenso
   auto logits_span = generator->GetLogits();
   const std::array<int64_t, 3> shape{generator->state_->params_->search.batch_size, 1, generator->model_->config_->model.vocab_size};
   std::span<const float> cpu_logits_span = logits_span.CopyDeviceToCpu();
+  const size_t expected_size = static_cast<size_t>(shape[0]) * static_cast<size_t>(shape[2]);
+  if (cpu_logits_span.size() != expected_size)
+    throw std::runtime_error("Generator logits have " + std::to_string(cpu_logits_span.size()) +
+                             " elements but the public logits shape requires " +
+                             std::to_string(expected_size) + ".");
 
   // Copy logits to cpu tensor
   std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor<float>(generator->model_->allocator_cpu_, shape);
@@ -606,6 +614,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* generator, OgaTenso
 
 OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* generator, OgaTensor* tensor) {
   OGA_TRY
+  generator->PrepareForSetLogits();
   auto logits = generator->search_->GetLogits();
   if (!generator->computed_logits_ && logits.size() != 0) {
     throw std::runtime_error("logits are not computed yet. Please call GenerateNextToken or AppendTokens before calling SetLogits.");

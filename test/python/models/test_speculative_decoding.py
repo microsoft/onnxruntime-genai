@@ -121,7 +121,7 @@ class TestSpeculativeConfigGuards:
     def test_sliding_window_kv_cache(self, tmp_path):
         decoder = _decoder_block(sliding_window={"window_size": 16, "slide_key_value_cache": True})
         path = _write_config(tmp_path / "sliding", _spec_config(decoder=decoder))
-        with pytest.raises(Exception, match="slide the KV cache"):
+        with pytest.raises(Exception, match="sliding-window KV cache"):
             og.Model(path)
 
     def test_lfm2_hybrid_layer_types(self, tmp_path):
@@ -245,6 +245,70 @@ def _make_fp16_logits_model(source_dir: str, dest_dir: Path) -> str:
     onnx.save(model, os.path.join(dest_dir, "model.onnx"))
     shutil.copyfile(os.path.join(source_dir, "genai_config.json"),
                     os.path.join(dest_dir, "genai_config.json"))
+    return os.fspath(dest_dir)
+
+
+def _make_pruned_logits_model(source_dir: str, dest_dir: Path) -> str:
+    """Make the graph return only its final logits row, exercising speculative's sequential
+    verification fallback for targets that do not expose every verified token's logits."""
+    import onnx
+    from onnx import helper, numpy_helper
+
+    source_dir = os.path.abspath(source_dir)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    model = onnx.load(os.path.join(source_dir, "model.onnx"))
+
+    rewired = False
+    for node in model.graph.node:
+        for i, output_name in enumerate(node.output):
+            if output_name == "logits":
+                node.output[i] = "logits_all_tokens"
+                rewired = True
+    if not rewired:
+        raise RuntimeError("expected a node producing a `logits` output")
+
+    model.graph.initializer.append(
+        numpy_helper.from_array(np.array([-1], dtype=np.int64), "last_logits_index"))
+    model.graph.node.append(
+        helper.make_node(
+            "Gather", ["logits_all_tokens", "last_logits_index"], ["logits"],
+            axis=1, name="keep_last_logits"))
+    onnx.save(model, os.path.join(dest_dir, "model.onnx"))
+    shutil.copyfile(
+        os.path.join(source_dir, "genai_config.json"),
+        os.path.join(dest_dir, "genai_config.json"))
+    return os.fspath(dest_dir)
+
+
+def _make_control_input_model(source_dir: str, dest_dir: Path) -> str:
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    source_dir = os.path.abspath(source_dir)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    model = onnx.load(os.path.join(source_dir, "model.onnx"))
+    vocab_size = model.graph.output[0].type.tensor_type.shape.dim[-1].dim_value
+
+    for node in model.graph.node:
+        for i, output_name in enumerate(node.output):
+            if output_name == "logits":
+                node.output[i] = "logits_base"
+
+    zeros = np.zeros((vocab_size,), dtype=np.float32)
+    for name in ("adapter_bias", "user_bias"):
+        model.graph.input.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, [vocab_size]))
+    model.graph.initializer.append(numpy_helper.from_array(zeros, "adapter_bias"))
+
+    model.graph.node.extend([
+        helper.make_node("Add", ["adapter_bias", "user_bias"], ["combined_bias"]),
+        helper.make_node("Add", ["logits_base", "combined_bias"], ["logits"]),
+    ])
+    onnx.save(model, os.path.join(dest_dir, "model.onnx"))
+    shutil.copyfile(
+        os.path.join(source_dir, "genai_config.json"),
+        os.path.join(dest_dir, "genai_config.json"))
     return os.fspath(dest_dir)
 
 
@@ -892,6 +956,302 @@ class TestSpeculativeAppendContinuous:
         ref = [int(t) for t in ref_gen.get_sequence(0)]
 
         assert mid_round == ref
+
+
+class TestSpeculativeExternalApis:
+    def _generator(self, spec_path, k, max_length):
+        model = og.Model(spec_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=max_length)
+        params.set_speculative_options(max_draft_tokens=k)
+        return og.Generator(model, params)
+
+    def _finish(self, generator):
+        while not generator.is_done():
+            generator.generate_next_token()
+        return [int(t) for t in generator.get_sequence(0)]
+
+    def test_named_io_forwards_to_target_and_missing_names_throw(
+            self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "external_named_io", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 12)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+
+        assert gen.get_input("input_ids").size > 0
+        assert gen.get_output("logits").size >= _vocab_size(decoder_only_model_path)
+        with pytest.raises(Exception, match="input 'missing_input' was not found"):
+            gen.get_input("missing_input")
+        with pytest.raises(Exception, match="output 'missing_output' was not found"):
+            gen.get_output("missing_output")
+
+    def test_named_input_falls_back_to_draft(self, decoder_only_model_path, tmp_path):
+        controlled_draft = _make_control_input_model(
+            decoder_only_model_path, tmp_path / "draft_named_input")
+        spec_path = _build_spec(
+            decoder_only_model_path, controlled_draft, tmp_path / "draft_named_spec", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 8)
+        bias = np.zeros((_vocab_size(decoder_only_model_path),), dtype=np.float32)
+        gen.set_model_input("user_bias", bias)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+
+        np.testing.assert_array_equal(gen.get_input("user_bias"), bias)
+
+    def test_unknown_extra_input_throws(self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "external_extra", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 12)
+        value = np.ones((1,), dtype=np.float32)
+        gen.set_model_input("missing_extra_input", value)
+        with pytest.raises(Exception, match="was not found in the target or draft model"):
+            gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+
+    def test_termination_reaches_and_releases_child_sessions(
+            self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "external_terminate", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 12)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        gen.set_runtime_option("terminate_session", "1")
+        with pytest.raises(Exception, match="Terminated state"):
+            gen.generate_next_token()
+        gen.set_runtime_option("terminate_session", "0")
+        gen.generate_next_token()
+
+    def test_runtime_profiling_reaches_both_child_sessions(
+            self, decoder_only_model_path, tmp_path):
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "external_profile", 4)
+        gen = self._generator(spec_path, 4, len(_PROMPT) + 8)
+        profile_prefix = os.fspath(tmp_path / "child_profile")
+        try:
+            gen.set_runtime_option("enable_profiling", profile_prefix)
+        except Exception as exc:
+            if "requires ONNX Runtime 1.25 or later" in str(exc):
+                pytest.skip(str(exc))
+            raise
+
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        gen.generate_next_token()
+
+        # A speculative prefill executes both child states. The unused composite State would emit no
+        # profile, so at least two files proves the option reached the actual target and draft runs.
+        assert len(list(tmp_path.glob("child_profile*.json"))) >= 2
+
+    def test_extra_input_reaches_both_children_and_adapter_reaches_target(
+            self, decoder_only_model_path, tmp_path):
+        try:
+            import onnxruntime
+        except ImportError:
+            pytest.skip("onnxruntime is required to create an adapter fixture")
+
+        controlled = _make_control_input_model(
+            decoder_only_model_path, tmp_path / "controlled_model")
+        vocab_size = _vocab_size(decoder_only_model_path)
+        forced_token = _PROMPT[0]
+        bias = np.zeros((vocab_size,), dtype=np.float32)
+        bias[forced_token] = 1e4
+
+        extra_spec = _build_self_spec(controlled, tmp_path / "extra_spec", 4)
+        extra_gen = self._generator(extra_spec, 4, len(_PROMPT) + 4)
+        extra_gen.set_model_input("user_bias", bias)
+        extra_gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        extra_gen.generate_next_token()
+        assert int(extra_gen.get_sequence(0)[-1]) == forced_token
+
+        adapter_spec = _build_spec(
+            controlled, decoder_only_model_path, tmp_path / "adapter_spec", 4)
+        model = og.Model(adapter_spec)
+        adapters = og.Adapters(model)
+        adapter_path = os.fspath(tmp_path / "bias.onnx_adapter")
+        adapter = onnxruntime.AdapterFormat()
+        adapter.set_adapter_version(1)
+        adapter.set_model_version(1)
+        adapter.set_parameters({
+            "adapter_bias": onnxruntime.OrtValue.ortvalue_from_numpy(bias)
+        })
+        adapter.export_adapter(adapter_path)
+        adapters.load(adapter_path, "bias")
+
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=len(_PROMPT) + 4)
+        params.set_speculative_options(max_draft_tokens=4)
+        adapter_gen = og.Generator(model, params)
+        adapter_gen.set_active_adapter(adapters, "bias")
+        zero_bias = np.zeros_like(bias)
+        adapter_gen.set_model_input("user_bias", zero_bias)
+        adapter_gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        adapter_gen.generate_next_token()
+        assert int(adapter_gen.get_sequence(0)[-1]) == forced_token
+
+    @pytest.mark.parametrize("k,n_generate", [(2, 1), (4, 2), (8, 3)])
+    def test_get_logits_mid_round_matches_clean_rebuild(
+            self, decoder_only_model_path, tmp_path, k, n_generate):
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"external_get_{k}", k)
+        gen = self._generator(spec_path, k, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(n_generate):
+            gen.generate_next_token()
+
+        committed = [int(t) for t in gen.get_sequence(0)]
+        logits = gen.get_logits()
+        assert logits.shape == (1, 1, _vocab_size(decoder_only_model_path))
+        actual = self._finish(gen)
+
+        ref = self._generator(spec_path, k, max_length)
+        ref.append_tokens(np.array([committed], dtype=np.int32))
+        assert actual == self._finish(ref)
+
+    @pytest.mark.parametrize("n_generate", [1, 2, 4, 5])
+    def test_get_logits_does_not_change_sampled_generation(
+            self, decoder_only_model_path, tmp_path, n_generate):
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / f"external_sample_get_{n_generate}", 4)
+
+        def run(inspect_logits):
+            model = og.Model(spec_path)
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                do_sample=True, max_length=max_length, random_seed=1234,
+                top_k=40, top_p=0.95, temperature=0.8)
+            params.set_speculative_options(max_draft_tokens=4)
+            gen = og.Generator(model, params)
+            gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+            for _ in range(n_generate):
+                gen.generate_next_token()
+            if inspect_logits:
+                first = gen.get_logits().copy()
+                second = gen.get_logits().copy()
+                np.testing.assert_array_equal(first, second)
+            sequence = self._finish(gen)
+            stats = gen.get_speculative_stats()
+            counters = {
+                key: stats[key]
+                for key in (
+                    "rounds", "draft_tokens_proposed", "draft_tokens_accepted",
+                    "correction_tokens", "bonus_tokens", "target_forward_passes")
+            }
+            return sequence, counters
+
+        baseline = run(False)
+        inspected = run(True)
+        assert inspected == baseline
+
+    def test_get_logits_mid_round_fp16_is_side_effect_free(
+            self, fp16_decoder_only_model_path, tmp_path):
+        max_length = len(_PROMPT) + 12
+        spec_path = _build_self_spec(
+            fp16_decoder_only_model_path, tmp_path / "external_fp16_get", 4)
+
+        baseline = self._generator(spec_path, 4, max_length)
+        baseline.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        baseline.generate_next_token()
+        baseline_sequence = self._finish(baseline)
+
+        inspected = self._generator(spec_path, 4, max_length)
+        inspected.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        inspected.generate_next_token()
+        assert inspected.get_logits().shape == (
+            1, 1, _vocab_size(fp16_decoder_only_model_path))
+        assert self._finish(inspected) == baseline_sequence
+
+    def test_get_logits_mid_round_pruned_target_is_side_effect_free(
+            self, decoder_only_model_path, tmp_path):
+        try:
+            import onnx  # noqa: F401
+        except ImportError:
+            pytest.skip("onnx is required to create a pruned-logits fixture")
+
+        pruned = _make_pruned_logits_model(
+            decoder_only_model_path, tmp_path / "pruned_logits_model")
+        max_length = len(_PROMPT) + 12
+        spec_path = _build_self_spec(pruned, tmp_path / "external_pruned_get", 4)
+
+        baseline = self._generator(spec_path, 4, max_length)
+        baseline.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        baseline.generate_next_token()
+        baseline_sequence = self._finish(baseline)
+
+        inspected = self._generator(spec_path, 4, max_length)
+        inspected.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        inspected.generate_next_token()
+        assert inspected.get_logits().shape == (1, 1, _vocab_size(pruned))
+        assert self._finish(inspected) == baseline_sequence
+
+    @pytest.mark.parametrize("k,n_generate", [(2, 1), (4, 2), (8, 3)])
+    def test_set_logits_mid_round_forces_token_and_matches_clean_rebuild(
+            self, decoder_only_model_path, tmp_path, k, n_generate):
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / f"external_set_{k}", k)
+        gen = self._generator(spec_path, k, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(n_generate):
+            gen.generate_next_token()
+
+        forced_token = _PROMPT[0]
+        forced_logits = np.full(
+            (1, 1, _vocab_size(decoder_only_model_path)), -1e9, dtype=np.float32)
+        forced_logits[0, 0, forced_token] = 1e9
+        gen.set_logits(forced_logits)
+        gen.generate_next_token()
+        assert int(gen.get_sequence(0)[-1]) == forced_token
+
+        committed = [int(t) for t in gen.get_sequence(0)]
+        actual = self._finish(gen)
+        ref = self._generator(spec_path, k, max_length)
+        ref.append_tokens(np.array([committed], dtype=np.int32))
+        assert actual == self._finish(ref)
+
+    def test_set_logits_mid_round_sampling_is_deterministic(
+            self, decoder_only_model_path, tmp_path):
+        max_length = len(_PROMPT) + 16
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "external_sample_set", 4)
+        forced_token = _PROMPT[0]
+        forced_logits = np.full(
+            (1, 1, _vocab_size(decoder_only_model_path)), -1e9, dtype=np.float32)
+        forced_logits[0, 0, forced_token] = 1e9
+
+        def run():
+            model = og.Model(spec_path)
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                do_sample=True, max_length=max_length, random_seed=4321,
+                top_k=40, top_p=0.95, temperature=0.8)
+            params.set_speculative_options(max_draft_tokens=4)
+            gen = og.Generator(model, params)
+            gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+            gen.generate_next_token()
+            gen.set_logits(forced_logits)
+            gen.generate_next_token()
+            assert int(gen.get_sequence(0)[-1]) == forced_token
+            return self._finish(gen)
+
+        assert run() == run()
+
+    def test_get_logits_after_rewind_matches_reappend(
+            self, decoder_only_model_path, tmp_path):
+        max_length = len(_PROMPT) + 20
+        spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "external_rewind", 4)
+        gen = self._generator(spec_path, 4, max_length)
+        gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(4):
+            gen.generate_next_token()
+
+        rewind_length = len(_PROMPT) + 1
+        boundary = int(gen.get_sequence(0)[rewind_length])
+        gen.rewind_to(rewind_length)
+        assert gen.get_logits().shape == (1, 1, _vocab_size(decoder_only_model_path))
+        committed = [int(t) for t in gen.get_sequence(0)]
+        assert len(committed) == rewind_length + 1
+        assert committed[-1] == boundary
+
+        actual = self._finish(gen)
+        ref = self._generator(spec_path, 4, max_length)
+        ref.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        for _ in range(4):
+            ref.generate_next_token()
+        ref.rewind_to(rewind_length)
+        ref.append_tokens(np.array([[boundary]], dtype=np.int32))
+        assert actual == self._finish(ref)
 
 
 # ---------------------------------------------------------------------------

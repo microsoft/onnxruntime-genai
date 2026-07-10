@@ -663,6 +663,10 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
   computed_logits_ = true;
 }
 
+void Generator::PrepareForSetLogits() {
+  strategy_->PrepareForSetLogits(*this);
+}
+
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -694,6 +698,10 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  DeviceSpan<float> strategy_logits;
+  if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
+    return strategy_logits;
+  }
   if (!computed_logits_) {
     ComputeLogits(search_->GetNextTokens());
   }

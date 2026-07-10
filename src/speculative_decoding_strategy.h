@@ -36,6 +36,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   SpeculativeStats GetStats() const final;
   void Reset() final;
   void PrepareForAppend(Generator& g) final;
+  bool TryGetExternalLogits(Generator& g, DeviceSpan<float>& logits) final;
+  void PrepareForSetLogits(Generator& g) final;
 
  protected:
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
@@ -82,6 +84,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void DrainOne(Generator& g);
   void FinalizeRound(Generator& g);
   void EmitToken(Generator& g, int32_t tok);
+  void ClearPendingExternalLogits();
 
   // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
@@ -100,6 +103,14 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
+
+  // Raw target rows corresponding to accepted tokens in pending_. These let get_logits inspect the
+  // next-token logits without discarding speculative lookahead or advancing RNG/model state.
+  DeviceSpan<float> pending_target_logits_;
+  int pending_target_logits_row0_{};
+  int current_target_logits_row_{-1};
+  int emitted_direct_tokens_{};
+  int cached_direct_tokens_{};
 
   // Round context saved by RunRound.
   Proposal saved_proposal_;
