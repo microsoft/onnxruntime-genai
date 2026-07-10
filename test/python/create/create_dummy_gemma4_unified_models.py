@@ -113,9 +113,14 @@ def main() -> None:
                 {"operation": {"name": "audio_decoder", "type": "AudioDecoder"}},
                 {
                     "operation": {
-                        "name": "gemma4_unified_audio_frames",
-                        "type": "Gemma4UnifiedAudioFrames",
-                        "attrs": {"audio_samples_per_token": 640, "sampling_rate": 16000, "padding_value": 0.0},
+                        "name": "gemma4_audio",
+                        "type": "Gemma4Audio",
+                        "attrs": {
+                            "type": "raw_frames",
+                            "audio_samples_per_token": 640,
+                            "sampling_rate": 16000,
+                            "padding_value": 0.0,
+                        },
                     }
                 },
             ]
