@@ -189,6 +189,20 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Returns the accumulated speculative decoding statistics.
+   *
+   * @return The accumulated speculative decoding statistics.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public SpeculativeStats getSpeculativeStats() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return getSpeculativeStatsNative(nativeHandle);
+  }
+
+  /**
    * Retrieves the last token in the sequence for the specified sequence index.
    *
    * @param sequenceIndex The index of the sequence.
@@ -301,6 +315,9 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 
   private native int[] getSequenceNative(long nativeHandle, long sequenceIndex)
+      throws GenAIException;
+
+  private native SpeculativeStats getSpeculativeStatsNative(long nativeHandle)
       throws GenAIException;
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)

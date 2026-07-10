@@ -8,6 +8,40 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal static class NativeMethods
     {
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct OgaSpeculativeStats
+        {
+            public UIntPtr Rounds;
+            public UIntPtr CompletedRounds;
+            public UIntPtr InterruptedRounds;
+            public UIntPtr ActiveRounds;
+            public UIntPtr DraftTokensProposed;
+            public UIntPtr DraftTokensEvaluated;
+            public UIntPtr DraftTokensAccepted;
+            public UIntPtr CorrectionTokens;
+            public UIntPtr BonusTokens;
+            public UIntPtr TokensQueued;
+            public UIntPtr TokensEmitted;
+            public UIntPtr TokensDiscarded;
+            public UIntPtr TokensBuffered;
+            public UIntPtr DraftForwardPasses;
+            public UIntPtr TargetForwardPasses;
+            public UIntPtr FormulaSupported;
+            public float TotalDraftMs;
+            public float TotalTargetMs;
+            public float TotalReconciliationMs;
+            public float AvgDraftMsPerToken;
+            public float AcceptanceRate;
+            public float AvgDraftTokensPerRound;
+            public float MeanEmittedTokensPerRound;
+            public float ExpectedTokensPerRound;
+            public float AvgTargetMsPerRound;
+            public float TargetBaselineMsPerToken;
+            public float TargetOverheadRatio;
+            public float EstimatedSpeedup;
+            public float ObservedSpeedup;
+        }
+
         internal class NativeLib
         {
 #if __ANDROID__
@@ -130,6 +164,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      out bool /* const bool* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSpeculativeNumber(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                           byte[] /* const char* */ speculativeOption,
+                                                                                           double value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSpeculativeNumber(IntPtr /* const OgaGeneratorParams* */ generatorParams,
+                                                                                           byte[] /* const char* */ speculativeOption,
+                                                                                           out double /* double* */ value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
@@ -184,6 +228,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern UIntPtr /* size_t */ OgaGenerator_GetSequenceCount(IntPtr /* const OgaGenerator* */ generator,
                                                                                 UIntPtr /* size_t */ index);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetSpeculativeStats(IntPtr /* const OgaGenerator* */ generator,
+                                                                                     out OgaSpeculativeStats stats);
 
         // This function returns the sequence data at the given index. The returned pointer is owned by the
         // OgaGenerator object and will be freed when the OgaGenerator object is destroyed. It is expected

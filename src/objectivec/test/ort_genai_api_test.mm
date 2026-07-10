@@ -147,6 +147,28 @@ NS_ASSUME_NONNULL_BEGIN
   ORTAssertBoolResultSuccessful(ret, error);
 }
 
+- (void)testSpeculativeAPIs {
+  NSError* error = nil;
+  OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(model, error);
+
+  OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+  ORTAssertNullableResultSuccessful(params, error);
+  BOOL ret = [params setSpeculativeOption:@"max_draft_tokens" doubleValue:4 error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+  XCTAssertEqual([params getSpeculativeNumber:@"max_draft_tokens" error:&error], 4);
+  XCTAssertNil(error);
+
+  OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model params:params error:&error];
+  ORTAssertNullableResultSuccessful(generator, error);
+  OGASpeculativeStats stats = {};
+  ret = [generator getSpeculativeStats:&stats error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+  XCTAssertEqual(stats.rounds, 0);
+  XCTAssertFalse(stats.formulaSupported);
+  XCTAssertEqual(stats.acceptanceRate, 0);
+}
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -63,3 +63,25 @@ Java_ai_onnxruntime_genai_GeneratorParams_getSearchBool(JNIEnv* env, jobject thi
   ThrowIfError(env, OgaGeneratorParamsGetSearchBool(generator_params, name, &value));
   return static_cast<jboolean>(value);
 }
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_GeneratorParams_setSpeculativeOptionNumber(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                                    jstring option_name, jdouble value) {
+  OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
+  CString name{env, option_name};
+
+  ThrowIfError(env, OgaGeneratorParamsSetSpeculativeNumber(generator_params, name, value));
+}
+
+JNIEXPORT jdouble JNICALL
+Java_ai_onnxruntime_genai_GeneratorParams_getSpeculativeNumber(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                              jstring option_name) {
+  const OgaGeneratorParams* generator_params = reinterpret_cast<const OgaGeneratorParams*>(native_handle);
+  CString name{env, option_name};
+  double value;
+
+  if (ThrowIfError(env, OgaGeneratorParamsGetSpeculativeNumber(generator_params, name, &value))) {
+    return 0;
+  }
+  return static_cast<jdouble>(value);
+}
