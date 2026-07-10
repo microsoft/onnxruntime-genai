@@ -147,10 +147,11 @@ def parse_hf_token(hf_token):
 
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     int4_cpu = precision == "int4" and execution_provider == "cpu"
+    int2_cpu = precision == "int2" and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
     bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
-    if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
+    if precision in {"int8", "fp32"} or int4_cpu or int2_cpu or fp32_webgpu:
         # FP32 precision
         return ir.DataType.FLOAT
 
@@ -165,6 +166,11 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
     if precision == "int4":
         return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
+
+    if precision == "int2":
+        # 2-bit quantized weights are emitted as MatMulNBits (bits=2); non-quantized
+        # ops follow io_dtype, so onnx_dtype tracks the FLOAT io_dtype used on CPU.
+        return ir.DataType.FLOAT
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -386,7 +392,7 @@ def get_args():
         "-p",
         "--precision",
         required=True,
-        choices=["int4", "bf16", "fp16", "fp32"],
+        choices=["int2", "int4", "bf16", "fp16", "fp32"],
         help="Precision of model",
     )
 

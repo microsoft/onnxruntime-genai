@@ -501,8 +501,8 @@ class QuantizedModel:
                                 tensor_map["self_attn.v_proj.qweight"] = tensor[q_size + kv_size :, :]
                             else:
                                 # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
-                                q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "quark"} else q_size
-                                kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "quark"} else kv_size
+                                q_dim = q_size // self._packed_out_factor(tensor, local_bits) if quant_type in {"awq", "quark"} else q_size
+                                kv_dim = kv_size // self._packed_out_factor(tensor, local_bits) if quant_type in {"awq", "quark"} else kv_size
                                 tensor_map["self_attn.q_proj.qweight"] = tensor[:, :q_dim]
                                 tensor_map["self_attn.k_proj.qweight"] = tensor[:, q_dim : q_dim + kv_dim]
                                 tensor_map["self_attn.v_proj.qweight"] = tensor[:, q_dim + kv_dim :]
@@ -546,12 +546,12 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 q_dim = (
-                                    q_size // (32 // local_bits)
+                                    q_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "gptq", "quark"}
                                     else q_size
                                 )
                                 kv_dim = (
-                                    kv_size // (32 // local_bits)
+                                    kv_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "gptq", "quark"}
                                     else kv_size
                                 )
@@ -592,7 +592,7 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
                                 intermediate_dim = (
-                                    intermediate_size // (32 // local_bits)
+                                    intermediate_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "quark"}
                                     else intermediate_size
                                 )
@@ -634,7 +634,7 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 intermediate_dim = (
-                                    intermediate_size // (32 // local_bits)
+                                    intermediate_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "gptq", "quark"}
                                     else intermediate_size
                                 )
@@ -905,6 +905,18 @@ class QuantizedModel:
         Return list of modules in quantized model in order of appearance in the model
         """
         return [self.embedding] + self.layers + [self.final_norm, self.lm_head]
+
+    @staticmethod
+    def _packed_out_factor(tensor, bits):
+        """Number of logical output channels stored per element along the packed
+        (column) axis: 8//bits for uint8 packing (Quark native uint2/uint4),
+        32//bits for int32 packing (AWQ/GPTQ style), and 1 for unpacked floating
+        tensors (per-group float scales / float zero-points)."""
+        if tensor.dtype == torch.uint8:
+            return 8 // bits
+        if tensor.dtype == torch.int32:
+            return 32 // bits
+        return 1
 
     def unpack(self, module):
         """
@@ -1468,6 +1480,8 @@ class QuarkModel(QuantizedModel):
         dtype_bits_maps = {
             "uint4": 4,
             "int4": 4,
+            "uint2": 2,
+            "int2": 2,
         }
 
         if global_dtype not in dtype_bits_maps:
@@ -1483,6 +1497,8 @@ class QuarkModel(QuantizedModel):
             dtype_bits_maps = {
                 "uint4": 4,
                 "int4": 4,
+                "uint2": 2,
+                "int2": 2,
             }
             if local_dtype not in dtype_bits_maps:
                 raise ValueError(f"Unexpected dtype: {local_dtype}.")
@@ -1495,6 +1511,31 @@ class QuarkModel(QuantizedModel):
             layer_quant_config = self._quant_attrs["config"]["layer_quant_config"][name]["weight"]
             return layer_quant_config["group_size"]
         return self.global_group_size
+
+    def unpack(self, module):
+        """
+        Unpack a Quark ``QuantizedTensorModule`` into the standard int-code layout.
+
+        Standard Quark native uint2 stores weights as uint8 ``[in, out/4]`` packed
+        MSB-first along the output axis, with per-group float ``scales`` and a float
+        ``zero_point`` (e.g. a constant 1.5). These are unpacked + dequantized here so
+        the shared ``repack``/``pack_ort_format`` pipeline can emit MatMulNBits-ready
+        tensors (same packing as the 4-bit path). Other bit-widths use the base
+        (int32-packed, AWQ-reorder) path.
+        """
+        if module.bits == 2:
+            module.qweight = self._unpack_uint2_msb_first(module.qweight)
+            self.dequant_weight(module)
+        else:
+            super().unpack(module)
+
+    @staticmethod
+    def _unpack_uint2_msb_first(packed):
+        """Unpack uint8 ``[rows, cols/4]`` (4x 2-bit codes per byte, MSB-first along
+        columns) into int codes ``[rows, cols]``."""
+        shifts = torch.tensor([6, 4, 2, 0], dtype=torch.int32, device=packed.device)
+        codes = (packed.to(torch.int32).unsqueeze(-1) >> shifts.view(1, 1, -1)) & 0x3
+        return codes.reshape(packed.shape[0], -1)
 
     def unpack_qweight(self, module):
         """
