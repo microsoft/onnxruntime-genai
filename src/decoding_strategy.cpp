@@ -23,7 +23,12 @@ std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   const auto& model_type = generator.model_->config_->model.type;
   if (ModelType::IsTransducer(model_type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
-  if (ModelType::IsSpeculative(model_type))
+  const auto& model = generator.model_->config_->model;
+  const bool is_phi3_speculative =
+      ModelType::IsPhi3Family(model_type) &&
+      !model.decoder.filename.empty() &&
+      !model.draft.filename.empty();
+  if (ModelType::IsSpeculative(model_type) || is_phi3_speculative)
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   return std::make_unique<StandardDecodingStrategy>();
 }

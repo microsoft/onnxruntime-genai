@@ -31,6 +31,13 @@ int32_t RowArgmax(std::span<const float> logits) {
 // Each call emits exactly one token. The first call of a round runs the whole round (RunRound)
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
+  if (g.phi3_rope_threshold_ != 0 &&
+      g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
+    auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
+    g.RewindToLength(0);
+    g.AppendTokens(current_seq);
+  }
+
   if (pending_.empty()) {
     // Fresh logits already present after prefill/ComputeLogits or when fold left a token
     // to start verify (pending_anchor_token_). After RewindToLength -> stale, so replay
@@ -267,7 +274,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   if (!spec_state)
     throw std::runtime_error(
         "SpeculativeDecodingStrategy::Step requires a SpeculativeDecodingState "
-        "(model.type=\"speculative\").");
+        "(model.type=\"speculative\" or a Phi3-family model with a draft).");
 
   const auto& params = *g.search_->params_;
   const int seed_length = g.search_->GetSequenceLength();
@@ -290,6 +297,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 
   // Don't look further ahead than max_length.
   K = std::min(K, remaining);
+  if (g.phi3_rope_threshold_ != 0 && seed_length < g.phi3_rope_threshold_) {
+    // Keep target verification below the ROPE switch; K=1 at the final position only judges pos0.
+    K = std::min(K, std::max(1, g.phi3_rope_threshold_ - seed_length - 1));
+  }
   // Seed the shared RNG.
   if (!rng_seeded_) {
     const uint32_t seed = (params.search.random_seed < 0)
@@ -643,6 +654,14 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
     return;
   }
 
+  if (g.phi3_rope_threshold_ != 0 &&
+      g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
+    DiscardPendingTokens();
+    ClearPendingExternalLogits();
+    reanchor_pending_ = false;
+    return;
+  }
+
   if (!pending_.empty() && !guidance_round_) {
     if (emitted_direct_tokens_ >= cached_direct_tokens_)
       throw std::runtime_error("Speculative decoding has buffered tokens without matching target logits.");
@@ -700,7 +719,10 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   if (rewind_to < target_kv_len)
     spec_state->target_state().RewindTo(rewind_to);
 
-  const bool fold = is_multiple_tokens_ && saved_K_ >= 2;
+  const bool before_phi3_rope_threshold =
+      g.phi3_rope_threshold_ != 0 &&
+      g.search_->GetSequenceLength() + 1 == g.phi3_rope_threshold_;
+  const bool fold = is_multiple_tokens_ && saved_K_ >= 2 && !before_phi3_rope_threshold;
   if (fold) {
     // Hand the committed token to the next round instead of running it now. Its verify pass
     // will both place it in the cache and give us its prediction - saving a full target run.

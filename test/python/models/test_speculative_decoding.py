@@ -91,6 +91,70 @@ def _write_config(directory: Path, config: dict) -> str:
     return os.fspath(directory)
 
 
+def _make_tiny_phi3_spec_model(
+        directory: Path, model_type: str, context_length: int,
+        draft_switch_at: int | None = None) -> str:
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    directory.mkdir(parents=True, exist_ok=True)
+
+    def save_model(filename: str, switch_at: int | None = None):
+        input_ids = helper.make_tensor_value_info(
+            "input_ids", TensorProto.INT32, ["batch", "sequence"])
+        attention_mask = helper.make_tensor_value_info(
+            "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
+        logits = helper.make_tensor_value_info(
+            "logits", TensorProto.FLOAT, ["batch", "sequence", 10])
+        table = numpy_helper.from_array(np.eye(10, dtype=np.float32), "logits_table")
+        nodes = [helper.make_node(
+            "Gather", ["logits_table", "input_ids"], ["base_logits"], axis=0)]
+        initializers = [table]
+        if switch_at is None:
+            nodes.append(helper.make_node("Identity", ["base_logits"], ["logits"]))
+        else:
+            switched_table = np.zeros((10, 10), dtype=np.float32)
+            switched_table[:, 4] = 1.0
+            initializers.extend([
+                numpy_helper.from_array(switched_table, "switched_logits_table"),
+                numpy_helper.from_array(np.array(1, dtype=np.int64), "sequence_axis"),
+                numpy_helper.from_array(np.array(switch_at, dtype=np.int64), "switch_at"),
+            ])
+            nodes.extend([
+                helper.make_node("Shape", ["attention_mask"], ["mask_shape"]),
+                helper.make_node(
+                    "Gather", ["mask_shape", "sequence_axis"], ["total_sequence"], axis=0),
+                helper.make_node(
+                    "GreaterOrEqual", ["total_sequence", "switch_at"], ["switch_logits"]),
+                helper.make_node(
+                    "Gather", ["switched_logits_table", "input_ids"],
+                    ["switched_logits"], axis=0),
+                helper.make_node(
+                    "Where", ["switch_logits", "switched_logits", "base_logits"], ["logits"]),
+            ])
+        graph = helper.make_graph(
+            nodes, "tiny_phi3", [input_ids, attention_mask], [logits], initializers)
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.ir_version = 10
+        onnx.save(model, directory / filename)
+
+    save_model("model.onnx")
+    if draft_switch_at is not None:
+        save_model("draft.onnx", draft_switch_at)
+
+    decoder = _decoder_block(
+        head_size=1, hidden_size=1, num_attention_heads=1,
+        num_key_value_heads=1, num_hidden_layers=0)
+    draft = copy.deepcopy(decoder)
+    if draft_switch_at is not None:
+        draft["filename"] = "draft.onnx"
+    config = _spec_config(
+        decoder=decoder, draft=draft, type=model_type,
+        vocab_size=10, context_length=context_length, eos_token_id=[9], pad_token_id=0)
+    config["search"]["max_length"] = context_length
+    return _write_config(directory, config)
+
+
 # ---------------------------------------------------------------------------
 # Config guards (no model weights required)
 # ---------------------------------------------------------------------------
@@ -436,6 +500,53 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
 
 
 class TestSpeculativeGeneration:
+    @pytest.mark.parametrize(
+        ("model_type", "threshold"),
+        [("phi3", 4097), ("phimoe", 4097), ("phi3small", 8193)])
+    def test_phi3_with_draft_reprefills_at_rope_threshold(
+            self, tmp_path, model_type, threshold):
+        path = _make_tiny_phi3_spec_model(
+            tmp_path / model_type, model_type, threshold + 8)
+        model = og.Model(path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=threshold + 8)
+        params.set_speculative_options(max_draft_tokens=4)
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.full((1, threshold - 1), 3, dtype=np.int32))
+
+        gen.generate_next_token()
+        stats = gen.get_speculative_stats()
+        assert len(gen.get_sequence(0)) == threshold
+        assert stats["draft_tokens_proposed"] == 1
+        assert stats["tokens_discarded"] == 1
+
+        gen.generate_next_token()
+        stats = gen.get_speculative_stats()
+        assert len(gen.get_sequence(0)) == threshold + 1
+        assert stats["rounds"] == 2
+        assert stats["draft_tokens_proposed"] == 5
+
+    def test_phi3_reanchors_before_final_short_rope_token(self, tmp_path):
+        threshold = 4097
+        path = _make_tiny_phi3_spec_model(
+            tmp_path / "phi3_reanchor", "phi3", threshold + 8,
+            draft_switch_at=threshold - 2)
+        model = og.Model(path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=threshold + 8)
+        params.set_speculative_options(max_draft_tokens=4)
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.full((1, threshold - 4), 3, dtype=np.int32))
+
+        for _ in range(3):
+            gen.generate_next_token()
+
+        stats = gen.get_speculative_stats()
+        assert len(gen.get_sequence(0)) == threshold - 1
+        assert stats["draft_tokens_accepted"] == 2
+        assert stats["correction_tokens"] == 1
+        assert stats["target_forward_passes"] == 2
+
     def test_k1_matches_standalone_greedy(self, decoder_only_model_path, tmp_path):
         """With K=1 every verify is a single-token pass, so self-speculative greedy is
         bitwise-identical to plain greedy of the same model."""

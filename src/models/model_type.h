@@ -66,6 +66,10 @@ struct ModelType {
     return model_type == "speculative";
   }
 
+  inline static bool IsPhi3Family(const std::string& model_type) {
+    return model_type == "phi3" || model_type == "phimoe" || model_type == "phi3small";
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
