@@ -288,6 +288,23 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
+TEST(CAPITests, SequencesOutOfBoundsAccess) {
+  auto sequences = OgaSequences::Create();
+
+  std::vector<int32_t> tokens{100, 200, 300};
+  sequences->Append(tokens.data(), tokens.size());
+
+  ASSERT_EQ(sequences->Count(), 1u);
+  EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
+  EXPECT_NE(sequences->SequenceData(0), nullptr);
+
+  // Out-of-bounds indices must not read past the underlying storage.
+  EXPECT_EQ(sequences->SequenceCount(1), 0u);
+  EXPECT_EQ(sequences->SequenceData(1), nullptr);
+  EXPECT_EQ(sequences->SequenceCount(1000), 0u);
+  EXPECT_EQ(sequences->SequenceData(1000), nullptr);
+}
+
 TEST(CAPITests, MaxLength) {
   // Batch size 1 case
   std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
