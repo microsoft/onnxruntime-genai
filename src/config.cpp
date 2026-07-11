@@ -458,7 +458,9 @@ struct PipelineModel_Element : JSON::Element {
 
   JSON::Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -491,19 +493,32 @@ struct PipelineModel_Element : JSON::Element {
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
 };
 
+template <typename PipelineModel>
+PipelineModel& GetOrCreatePipelineModel(std::vector<PipelineModel>& models, std::string_view model_id) {
+  auto model = std::find_if(models.begin(), models.end(),
+                            [model_id](const auto& model) { return model.model_id == model_id; });
+  if (model != models.end()) {
+    return *model;
+  }
+
+  auto& new_model = models.emplace_back();
+  new_model.model_id = model_id;
+  return new_model;
+}
+
 struct PipelineModelObject_Element : JSON::Element {
   explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    pipeline_model_elements_.emplace_back(model);
-    return pipeline_model_elements_.back();
+    pipeline_model_element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    pipeline_model_element_ = std::make_unique<PipelineModel_Element>(model);
+    return *pipeline_model_element_;
   }
 
  private:
   std::vector<Config::Model::Decoder::PipelineModel>& v_;
-  std::vector<PipelineModel_Element> pipeline_model_elements_;
+  std::unique_ptr<PipelineModel_Element> pipeline_model_element_;
 };
 
 struct Pipeline_Element : JSON::Element {
@@ -729,7 +744,9 @@ struct VisionPipelineModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -763,15 +780,15 @@ struct VisionPipelineModelObject_Element : JSON::Element {
   explicit VisionPipelineModelObject_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    elements_.emplace_back(model);
-    return elements_.back();
+    element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    element_ = std::make_unique<VisionPipelineModel_Element>(model);
+    return *element_;
   }
 
  private:
   std::vector<Config::Model::Vision::PipelineModel>& v_;
-  std::vector<VisionPipelineModel_Element> elements_;
+  std::unique_ptr<VisionPipelineModel_Element> element_;
 };
 
 struct VisionPipeline_Element : JSON::Element {
