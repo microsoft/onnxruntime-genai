@@ -230,6 +230,20 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
   source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
+
+  # When bundling the CUDA plugin EP (onnxruntime-genai-cuda package layout), embed
+  # the plugin library next to libonnxruntime so genai can self-register it at runtime
+  # (see ORTGENAI_REGISTER_BUNDLED_CUDA_PLUGIN_EP). The library is an ORT artifact in
+  # ORT_LIB_DIR; if it is missing the post-build copy fails, surfacing the misconfiguration.
+  if(REGISTER_BUNDLED_CUDA_PLUGIN_EP)
+    set(CUDA_PLUGIN_EP_LIB_PATH "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
+    if(NOT EXISTS "${CUDA_PLUGIN_EP_LIB_PATH}")
+      message(FATAL_ERROR
+        "REGISTER_BUNDLED_CUDA_PLUGIN_EP is ON but the CUDA plugin EP library was not found at "
+        "'${CUDA_PLUGIN_EP_LIB_PATH}'. Provide it in the ORT lib directory or turn the option OFF.")
+    endif()
+    list(APPEND ortgenai_embed_libs "${CUDA_PLUGIN_EP_LIB_PATH}")
+  endif()
   if(APPLE)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/cuda/exported_symbols.lst")
   elseif(UNIX)

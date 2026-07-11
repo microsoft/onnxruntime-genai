@@ -57,6 +57,9 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   list(FILTER generator_cudalib_srcs EXCLUDE REGEX ".*/cuda/session_options\\.(cpp|h)$")
 
   add_compile_definitions(USE_CUDA=1)
+  if(REGISTER_BUNDLED_CUDA_PLUGIN_EP)
+    add_compile_definitions(ORTGENAI_REGISTER_BUNDLED_CUDA_PLUGIN_EP=1)
+  endif()
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler

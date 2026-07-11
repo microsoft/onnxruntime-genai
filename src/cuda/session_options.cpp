@@ -4,9 +4,57 @@
 #include "session_options.h"
 #include "../models/session_options.h"
 
+#include <algorithm>
+
+#if defined(_WIN32)
+std::string CurrentModulePath();
+#endif
+
 namespace Generators::CUDAExecutionProvider {
 
 namespace {
+
+// The plugin and legacy CUDA EP intentionally use the same canonical provider
+// name. The build of onnxruntime_providers_cuda determines which implementation
+// is present.
+constexpr const char* kCudaEpName = "CUDAExecutionProvider";
+
+#if defined(ORTGENAI_REGISTER_BUNDLED_CUDA_PLUGIN_EP)
+// The CUDA plugin uses the same native filename as the legacy CUDA provider.
+#if defined(_WIN32)
+constexpr const char* kDefaultCudaPluginLibrary = "onnxruntime_providers_cuda.dll";
+#elif defined(__APPLE__)
+constexpr const char* kDefaultCudaPluginLibrary = "libonnxruntime_providers_cuda.dylib";
+#else
+constexpr const char* kDefaultCudaPluginLibrary = "libonnxruntime_providers_cuda.so";
+#endif
+
+// Best-effort, idempotent registration of the bundled CUDA plugin library.
+// If the library is absent or fails to load, logs a warning and continues so the
+// caller transparently falls back to the built-in CUDA EP.
+void TryRegisterBundledCudaPluginEp() {
+  if (!FindRegisteredEpDevices(kCudaEpName).empty()) {
+    return;  // ORT (for example, its Python package) already registered it.
+  }
+
+  fs::path library_path{kDefaultCudaPluginLibrary};
+#if defined(_WIN32)
+  // CurrentModulePath is implemented in generators.cpp and includes the trailing separator.
+  library_path = fs::path(::CurrentModulePath()) / kDefaultCudaPluginLibrary;
+#elif defined(__linux__) && !defined(__ANDROID__)
+  // Resolve next to libonnxruntime-genai rather than relying on the process search path.
+  library_path = fs::path(Ort::GetCurrentModuleDir()) / kDefaultCudaPluginLibrary;
+#endif
+
+  try {
+    EnsureExecutionProviderLibraryRegistered(kCudaEpName, library_path);
+  } catch (const std::exception& e) {
+    Log("warning", std::string("Failed to register the bundled CUDA plugin EP library '") +
+                       library_path.string() + "': " + e.what() +
+                       ". Falling back to the provider-bridge CUDA EP.");
+  }
+}
+#endif  // ORTGENAI_REGISTER_BUNDLED_CUDA_PLUGIN_EP
 
 void AppendProviderBridgeExecutionProvider(
     OrtSessionOptions& session_options,
@@ -89,10 +137,19 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // sessions (vision, embedding, speech) should set enable_cuda_graph=0
   // in their own session_options in genai_config.json.
 
-  // Try pre-registered plugin path first
+#if defined(ORTGENAI_REGISTER_BUNDLED_CUDA_PLUGIN_EP)
+  // Bundled deployment (e.g. the onnxruntime-genai-cuda package): the plugin
+  // library ships next to libonnxruntime-genai, so genai registers that
+  // colocated file. No caller-side registration is required. Best-effort: if the
+  // library is missing, this falls back to the built-in CUDA EP below.
+  TryRegisterBundledCudaPluginEp();
+#endif
+
+  // Use the V2 path when the canonical CUDA EP has been registered as a plugin.
+  // Otherwise use the legacy provider bridge. Both implementations are named
+  // CUDAExecutionProvider and consume the same provider options.
   if (!AppendExecutionProviderV2(session_options, provider_options,
-                                 DeviceType::CUDA, "CUDAExecutionProvider")) {
-    // Register the CUDA execution provider as a provider-bridge provider.
+                                 DeviceType::CUDA, kCudaEpName)) {
     CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
         session_options, provider_options, device);
   }

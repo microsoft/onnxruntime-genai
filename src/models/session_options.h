@@ -30,6 +30,12 @@ bool AppendExecutionProviderV2(OrtSessionOptions& session_options,
 void AppendExecutionProviderV1(OrtSessionOptions& session_options,
                                const Config::ProviderOptions& provider_options);
 
+// Registers an execution provider plugin library with the global OrtEnv exactly once
+// per |registration_name|. Subsequent calls with the same name are no-ops, so this is
+// safe to call from every session-creation path (decoder, vision, allocator init, etc.).
+void EnsureExecutionProviderLibraryRegistered(const std::string& registration_name,
+                                              const fs::path& library_path);
+
 // Iterates over the requested providers, dispatches to provider-specific
 // AppendExecutionProvider implementations, and returns the DeviceInterface
 // for the first provider that supplies one (or nullptr if none do).

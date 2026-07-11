@@ -36,8 +36,9 @@ constexpr const char* kProviderSuffix = ".so";
 // Execution providers that can be loaded as plugin libraries at test time, mapped to the
 // platform-independent stem of their library file. The full file name is built as
 // "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".
-constexpr std::array<std::pair<std::string_view, std::string_view>, 1> kPluginEpLibraries = {{
+constexpr std::array<std::pair<std::string_view, std::string_view>, 2> kPluginEpLibraries = {{
     {"WebGpuExecutionProvider", "onnxruntime_providers_webgpu"},
+    {"CUDAExecutionProvider", "onnxruntime_providers_cuda"},
 }};
 
 // Builds the platform-specific plugin library file name for an EP library stem.
