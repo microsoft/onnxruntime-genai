@@ -405,6 +405,14 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.num_beams > 1 && params.config.model.vocab_size < 2)
     throw std::runtime_error("vocab_size (" + std::to_string(params.config.model.vocab_size) + ") must be 2 or greater when using beam search (num_beams=" + std::to_string(params.search.num_beams) + ")");
 
+  // eos_token_id values are used directly as indices into the per-token score
+  // row (of size vocab_size), e.g. in Search::ApplyMinLength. An out-of-range
+  // value would cause an out-of-bounds write, so reject it here.
+  for (auto eos_token_id : params.config.model.eos_token_id) {
+    if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
+      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
+  }
+
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used

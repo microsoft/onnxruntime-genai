@@ -28,7 +28,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
                                    0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   auto model = OgaModel::Create(*config);
   auto params = OgaGeneratorParams::Create(*model);
@@ -56,7 +56,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   int batch_size = 4;
 
@@ -102,6 +102,27 @@ TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
   }
 }
 
+// Regression test: an eos_token_id outside [0, vocab_size) must be rejected at
+// generator creation time instead of causing an out-of-bounds write in
+// Search_Cpu::ApplyMinLength (which uses eos_token_id as a score-row index).
+TEST(SamplingTests, EosTokenIdExceedsVocabSizeThrowsCpu) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 5 } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("min_length", 5);
+
+  try {
+    OgaGenerator::Create(*model, *params);
+    FAIL() << "Expected std::runtime_error for eos_token_id >= vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
 TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
@@ -110,7 +131,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   int batch_size = 4;
 
@@ -244,7 +265,7 @@ void Softmax(std::span<float> scores, float temperature) {
 void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_iter, float temperature, bool use_cuda) {
   // --- 1. Setup Model and Generator Parameters ---
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  std::string overlay_json = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
+  std::string overlay_json = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"(, "eos_token_id" : 0 } })";
   config->Overlay(overlay_json.c_str());
 
   if (use_cuda) {
@@ -506,7 +527,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -536,7 +557,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -569,7 +590,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -728,7 +749,7 @@ struct NvTensorRtRtxTestSetup {
 
     // Create config with vocab_size overlay
     auto config = OgaConfig::Create(resolved_path.c_str());
-    std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
+    std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"(, "eos_token_id" : 0 } })";
     config->Overlay(overlay.c_str());
     config->ClearProviders();
     config->AppendProvider("NvTensorRtRtx");
