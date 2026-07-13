@@ -1537,7 +1537,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 
-#if ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#if ORT_GENAI_HAS_MODEL_PACKAGE
 
 namespace Ort {
 
@@ -1547,25 +1547,32 @@ inline const ModelPackageApi& GetModelPackageApi() {
     if (api == nullptr) {
       return f;
     }
-    // Resolve each entry by name through OrtApi::GetExperimentalFunction. Member names match
-    // their function's suffix, so the name is "OrtModelPackageApi_<member>_SinceV28".
-#define ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(member) \
-  f.member = reinterpret_cast<decltype(f.member)>( \
-      api->GetExperimentalFunction("OrtModelPackageApi_" #member "_SinceV28"))
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(CreateModelPackageOptionsFromSessionOptions);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageOptions);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(CreateModelPackageContext);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageContext);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetComponentCount);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetComponentNames);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantCount);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantNames);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_GetVariantEpName);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackage_ResolveStringRef);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(SelectComponent);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ReleaseModelPackageComponentContext);
-    ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
-#undef ORT_GENAI_RESOLVE_MODEL_PACKAGE_FN
+    // Resolve OrtModelPackageApi entries via the C API to avoid including
+    // onnxruntime_experimental_cxx_api.h. That header defines the
+    // Ort::Experimental::Get_OrtModelPackageApi_*_SinceV28_Fn accessors but transitively
+    // pulls in onnxruntime_cxx_api.h, which redefines the Ort:: types that genai has
+    // vendored in onnxruntime_api.h.
+#define GENAI_MP_V28_FN(NAME)                                                \
+  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
+      api->GetExperimentalFunction(                                          \
+          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
+
+    f.CreateModelPackageOptionsFromSessionOptions = GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
+    f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
+    f.CreateModelPackageContext = GENAI_MP_V28_FN(CreateModelPackageContext);
+    f.ReleaseModelPackageContext = GENAI_MP_V28_FN(ReleaseModelPackageContext);
+    f.ModelPackage_GetComponentCount = GENAI_MP_V28_FN(ModelPackage_GetComponentCount);
+    f.ModelPackage_GetComponentNames = GENAI_MP_V28_FN(ModelPackage_GetComponentNames);
+    f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
+    f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
+    f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
+    f.ModelPackage_ResolveStringRef = GENAI_MP_V28_FN(ModelPackage_ResolveStringRef);
+    f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
+    f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
+    f.ModelPackageComponent_GetSelectedVariantFolderPath =
+        GENAI_MP_V28_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
+
+#undef GENAI_MP_V28_FN
     return f;
   }();
   if (fns.CreateModelPackageContext == nullptr) {
@@ -1644,4 +1651,4 @@ inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelected
   return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
 }
 
-#endif  // ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE

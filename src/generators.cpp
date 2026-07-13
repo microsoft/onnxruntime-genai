@@ -398,6 +398,20 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
+  // Beam search selects the top 2*num_beams (beam, token) candidates out of
+  // num_beams*vocab_size entries in BeamSearch_Cpu::SelectTop, which requires
+  // num_beams*vocab_size >= 2*num_beams, i.e. vocab_size >= 2. A smaller
+  // vocabulary would drive an out-of-bounds partial_sort.
+  if (params.search.num_beams > 1 && params.config.model.vocab_size < 2)
+    throw std::runtime_error("vocab_size (" + std::to_string(params.config.model.vocab_size) + ") must be 2 or greater when using beam search (num_beams=" + std::to_string(params.search.num_beams) + ")");
+
+  // eos_token_id values are used directly as indices into the per-token score
+  // row (of size vocab_size), e.g. in Search::ApplyMinLength. An out-of-range
+  // value would cause an out-of-bounds write, so reject it here.
+  for (auto eos_token_id : params.config.model.eos_token_id) {
+    if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
+      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
+  }
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
