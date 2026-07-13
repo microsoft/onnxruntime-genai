@@ -288,6 +288,23 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
+TEST(CAPITests, SequencesOutOfBoundsAccess) {
+  auto sequences = OgaSequences::Create();
+
+  std::vector<int32_t> tokens{100, 200, 300};
+  sequences->Append(tokens.data(), tokens.size());
+
+  ASSERT_EQ(sequences->Count(), 1u);
+  EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
+  EXPECT_NE(sequences->SequenceData(0), nullptr);
+
+  // Out-of-bounds indices must not read past the underlying storage.
+  EXPECT_EQ(sequences->SequenceCount(1), 0u);
+  EXPECT_EQ(sequences->SequenceData(1), nullptr);
+  EXPECT_EQ(sequences->SequenceCount(1000), 0u);
+  EXPECT_EQ(sequences->SequenceData(1000), nullptr);
+}
+
 TEST(CAPITests, MaxLength) {
   // Batch size 1 case
   std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
@@ -1121,6 +1138,77 @@ TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
 INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
+
+// Regression test: a top_k value larger than the model's vocab_size must be
+// rejected at generator creation time instead of triggering an out-of-bounds
+// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+TEST(CAPITests, TopKExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  // Chosen to sit well above typical vocabulary sizes (and above Phi-2's known
+  // vocab_size) so it reliably exceeds the model's vocab_size.
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test for the combined Top-K + Top-P sampling path.
+TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("top_p", 0.6f);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test: a GeneratorParams created from a model must keep that model
+// alive, so destroying the model handle before creating the generator does not
+// cause a use-after-free (GeneratorParams aliases the model-owned Config, and
+// Generator::Generator calls model.shared_from_this()).
+TEST(CAPITests, CreateGeneratorAfterDestroyModel) {
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(PHI2_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  ASSERT_NE(params, nullptr);
+
+  // Drop the external reference to the model by destroying its handle. Because
+  // params co-owns the underlying Model (and its Config) via shared ownership,
+  // the object itself stays alive, so dereferencing the raw model pointer below
+  // remains valid. This does NOT imply the handle is generally usable after
+  // OgaDestroyModel; it is valid here only because another owner keeps it alive.
+  OgaDestroyModel(model);
+
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+}
 
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
