@@ -2176,14 +2176,31 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
         # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...] for swiglu_fusion=1
-        raw_gate_up = mlp.experts.gate_up_proj
-        half = raw_gate_up.shape[1] // 2
-        interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+        is_nvfp4 = self.moe_attrs.get("quant_type") == "nvfp4"
+        gate_up_proj_global_scales = ""
+        down_proj_global_scales = ""
 
-        if op_type == "MoE":
+        if is_nvfp4:
+            # Consume the Model Optimizer NVFP4 experts directly (block-16 E2M1 weights,
+            # FP8-E4M3 block scales, per-expert FP32 global scale). No re-quantization.
+            self.moe_attrs["block_size"] = 16
+            gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
+            down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+            self.make_nvfp4_moe_initializers(
+                layer_id,
+                gate_up_proj_weight, gate_up_proj_scales, gate_up_proj_global_scales,
+                down_proj_weight, down_proj_scales, down_proj_global_scales,
+            )
+        elif op_type == "MoE":
+            raw_gate_up = mlp.experts.gate_up_proj
+            half = raw_gate_up.shape[1] // 2
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
             self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
             self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
         else:
+            raw_gate_up = mlp.experts.gate_up_proj
+            half = raw_gate_up.shape[1] // 2
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
             gate_up_qw_list, gate_up_sc_list = [], []
             down_qw_list, down_sc_list = [], []
             for i in range(self.moe_attrs["num_experts"]):
@@ -2214,6 +2231,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             weight2=down_proj_weight,
             scales2=down_proj_scales if op_type == "QMoE" else "",
             bias2=down_proj_bias,
+            global_scales1=gate_up_proj_global_scales,
+            global_scales2=down_proj_global_scales,
         )
 
         # --- Shared expert ---
@@ -2227,8 +2246,100 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
+    # ------------------------------------------------------------------
+    # NVFP4 (Model Optimizer) pre-quantized expert loading
+    # ------------------------------------------------------------------
+    def _nvfp4_snapshot_dir(self):
+        """Locate the source checkpoint directory (local dir or HF snapshot)."""
+        cached = getattr(self, "_nvfp4_snapshot_dir_cache", None)
+        if cached is not None:
+            return cached
+        from pathlib import Path
+
+        model_path = Path(self.model_name_or_path)
+        if model_path.is_dir():
+            self._nvfp4_snapshot_dir_cache = model_path
+            return model_path
+        from huggingface_hub import snapshot_download
+
+        self._nvfp4_snapshot_dir_cache = Path(
+            snapshot_download(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, local_files_only=True)
+        )
+        return self._nvfp4_snapshot_dir_cache
+
+    def _nvfp4_weight_map(self):
+        cached = getattr(self, "_nvfp4_weight_map_cache", "unset")
+        if cached != "unset":
+            return cached
+        import json
+
+        index_path = self._nvfp4_snapshot_dir() / "model.safetensors.index.json"
+        self._nvfp4_weight_map_cache = json.load(open(index_path))["weight_map"] if index_path.exists() else None
+        return self._nvfp4_weight_map_cache
+
+    def _load_nvfp4_tensor(self, tensor_name):
+        """Read a raw tensor from the source safetensors (bypasses transformers)."""
+        from safetensors import safe_open
+
+        snapshot_dir = self._nvfp4_snapshot_dir()
+        weight_map = self._nvfp4_weight_map()
+        handles = getattr(self, "_nvfp4_handles", None)
+        if handles is None:
+            handles = self._nvfp4_handles = {}
+            self._nvfp4_handle_keys = {}
+        files = [snapshot_dir / weight_map[tensor_name]] if weight_map is not None else sorted(snapshot_dir.glob("*.safetensors"))
+        for f in files:
+            key = str(f)
+            handle = handles.get(key)
+            if handle is None:
+                handle = handles[key] = safe_open(f, framework="pt", device="cpu")
+                self._nvfp4_handle_keys[key] = set(handle.keys())
+            if tensor_name in self._nvfp4_handle_keys[key]:
+                return handle.get_tensor(tensor_name)
+        raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
+
+    def make_nvfp4_moe_initializers(
+        self, layer_id,
+        gate_up_weight_name, gate_up_scales_name, gate_up_global_name,
+        down_weight_name, down_scales_name, down_global_name,
+    ):
+        """Emit QMoE NVFP4 initializers for all routed experts of one layer.
+
+        Reads the Model Optimizer per-expert tensors (``weight`` uint8 ``[N, K/2]``,
+        ``weight_scale`` e4m3 ``[N, K/16]``, ``weight_scale_2`` f32 scalar), repacks the
+        E2M1 codes into the CUDA QMoE ``[E, K, N/2]`` layout, and interleaves gate/up
+        along N for ``swiglu_fusion=1``. gate and up share one per-expert global scale.
+        """
+        num_experts = self.moe_attrs["num_experts"]
+        prefix = f"model.language_model.layers.{layer_id}.mlp.experts"
+
+        gate_up_qw, gate_up_sc, gate_up_g = [], [], []
+        down_qw, down_sc, down_g = [], [], []
+        for e in range(num_experts):
+            g_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight"))
+            u_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.up_proj.weight"))
+            inter = g_codes.shape[0]
+            fused_codes = torch.stack([g_codes, u_codes], dim=1).reshape(2 * inter, -1)  # [2*inter, K]
+            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))               # [K, inter]
+
+            g_sc = self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight_scale").view(torch.uint8)
+            u_sc = self._load_nvfp4_tensor(f"{prefix}.{e}.up_proj.weight_scale").view(torch.uint8)
+            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))   # [2*inter, K/16] e4m3 bytes
+            gate_up_g.append(float(self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight_scale_2").float().reshape(-1)[0]))
+
+            d_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight"))
+            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))                       # [inter, hidden/2]
+            down_sc.append(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight_scale").view(torch.uint8))
+            down_g.append(float(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight_scale_2").float().reshape(-1)[0]))
+
+        self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
+        self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_weight_name)
+        self.make_fp8e4m3_initializer(torch.stack(gate_up_sc, dim=0), gate_up_scales_name)
+        self.make_fp8e4m3_initializer(torch.stack(down_sc, dim=0), down_scales_name)
+        self.make_initializer(torch.tensor(gate_up_g, dtype=torch.float32), gate_up_global_name)
+        self.make_initializer(torch.tensor(down_g, dtype=torch.float32), down_global_name)
+
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        """Build shared expert SiLU-MLP with sigmoid gating."""
         basename = f"/model/layers.{layer_id}/shared_expert"
 
         gate_matmul = self.make_matmul(shared_expert.gate_proj, f"{basename}/gate_proj/MatMul", root_input)
@@ -2244,7 +2355,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                       dtype=self.io_dtype,
                       shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
 
-        gate_up_mul_name = f"{basename}/Mul"
+        gate_up_mul_name = f"{basename}/gate_up/Mul"
         self.make_mul(gate_up_mul_name,
                       [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
                       dtype=self.io_dtype,
