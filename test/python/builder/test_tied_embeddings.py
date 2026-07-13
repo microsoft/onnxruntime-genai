@@ -494,7 +494,7 @@ def test_int4_matmul_uses_float_fallback_when_model_not_already_quantized():
     model = _make_minimal_model_for_int4_matmul()
 
     matmul = types.SimpleNamespace(weight=object())
-    result = model.make_matmul_int4(matmul, "/lm_head/MatMul", "hidden_states")
+    result = model.make_matmul_nbits(matmul, "/lm_head/MatMul", "hidden_states")
 
     assert result == "float_fallback"
     assert model._float_called is True
@@ -514,7 +514,7 @@ def test_int4_matmul_emits_matmul_nbits_when_model_already_quantized():
         in_features=64,
         out_features=128,
     )
-    result = model.make_matmul_int4(matmul, "/lm_head/MatMul", "hidden_states")
+    result = model.make_matmul_nbits(matmul, "/lm_head/MatMul", "hidden_states")
 
     assert result == "/lm_head/MatMulNBits"
     assert model._float_called is False

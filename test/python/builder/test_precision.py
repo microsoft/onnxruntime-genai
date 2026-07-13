@@ -89,7 +89,8 @@ def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
 
 
 # ---------------------------------------------------------------------------
-# int8's INT8/UINT8 onnx_dtype routes to the float MatMul builders.
+# int8's INT8/UINT8 onnx_dtype routes through the MatMulNBits builders, which
+# fall back to a float MatMul when the source model is not already quantized.
 # ---------------------------------------------------------------------------
 
 
@@ -101,7 +102,7 @@ def _make_bare_model(onnx_dtype, quant_attrs=None):
 
 
 @pytest.mark.parametrize("onnx_dtype", [ir.DataType.INT8, ir.DataType.UINT8])
-def test_make_matmul_op_float_path_for_int8_dtype(monkeypatch, onnx_dtype):
+def test_make_matmul_op_int8_falls_back_to_float_when_not_quantized(monkeypatch, onnx_dtype):
     model = _make_bare_model(onnx_dtype)
     sentinel = object()
     monkeypatch.setattr(model, "make_matmul_float", lambda *a, **k: sentinel)
@@ -110,7 +111,7 @@ def test_make_matmul_op_float_path_for_int8_dtype(monkeypatch, onnx_dtype):
 
 
 @pytest.mark.parametrize("onnx_dtype", [ir.DataType.INT8, ir.DataType.UINT8])
-def test_make_packed_matmul_float_path_for_int8_dtype(monkeypatch, onnx_dtype):
+def test_make_packed_matmul_int8_falls_back_to_float_when_not_quantized(monkeypatch, onnx_dtype):
     model = _make_bare_model(onnx_dtype)
     sentinel = object()
     monkeypatch.setattr(model, "make_packed_matmul_float", lambda *a, **k: sentinel)
