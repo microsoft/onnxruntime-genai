@@ -55,6 +55,7 @@ struct Memory : DeviceBuffer {
 
   bool owned_;
 };
+
 struct Interface : RyzenAIInterface {
   Interface(OrtEnv& env) : env_{env} {
 #if defined(_WIN32)
@@ -128,6 +129,11 @@ struct Interface : RyzenAIInterface {
   }
 
   ~Interface() {
+    // Clear the process-global allocator pointer so a subsequent re-init (new interface on a fresh
+    // env) starts from a clean state: InitOrt()'s assert holds again and no Memory allocation can
+    // dangle against this env's now-destroyed session allocator.
+    ort_allocator_ = nullptr;
+
     // TODO: make it linux compatible
 #if defined(_WIN32)
     // Only shut the EP down if genai loaded the module. If it was already resident when this interface

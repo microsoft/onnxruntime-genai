@@ -77,6 +77,11 @@ OrtGlobals::OrtGlobals()
 // The single genai global. Lazily (re)created by GetOrtGlobals() and reset by Shutdown(), so that
 // genai can be torn down and re-initialized in-process (e.g. a host recreating its wrapper).
 static std::unique_ptr<OrtGlobals> g_ort_globals;
+// Guards lazy (re)creation and teardown of g_ort_globals so concurrent first-use (or first-use
+// after a shutdown) cannot double-construct the globals, and a concurrent Shutdown() cannot race
+// creation. Re-init after shutdown must remain possible, so this is a plain mutex rather than
+// std::call_once (which is process-once).
+static std::mutex g_ort_globals_mutex;
 // Set by the process-exit EnsureShutdown destructor to prevent GetOrtGlobals() from resurrecting
 // the globals during static destruction.
 static bool g_process_exiting = false;
@@ -94,14 +99,11 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   // Registered once; its destructor runs at process exit (before g_ort_globals is destroyed) and
   // performs the final Shutdown().
   static EnsureShutdown ensure_shutdown;
-  // Guard lazy (re)creation so concurrent first-use (or first-use after a shutdown) cannot
-  // double-construct the globals. Re-init after shutdown must remain possible, so this is a plain
-  // mutex rather than std::call_once (which is process-once). The OrtGlobals constructor does not
-  // re-enter GetOrtGlobals() (it bootstraps the CPU interface via the OrtGlobals member accessor),
-  // so acquiring this lock here cannot deadlock. The lock is released before the returned
-  // reference is dereferenced by callers, so it does not nest with device_interfaces_mutex_.
-  static std::mutex creation_mutex;
-  std::scoped_lock lock{creation_mutex};
+  // The OrtGlobals constructor does not re-enter GetOrtGlobals() (it bootstraps the CPU interface
+  // via the OrtGlobals member accessor), so acquiring this lock here cannot deadlock. The lock is
+  // released before the returned reference is dereferenced by callers, so it does not nest with
+  // device_interfaces_mutex_.
+  std::scoped_lock lock{g_ort_globals_mutex};
   if (!g_ort_globals && !g_process_exiting)
     g_ort_globals = std::make_unique<OrtGlobals>();
 
@@ -137,9 +139,12 @@ void Shutdown() {
     std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
   }
 
-  // Delete now because on process exit is too late. ~OrtGlobals tears down the device interfaces
-  // (including the RyzenAI EP shutdown) and unloads the genai add-on libraries.
-  GetOrtGlobals().reset();
+  // Reset g_ort_globals directly (rather than through GetOrtGlobals(), which would lazily construct
+  // the globals just to immediately tear them down). If genai was never initialized there is nothing
+  // to do. Delete now because on process exit is too late. ~OrtGlobals tears down the device
+  // interfaces (including the RyzenAI EP shutdown) and unloads the genai add-on libraries.
+  std::scoped_lock lock{g_ort_globals_mutex};
+  g_ort_globals.reset();
 }
 
 OrtEnv& GetOrtEnv() {

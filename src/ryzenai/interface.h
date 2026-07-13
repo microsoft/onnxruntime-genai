@@ -2,6 +2,11 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace Generators {
 
 // Note: memory allocated through RyzenAI interface is host/cpu accessible
