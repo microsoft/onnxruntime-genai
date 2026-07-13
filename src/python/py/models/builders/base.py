@@ -285,11 +285,8 @@ class Model:
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
         }
 
-        # int8 precision requests 8-bit weight-only quantization; INT4/UINT4 onnx_dtype forces 4-bit.
-        quantize_to_8bits = (
-            bool(extra_options.get("use_8bit_matmul_weights", False))
-            and self.onnx_dtype not in {ir.DataType.INT4, ir.DataType.UINT4}
-        )
+        # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes weights to 8-bit at save time.
+        quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
 
         # MoE-specific variables
         moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
@@ -523,8 +520,8 @@ class Model:
 
         # Determine if embeddings and lm_head will be quantized or not.
         # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
-        # The lm_head MatMul is quantized for INT4/UINT4 or for int8 precision (bits == 8).
-        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} or self.quant_attrs["bits"] == 8
+        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
+        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
             self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
@@ -813,7 +810,7 @@ class Model:
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
-        if (self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} or self.quant_attrs["bits"] == 8) and not already_quantized_in_qdq_format:
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
             model = self.to_nbits()
         else:
             model = self.model
@@ -1179,8 +1176,8 @@ class Model:
             # For regular `MatMul`
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
-    def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
+    def make_matmul_op(self, matmul, basename, root_input, **kwargs):        # INT8/UINT8 build a float graph and are quantized to 8-bit MatMulNBits at save time.
+        if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT, ir.DataType.INT8, ir.DataType.UINT8}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             if self.quant_attrs["use_qdq"]:
@@ -1369,7 +1366,7 @@ class Model:
         return add_name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
+        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.INT8, ir.DataType.UINT8}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
@@ -1377,7 +1374,7 @@ class Model:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
     def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
-        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
+        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.INT8, ir.DataType.UINT8}:
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)

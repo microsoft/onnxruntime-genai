@@ -57,7 +57,7 @@ from transformers import (
 )
 
 
-def check_extra_options(kv_pairs, execution_provider):
+def check_extra_options(kv_pairs, precision, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
@@ -111,8 +111,12 @@ def check_extra_options(kv_pairs, execution_provider):
         )
         kv_pairs["enable_webgpu_graph"] = False
 
+    if precision == "int8" and kv_pairs.get("use_qdq", False):
+        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
+        raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
-def parse_extra_options(kv_items, execution_provider):
+
+def parse_extra_options(kv_items, precision, execution_provider):
     """
     Parse key-value pairs that are separated by '='
     """
@@ -124,7 +128,7 @@ def parse_extra_options(kv_items, execution_provider):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs, execution_provider)
+    check_extra_options(kv_pairs, precision, execution_provider)
     return kv_pairs
 
 
@@ -146,11 +150,11 @@ def parse_hf_token(hf_token):
 
 
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
-    int4_cpu = precision == "int4" and execution_provider == "cpu"
+    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
     bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
-    if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
+    if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
         return ir.DataType.FLOAT
 
@@ -167,8 +171,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
         return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
 
     if precision == "int8":
-        # int8 keeps FP32 weights; 8-bit quantization happens in the final MatMulNBits pass.
-        return ir.DataType.FLOAT
+        return ir.DataType.INT8 if extra_options.get("is_symmetric", True) else ir.DataType.UINT8
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -222,11 +225,6 @@ def create_model(
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
     config_only = "config_only" in extra_options
-
-    if precision == "int8":
-        if extra_options.get("use_qdq", False):
-            raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
-        extra_options["use_8bit_matmul_weights"] = True
 
     # List architecture options in alphabetical order
     if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
@@ -404,7 +402,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4/INT8 WebGPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU, INT8 WebGPU)",
     )
 
     parser.add_argument(
@@ -516,7 +514,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    extra_options = parse_extra_options(args.extra_options, args.execution_provider)
+    extra_options = parse_extra_options(args.extra_options, args.precision, args.execution_provider)
     create_model(
         args.model_name,
         args.input,

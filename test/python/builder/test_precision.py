@@ -49,15 +49,19 @@ Model = base_module.Model
 
 
 # ---------------------------------------------------------------------------
-# int8 keeps FP32 weights + I/O so graph construction avoids the INT8/UINT8
-# `NotImplementedError` branches.
+# int8 precision maps onnx_dtype to INT8/UINT8 (like int4 -> INT4/UINT4).
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("is_symmetric", [True, False, None])
-def test_int8_onnx_dtype_stays_float(is_symmetric):
-    extra_options = {} if is_symmetric is None else {"is_symmetric": is_symmetric}
-    assert builder_module.set_onnx_dtype("int8", extra_options) == ir.DataType.FLOAT
+@pytest.mark.parametrize(
+    "is_symmetric, expected",
+    [
+        (True, ir.DataType.INT8),
+        (False, ir.DataType.UINT8),
+    ],
+)
+def test_int8_onnx_dtype_is_int8(is_symmetric, expected):
+    assert builder_module.set_onnx_dtype("int8", {"is_symmetric": is_symmetric}) == expected
 
 
 @pytest.mark.parametrize(
@@ -71,12 +75,21 @@ def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
     assert builder_module.set_onnx_dtype("int4", {"is_symmetric": is_symmetric}) == expected
 
 
-def test_int8_io_dtype_is_fp32():
-    assert builder_module.set_io_dtype("int8", "cpu", {}) == ir.DataType.FLOAT
+@pytest.mark.parametrize(
+    "execution_provider, expected",
+    [
+        ("cpu", ir.DataType.FLOAT),
+        ("cuda", ir.DataType.FLOAT16),
+        ("webgpu", ir.DataType.FLOAT16),
+    ],
+)
+def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
+    # int8 must not assume FP32 I/O: GPU/WebGPU use FP16, only CPU uses FP32.
+    assert builder_module.set_io_dtype("int8", execution_provider, {}) == expected
 
 
 # ---------------------------------------------------------------------------
-# int8's FP32 onnx_dtype routes to the float MatMul builders (no NotImplementedError).
+# int8's INT8/UINT8 onnx_dtype routes to the float MatMul builders.
 # ---------------------------------------------------------------------------
 
 
@@ -87,16 +100,18 @@ def _make_bare_model(onnx_dtype, quant_attrs=None):
     return model
 
 
-def test_make_matmul_op_float_path_for_int8_dtype(monkeypatch):
-    model = _make_bare_model(ir.DataType.FLOAT)
+@pytest.mark.parametrize("onnx_dtype", [ir.DataType.INT8, ir.DataType.UINT8])
+def test_make_matmul_op_float_path_for_int8_dtype(monkeypatch, onnx_dtype):
+    model = _make_bare_model(onnx_dtype)
     sentinel = object()
     monkeypatch.setattr(model, "make_matmul_float", lambda *a, **k: sentinel)
 
     assert model.make_matmul_op(object(), "/lm_head/MatMul", "root") is sentinel
 
 
-def test_make_packed_matmul_float_path_for_int8_dtype(monkeypatch):
-    model = _make_bare_model(ir.DataType.FLOAT)
+@pytest.mark.parametrize("onnx_dtype", [ir.DataType.INT8, ir.DataType.UINT8])
+def test_make_packed_matmul_float_path_for_int8_dtype(monkeypatch, onnx_dtype):
+    model = _make_bare_model(onnx_dtype)
     sentinel = object()
     monkeypatch.setattr(model, "make_packed_matmul_float", lambda *a, **k: sentinel)
 
@@ -155,18 +170,12 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
 # ---------------------------------------------------------------------------
 
 
-def test_int8_with_qdq_is_rejected(monkeypatch):
-    config = types.SimpleNamespace(architectures=["LlamaForCausalLM"])
-    monkeypatch.setattr(builder_module.AutoConfig, "from_pretrained", lambda *a, **k: config)
-
+def test_int8_with_qdq_is_rejected():
     with pytest.raises(NotImplementedError, match="QDQ"):
-        builder_module.create_model(
-            model_name="dummy",
-            input_path="",
-            output_dir=".",
-            precision="int8",
-            execution_provider="cpu",
-            cache_dir=".",
-            use_qdq=True,
-        )
+        builder_module.check_extra_options({"use_qdq": "true"}, "int8", "cpu")
+
+
+def test_int4_with_qdq_is_allowed():
+    # QDQ is only rejected for int8; int4 still supports it.
+    builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
 
