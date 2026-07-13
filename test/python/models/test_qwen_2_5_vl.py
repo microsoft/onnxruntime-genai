@@ -120,7 +120,7 @@ def ort_io_binding_helper(
     sess.run_with_iobinding(bind)
 
 
-def test_parity(
+def run_parity(
     hf_model_name: str,
     cache_dir: str,
     onnx_model_path: str,
@@ -405,7 +405,7 @@ if __name__ == "__main__":
         print("Warning: CPU testing with IOBinding is not set up. Forcing GPU.")
         # This script is now GPU-only
 
-    test_parity(
+    run_parity(
         hf_model_name=args.hf_model,
         cache_dir=args.cache_dir,
         onnx_model_path=args.onnx_model,

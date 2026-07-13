@@ -246,7 +246,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGPU";
-    case DeviceType::QNN:
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
@@ -273,8 +274,9 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
 #endif
     case DeviceType::WEBGPU:
       return GetWebGPUInterface();
-    case DeviceType::QNN:
-      return GetQNNInterface();
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
+      return GetQNNInterface(type);
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
     case DeviceType::RyzenAI:
@@ -288,7 +290,8 @@ GeneratorParams::GeneratorParams(const Config& config)
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
-    : config{*model.config_.get()},
+    : model_{model.shared_from_this()},
+      config{*model_->config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_scoring_} {
@@ -396,6 +399,20 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
+  // Beam search selects the top 2*num_beams (beam, token) candidates out of
+  // num_beams*vocab_size entries in BeamSearch_Cpu::SelectTop, which requires
+  // num_beams*vocab_size >= 2*num_beams, i.e. vocab_size >= 2. A smaller
+  // vocabulary would drive an out-of-bounds partial_sort.
+  if (params.search.num_beams > 1 && params.config.model.vocab_size < 2)
+    throw std::runtime_error("vocab_size (" + std::to_string(params.config.model.vocab_size) + ") must be 2 or greater when using beam search (num_beams=" + std::to_string(params.search.num_beams) + ")");
+
+  // eos_token_id values are used directly as indices into the per-token score
+  // row (of size vocab_size), e.g. in Search::ApplyMinLength. An out-of-range
+  // value would cause an out-of-bounds write, so reject it here.
+  for (auto eos_token_id : params.config.model.eos_token_id) {
+    if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
+      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
+  }
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state

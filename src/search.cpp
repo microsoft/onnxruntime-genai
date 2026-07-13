@@ -118,7 +118,12 @@ void BeamSearch_Cpu::SelectTop() {
   // Use partial_sort to find only the top 2*num_beams elements per batch,
   // instead of heapifying the entire vocab*beams array via priority_queue.
   const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
-  assert(total_elements >= top_k);
+  // Defense-in-depth: a plain assert() is compiled out under NDEBUG (release
+  // builds), so enforce the invariant that partial_sort relies on at runtime.
+  // This is normally guaranteed by the vocab_size >= 2 validation for beam
+  // search in Generator::Generator.
+  if (total_elements < top_k)
+    throw std::runtime_error("Beam search requires num_beams * vocab_size (" + std::to_string(total_elements) + ") to be at least 2 * num_beams (" + std::to_string(top_k) + "); vocab_size is too small");
 
   // Reuse class member to avoid re-allocating on every call (size is constant).
   select_top_idx_.resize(total_elements);

@@ -661,6 +661,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& DisablePerSessionThreads();  ///< Wraps OrtApi::DisablePerSessionThreads
 
   OrtSessionOptions& AddConfigEntry(const char* config_key, const char* config_value);                                                          ///< Wraps OrtApi::AddSessionConfigEntry
+  bool HasConfigEntry(const char* config_key) const;                                                                                            ///< Wraps OrtApi::HasSessionConfigEntry
   OrtSessionOptions& AddInitializer(const char* name, const OrtValue& ort_val);                                                                 ///< Wraps OrtApi::AddInitializer
   OrtSessionOptions& AddExternalInitializers(const std::vector<std::string>& names, const std::vector<std::unique_ptr<OrtValue>>& ort_values);  ///< Wraps OrtApi::AddExternalInitializers
 
@@ -1514,6 +1515,8 @@ struct ModelPackageApi {
       ModelPackage_GetVariantNames{nullptr};
   OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
       ModelPackage_GetVariantEpName{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn
+      ModelPackage_ResolveStringRef{nullptr};
   OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
       SelectComponent{nullptr};
   OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
@@ -1555,6 +1558,14 @@ struct OrtModelPackageContext {
   /// Returns the EP name declared for a (component, variant) pair, or an empty string when
   /// the variant does not declare an EP.
   std::string GetVariantEpName(const char* component_name, const char* variant_name) const;
+
+  /// Resolves a path reference from the package to an on-disk path using the model_package
+  /// rules: a "sha256:<hex>[/tail]" content-addressed shared-asset reference (honoring
+  /// manifest overrides), or a plain relative path resolved against `base_dir` (empty
+  /// base_dir falls back to the package root). When `must_exist` is true the resolved path
+  /// must exist on disk.
+  std::string ResolveStringRef(const std::string& base_dir, const std::string& input,
+                               bool must_exist) const;
 
   std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(
       const char* component_name, const OrtModelPackageOptions& options) const;
