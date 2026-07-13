@@ -5,9 +5,10 @@
 """Benchmark n-gram speculative decoding locally or in ep-cert.
 
 Compares standard greedy decoding with model-free n-gram speculative decoding
-on identical prompts. The script reuses the model resolution, MT-Bench dataset
-loading, chat-template handling, and local-build import logic from
-benchmark_speculative.py, but requires only one target model.
+on identical prompts. MT-Bench measures broad speed behavior, while optional
+GSM8K and HumanEval suites add task-level accuracy and pass@1 measurements.
+The script reuses model resolution, chat-template handling, and local-build
+import logic from benchmark_speculative.py, but requires only one target model.
 
 Examples:
     # Quick Qwen3-4B CPU smoke test with the bundled prompts.
@@ -19,6 +20,11 @@ Examples:
         --tasks coding,extraction,math --limit-per-task 2 \
         --ngram-size 2,3,4 --k 2,4,8 --max-new-tokens 64 --reps 2
 
+    # Add GSM8K accuracy and HumanEval pass@1 to the MT-Bench run.
+    python benchmark_ngram.py --model 4b \
+        --suites mtbench,gsm8k,humaneval --gsm8k-problems 50 \
+        --humaneval-problems 20 --max-new-tokens 512 --allow-code-execution
+
 Run ``benchmark_ngram.py -h`` for all options.
 """
 from __future__ import annotations
@@ -29,13 +35,39 @@ import gc
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 import benchmark_speculative as common
+
+
+GSM8K_URL = (
+    "https://raw.githubusercontent.com/openai/grade-school-math/master/"
+    "grade_school_math/data/test.jsonl"
+)
+GSM8K_FEW_SHOT_EXAMPLES = """Question: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?
+Answer: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. #### 6
+
+Question: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?
+Answer: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. #### 5
+
+Question: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?
+Answer: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. #### 39
+
+Question: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?
+Answer: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. #### 8
+
+Question: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?
+Answer: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 2 + 2 = 4 more toys. 5 + 4 = 9. #### 9
+
+"""
+SUPPORTED_SUITES = {"mtbench", "gsm8k", "humaneval"}
 
 
 class ProcessMemoryMonitor:
@@ -89,6 +121,213 @@ def parse_int_list(parser, value, name, minimum, maximum):
         if not minimum <= item <= maximum:
             parser.error(f"{name} value {item} is outside [{minimum}, {maximum}]")
     return values
+
+
+def parse_suites(parser, value):
+    suites = [item.strip().lower() for item in value.split(",") if item.strip()]
+    if not suites:
+        parser.error("--suites must contain at least one suite")
+    unknown = sorted(set(suites) - SUPPORTED_SUITES)
+    if unknown:
+        parser.error(
+            f"--suites contains unsupported values: {', '.join(unknown)}; "
+            f"choose from {', '.join(sorted(SUPPORTED_SUITES))}"
+        )
+    return list(dict.fromkeys(suites))
+
+
+def extract_gsm8k_answer(text):
+    match = re.search(r"####\s*([+-]?[\d,]+\.?\d*)", text)
+    if match:
+        return match.group(1).replace(",", "")
+    match = re.search(
+        r"(?:the answer is|answer:|= )\s*\$?([+-]?[\d,]+\.?\d*)",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).replace(",", "")
+    numbers = re.findall(r"[+-]?\d[\d,]*\.?\d*", text)
+    return numbers[-1].replace(",", "") if numbers else None
+
+
+def gsm8k_answers_equal(prediction, reference):
+    if prediction is None:
+        return False
+    try:
+        return Decimal(prediction) == Decimal(reference)
+    except InvalidOperation:
+        return False
+
+
+def load_gsm8k_prompts(dataset_path, max_problems):
+    if not os.path.exists(dataset_path):
+        os.makedirs(os.path.dirname(os.path.abspath(dataset_path)), exist_ok=True)
+        print(f"Downloading GSM8K to {dataset_path} ...")
+        urllib.request.urlretrieve(GSM8K_URL, dataset_path)
+
+    examples = []
+    with open(dataset_path, encoding="utf-8") as file:
+        for index, line in enumerate(file):
+            example = json.loads(line)
+            ground_truth = extract_gsm8k_answer(example["answer"])
+            if ground_truth is None:
+                raise ValueError(f"GSM8K item {index} has no ground-truth answer")
+            examples.append({
+                "task": "gsm8k",
+                "subcategory": "math_reasoning",
+                "question_id": index,
+                "text": (
+                    f"{GSM8K_FEW_SHOT_EXAMPLES}Question: "
+                    f"{example['question']}\nAnswer:"
+                ),
+                "raw_prompt": True,
+                "quality_metric": "accuracy",
+                "reference_answer": ground_truth,
+            })
+            if max_problems and len(examples) >= max_problems:
+                break
+    return examples
+
+
+def load_humaneval_prompts(max_problems):
+    try:
+        from human_eval.data import read_problems
+    except ImportError as error:
+        raise RuntimeError(
+            "HumanEval requires the 'human-eval' package. "
+            "Install it with `pip install human-eval`."
+        ) from error
+
+    prompts = []
+    for task_id, problem in read_problems().items():
+        prompts.append({
+            "task": "humaneval",
+            "subcategory": "coding",
+            "question_id": task_id,
+            "text": problem["prompt"],
+            "raw_prompt": True,
+            "quality_metric": "pass@1",
+            "humaneval_problem": problem,
+        })
+        if max_problems and len(prompts) >= max_problems:
+            break
+    return prompts
+
+
+def trim_humaneval_completion(completion):
+    for stop in ("\nclass ", "\ndef ", "\n#", "\nif __name__", "\nprint(", "\n```"):
+        index = completion.find(stop)
+        if index != -1:
+            completion = completion[:index]
+    return completion
+
+
+def _execute_humaneval(problem, completion, connection):
+    from human_eval.execution import create_tempdir, reliability_guard, swallow_io
+
+    try:
+        with create_tempdir():
+            import shutil
+
+            rmtree = shutil.rmtree
+            rmdir = os.rmdir
+            chdir = os.chdir
+            reliability_guard()
+            check_program = (
+                problem["prompt"]
+                + completion
+                + "\n"
+                + problem["test"]
+                + "\n"
+                + f"check({problem['entry_point']})"
+            )
+            try:
+                with swallow_io():
+                    exec(check_program, {})
+                result = "passed"
+            except BaseException as error:
+                result = f"failed: {error}"
+            finally:
+                shutil.rmtree = rmtree
+                os.rmdir = rmdir
+                os.chdir = chdir
+        connection.send(result)
+    except BaseException as error:
+        connection.send(f"failed: {error}")
+    finally:
+        connection.close()
+
+
+def check_humaneval_correctness(problem, completion, timeout):
+    import multiprocessing
+
+    receive, send = multiprocessing.Pipe(duplex=False)
+    process = multiprocessing.Process(
+        target=_execute_humaneval,
+        args=(problem, completion, send),
+    )
+    process.start()
+    send.close()
+    process.join(timeout)
+    if process.is_alive():
+        process.kill()
+        process.join()
+        result = "timed out"
+    elif receive.poll():
+        result = receive.recv()
+    else:
+        result = f"failed: evaluator process exited with code {process.exitcode}"
+    receive.close()
+    return {
+        "task_id": problem["task_id"],
+        "passed": result == "passed",
+        "result": result,
+    }
+
+
+def score_completion(item, token_ids, timeout, cache, decode):
+    metric = item.get("quality_metric")
+    if not metric:
+        return {
+            "quality_metric": "",
+            "quality_score": "",
+            "quality_prediction": "",
+            "quality_detail": "",
+        }
+
+    cache_key = (item["task"], str(item["question_id"]), tuple(token_ids))
+    if cache_key in cache:
+        return cache[cache_key]
+
+    completion = decode(token_ids)
+    if metric == "accuracy":
+        prediction = extract_gsm8k_answer(completion)
+        result = {
+            "quality_metric": metric,
+            "quality_score": gsm8k_answers_equal(
+                prediction, item["reference_answer"]
+            ),
+            "quality_prediction": prediction or "",
+            "quality_detail": "",
+        }
+    elif metric == "pass@1":
+        outcome = check_humaneval_correctness(
+            item["humaneval_problem"],
+            trim_humaneval_completion(completion),
+            timeout,
+        )
+        result = {
+            "quality_metric": metric,
+            "quality_score": bool(outcome["passed"]),
+            "quality_prediction": "",
+            "quality_detail": outcome["result"],
+        }
+    else:
+        raise ValueError(f"Unsupported quality metric: {metric}")
+
+    cache[cache_key] = result
+    return result
 
 
 def run_once(og, model, token_ids, max_new_tokens, ngram_size=0, max_draft_tokens=0):
@@ -162,6 +401,10 @@ CSV_COLUMNS = [
     "task",
     "subcategory",
     "question_id",
+    "quality_metric",
+    "quality_score",
+    "quality_prediction",
+    "quality_detail",
     "prompt_id",
     "rep",
     "decoder",
@@ -325,6 +568,50 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
 
     print("\n* Input-guided task: prompt reuse can increase n-gram proposal coverage.")
     print("Exact must be 100% for every supported deterministic greedy configuration.")
+
+    quality_tasks = list(dict.fromkeys(
+        row["task"] for row in rows
+        if row["quality_metric"] and row["rep"] == 0
+    ))
+    if quality_tasks:
+        print("\nTask quality (first deterministic repetition)")
+        print(f"  {'task':18}{'metric':>12}{'standard':>12}" + "".join(
+            f"{f'n={n}/K={k}':>12}" for n in ngram_sizes for k in draft_lengths
+        ))
+        for task in quality_tasks:
+            task_rows = [
+                row for row in rows
+                if row["task"] == task and row["rep"] == 0
+            ]
+            metric = next(row["quality_metric"] for row in task_rows)
+            baseline_scores = [
+                bool(row["quality_score"]) for row in task_rows
+                if row["decoder"] == "standard"
+            ]
+            baseline = (
+                sum(baseline_scores) / len(baseline_scores)
+                if baseline_scores else None
+            )
+            cells = []
+            for ngram_size in ngram_sizes:
+                for max_draft_tokens in draft_lengths:
+                    config_scores = [
+                        bool(row["quality_score"]) for row in task_rows
+                        if row["decoder"] == "ngram"
+                        and row["ngram_size"] == ngram_size
+                        and row["K"] == max_draft_tokens
+                    ]
+                    score = (
+                        sum(config_scores) / len(config_scores)
+                        if config_scores else None
+                    )
+                    cells.append(
+                        f"{score:>11.1%} " if score is not None else f"{'-':>12}"
+                    )
+            baseline_text = (
+                f"{baseline:>11.1%} " if baseline is not None else f"{'-':>12}"
+            )
+            print(f"  {task:18}{metric:>12}{baseline_text}{''.join(cells)}")
     print("=" * width)
 
 
@@ -361,6 +648,11 @@ def main():
                         help="measured repetitions per prompt/configuration")
     parser.add_argument("--warmup", type=int, default=1,
                         help="warmup generations per decoder configuration")
+    parser.add_argument(
+        "--suites",
+        default="mtbench",
+        help="comma-separated suites: mtbench,gsm8k,humaneval",
+    )
 
     default_dataset = os.path.join(here, "question.jsonl")
     parser.add_argument(
@@ -395,6 +687,34 @@ def main():
                         help="skip the model chat template")
     parser.add_argument("--think", action="store_true",
                         help="enable Qwen3 reasoning; default uses concise no-think mode")
+    parser.add_argument(
+        "--gsm8k-path",
+        default=os.path.join(here, ".cache", "gsm8k_test.jsonl"),
+        help="GSM8K test JSONL path; downloaded from the official repository if absent",
+    )
+    parser.add_argument(
+        "--gsm8k-problems",
+        type=int,
+        default=200,
+        help="number of GSM8K problems; 0 uses the full 1,319-problem test set",
+    )
+    parser.add_argument(
+        "--humaneval-problems",
+        type=int,
+        default=164,
+        help="number of HumanEval problems; 0 uses all 164",
+    )
+    parser.add_argument(
+        "--humaneval-timeout",
+        type=float,
+        default=3.0,
+        help="per-problem HumanEval execution timeout in seconds",
+    )
+    parser.add_argument(
+        "--allow-code-execution",
+        action="store_true",
+        help="required for HumanEval; executes generated Python in human-eval's guard",
+    )
     parser.add_argument("--use-installed", action="store_true",
                         help="use installed onnxruntime-genai instead of the local build")
     parser.add_argument(
@@ -445,6 +765,30 @@ def main():
         parser.error("--reps must be positive")
     if args.warmup < 0:
         parser.error("--warmup cannot be negative")
+    if args.gsm8k_problems < 0:
+        parser.error("--gsm8k-problems cannot be negative")
+    if args.humaneval_problems < 0:
+        parser.error("--humaneval-problems cannot be negative")
+    if args.humaneval_timeout <= 0:
+        parser.error("--humaneval-timeout must be positive")
+    suites = parse_suites(parser, args.suites)
+    if "humaneval" in suites and not args.allow_code_execution:
+        parser.error(
+            "HumanEval executes generated Python. Pass --allow-code-execution "
+            "only on an isolated machine or container."
+        )
+    if {"gsm8k", "humaneval"} & set(suites) and args.max_new_tokens < 512:
+        print(
+            "WARNING: GSM8K/HumanEval reference evaluations use "
+            "--max-new-tokens 512; shorter outputs can understate quality.",
+            file=sys.stderr,
+        )
+    if "humaneval" in suites:
+        print(
+            "WARNING: human-eval's reliability guard is not a security sandbox. "
+            "Run generated code only on an isolated, disposable machine.",
+            file=sys.stderr,
+        )
     ngram_sizes = parse_int_list(
         parser, args.ngram_size, "--ngram-size", 2, 16
     )
@@ -461,21 +805,32 @@ def main():
         or provider in common._WINML_PLUGIN_EPS and not args.ep_library_path
     )
 
-    if args.dataset and not args.builtin:
-        task_filter = (
-            {task.strip() for task in args.tasks.split(",") if task.strip()}
-            if args.tasks else None
+    prompt_items = []
+    if "mtbench" in suites:
+        if args.dataset and not args.builtin:
+            task_filter = (
+                {task.strip() for task in args.tasks.split(",") if task.strip()}
+                if args.tasks else None
+            )
+            mtbench_items = common.load_dataset_prompts(
+                args.dataset,
+                task_filter,
+                args.limit_per_task,
+                mt_bench_by_subcategory=args.by_category,
+            )
+            if not mtbench_items:
+                parser.error("no prompts matched --dataset/--tasks")
+            prompt_items.extend(mtbench_items)
+        else:
+            prompt_items.extend(common.builtin_prompts(args.max_prompts))
+    if "gsm8k" in suites:
+        prompt_items.extend(
+            load_gsm8k_prompts(args.gsm8k_path, args.gsm8k_problems)
         )
-        prompt_items = common.load_dataset_prompts(
-            args.dataset,
-            task_filter,
-            args.limit_per_task,
-            mt_bench_by_subcategory=args.by_category,
-        )
-        if not prompt_items:
-            parser.error("no prompts matched --dataset/--tasks")
-    else:
-        prompt_items = common.builtin_prompts(args.max_prompts)
+    if "humaneval" in suites:
+        prompt_items.extend(load_humaneval_prompts(args.humaneval_problems))
+    if not prompt_items:
+        parser.error("the selected suites produced no prompts")
 
     model_label = (
         os.path.basename(os.path.normpath(args.model))
@@ -519,7 +874,7 @@ def main():
     print(f"onnxruntime_genai={og.__file__}")
     print(f"model={model_path}")
     print(
-        f"prompts={len(prompt_items)}  ngram_sizes={ngram_sizes}  "
+        f"suites={suites}  prompts={len(prompt_items)}  ngram_sizes={ngram_sizes}  "
         f"K={draft_lengths}  max_new={args.max_new_tokens}  reps={args.reps}"
     )
     print(
@@ -538,7 +893,7 @@ def main():
         common.encode_prompt(
             tokenizer,
             item["text"],
-            chat=not args.raw,
+            chat=not (args.raw or item.get("raw_prompt", False)),
             think=args.think,
         )
         for item in prompt_items
@@ -571,6 +926,7 @@ def main():
 
     rows = []
     baselines = {}
+    quality_cache = {}
     benchmark_start = time.perf_counter()
 
     for prompt_index, (item, token_ids) in enumerate(zip(prompt_items, encoded)):
@@ -596,11 +952,19 @@ def main():
                     f"standard greedy output changed across repetitions for "
                     f"prompt {prompt_index}"
                 )
+            quality = score_completion(
+                item,
+                result["tail"],
+                args.humaneval_timeout,
+                quality_cache,
+                tokenizer.decode,
+            )
             rows.append({
                 **run_metadata,
                 "task": item["task"],
                 "subcategory": item["subcategory"],
                 "question_id": item["question_id"],
+                **quality,
                 "prompt_id": prompt_index,
                 "rep": rep,
                 "decoder": "standard",
@@ -702,6 +1066,13 @@ def main():
                     comparison = compare_tokens(
                         baseline["tail"], result["tail"]
                     )
+                    quality = score_completion(
+                        item,
+                        result["tail"],
+                        args.humaneval_timeout,
+                        quality_cache,
+                        tokenizer.decode,
+                    )
                     rounds = int(stats.get("rounds", 0))
                     proposed = int(stats.get("draft_tokens_proposed", 0))
                     evaluated = int(stats.get("draft_tokens_evaluated", 0))
@@ -723,6 +1094,7 @@ def main():
                         "task": item["task"],
                         "subcategory": item["subcategory"],
                         "question_id": item["question_id"],
+                        **quality,
                         "prompt_id": prompt_index,
                         "rep": rep,
                         "decoder": "ngram",
