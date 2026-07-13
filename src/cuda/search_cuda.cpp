@@ -11,6 +11,7 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
+#include <mutex>
 
 namespace Generators {
 
@@ -268,6 +269,16 @@ void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
   cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().Span().data(),
                                          GetScores().data(), params_->search.batch_size, params_->search.num_beams, params_->config.model.vocab_size,
                                          params_->search.max_length, GetSequenceLength(), penalty, GetStream());
+}
+
+void Search_Cuda::ApplyNoRepeatNgram(int ngram_size) {
+  static std::once_flag warn_once;
+  if (ngram_size <= 0)
+    return;
+
+  std::call_once(warn_once, []() {
+    Log("warning", "no_repeat_ngram_size is not implemented for CUDA search and will be ignored");
+  });
 }
 
 }  // namespace Generators
