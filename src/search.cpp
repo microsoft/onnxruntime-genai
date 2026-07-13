@@ -6,7 +6,6 @@
 #include <queue>
 #include <algorithm>
 #include <limits>
-#include <mutex>
 
 namespace Generators {
 
@@ -584,20 +583,6 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
         repetition_penalty_visited_[word_id] = false;
     }
   }
-}
-
-void Search::ApplyNoRepeatNgram(int ngram_size) {
-  if (ngram_size <= 0)
-    return;
-
-  // Default for backends that don't implement n-gram blocking (e.g. CUDA, DML).
-  // Warn once so a set option isn't silently ignored.
-  static std::once_flag warn_once;
-  std::call_once(warn_once, [] {
-    Log("warning",
-        "no_repeat_ngram_size is only implemented for CPU search and is ignored "
-        "on this backend.");
-  });
 }
 
 void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
