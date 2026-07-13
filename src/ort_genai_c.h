@@ -491,7 +491,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGene
 /**
  * \brief Set a numerical value for a speculative decoding option.
  * \param[in] params The generator params to set.
- * \param[in] name The name of the speculative option (e.g. "max_draft_tokens").
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens" or "ngram_size").
  * \param[in] value The value to set.
  * \return OgaResult containing the error message if setting the option failed.
  */

@@ -4,9 +4,10 @@
 
 #include "generators.h"
 #include "search.h"
+#include "standard_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "speculative_sampling.h"
-#include "models/speculative_decoding.h"
+#include "models/model.h"
 
 #include <algorithm>
 #include <chrono>
@@ -107,6 +108,10 @@ std::vector<int32_t> CommitGuidanceToken(ConstrainedLogitsProcessor& guidance_pr
 }
 }  // namespace
 
+SpeculativeDecodingStrategy::SpeculativeDecodingStrategy(State& target_state,
+                                                         const Model& target_model)
+    : target_state_{target_state}, target_model_{target_model} {}
+
 // Each call emits exactly one token. The first call of a round runs the whole round (RunRound)
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
@@ -134,6 +139,8 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
     }
     RunRound(g);
   }
+  if (pending_.empty())
+    return;
   DrainOne(g);
 }
 
@@ -145,6 +152,7 @@ void SpeculativeDecodingStrategy::Reset() {
   round_dirty_ = false;
   guidance_round_ = false;
   ff_carry_.clear();
+  ResetProposer();
 }
 
 // Continuous decoding via a mid-generation AppendTokens. A buffered round can leave the inner
@@ -154,11 +162,6 @@ void SpeculativeDecodingStrategy::Reset() {
 void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
   if (!round_dirty_)
     return;
-
-  auto* spec_state = dynamic_cast<SpeculativeDecodingState*>(g.state_.get());
-  if (!spec_state)
-    throw std::runtime_error(
-        "SpeculativeDecodingStrategy::PrepareForAppend requires a SpeculativeDecodingState.");
 
   int floor = saved_seed_length_ - 1;
   if (floor < 0)
@@ -304,14 +307,13 @@ DeviceSpan<float> SpeculativeDecodingStrategy::ReplayCommittedTail(Generator& g,
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
-  auto* spec_state = static_cast<SpeculativeDecodingState*>(g.state_.get());
   const auto& params = *g.search_->params_;
-  const int vocab_size = params.config.model.vocab_size;
   const int committed_length = g.search_->GetSequenceLength();
 
-  spec_state->RewindTo(static_cast<size_t>(floor));
-
+  const auto reconciliation_start = clock::now();
+  target_state_.RewindTo(static_cast<size_t>(floor));
   auto committed = g.search_->GetSequence(0).CopyDeviceToCpu();
+  ReconcileProposer(g, floor, committed, committed_length, record_stats);
   const int replay_count = committed_length - floor;
   auto replay = params.p_device->Allocate<int32_t>(static_cast<size_t>(replay_count));
   auto replay_cpu = replay.CpuSpan();
@@ -319,14 +321,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::ReplayCommittedTail(Generator& g,
     replay_cpu[i] = committed[static_cast<size_t>(floor + i)];
   replay.CopyCpuToDevice();
 
-  const auto reconciliation_start = clock::now();
-  auto draft_logits = spec_state->draft_state().Run(committed_length, replay, {});
-  if (record_stats)
-    draft_runs_++;
-  auto draft_cpu = draft_logits.CopyDeviceToCpu();
-  spec_state->assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
-
-  auto target_logits = spec_state->target_state().Run(committed_length, replay, {});
+  auto target_logits = target_state_.Run(committed_length, replay, {});
   if (record_stats)
     target_runs_++;
   const auto reconciliation_end = clock::now();
@@ -348,12 +343,6 @@ DeviceSpan<float> SpeculativeDecodingStrategy::ReplayCommittedTail(Generator& g,
 void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
-
-  auto* spec_state = dynamic_cast<SpeculativeDecodingState*>(g.state_.get());
-  if (!spec_state)
-    throw std::runtime_error(
-        "SpeculativeDecodingStrategy::Step requires a SpeculativeDecodingState "
-        "(model.type=\"speculative\" or a Phi3-family model with a draft).");
 
   const auto& params = *g.search_->params_;
   const int seed_length = g.search_->GetSequenceLength();
@@ -397,10 +386,25 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   Proposal proposal = Propose(g, K, seed_length);
   auto t_propose_end = clock::now();
 
-  if (static_cast<int>(proposal.tokens.size()) != K)
+  if (static_cast<int>(proposal.tokens.size()) > K)
     throw std::runtime_error(
         "Speculative draft returned " + std::to_string(proposal.tokens.size()) +
-        " tokens, expected K=" + std::to_string(K) + ".");
+        " tokens, exceeding K=" + std::to_string(K) + ".");
+  K = static_cast<int>(proposal.tokens.size());
+  if (K == 0) {
+    if (pending_anchor_token_) {
+      auto anchor = params.p_device->Allocate<int32_t>(1);
+      anchor.CpuSpan()[0] = *pending_anchor_token_;
+      anchor.CopyCpuToDevice();
+      g.SetLogits(target_state_.Run(seed_length, anchor, {}));
+      target_runs_++;
+      pending_anchor_token_.reset();
+      round_dirty_ = false;
+    }
+    total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
+    RunStandardDecodingStep(g);
+    return;
+  }
   const bool greedy_accept = proposal.probs.empty();
   if (!greedy_accept && static_cast<int>(proposal.probs.size()) != K)
     throw std::runtime_error(
@@ -476,15 +480,14 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  spec_state->target_state().Run(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
   // K target distributions.
-  const std::string& logits_name =
-      spec_state->spec_model().target_model().config_->model.decoder.outputs.logits;
-  OrtValue* raw_ort = spec_state->target_state().GetOutput(logits_name.c_str());
+  const std::string& logits_name = target_model_.config_->model.decoder.outputs.logits;
+  OrtValue* raw_ort = target_state_.GetOutput(logits_name.c_str());
   if (!raw_ort)
     throw std::runtime_error(
         "Speculative decoding: target state has no logits output named '" + logits_name + "'.");
@@ -510,7 +513,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     // Device-agnostic verify read (mirrors Logits::Get()) - cast fp16/bf16 -> fp32 on the target's
     // device (Cast falls back to CPU when needed), wrap as a DeviceSpan<float>, and copy to host.
     // No-op on CPU; on GPU/NPU it handles device and fp16/bf16 logits.
-    auto& target_device = *spec_state->spec_model().target_model().p_device_inputs_;
+    auto& target_device = *target_model_.p_device_inputs_;
     const auto elem_type = raw_ort->GetTensorTypeAndShapeInfo()->GetElementType();
 
     DeviceSpan<float> verify_logits;
@@ -550,7 +553,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       throw std::runtime_error(
           "Speculative decoding: internal error - re-anchor fold reached the non-multi target "
           "path. The fold must only engage for targets that return one logits row per token.");
-    spec_state->target_state().RewindTo(seed_length);
+    target_state_.RewindTo(seed_length);
     auto single_buf = params.p_device->Allocate<int32_t>(1);
     pending_target_logits_ =
         params.p_device->Allocate<float>(static_cast<size_t>(K) * static_cast<size_t>(vocab_size));
@@ -562,7 +565,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       single_buf.CpuSpan()[0] = proposal.tokens[i];
       single_buf.CopyCpuToDevice();
       const auto single_target_start = clock::now();
-      auto lgt = spec_state->target_state().Run(seed_length + i + 1, single_buf, {});
+      auto lgt = target_state_.Run(seed_length + i + 1, single_buf, {});
       target_runs_++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
@@ -746,7 +749,6 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
     return;
   }
 
-  auto* spec_state = dynamic_cast<SpeculativeDecodingState*>(g.state_.get());
   const auto& params = *g.search_->params_;
 
   const int target_kv_len = saved_seed_length_ + saved_K_;
@@ -754,7 +756,7 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 
   // Only rewind if there's actually something to drop.
   if (rewind_to < target_kv_len)
-    spec_state->target_state().RewindTo(rewind_to);
+    target_state_.RewindTo(rewind_to);
 
   const bool before_phi3_rope_threshold =
       g.phi3_rope_threshold_ != 0 &&
@@ -771,7 +773,7 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 
     const int next_len = saved_seed_length_ + saved_n_direct_ + 1;
     auto t_target_start = clock::now();
-    auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
+    auto target_lgt = target_state_.Run(next_len, single_buf, {});
     target_runs_++;
     auto t_target_end = clock::now();
     // One single-token target run, which is exactly the baseline cost per token (T_target).
@@ -802,7 +804,6 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
-  auto* spec_state = static_cast<SpeculativeDecodingState*>(g.state_.get());
   const auto& params = *g.search_->params_;
   const int vocab_size = params.config.model.vocab_size;
   auto& proc = *g.guidance_logits_processor_;
@@ -837,16 +838,15 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  spec_state->target_state().Run(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
   // Read the K target rows (device-agnostic, mirrors the non-guidance verify read).
   std::vector<std::vector<float>> rows(static_cast<size_t>(K));
-  const std::string& logits_name =
-      spec_state->spec_model().target_model().config_->model.decoder.outputs.logits;
-  OrtValue* raw_ort = spec_state->target_state().GetOutput(logits_name.c_str());
+  const std::string& logits_name = target_model_.config_->model.decoder.outputs.logits;
+  OrtValue* raw_ort = target_state_.GetOutput(logits_name.c_str());
   if (!raw_ort)
     throw std::runtime_error("Speculative guidance: target state has no logits output named '" +
                              logits_name + "'.");
@@ -854,7 +854,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   const bool is_multiple_tokens =
       (raw_shape.size() >= 2 && raw_shape[1] == static_cast<int64_t>(K));
   if (is_multiple_tokens) {
-    auto& target_device = *spec_state->spec_model().target_model().p_device_inputs_;
+    auto& target_device = *target_model_.p_device_inputs_;
     const auto elem_type = raw_ort->GetTensorTypeAndShapeInfo()->GetElementType();
     DeviceSpan<float> verify_logits;
     if (elem_type == Ort::TypeToTensorType<float>) {
@@ -869,13 +869,13 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
                                           data + static_cast<ptrdiff_t>(i + 1) * vocab_size);
   } else {
     // Pruned target - one pass per token.
-    spec_state->target_state().RewindTo(static_cast<size_t>(seed_length));
+    target_state_.RewindTo(static_cast<size_t>(seed_length));
     auto single = params.p_device->Allocate<int32_t>(1);
     for (int i = 0; i < K; i++) {
       single.CpuSpan()[0] = proposal.tokens[i];
       single.CopyCpuToDevice();
       const auto single_target_start = clock::now();
-      auto lgt = spec_state->target_state().Run(seed_length + i + 1, single, {});
+      auto lgt = target_state_.Run(seed_length + i + 1, single, {});
       target_runs_++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
@@ -1016,7 +1016,6 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
-  auto* spec_state = static_cast<SpeculativeDecodingState*>(g.state_.get());
   const auto& params = *g.search_->params_;
   const int vocab_size = params.config.model.vocab_size;
   const int C = static_cast<int>(saved_committed_.size());
@@ -1024,22 +1023,8 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
 
   auto single = params.p_device->Allocate<int32_t>(1);
 
-  // Draft - replay every committed token from the round's start and save the final logits for the
-  // next Propose. Only rewind when the draft cache is past seed (rewinding to the current length is
-  // rejected by the cache).
-  const int draft_kv_len = seed + saved_K_ - 1;
-  if (seed < draft_kv_len)
-    spec_state->draft_state().RewindTo(static_cast<size_t>(seed));
-  DeviceSpan<float> draft_logits;
   const auto draft_start = clock::now();
-  for (int p = 0; p < C; p++) {
-    single.CpuSpan()[0] = saved_committed_[static_cast<size_t>(p)];
-    single.CopyCpuToDevice();
-    draft_logits = spec_state->draft_state().Run(seed + p + 1, single, {});
-    draft_runs_++;
-  }
-  auto dcpu = draft_logits.CopyDeviceToCpu();
-  spec_state->assign_draft_pending_logits(dcpu.data(), static_cast<size_t>(vocab_size));
+  FinalizeGuidanceProposer(g, seed, saved_K_, saved_committed_);
   const auto draft_end = clock::now();
   total_propose_ms_ += ms_f(draft_end - draft_start).count();
 
@@ -1050,20 +1035,20 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
   const int vp = saved_verify_prefix_;
   if (C == vp && !saved_last_row_.empty()) {
     if (vp < saved_K_)
-      spec_state->target_state().RewindTo(static_cast<size_t>(seed + vp));
+      target_state_.RewindTo(static_cast<size_t>(seed + vp));
     auto out = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
     std::copy(saved_last_row_.begin(), saved_last_row_.end(), out.CpuSpan().begin());
     out.CopyCpuToDevice();
     return out;
   }
   if (seed + vp < target_kv_len)
-    spec_state->target_state().RewindTo(static_cast<size_t>(seed + vp));
+    target_state_.RewindTo(static_cast<size_t>(seed + vp));
   DeviceSpan<float> target_logits;
   const auto target_start = clock::now();
   for (int p = vp; p < C; p++) {
     single.CpuSpan()[0] = saved_committed_[static_cast<size_t>(p)];
     single.CopyCpuToDevice();
-    target_logits = spec_state->target_state().Run(seed + p + 1, single, {});
+    target_logits = target_state_.Run(seed + p + 1, single, {});
     target_runs_++;
   }
   const auto target_end = clock::now();

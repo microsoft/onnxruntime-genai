@@ -49,7 +49,10 @@ static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
   return *spec_state;
 }
 
-BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{RequireSpeculativeState(g)} {}
+BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g)
+    : SpeculativeDecodingStrategy{RequireSpeculativeState(g).target_state(),
+                                  RequireSpeculativeState(g).spec_model().target_model()},
+      spec_state_{RequireSpeculativeState(g)} {}
 
 // Propose K draft tokens.
 // Greedy: argmax, probs empty.
@@ -212,6 +215,48 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
   // Reuse the pending-logits buffer instead of allocating a fresh vocab-sized vector each round.
   spec_state_.assign_draft_pending_logits(cpu_draft.data(), static_cast<size_t>(vocab_size));
+}
+
+void BaseSpeculativeStrategy::ReconcileProposer(Generator& g,
+                                                int floor,
+                                                std::span<const int32_t> committed,
+                                                int committed_length,
+                                                bool record_stats) {
+  const int vocab_size = g.search_->params_->config.model.vocab_size;
+  spec_state_.draft_state().RewindTo(static_cast<size_t>(floor));
+
+  const int replay_count = committed_length - floor;
+  auto replay = g.search_->params_->p_device->Allocate<int32_t>(static_cast<size_t>(replay_count));
+  std::copy_n(committed.data() + floor, replay_count, replay.CpuSpan().data());
+  replay.CopyCpuToDevice();
+  auto draft_logits = spec_state_.draft_state().Run(committed_length, replay, {});
+  if (record_stats)
+    draft_runs_++;
+  auto draft_cpu = draft_logits.CopyDeviceToCpu();
+  spec_state_.assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
+}
+
+void BaseSpeculativeStrategy::FinalizeGuidanceProposer(
+    Generator& g,
+    int seed_length,
+    int proposal_length,
+    std::span<const int32_t> committed) {
+  const int vocab_size = g.search_->params_->config.model.vocab_size;
+  const int draft_kv_len = seed_length + proposal_length - 1;
+  if (seed_length < draft_kv_len)
+    spec_state_.draft_state().RewindTo(static_cast<size_t>(seed_length));
+
+  auto single = g.search_->params_->p_device->Allocate<int32_t>(1);
+  DeviceSpan<float> draft_logits;
+  for (size_t p = 0; p < committed.size(); p++) {
+    single.CpuSpan()[0] = committed[p];
+    single.CopyCpuToDevice();
+    draft_logits =
+        spec_state_.draft_state().Run(seed_length + static_cast<int>(p) + 1, single, {});
+    draft_runs_++;
+  }
+  auto draft_cpu = draft_logits.CopyDeviceToCpu();
+  spec_state_.assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
 }
 
 }  // namespace Generators

@@ -9,19 +9,11 @@
 
 namespace Generators {
 
-void StandardDecodingStrategy::Step(Generator& g) {
+void RunStandardDecodingStep(Generator& g) {
   if (g.search_->GetSequenceLength() == 0 && !g.computed_logits_)
     throw std::runtime_error(
         "GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or "
         "SetInputs before calling GenerateNextToken.");
-
-  // Phi3 models switch rope factors at a threshold token; recompute position
-  // IDs and KV cache by rewinding and re-appending the sequence.
-  if (g.phi3_rope_threshold_ != 0 && g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
-    auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
-    g.RewindToLength(0);
-    g.AppendTokens(current_seq);
-  }
 
   if (!g.computed_logits_) {
     auto next_tokens = g.search_->GetNextTokens();
@@ -65,6 +57,17 @@ void StandardDecodingStrategy::Step(Generator& g) {
     default:
       throw std::runtime_error("Unknown sampling method");
   }
+}
+
+void StandardDecodingStrategy::Step(Generator& g) {
+  // Phi3 models switch rope factors at a threshold token; recompute position
+  // IDs and KV cache by rewinding and re-appending the sequence.
+  if (g.phi3_rope_threshold_ != 0 && g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
+    auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
+    g.RewindToLength(0);
+    g.AppendTokens(current_seq);
+  }
+  RunStandardDecodingStep(g);
 }
 
 }  // namespace Generators

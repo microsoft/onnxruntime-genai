@@ -367,6 +367,8 @@ void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) 
 double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
   if (name == "max_draft_tokens")
     return static_cast<double>(speculative.max_draft_tokens);
+  if (name == "ngram_size")
+    return static_cast<double>(speculative.ngram_size);
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
 }
 

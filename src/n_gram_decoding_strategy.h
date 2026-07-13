@@ -1,18 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+
+#include "n_gram_lookup.h"
 #include "speculative_decoding_strategy.h"
 
 namespace Generators {
 
-struct SpeculativeDecodingState;
-
-// BaseSpeculativeStrategy
-// Draft decoder proposes, the target decoder verifies. Greedy mode uses argmax-match; sampling mode
-// samples draft from its distribution q and accepts with u < min(1, p_t/p_d).
-// All counters and the propose -> verify -> commit -> re-anchor skeleton live in the base.
-struct BaseSpeculativeStrategy final : SpeculativeDecodingStrategy {
-  explicit BaseSpeculativeStrategy(Generator& g);
+struct NGramDecodingStrategy final : SpeculativeDecodingStrategy {
+  explicit NGramDecodingStrategy(Generator& g);
 
  protected:
   Proposal Propose(Generator& g, int K, int seed_length) override;
@@ -30,10 +26,12 @@ struct BaseSpeculativeStrategy final : SpeculativeDecodingStrategy {
                                 int seed_length,
                                 int proposal_length,
                                 std::span<const int32_t> committed) override;
-  void ResetProposer() override {}
+  void ResetProposer() override;
 
  private:
-  SpeculativeDecodingState& spec_state_;
+  void Sync(Generator& g);
+
+  NGramLookup lookup_;
 };
 
 }  // namespace Generators

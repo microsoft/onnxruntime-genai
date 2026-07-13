@@ -167,6 +167,7 @@ struct Generator : LeakChecked<Generator> {
   friend struct StandardDecodingStrategy;
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
+  friend void RunStandardDecodingStep(Generator& g);
 };
 
 struct OrtGlobals {

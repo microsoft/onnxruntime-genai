@@ -207,6 +207,7 @@ struct PyGeneratorParams {
   pybind11::dict GetSpeculativeOptions() {
     pybind11::dict d;
     d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
+    d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
     return d;
   }
 

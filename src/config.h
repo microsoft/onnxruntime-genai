@@ -431,7 +431,8 @@ struct Config {
   } search;
 
   struct Speculative {
-    int max_draft_tokens{4}; // Number of tokens the draft proposes per round.
+    int max_draft_tokens{4};  // Maximum number of tokens proposed per round.
+    int ngram_size{};         // 0 disables n-gram decoding; N matches the last N-1 tokens.
   } speculative;
 
   struct Engine {

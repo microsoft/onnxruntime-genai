@@ -6,6 +6,7 @@
 #include <deque>
 #include <optional>
 #include <random>
+#include <span>
 #include <vector>
 #include "decoding_strategy.h"
 #include "smartptrs.h"
@@ -14,6 +15,8 @@
 namespace Generators {
 
 struct Generator;
+struct Model;
+struct State;
 struct SpeculativeStats;
 
 // SpeculativeDecodingStrategy
@@ -41,6 +44,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void PrepareForSetLogits(Generator& g) final;
 
  protected:
+  SpeculativeDecodingStrategy(State& target_state, const Model& target_model);
+
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
   // read from the canonical config (g.search_->params_->search) and g.IsGreedySampling().
   virtual Proposal Propose(Generator& g, int K, int seed_length) = 0;
@@ -53,6 +58,24 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
                        int n_direct,
                        int32_t final_token,
                        int seed_length) = 0;
+
+  // Keep proposer-specific state synchronized after the target cache is rewound and replayed.
+  virtual void ReconcileProposer(Generator& g,
+                                 int floor,
+                                 std::span<const int32_t> committed,
+                                 int committed_length,
+                                 bool record_stats) = 0;
+
+  // Guidance may commit correction/forced tokens that differ from the original proposal.
+  virtual void FinalizeGuidanceProposer(Generator& g,
+                                        int seed_length,
+                                        int proposal_length,
+                                        std::span<const int32_t> committed) = 0;
+
+  virtual void ResetProposer() = 0;
+
+  State& target_state_;
+  const Model& target_model_;
 
   // Stats accumulators.
   std::size_t rounds_{};
