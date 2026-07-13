@@ -89,8 +89,18 @@ static bool g_process_exiting = false;
 // Ensure Shutdown() has been called before process exit
 struct EnsureShutdown {
   ~EnsureShutdown() {
-    g_process_exiting = true;
-    if (g_ort_globals)
+    // Set the process-exit flag under the mutex so GetOrtGlobals() (which reads it under the same
+    // lock) can never race with this write. Capture whether teardown is needed while holding the
+    // lock, then call Shutdown() outside it -- Shutdown() re-acquires the mutex, so holding it here
+    // would self-deadlock (the mutex is non-recursive).
+    bool needs_shutdown = false;
+    {
+      std::scoped_lock lock{g_ort_globals_mutex};
+      g_process_exiting = true;
+      needs_shutdown = static_cast<bool>(g_ort_globals);
+    }
+
+    if (needs_shutdown)
       Shutdown();
   }
 };

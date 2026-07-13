@@ -9,8 +9,9 @@
 // process-global GenAI state (the ORT environment, the device interfaces, the genai add-on
 // libraries, and any registered plugin EP libraries). Running them inside the shared suite would
 // couple every other test to their teardown and depend on test ordering; isolating them removes
-// that fragility. This binary deliberately does not register any plugin EPs — re-init is exercised
-// on the always-present CPU path.
+// that fragility. Re-init is always exercised on the always-present CPU path; if plugin EPs are
+// discovered (WinML packages and/or --ep_dir) they are additionally registered and torn down each
+// cycle.
 
 #include <cstring>
 #include <filesystem>

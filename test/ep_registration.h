@@ -68,7 +68,8 @@ inline std::string EpLibraryFileName(std::string_view stem) {
 class EpRegistrar {
  public:
   // Records every known EP plugin library found under `ep_dir` (recursive, so a flat --ep_dir and
-  // nested WinML MSIX package layouts both work). Deduped by registration handle.
+  // nested WinML MSIX package layouts both work). Distinct candidate libraries for the same handle
+  // are all kept (see AddFound) so RegisterAll() can fall back across them.
   void DiscoverFromDirectory(const fs::path& ep_dir) {
     std::error_code ec;
     if (ep_dir.empty()) return;
@@ -97,13 +98,19 @@ class EpRegistrar {
   }
 #endif
 
-  // Registers all discovered EP libraries on genai's current env. Safe to call again after
-  // OgaShutdown() (re-registers on the freshly created env). Recomputes and returns the genai
-  // provider names (OgaConfig::AppendProvider) that registered successfully.
+  // Registers discovered EP libraries on genai's current env. Safe to call again after
+  // OgaShutdown() (re-registers on the freshly created env). For a registration handle with more
+  // than one candidate library name, the candidates are tried in discovery order and the first that
+  // registers wins; the remaining candidates for that handle are skipped. Recomputes and returns
+  // the genai provider names (OgaConfig::AppendProvider) that registered successfully.
   const std::vector<std::string>& RegisterAll() {
     providers_.clear();
     registered_handles_.clear();
     for (const auto& f : found_) {
+      // An earlier candidate for this handle already registered; skip the alternative library names.
+      if (IsRegistered(f.registration_name))
+        continue;
+
       try {
         std::cout << "Registering execution provider library '" << f.registration_name << "' -> "
                   << f.path.string() << std::endl;
@@ -112,6 +119,7 @@ class EpRegistrar {
         if (!f.provider_name.empty())
           providers_.push_back(f.provider_name);
       } catch (const std::exception& e) {
+        // Fall through to try the next candidate library (if any) for this handle.
         std::cerr << "Warning: failed to register execution provider library '" << f.registration_name
                   << "': " << e.what() << std::endl;
       }
@@ -137,8 +145,12 @@ class EpRegistrar {
   };
 
   void AddFound(const EpLibrary& ep, const fs::path& path) {
+    // Keep every distinct candidate library for a handle (an EP may ship under multiple file names
+    // across ORT versions) so RegisterAll() can fall back to an alternative if the first fails to
+    // register. Only skip an exact duplicate (same handle and same path) to avoid re-adding the
+    // same file discovered twice (e.g. overlapping --ep_dir and WinML scans).
     for (const auto& f : found_)
-      if (f.registration_name == ep.registration_name) return;  // dedupe by handle
+      if (f.registration_name == ep.registration_name && f.path == path) return;  // exact dupe
     found_.push_back({std::string(ep.registration_name), std::string(ep.provider_name), path});
   }
 
