@@ -80,9 +80,11 @@ struct HtpInterfaceImpl : QnnInterfaceBase {
     //             "enable_dx12_shared_memory_allocator" in `GpuInterfaceImpl::ShapeInitSessionProviderOptions`.
     //         2.) Oga keeps one global allocator for HTP and one for GPU, each of which is created once. Because each device
     //             only supports once allocator, the fact that each device's chosen allocator is sticky is ok.
-    for (const auto& opt : user_options->options) {
-      if (opt.first == "enable_htp_shared_memory_allocator") {
-        init_options.options.emplace_back(opt);
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        if (opt.first == "enable_htp_shared_memory_allocator") {
+          init_options.options.emplace_back(opt);
+        }
       }
     }
 
@@ -96,9 +98,11 @@ struct GpuInterfaceImpl : QnnInterfaceBase {
 
   void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
                                        const Config::ProviderOptions* user_options) const override {
-    for (const auto& opt : user_options->options) {
-      if (opt.first == "enable_dx12_shared_memory_allocator") {
-        init_options.options.emplace_back(opt);
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        if (opt.first == "enable_dx12_shared_memory_allocator") {
+          init_options.options.emplace_back(opt);
+        }
       }
     }
 
@@ -108,16 +112,12 @@ struct GpuInterfaceImpl : QnnInterfaceBase {
 
 }  // namespace QNN
 
-DeviceInterface* GetQNNInterface(DeviceType device_type) {
-  assert(type == DeviceType::QnnHtp || type == DeviceType::QnnGpu);
-
-  static std::unique_ptr<DeviceInterface> g_htp_device = std::make_unique<QNN::HtpInterfaceImpl>();
-  static std::unique_ptr<DeviceInterface> g_gpu_device = std::make_unique<QNN::GpuInterfaceImpl>();
+std::unique_ptr<DeviceInterface> CreateQNNInterface(DeviceType device_type) {
   switch (device_type) {
     case DeviceType::QnnHtp:
-      return g_htp_device.get();
+      return std::make_unique<QNN::HtpInterfaceImpl>();
     case DeviceType::QnnGpu:
-      return g_gpu_device.get();
+      return std::make_unique<QNN::GpuInterfaceImpl>();
     default:
       return nullptr;
   }

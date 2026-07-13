@@ -5,12 +5,9 @@
 #include "../models/model.h"
 #include "interface.h"
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <span>
-
-#if !defined(_WIN32)
-#include <dlfcn.h>
-#endif
 
 namespace Generators {
 namespace RyzenAI {
@@ -58,19 +55,21 @@ struct Memory : DeviceBuffer {
 
   bool owned_;
 };
-
 struct Interface : RyzenAIInterface {
-  Interface() {
-    ep_path_ = ep_filename_;
-    // If already loaded then nothing to do
+  Interface(OrtEnv& env) : env_{env} {
 #if defined(_WIN32)
-    if (GetModuleHandleA(ep_filename_))
-      return;
-#else
-    if (dlopen(ep_filename_, RTLD_NOLOAD | RTLD_NOW))
-      return;
+    // Record whether the EP module is already resident, before our registration below loads it. If it
+    // was not resident, our registration loads it and genai owns shutting it down in the destructor;
+    // if it was already resident (loaded by the host outside genai), another owner is responsible.
+    // ORT unloads the EP library when this interface's env is torn down, so each fresh interface
+    // re-evaluates this against a genuinely unloaded module on the next re-init cycle.
+    owns_ep_module_ = (GetModuleHandleA(ep_filename_) == nullptr);
 #endif
 
+    // Resolve the EP library path (SetupProvider also needs it for RegisterCustomOpsLibrary_V2) and
+    // register it on env_ below. The EP module may already be resident -- from an earlier env cycle or
+    // loaded by the host outside genai -- but ORT keys EP-library registration per-OrtEnv, so a fresh
+    // env still needs the library registered on it.
     std::error_code ec;
 
     ep_path_ = GetEnv(ep_path_env_key_);
@@ -98,8 +97,8 @@ struct Interface : RyzenAIInterface {
     };
 
     if (ep_path_.empty())
-      // check next to onnxruntime-genai.dll
-      if (const auto hmod = get_hmod_for_method(GetRyzenAIInterface))
+      // check next to onnxruntime-genai.dll (use CreateRyzenAIInterface as module-address marker)
+      if (const auto hmod = get_hmod_for_method(CreateRyzenAIInterface))
         ep_path_ = find_next_to_module(hmod);
 
     if (ep_path_.empty())
@@ -117,15 +116,27 @@ struct Interface : RyzenAIInterface {
       // fallback to current working directory
       ep_path_ = std::filesystem::current_path(ec) / ep_filename_;
 
-    Ort::ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(GetOrtGlobals()->env_.get(), ep_name_, ep_path_.native().c_str()));
+    // Register on this env, tolerating the case where it is already registered. An OrtEnv can outlive
+    // a genai OgaShutdown (the host may hold a reference), so on re-init the same env may already have
+    // the library; ORT reports that as "library is already registered under ...", which is benign here.
+    if (auto status = std::unique_ptr<OrtStatus>{
+            Ort::api->RegisterExecutionProviderLibrary(&env_, ep_name_, ep_path_.native().c_str())}) {
+      const std::string message = status->GetErrorMessage();
+      if (message.find("already registered") == std::string::npos)
+        throw std::runtime_error("Failed to register RyzenAI execution provider library: " + message);
+    }
   }
 
   ~Interface() {
     // TODO: make it linux compatible
 #if defined(_WIN32)
-    if (const auto mod = GetModuleHandleA(ep_filename_))
-      if (const auto func = reinterpret_cast<void (*)()>(GetProcAddress(mod, func_shutdown_)))
-        func();
+    // Only shut the EP down if genai loaded the module. If it was already resident when this interface
+    // was constructed, another owner is responsible for it and shutting it down here could pull state
+    // out from under them.
+    if (owns_ep_module_)
+      if (const auto mod = GetModuleHandleA(ep_filename_))
+        if (const auto func = reinterpret_cast<void (*)()>(GetProcAddress(mod, func_shutdown_)))
+          func();
 #endif  // _WIN32
   }
 
@@ -136,7 +147,7 @@ struct Interface : RyzenAIInterface {
       const OrtEpDevice* const* devices = nullptr;
       size_t ndevices = 0;
 
-      Ort::ThrowOnError(Ort::api->GetEpDevices(&GetOrtEnv(), &devices, &ndevices));
+      Ort::ThrowOnError(Ort::api->GetEpDevices(&env_, &devices, &ndevices));
 
       for (const auto& device : std::span{devices, ndevices})
         if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(device) &&
@@ -157,7 +168,8 @@ struct Interface : RyzenAIInterface {
 
       // this call merges provider_options into session_options
       Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(&session_options,
-                                                                           &GetOrtEnv(), supported_devices.data(), supported_devices.size(),
+                                                                           &env_, supported_devices.data(),
+                                                                           supported_devices.size(),
                                                                            ep_keys.data(), ep_values.data(), ep_keys.size()));
     }
 
@@ -189,25 +201,17 @@ struct Interface : RyzenAIInterface {
   void Synchronize() override {}
 
  private:
+  OrtEnv& env_;  // The env this interface belongs to; valid until OrtGlobals tears this interface down.
   std::filesystem::path ep_path_;
+#if defined(_WIN32)
+  bool owns_ep_module_{false};  // True if genai's registration loaded the EP module, so genai shuts it down.
+#endif
 };
-
-static std::unique_ptr<Interface> interface_;
 
 }  // namespace RyzenAI
 
-void RyzenAIInterface::Shutdown() {
-  RyzenAI::interface_.reset();
-}
-
-RyzenAIInterface* GetRyzenAIInterface() {
-  static std::once_flag once;
-
-  std::call_once(once, []() {
-    RyzenAI::interface_ = std::make_unique<RyzenAI::Interface>();
-  });
-
-  return RyzenAI::interface_.get();
+std::unique_ptr<DeviceInterface> CreateRyzenAIInterface(OrtEnv& env) {
+  return std::make_unique<RyzenAI::Interface>(env);
 }
 
 }  // namespace Generators

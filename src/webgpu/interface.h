@@ -3,6 +3,7 @@
 
 namespace Generators {
 
-DeviceInterface* GetWebGPUInterface();
+// Creates a fresh WebGPU DeviceInterface instance. Ownership is taken by OrtGlobals.
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface();
 
 }  // namespace Generators
