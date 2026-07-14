@@ -1642,9 +1642,18 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
   try {
     JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
   } catch (const std::exception& message) {
-    std::ostringstream oss;
-    oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
-    throw std::runtime_error(oss.str());
+    // In release builds, intentionally omit the parser's message: it can echo
+    // verbatim content (such as JSON key names) from the file being parsed,
+    // which would disclose file contents through the error message when the path
+    // is influenced by untrusted input (MSRC hardening). The failing file path
+    // is always retained. In debug builds we include the parser detail to aid
+    // diagnosing which key/token failed to parse.
+#if !defined(NDEBUG)
+    throw std::runtime_error("Error encountered while parsing '" + filename.string() + "' " + message.what());
+#else
+    (void)message;
+    throw std::runtime_error("Error encountered while parsing '" + filename.string() + "'");
+#endif
   }
 
   if (!json_overlay.empty()) {
