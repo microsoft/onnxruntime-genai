@@ -4,9 +4,7 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
-#include <charconv>
 #include <cstring>
-#include <system_error>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -61,27 +59,6 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   bool ort_verbose_logging = false;
   GetEnv("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
   return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
-}
-
-static bool HasValidTrtRtxMultiRotaryCacheConcatOffset(const Config& config) {
-  for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
-    if (provider_options.name != "NvTensorRtRtx")
-      continue;
-
-    for (const auto& [name, value] : provider_options.options) {
-      if (name != "multi_rotary_cache_concat_offset")
-        continue;
-
-      int offset{};
-      const auto* const value_begin = value.data();
-      const auto* const value_end = value_begin + value.size();
-      const auto [parse_end, error_code] = std::from_chars(value_begin, value_end, offset);
-      return error_code == std::errc{} && parse_end == value_end && offset > 0 &&
-             offset <= config.model.context_length;
-    }
-  }
-
-  return false;
 }
 
 OrtGlobals::OrtGlobals()
@@ -430,16 +407,10 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
-  const auto device_type = model_->p_device_->GetType();
-  const bool trt_rtx_uses_multi_rope_cache = device_type == DeviceType::NvTensorRtRtx &&
-                                             HasValidTrtRtxMultiRotaryCacheConcatOffset(*model_->config_);
-  const bool ep_uses_single_rope_factor = device_type == DeviceType::DML ||
-                                          (device_type == DeviceType::NvTensorRtRtx && !trt_rtx_uses_multi_rope_cache);
-
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
-  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
+  if (params.BatchBeamSize() == 1 && model_->p_device_->SupportsPhi3RopeRewind(*model_->config_)) {
     if (model_type == "phi3" || model_type == "phimoe")
       phi3_rope_threshold_ = 4097;
     else if (model_type == "phi3small")
