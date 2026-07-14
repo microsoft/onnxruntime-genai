@@ -7,6 +7,16 @@
 
 #include <functional>
 
+#if defined(_WIN32)
+#if defined(BUILDING_ORT_GENAI_INTERNALS)
+#define OGA_INTERNAL_EXPORT __declspec(dllexport)
+#else
+#define OGA_INTERNAL_EXPORT __declspec(dllimport)
+#endif
+#else
+#define OGA_INTERNAL_EXPORT
+#endif
+
 namespace Generators {
 
 struct RuntimeSettings;
@@ -464,7 +474,7 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
-void OverlayConfig(Config& config, std::string_view json);
+OGA_INTERNAL_EXPORT void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
@@ -478,3 +488,5 @@ void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_vie
 void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name);
 
 }  // namespace Generators
+
+#undef OGA_INTERNAL_EXPORT
