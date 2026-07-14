@@ -119,28 +119,6 @@ class Gemma2Model(GemmaModel):
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
 
-    def make_layernorm_op(self, name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs):
-        if self.ep == "cpu" and op_type == "SkipSimplifiedLayerNormalization":
-            add_name = f"{name}/Add"
-            output_3 = outputs[3] if len(outputs) > 3 and outputs[3] != "" else f"{add_name}/output_0"
-            self.make_node("Add", inputs=[inputs[0], inputs[1]], outputs=[output_3], name=add_name)
-            self.make_value(output_3, new_io_dtype, shape=self.values[inputs[0]].shape)
-
-            simplified_layernorm_name = f"{name}/SimplifiedLayerNormalization"
-            self.make_node(
-                "SimplifiedLayerNormalization",
-                inputs=[output_3, inputs[2]],
-                outputs=[outputs[0]],
-                name=simplified_layernorm_name,
-                epsilon=kwargs["epsilon"],
-                axis=kwargs.get("axis", -1),
-                stash_type=kwargs.get("stash_type", 1),
-            )
-            return
-
-        super().make_layernorm_op(name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs)
-
-
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)

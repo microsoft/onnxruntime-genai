@@ -44,7 +44,7 @@ def _make_gemma_model(ep: str):
     return model, calls
 
 
-def test_cpu_skip_simplified_layernorm_is_expanded():
+def test_cpu_skip_simplified_layernorm_uses_fused_op():
     model, calls = _make_gemma_model("cpu")
 
     Gemma2Model.make_layernorm_op(
@@ -58,10 +58,8 @@ def test_cpu_skip_simplified_layernorm_is_expanded():
         epsilon=1e-6,
     )
 
-    assert [call["op_type"] for call in calls] == ["Add", "SimplifiedLayerNormalization"]
-    assert calls[0]["outputs"] == ["output_3"]
-    assert calls[1]["inputs"] == ["output_3", "weight"]
-    assert calls[1]["outputs"] == ["output_0"]
+    assert [call["op_type"] for call in calls] == ["SkipSimplifiedLayerNormalization"]
+    assert calls[0]["kwargs"]["domain"] == "com.microsoft"
 
 
 def test_non_cpu_skip_simplified_layernorm_uses_fused_op():
