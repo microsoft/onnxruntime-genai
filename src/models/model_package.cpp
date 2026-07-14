@@ -59,12 +59,19 @@ std::unique_ptr<OrtSessionOptions> BuildSelectionSessionOptions(const std::strin
 
 bool IsModelPackage(const fs::path& path) {
   constexpr const char* kManifestFilename = "manifest.json";
+  constexpr const char* kGenaiConfigFilename = "genai_config.json";
   std::error_code ec;
   const std::filesystem::path root = AsStdPath(path);
-  if (!std::filesystem::is_directory(root, ec) || ec) {
+  if (!std::filesystem::is_directory(root, ec)) {
     return false;
   }
-  return std::filesystem::is_regular_file(root / kManifestFilename, ec) && !ec;
+  if (!std::filesystem::is_regular_file(root / kManifestFilename, ec)) {
+    return false;
+  }
+  // A model package keeps genai_config.json inside each variant directory, never at the root.
+  // A flat model directory keeps it at the root and may carry an unrelated manifest.json, so a
+  // root genai_config.json means this is a flat directory, not a package.
+  return !std::filesystem::is_regular_file(root / kGenaiConfigFilename, ec);
 }
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE

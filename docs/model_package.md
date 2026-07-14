@@ -168,6 +168,11 @@ When passed a package they auto-detect the execution provider; an ambiguous pack
 returns an error pointing at `OgaCreateConfigFromPackageEp`. The `FromPackageEp` entry
 point rejects flat directories.
 
+A directory is treated as a package when it has a top-level `manifest.json` and no
+top-level `genai_config.json`. A flat model directory always keeps `genai_config.json` at
+its root, so one that happens to carry an unrelated `manifest.json` is still loaded as a
+flat directory.
+
 Combining a model package with `OgaRuntimeSettings` is not supported and returns an
 error. Runtime settings work as before with flat directories via
 `OgaCreateModelWithRuntimeSettings`.
