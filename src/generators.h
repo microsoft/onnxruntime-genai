@@ -139,6 +139,8 @@ struct Generator : LeakChecked<Generator> {
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
   TransducerState* transducer_state_{nullptr};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
+  // Sequence length at the first generated step; used for begin_suppress_tokens. -1 = not yet set.
+  int begin_suppress_length_{-1};
   enum class SamplingMethod { kGreedy,
                               kTopK,
                               kTopP,

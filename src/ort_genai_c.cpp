@@ -423,6 +423,13 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* para
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchTokensArray(OgaGeneratorParams* params, const char* name, const int32_t* tokens, size_t tokens_count) {
+  OGA_TRY
+  Generators::SetSearchTokensArray(params->search, name, std::span<const int32_t>(tokens, tokens_count));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
   OGA_TRY
   params->SetGuidance(type, data, enable_ff_tokens);

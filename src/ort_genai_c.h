@@ -462,6 +462,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
 
 /**
+ * \brief Set an array of token ids for a search parameter (e.g. suppress_tokens, begin_suppress_tokens)
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the search parameter.
+ * \param[in] tokens The array of token ids.
+ * \param[in] tokens_count The number of token ids in the array.
+ * \return OgaResult containing the error message if setting the generator params failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchTokensArray(OgaGeneratorParams* params, const char* name, const int32_t* tokens, size_t tokens_count);
+
+/**
  * \brief Sets the guidance type and data for the Generator params
  * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar.

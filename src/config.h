@@ -434,6 +434,10 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    // Token ids whose logits are set to -inf at every decoding step.
+    std::vector<int> suppress_tokens;
+    // Token ids whose logits are set to -inf only at the first generated step.
+    std::vector<int> begin_suppress_tokens;
   } search;
 
   struct Engine {
@@ -462,6 +466,7 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void SetSearchTokensArray(Config::Search& search, std::string_view name, std::span<const int32_t> tokens);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

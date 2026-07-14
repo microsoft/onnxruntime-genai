@@ -270,4 +270,15 @@ void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
                                          params_->search.max_length, GetSequenceLength(), penalty, GetStream());
 }
 
+void Search_Cuda::ApplySuppressTokens(const std::vector<int>& suppress_tokens) {
+  if (suppress_tokens.empty())
+    return;
+
+  const int vocab_size = params_->config.model.vocab_size;
+  for (auto token_id : suppress_tokens) {
+    if (token_id >= 0 && token_id < vocab_size)
+      cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), vocab_size, token_id, std::numeric_limits<float>::lowest(), GetStream());
+  }
+}
+
 }  // namespace Generators
