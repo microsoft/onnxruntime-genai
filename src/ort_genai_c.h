@@ -174,7 +174,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSe
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
- * \return The number of tokens in the sequence at the given index
+ * \return The number of tokens in the sequence at the given index. Returns 0 if
+ *         sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* sequences, size_t sequence_index);
 
@@ -184,6 +185,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
+ *         Returns nullptr if sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 

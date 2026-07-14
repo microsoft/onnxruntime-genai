@@ -46,6 +46,17 @@ def parse_args():
         help="Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator",
     )
 
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help=(
+            "Allow loading custom Python code shipped inside the Hugging Face repository "
+            "during tokenizer load (and forward `hf_remote=true` to the ONNX model "
+            "builder). This is equivalent to running arbitrary code from that repository "
+            "as the current user and should only be enabled for repositories you fully trust."
+        ),
+    )
+
     args = parser.parse_args()
     return args
 
@@ -55,7 +66,9 @@ def quantize_model(args):
 
     # Load model
     model = AutoAWQForCausalLM.from_pretrained(args.model_path, low_cpu_mem_usage=True, use_cache=False)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    # `trust_remote_code` is opt-in: forwarding True without explicit user consent would
+    # cause arbitrary Python shipped inside the repository to execute during tokenizer load.
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=args.trust_remote_code)
 
     # Quantize model
     model.quantize(tokenizer, quant_config=quant_config)
@@ -137,6 +150,7 @@ def main():
 
     extra_options = {
         "use_qdq": args.use_qdq,
+        "hf_remote": args.trust_remote_code,
     }
 
     create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
