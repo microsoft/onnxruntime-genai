@@ -27,6 +27,7 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 base_module = _load_builder_module("base")
 gemma_module = _load_builder_module("gemma")
 Gemma2Model = gemma_module.Gemma2Model
+Gemma3Model = gemma_module.Gemma3Model
 Model = base_module.Model
 
 
@@ -147,3 +148,107 @@ def test_non_cpu_skip_simplified_layernorm_uses_fused_op():
 
     assert [call["op_type"] for call in calls] == ["SkipSimplifiedLayerNormalization"]
     assert calls[0]["kwargs"]["domain"] == "com.microsoft"
+
+
+# ---------------------------------------------------------------------------
+# is_local tests
+#
+# Root cause: Gemma2Model.is_local previously returned `layer_id % 2 == 1`
+# (odd=local), which is the OPPOSITE of HuggingFace Gemma-2 where even layers
+# (0, 2, 4, ...) use sliding-window (local) attention and odd layers (1, 3, 5,
+# ...) use full (global) attention.  This caused every layer to use the wrong
+# attention type, producing garbage output.
+#
+# Fix: is_local now reads config.layer_types (populated by HuggingFace
+# __post_init__) when available, falling back to the correct formula
+# (even=local) otherwise.
+# ---------------------------------------------------------------------------
+
+
+def _gemma2_model_with_layer_types(layer_types):
+    """Return a minimal Gemma2Model stub with the given layer_types list."""
+    model = Gemma2Model.__new__(Gemma2Model)
+    model.layer_types = layer_types
+    return model
+
+
+def _gemma3_model_with_layer_types(layer_types):
+    """Return a minimal Gemma3Model stub with the given layer_types list."""
+    model = Gemma3Model.__new__(Gemma3Model)
+    model.layer_types = layer_types
+    return model
+
+
+class TestGemma2IsLocal:
+    def test_reads_layer_types_from_config(self):
+        """is_local uses layer_types when it is set."""
+        layer_types = ["sliding_attention", "full_attention"] * 14  # 28 layers
+        model = _gemma2_model_with_layer_types(layer_types)
+        # Even layers (0, 2, ...) are "sliding_attention" -> local
+        assert model.is_local(0) is True
+        assert model.is_local(2) is True
+        # Odd layers (1, 3, ...) are "full_attention" -> not local
+        assert model.is_local(1) is False
+        assert model.is_local(3) is False
+
+    def test_fallback_without_layer_types(self):
+        """is_local uses the correct fallback when layer_types is None."""
+        model = _gemma2_model_with_layer_types(None)
+        # HuggingFace default: even=local, odd=global
+        assert model.is_local(0) is True
+        assert model.is_local(1) is False
+        assert model.is_local(2) is True
+        assert model.is_local(3) is False
+
+    def test_previous_formula_was_inverted(self):
+        """Demonstrates that the old formula `layer_id % 2 == 1` was wrong.
+
+        HuggingFace Gemma-2 sets layer_types[i] = "sliding_attention" when
+        bool((i + 1) % 2) is True, which is True for even i (0, 2, 4, ...).
+        The old formula returned True for ODD layers -- the opposite.
+        """
+        old_is_local = lambda layer_id: layer_id % 2 == 1  # noqa: E731 (old, wrong formula)
+        hf_is_local = lambda layer_id: bool((layer_id + 1) % 2)  # noqa: E731 (HuggingFace formula)
+
+        for layer_id in range(8):
+            # The old formula and HuggingFace are opposite for every layer
+            assert old_is_local(layer_id) != hf_is_local(layer_id), (
+                f"layer {layer_id}: old={old_is_local(layer_id)}, hf={hf_is_local(layer_id)}"
+            )
+
+
+class TestGemma3IsLocal:
+    def test_reads_layer_types_from_config(self):
+        """Gemma3 is_local uses layer_types when available."""
+        # 26-layer model: 5 local + 1 global per 6 layers
+        layer_types = [
+            "sliding_attention" if bool((i + 1) % 6) else "full_attention"
+            for i in range(26)
+        ]
+        model = _gemma3_model_with_layer_types(layer_types)
+        # Layers 0-4 are local, layer 5 is global
+        for i in range(5):
+            assert model.is_local(i) is True
+        assert model.is_local(5) is False
+
+    def test_fallback_uses_6_pattern(self):
+        """Gemma3 is_local fallback uses the 5-local-1-global-per-6 pattern."""
+        model = _gemma3_model_with_layer_types(None)
+        for i in range(5):
+            assert model.is_local(i) is True
+        assert model.is_local(5) is False
+
+    def test_custom_sliding_window_pattern_via_layer_types(self):
+        """Non-default sliding_window_pattern is handled correctly via layer_types."""
+        # sliding_window_pattern = 4: 3 local + 1 global per 4 layers
+        layer_types = [
+            "sliding_attention" if bool((i + 1) % 4) else "full_attention"
+            for i in range(16)
+        ]
+        model = _gemma3_model_with_layer_types(layer_types)
+        for i in range(3):
+            assert model.is_local(i) is True
+        assert model.is_local(3) is False
+        for i in range(4, 7):
+            assert model.is_local(i) is True
+        assert model.is_local(7) is False
