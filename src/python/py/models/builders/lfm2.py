@@ -276,9 +276,5 @@ class LFM2Model(Model):
         decoder["inputs"]["past_conv_names"] = "past_conv.%d"
         decoder["outputs"]["present_conv_names"] = "present_conv.%d"
 
-        # past_present_share_buffer: LFM2Cache pre-allocates KV to search.max_length when
-        # IsPastPresentShareBufferEnabled is true. Do not force the flag off here — the base
-        # class sets it from model layout; overriding broke shared-KV execution paths.
-
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)
