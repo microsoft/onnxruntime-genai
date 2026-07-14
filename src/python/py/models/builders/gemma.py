@@ -145,7 +145,24 @@ class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.rope_local_theta = config.rope_local_base_freq
+        # Gemma3TextConfig stores separate RoPE bases under rope_parameters:
+        # - full_attention.rope_theta (global attention)
+        # - sliding_attention.rope_theta (local attention)
+        # Prefer those values when present so rotary caches match HF behavior.
+        rope_params = config.rope_parameters if hasattr(config, "rope_parameters") else None
+        full_rope = rope_params.get("full_attention", {}) if isinstance(rope_params, dict) else {}
+        sliding_rope = rope_params.get("sliding_attention", {}) if isinstance(rope_params, dict) else {}
+
+        if "rope_theta" in full_rope:
+            self.rope_attrs["theta"] = full_rope["rope_theta"]
+
+        self.rope_local_theta = (
+            sliding_rope["rope_theta"]
+            if "rope_theta" in sliding_rope
+            else config.rope_local_base_freq
+            if hasattr(config, "rope_local_base_freq")
+            else self.rope_attrs["theta"]
+        )
         self.make_rotary_embedding_multi_cache()
 
     def is_local(self, layer_id):
