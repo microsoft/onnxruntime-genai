@@ -474,10 +474,14 @@ class Model:
             # Packed MatMul with LoRA/QLoRA is not currently supported
             # use_packed_matmul can be overrided by upstream quantization choice
             # (e.g., when q_proj, k_proj, v_proj have different quantization settings)
+            # Packed MatMul is also not supported when QK normalization is used,
+            # because q_norm/k_norm must be applied to the individual Q and K tensors
             self.attention_attrs["use_packed_matmul"] = (
                 self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.extra_options.get("disable_qkv_fusion", False)
+                and not self.attention_attrs["q_norm"]
+                and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
@@ -579,6 +583,17 @@ class Model:
             "",
         )
 
+    def make_genai_model_type(self):
+        prefix = self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower()
+
+        if self.model_type.endswith("ForCausalLM"):
+            return prefix
+
+        if self.model_type.endswith("ForConditionalGeneration"):
+            return f"{prefix}_text"
+
+        return self.model_type.lower()
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -658,7 +673,7 @@ class Model:
                 },
                 "eos_token_id": eos_token_id,
                 "pad_token_id": pad_token_id,
-                "type": self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
+                "type": self.make_genai_model_type(),
                 "vocab_size": self.vocab_size,
             },
             "search": {

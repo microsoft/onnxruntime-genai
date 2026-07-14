@@ -24,9 +24,15 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["output_0"] = True
         self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar**-0.5
+        # layer_types is populated by HuggingFace __post_init__ and lists each layer as
+        # "sliding_attention" (local) or "full_attention" (global).
+        self.layer_types = config.layer_types if hasattr(config, "layer_types") else None
 
     def is_local(self, layer_id):
-        return layer_id % 2 == 1
+        if self.layer_types is not None:
+            return self.layer_types[layer_id] == "sliding_attention"
+        # Fallback: HuggingFace default is even layers local, odd layers global
+        return layer_id % 2 == 0
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -119,15 +125,36 @@ class Gemma2Model(GemmaModel):
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
 
-
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.rope_local_theta = config.rope_local_base_freq
+        # Gemma3TextConfig stores separate RoPE bases under rope_parameters:
+        # - full_attention.rope_theta (global attention)
+        # - sliding_attention.rope_theta (local attention)
+        # Prefer those values when present so rotary caches match HF behavior.
+        rope_params = config.rope_parameters if hasattr(config, "rope_parameters") else None
+        full_rope = rope_params.get("full_attention", {}) if isinstance(rope_params, dict) else {}
+        sliding_rope = rope_params.get("sliding_attention", {}) if isinstance(rope_params, dict) else {}
+
+        if "rope_theta" in full_rope:
+            self.rope_attrs["theta"] = full_rope["rope_theta"]
+
+        self.rope_local_theta = (
+            sliding_rope["rope_theta"]
+            if "rope_theta" in sliding_rope
+            else config.rope_local_base_freq
+            if hasattr(config, "rope_local_base_freq")
+            else self.rope_attrs["theta"]
+        )
         self.make_rotary_embedding_multi_cache()
 
     def is_local(self, layer_id):
+        # Use layer_types from config (set by Gemma3TextConfig.__post_init__) when available.
+        # This handles non-default sliding_window_pattern values correctly.
+        if self.layer_types is not None:
+            return self.layer_types[layer_id] == "sliding_attention"
+        # Fallback: HuggingFace default is 5 local + 1 global per group of 6
         return bool((layer_id + 1) % 6)
 
     def make_attention_init(self, config):
