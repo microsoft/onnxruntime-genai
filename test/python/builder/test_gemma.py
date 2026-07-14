@@ -217,6 +217,91 @@ class TestGemma2IsLocal:
             )
 
 
+# ---------------------------------------------------------------------------
+# use_packed_matmul + q_norm/k_norm regression tests
+#
+# Root cause: make_attention_init() in base.py computed use_packed_matmul
+# without checking q_norm / k_norm.  For Gemma-3 (q_norm=True, k_norm=True)
+# this caused packed matmul to be enabled.  make_qk_norm then operated on the
+# packed QKV tensor (instead of the individual Q tensor) and used "" (empty
+# string) as the k_path input — producing a malformed graph and garbage output.
+#
+# Fix: use_packed_matmul is now False whenever q_norm or k_norm is True,
+# matching v0.9.0 behaviour.
+# ---------------------------------------------------------------------------
+
+
+def _make_attention_init_state(ep: str, q_norm: bool, k_norm: bool):
+    """Build a minimal stub that can exercise base.Model.make_attention_init."""
+    import types
+
+    base = _load_builder_module("base")
+    model = base.Model.__new__(base.Model)
+
+    model.ep = ep
+    model.io_dtype = base.ir.DataType.FLOAT
+    model.extra_options = {}
+    model.matmul_attrs = {"use_lora": False}
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs = {
+        "q_norm": q_norm,
+        "k_norm": k_norm,
+    }
+    model.num_attn_heads = 8
+    model.num_kv_heads = 4
+    model.head_size = 256
+    return model
+
+
+class TestPackedMatmulQKNorm:
+    """use_packed_matmul must be False when q_norm or k_norm is enabled."""
+
+    def test_gemma3_cpu_fp32_disables_packed_matmul(self):
+        """Gemma-3 (q_norm=k_norm=True) must NOT use packed matmul (CPU fp32 GQA)."""
+        model = _make_attention_init_state("cpu", q_norm=True, k_norm=True)
+        base_module = _load_builder_module("base")
+        base_module.Model.make_attention_init(model, config=None)
+        assert not model.attention_attrs["use_packed_matmul"], (
+            "use_packed_matmul must be False when q_norm=True to avoid applying "
+            "qk-norm to the packed QKV tensor instead of the individual Q/K tensors"
+        )
+
+    def test_gemma2_cpu_fp32_uses_packed_matmul(self):
+        """Gemma-2 (q_norm=k_norm=False) SHOULD use packed matmul (CPU fp32 GQA)."""
+        model = _make_attention_init_state("cpu", q_norm=False, k_norm=False)
+        base_module = _load_builder_module("base")
+        base_module.Model.make_attention_init(model, config=None)
+        assert model.attention_attrs["use_packed_matmul"], (
+            "use_packed_matmul must be True for models without q_norm/k_norm"
+        )
+
+    def test_q_norm_alone_disables_packed_matmul(self):
+        """q_norm=True alone is sufficient to disable packed matmul."""
+        model = _make_attention_init_state("cpu", q_norm=True, k_norm=False)
+        base_module = _load_builder_module("base")
+        base_module.Model.make_attention_init(model, config=None)
+        assert not model.attention_attrs["use_packed_matmul"]
+
+    def test_k_norm_alone_disables_packed_matmul(self):
+        """k_norm=True alone is sufficient to disable packed matmul."""
+        model = _make_attention_init_state("cpu", q_norm=False, k_norm=True)
+        base_module = _load_builder_module("base")
+        base_module.Model.make_attention_init(model, config=None)
+        assert not model.attention_attrs["use_packed_matmul"]
+
+    def test_previous_code_incorrectly_enabled_packed_matmul_for_gemma3(self):
+        """Demonstrates that the old code always set use_packed_matmul=True on CPU fp32,
+        regardless of q_norm/k_norm — which caused garbage output for Gemma-3."""
+        # Old formula (pre-fix): only checks ep and lora/disable flags
+        old_use_packed_matmul = lambda ep, q_norm, k_norm: (  # noqa: E731
+            ep not in ["dml"]
+            # missing: and not q_norm and not k_norm
+        )
+        assert old_use_packed_matmul("cpu", q_norm=True, k_norm=True) is True, (
+            "Old formula enabled packed matmul even with q_norm=True — this is the bug"
+        )
+
+
 class TestGemma3IsLocal:
     def test_reads_layer_types_from_config(self):
         """Gemma3 is_local uses layer_types when available."""

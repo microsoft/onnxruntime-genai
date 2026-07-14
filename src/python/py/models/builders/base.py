@@ -474,10 +474,14 @@ class Model:
             # Packed MatMul with LoRA/QLoRA is not currently supported
             # use_packed_matmul can be overrided by upstream quantization choice
             # (e.g., when q_proj, k_proj, v_proj have different quantization settings)
+            # Packed MatMul is also not supported when QK normalization is used,
+            # because q_norm/k_norm must be applied to the individual Q and K tensors
             self.attention_attrs["use_packed_matmul"] = (
                 self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.extra_options.get("disable_qkv_fusion", False)
+                and not self.attention_attrs["q_norm"]
+                and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
