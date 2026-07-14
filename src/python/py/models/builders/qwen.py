@@ -952,9 +952,10 @@ class Qwen35TextModel(Model):
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
-        # When exclude_embeds is explicitly set to False, build as a standalone LLM.
-        self.is_text_only = extra_options.get("exclude_embeds", None) is False
+        # Qwen3.5 supports two export modes:
+        # - exclude_embeds=False (default): standalone text-only LLM that takes input_ids.
+        # - exclude_embeds=True: VL decoder-only component that takes inputs_embeds.
+        self.is_text_only = not extra_options.get("exclude_embeds", False)
 
         # Qwen3.5 is a multimodal model whose HF config nests text config
         # under text_config. Flatten text_config attributes onto config so
