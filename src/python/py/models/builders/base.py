@@ -1169,6 +1169,10 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
+        # 2-bit Quark weights are emitted as MatMulNBits even when the io/onnx dtype is
+        # float (ORT runs the float zero-point 2-bit MatMulNBits on CPU/MLAS).
+        if hasattr(matmul, "qweight") and matmul.qweight is not None and getattr(matmul, "bits", None) == 2:
+            return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
@@ -1210,7 +1214,12 @@ class Model:
 
         if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_initializer(matmul.qzeros, zeros)
+            # Float zero-points (e.g. 2-bit Quark) must match the scales' dtype; integer
+            # zero-points are emitted in their packed integer form.
+            if torch.is_floating_point(matmul.qzeros):
+                self.make_initializer(matmul.qzeros, zeros, to=self.io_dtype)
+            else:
+                self.make_initializer(matmul.qzeros, zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
@@ -1358,6 +1367,10 @@ class Model:
         return add_name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+        # 2-bit Quark weights use the (bits-generic) NBits packed path even when the
+        # io/onnx dtype is float.
+        if hasattr(q_matmul, "qweight") and q_matmul.qweight is not None and getattr(q_matmul, "bits", None) == 2:
+            return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
@@ -1366,6 +1379,8 @@ class Model:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
     def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
+        if hasattr(q_matmul, "qweight") and q_matmul.qweight is not None and getattr(q_matmul, "bits", None) == 2:
+            return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
