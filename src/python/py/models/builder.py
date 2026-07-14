@@ -46,7 +46,7 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
-    Qwen35MoeTextModel,
+    Qwen35MoETextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
@@ -221,7 +221,7 @@ def create_model(
 
     # List architecture options in alphabetical order
     if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-        # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+        # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model has the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -243,9 +243,9 @@ def create_model(
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -270,8 +270,9 @@ def create_model(
                 setattr(config, key, getattr(text_config, key))
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
-        extra_options["exclude_embeds"] = True
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
@@ -293,43 +294,47 @@ def create_model(
     elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
-        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen2_5_text"
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
-        onnx_model = Qwen35MoeTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3"
+    elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3_5_text"
+    elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        onnx_model = Qwen35MoETextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3_5_moe_text"
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen2"
     elif config.architectures[0] == "WhisperForConditionalGeneration":
         onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:

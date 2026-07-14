@@ -579,6 +579,17 @@ class Model:
             "",
         )
 
+    def make_genai_model_type(self):
+        prefix = self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower()
+
+        if self.model_type.endswith("ForCausalLM"):
+            return prefix
+
+        if self.model_type.endswith("ForConditionalGeneration"):
+            return f"{prefix}_text"
+
+        return self.model_type.lower()
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -658,7 +669,7 @@ class Model:
                 },
                 "eos_token_id": eos_token_id,
                 "pad_token_id": pad_token_id,
-                "type": self.model_type[: self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
+                "type": self.make_genai_model_type(),
                 "vocab_size": self.vocab_size,
             },
             "search": {

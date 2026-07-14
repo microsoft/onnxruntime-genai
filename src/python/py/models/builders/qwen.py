@@ -693,11 +693,6 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
-        # but the C++ runtime expects "qwen3_vl" (with underscore).
-        # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
-
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
@@ -924,19 +919,13 @@ class VideoChatFlashQwenModel(QwenModel):
     standard weight keys (model.layers.*, lm_head.*). The model uses standard
     2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
 
-    This builder exports only the text decoder component. It sets exclude_embeds=True
+    This builder exports only the text decoder component. The user should set exclude_embeds=True
     so the decoder receives inputs_embeds from the embedding merger model, which
     fuses the InternVideo2 visual tokens with text embeddings.
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # Override model_type for the C++ runtime registration in model.cpp
-        # and genai_config.json. Same pattern as Qwen3VLTextModel.
-        # Base class transforms this to "videochat_flash_qwen" via:
-        #   model_type[:model_type.find("For")].lower()
-        self.model_type = "VideoChat_Flash_QwenForCausalLM"
 
     def load_weights(self, input_path):
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
@@ -966,9 +955,6 @@ class Qwen35TextModel(Model):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
         self.is_text_only = extra_options.get("exclude_embeds", None) is False
-        if "exclude_embeds" not in extra_options:
-            extra_options["exclude_embeds"] = True
-            print("Setting exclude_embeds=True for Qwen3.5 VL decoder.")
 
         # Qwen3.5 is a multimodal model whose HF config nests text config
         # under text_config. Flatten text_config attributes onto config so
@@ -987,7 +973,7 @@ class Qwen35TextModel(Model):
                 config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
 
         # Parse layer types before super().__init__() because
-        # make_int4_algo_config() is called from the base class init
+        # make_algo_config() is called from the base class init
         # and needs self.layer_types to identify linear attention layers.
         # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
         text_config = getattr(config, "text_config", config)
@@ -1003,8 +989,6 @@ class Qwen35TextModel(Model):
             self.layer_types = ["full_attention"] * num_layers
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
@@ -2071,7 +2055,7 @@ class Qwen35TextModel(Model):
         del self.output_names["present.value"]
 
 
-class Qwen35MoeTextModel(Qwen35TextModel):
+class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
     Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
@@ -2096,14 +2080,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 tc.intermediate_size = tc.moe_intermediate_size
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # The base builder derives the GenAI model.type by stripping the suffix
-        # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = (
-            "Qwen3_5_Moe_textForCausalLM"
-            if self.is_text_only
-            else "Qwen3_5_MoeForConditionalGeneration"
-        )
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"

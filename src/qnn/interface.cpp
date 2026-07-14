@@ -109,7 +109,7 @@ struct GpuInterfaceImpl : QnnInterfaceBase {
 }  // namespace QNN
 
 DeviceInterface* GetQNNInterface(DeviceType device_type) {
-  assert(type == DeviceType::QnnHtp || type == DeviceType::QnnGpu);
+  assert(device_type == DeviceType::QnnHtp || device_type == DeviceType::QnnGpu);
 
   static std::unique_ptr<DeviceInterface> g_htp_device = std::make_unique<QNN::HtpInterfaceImpl>();
   static std::unique_ptr<DeviceInterface> g_gpu_device = std::make_unique<QNN::GpuInterfaceImpl>();
