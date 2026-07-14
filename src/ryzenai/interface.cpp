@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 
 namespace Generators {
 namespace RyzenAI {
@@ -120,9 +121,10 @@ struct Interface : RyzenAIInterface {
     // Register on this env, tolerating the case where it is already registered. An OrtEnv can outlive
     // a genai OgaShutdown (the host may hold a reference), so on re-init the same env may already have
     // the library; ORT reports that as "library is already registered under ...", which is benign here.
-    if (auto status = std::unique_ptr<OrtStatus>{
-            Ort::api->RegisterExecutionProviderLibrary(&env_, ep_name_, ep_path_.native().c_str())}) {
-      const std::string message = status->GetErrorMessage();
+    try {
+      Ort::RegisterExecutionProviderLibrary(&env_, ep_name_, ep_path_.native().c_str());
+    } catch (const Ort::Exception& e) {
+      const std::string message = e.what();
       if (message.find("already registered") == std::string::npos)
         throw std::runtime_error("Failed to register RyzenAI execution provider library: " + message);
     }
@@ -153,33 +155,24 @@ struct Interface : RyzenAIInterface {
       const OrtEpDevice* const* devices = nullptr;
       size_t ndevices = 0;
 
-      Ort::ThrowOnError(Ort::api->GetEpDevices(&env_, &devices, &ndevices));
+      Ort::GetEpDevices(&env_, &devices, &ndevices);
 
       for (const auto& device : std::span{devices, ndevices})
-        if (std::string_view{ep_name_} == Ort::api->EpDevice_EpName(device) &&
-            OrtHardwareDeviceType_NPU == Ort::api->HardwareDevice_Type(Ort::api->EpDevice_Device(device)))
+        if (std::string_view{ep_name_} == device->Name() &&
+            OrtHardwareDeviceType_NPU == device->Device()->Type())
           supported_devices.push_back(device);
     }
 
     if (supported_devices.empty())
       throw std::runtime_error{"No RyzenAI devices detected"};
 
-    {
-      std::vector<const char*> ep_keys, ep_values;
+    // this call merges provider_options into session_options
+    std::unordered_map<std::string, std::string> ep_options;
+    for (const auto& option : provider_options)
+      ep_options.emplace(option.first, option.second);
+    session_options.AppendExecutionProvider_V2(env_, supported_devices, ep_options);
 
-      for (auto& option : provider_options) {
-        ep_keys.emplace_back(option.first.c_str());
-        ep_values.emplace_back(option.second.c_str());
-      }
-
-      // this call merges provider_options into session_options
-      Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(&session_options,
-                                                                           &env_, supported_devices.data(),
-                                                                           supported_devices.size(),
-                                                                           ep_keys.data(), ep_values.data(), ep_keys.size()));
-    }
-
-    Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(&session_options, ep_path_.native().c_str()));
+    session_options.RegisterCustomOpsLibrary(ep_path_.native().c_str());
   }
 
   DeviceType GetType() const override { return DeviceType::RyzenAI; }
