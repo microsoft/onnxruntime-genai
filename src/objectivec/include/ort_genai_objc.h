@@ -350,7 +350,7 @@ typedef struct OGASpeculativeStats {
  * @param value The option value.
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)setSpeculativeOption:(NSString*)key
+- (BOOL)setSpeculativeNumber:(NSString*)key
                 doubleValue:(double)value
                       error:(NSError**)error;
 

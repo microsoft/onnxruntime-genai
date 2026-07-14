@@ -214,7 +214,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generatorParams.SetSearchOption("max_length", maxLength);
                         generatorParams.SetSearchOption("batch_size", batchSize);
-                        generatorParams.SetSpeculativeOption("max_draft_tokens", 4);
+                        generatorParams.SetSpeculativeNumber("max_draft_tokens", 4);
 
                         using (var generator = new Generator(model, generatorParams))
                         {

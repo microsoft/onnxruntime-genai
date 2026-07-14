@@ -51,9 +51,9 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (BOOL)setSpeculativeOption:(NSString*)key doubleValue:(double)value error:(NSError**)error {
+- (BOOL)setSpeculativeNumber:(NSString*)key doubleValue:(double)value error:(NSError**)error {
   try {
-    _generatorParams->SetSpeculativeOption([key UTF8String], value);
+    _generatorParams->SetSpeculativeNumber([key UTF8String], value);
     return YES;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)

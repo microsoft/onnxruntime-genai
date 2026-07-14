@@ -196,9 +196,9 @@ struct PyGeneratorParams {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
       if (pybind11::isinstance<pybind11::float_>(entry.second)) {
-        params_->SetSpeculativeOption(name.c_str(), entry.second.cast<double>());
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
       } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
-        params_->SetSpeculativeOption(name.c_str(), entry.second.cast<int>());
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
       } else
         throw std::runtime_error("Unknown speculative option type, must be int or float: " + name);
     }

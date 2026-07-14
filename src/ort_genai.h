@@ -445,7 +445,7 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
-  void SetSpeculativeOption(const char* name, double value) {
+  void SetSpeculativeNumber(const char* name, double value) {
     OgaCheckResult(OgaGeneratorParamsSetSpeculativeNumber(this, name, value));
   }
 

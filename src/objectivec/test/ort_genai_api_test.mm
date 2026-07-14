@@ -154,7 +154,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
   ORTAssertNullableResultSuccessful(params, error);
-  BOOL ret = [params setSpeculativeOption:@"max_draft_tokens" doubleValue:4 error:&error];
+  BOOL ret = [params setSpeculativeNumber:@"max_draft_tokens" doubleValue:4 error:&error];
   ORTAssertBoolResultSuccessful(ret, error);
   XCTAssertEqual([params getSpeculativeNumber:@"max_draft_tokens" error:&error], 4);
   XCTAssertNil(error);
