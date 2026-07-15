@@ -1424,13 +1424,27 @@ static std::string EscapeJsonString(std::string_view s) {
   result.reserve(s.size());
   for (char c : s) {
     switch (c) {
-      case '"':  result += "\\\""; break;
-      case '\\': result += "\\\\"; break;
-      case '\b': result += "\\b";  break;
-      case '\f': result += "\\f";  break;
-      case '\n': result += "\\n";  break;
-      case '\r': result += "\\r";  break;
-      case '\t': result += "\\t";  break;
+      case '"':
+        result += "\\\"";
+        break;
+      case '\\':
+        result += "\\\\";
+        break;
+      case '\b':
+        result += "\\b";
+        break;
+      case '\f':
+        result += "\\f";
+        break;
+      case '\n':
+        result += "\\n";
+        break;
+      case '\r':
+        result += "\\r";
+        break;
+      case '\t':
+        result += "\\t";
+        break;
       default:
         if (static_cast<unsigned char>(c) < 0x20) {
           throw std::runtime_error(
