@@ -57,7 +57,7 @@ from transformers import (
 )
 
 
-def check_extra_options(kv_pairs, execution_provider):
+def check_extra_options(kv_pairs, precision, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
@@ -103,6 +103,28 @@ def check_extra_options(kv_pairs, execution_provider):
     if "int4_nodes_to_exclude" in kv_pairs:
         kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
 
+    for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
+        if key in kv_pairs:
+            kv_pairs[key] = int(kv_pairs[key])
+
+    if kv_pairs.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
+        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {kv_pairs['qmoe_weights_prepacked']}.")
+
+    if kv_pairs.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
+        raise ValueError(
+            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {kv_pairs['matmulnbits_weights_prepacked']}."
+        )
+
+    if kv_pairs.get("use_fp4_moe", False):
+        if kv_pairs.get("use_8bits_moe", False):
+            raise ValueError("use_fp4_moe and use_8bits_moe are mutually exclusive.")
+        if execution_provider != "cuda":
+            raise ValueError(f"use_fp4_moe is only supported on the CUDA EP, got ep='{execution_provider}'.")
+        if not (precision == "int4" and kv_pairs.get("int4_is_symmetric", True)):
+            raise ValueError(
+                "use_fp4_moe requires precision=int4 with symmetric INT4 quantization so the model exports QMoE."
+            )
+
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
@@ -117,7 +139,7 @@ def check_extra_options(kv_pairs, execution_provider):
         kv_pairs["enable_webgpu_graph"] = False
 
 
-def parse_extra_options(kv_items, execution_provider):
+def parse_extra_options(kv_items, precision, execution_provider):
     """
     Parse key-value pairs that are separated by '='
     """
@@ -129,7 +151,7 @@ def parse_extra_options(kv_items, execution_provider):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs, execution_provider)
+    check_extra_options(kv_pairs, precision, execution_provider)
     return kv_pairs
 
 
@@ -524,7 +546,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    extra_options = parse_extra_options(args.extra_options, args.execution_provider)
+    extra_options = parse_extra_options(args.extra_options, args.precision, args.execution_provider)
     create_model(
         args.model_name,
         args.input,

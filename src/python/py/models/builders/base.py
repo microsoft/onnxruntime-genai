@@ -105,12 +105,6 @@ class Model:
         # EP-specific variables
         self.ep = ep
         use_fp4_moe = extra_options.get("use_fp4_moe", False)
-        if use_fp4_moe and extra_options.get("use_8bits_moe", False):
-            raise ValueError("use_fp4_moe and use_8bits_moe are mutually exclusive.")
-        if use_fp4_moe and self.ep != "cuda":
-            raise ValueError(f"use_fp4_moe is only supported on the CUDA EP, got ep='{self.ep}'.")
-        if use_fp4_moe and self.onnx_dtype != ir.DataType.INT4:
-            raise ValueError("use_fp4_moe requires precision=int4 with symmetric INT4 quantization so the model exports QMoE.")
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -272,8 +266,6 @@ class Model:
             "rope": True,                                    # Use rotary embeddings in attention subgraph
             "q_norm": False,                                 # LayerNorm after MatMul in Q path
             "k_norm": False,                                 # LayerNorm after MatMul in K path
-            "q_norm_weight": "",                             # Q norm weight input to GroupQueryAttention
-            "k_norm_weight": "",                             # K norm weight input to GroupQueryAttention
             "qk_norm_epsilon": epsilon,                      # Epsilon value for Q/K norm in GroupQueryAttention
             "sinks": False,                                  # Sink values for softmax in attention
             # Attributes for packed Attention op:
@@ -306,8 +298,6 @@ class Model:
         # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
         # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
         weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
-        if weights_prepacked not in (-1, 0, 1):
-            raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {weights_prepacked}.")
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -334,15 +324,6 @@ class Model:
         self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
-        # Decouple the int4 quantization *method* (how weights are rounded) from the
-        # int8 bit *placement* (which MatMuls are upgraded to 8 bits). The base method
-        # is one of {"default", "rtn", "k_quant"}; bit placement is controlled by the
-        # orthogonal flags resolved in `resolve_int4_quant_config`. Legacy compound
-        # names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
-        self.algo_config_name = extra_options.get("int4_algo_config", "default")
-        self.int4_base_method, self.int4_bit_placement = self.resolve_int4_quant_config(extra_options)
-        self.int4_customized_weight_config = self.make_bit_placement_config(self.int4_bit_placement)
-        algo_config = self.make_algo_config(self.int4_base_method, self.int4_customized_weight_config)
         self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
         # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
@@ -350,10 +331,6 @@ class Model:
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
         self.matmulnbits_weights_prepacked = int(extra_options.get("matmulnbits_weights_prepacked", 0))
-        if self.matmulnbits_weights_prepacked not in (0, 1, 2):
-            raise ValueError(
-                f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {self.matmulnbits_weights_prepacked}."
-            )
         # MXFP4 mandates a block size of 32; ignore any user override for FP4 QMoE.
         if self.moe_attrs.get("quant_type") == "fp4":
             self.qmoe_block_size = 32
@@ -366,7 +343,7 @@ class Model:
             "is_symmetric": extra_options.get("int4_is_symmetric", True),
             "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
             "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
-            "algo_config": algo_config,
+            "algo_config": None,  # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": extra_options.get("use_qdq", False),
         }
         self.make_quant_init(config)
@@ -546,7 +523,30 @@ class Model:
     def make_lm_head_init(self, config):
         pass
 
+    # Legacy compound `int4_algo_config` names map to a base method plus a set of
+    # int8 bit-placement flags so existing recipes keep producing identical models.
+    LEGACY_INT4_ALGO_ALIASES = {
+        "rtn_last": ("rtn", {"last_matmul_weight_int8": True}),
+        "k_quant_last": ("k_quant", {"last_matmul_weight_int8": True}),
+        "k_quant_mixed": ("k_quant", {"last_matmul_weight_int8": True, "int8_mixed_layers": True}),
+        "k_quant_linear": ("k_quant", {"last_matmul_weight_int8": True, "int8_linear_attn": True}),
+    }
+
+    # Orthogonal int8 bit-placement flags (each can be combined with any base method).
+    INT8_PLACEMENT_FLAGS = ("last_matmul_weight_int8", "int8_mixed_layers", "int8_linear_attn")
+
     def make_quant_init(self, config):
+        # Decouple the int4 quantization *method* (how weights are rounded) from the
+        # int8 bit *placement* (which MatMuls are upgraded to 8 bits). The base method
+        # is one of {"default", "rtn", "k_quant"}; bit placement is controlled by the
+        # orthogonal flags resolved in `resolve_int4_quant_config`. Legacy compound
+        # names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
+        self.resolve_int4_quant_config(self.extra_options)
+        self.make_bit_placement_config(self.int4_bit_placement)
+        self.quant_attrs["algo_config"] = self.make_algo_config(
+            self.int4_base_method, self.int4_customized_weight_config
+        )
+
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
@@ -600,9 +600,10 @@ class Model:
         # where rtn* = rtn, rtn_last
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
-        base_method, placement = self.resolve_int4_quant_config(getattr(self, "extra_options", {}))
-        base_method = getattr(self, "int4_base_method", base_method)
-        placement = getattr(self, "int4_bit_placement", placement)
+        if not hasattr(self, "int4_base_method") or not hasattr(self, "int4_bit_placement"):
+            self.resolve_int4_quant_config(getattr(self, "extra_options", {}))
+        base_method = self.int4_base_method
+        placement = self.int4_bit_placement
 
         bits = 8 if placement.get("last_matmul_weight_int8", False) else 4
         is_symmetric = self.quant_attrs["is_symmetric"]
@@ -791,25 +792,13 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    # Legacy compound `int4_algo_config` names map to a base method plus a set of
-    # int8 bit-placement flags so existing recipes keep producing identical models.
-    LEGACY_INT4_ALGO_ALIASES = {
-        "rtn_last": ("rtn", {"last_matmul_weight_int8": True}),
-        "k_quant_last": ("k_quant", {"last_matmul_weight_int8": True}),
-        "k_quant_mixed": ("k_quant", {"last_matmul_weight_int8": True, "int8_mixed_layers": True}),
-        "k_quant_linear": ("k_quant", {"last_matmul_weight_int8": True, "int8_linear_attn": True}),
-    }
-
-    # Orthogonal int8 bit-placement flags (each can be combined with any base method).
-    INT8_PLACEMENT_FLAGS = ("last_matmul_weight_int8", "int8_mixed_layers", "int8_linear_attn")
-
     def resolve_int4_quant_config(self, extra_options):
         """Split `int4_algo_config` into a base method and int8 bit-placement flags.
 
-        Returns ``(base_method, placement)`` where ``base_method`` is one of
-        ``{"default", "rtn", "k_quant"}`` and ``placement`` is a dict of the
-        ``INT8_PLACEMENT_FLAGS`` booleans. Explicit flags in ``extra_options`` take
-        precedence over the defaults implied by a legacy compound name.
+        Sets ``self.int4_base_method`` (one of ``{"default", "rtn", "k_quant"}``) and
+        ``self.int4_bit_placement`` (a dict of the ``INT8_PLACEMENT_FLAGS`` booleans).
+        Explicit flags in ``extra_options`` take precedence over the defaults implied
+        by a legacy compound name.
         """
         algo = extra_options.get("int4_algo_config", "default")
 
@@ -821,10 +810,15 @@ class Model:
         placement = {}
         for flag in self.INT8_PLACEMENT_FLAGS:
             placement[flag] = bool(extra_options.get(flag, implied.get(flag, False)))
-        return base_method, placement
+
+        self.int4_base_method = base_method
+        self.int4_bit_placement = placement
 
     def make_bit_placement_config(self, placement):
-        """Build the per-node `customized_weight_config` (int8 upgrades) from bit-placement flags."""
+        """Build the per-node `customized_weight_config` (int8 upgrades) from bit-placement flags.
+
+        Sets ``self.int4_customized_weight_config`` with the per-node int8 upgrades.
+        """
         customized_weight_config = {}
 
         if placement.get("last_matmul_weight_int8"):
@@ -856,7 +850,7 @@ class Model:
                     for proj in ("gate_proj", "up_proj", "down_proj"):
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
-        return customized_weight_config
+        self.int4_customized_weight_config = customized_weight_config
 
     def make_algo_config(self, quant_method: str, customized_weight_config=None):
         """Create the MatMulNBitsQuantizer algo config for a *base* method.
@@ -2914,9 +2908,6 @@ class Model:
         #                   O_MatMul
         #                       |
         #                     O_Add
-        self.attention_attrs["q_norm_weight"] = ""
-        self.attention_attrs["k_norm_weight"] = ""
-
         self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
         self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
         self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -3043,17 +3034,23 @@ class Model:
             else:
                 self.make_qk_norm(layer_id, attention)
 
+    def get_qk_norm_weight_names(self, layer_id):
+        # Convention-based initializer names for the fused GQA Q/K norm weights.
+        # Derived from the layer id (like the `sinks` initializer) so callers only need
+        # the `q_norm`/`k_norm` booleans instead of separate stored weight-name attributes.
+        return (
+            f"model.layers.{layer_id}.attn.q_norm.layernorm.weight",
+            f"model.layers.{layer_id}.attn.k_norm.layernorm.weight",
+        )
+
     def make_fused_gqa_qk_norm_inputs(self, layer_id, attention):
-        q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
-        k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
+        q_weight_name, k_weight_name = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(
             attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
         )
         self.make_initializer(
             attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
         )
-        self.attention_attrs["q_norm_weight"] = q_weight_name
-        self.attention_attrs["k_norm_weight"] = k_weight_name
 
     def make_attention_qk_rope(self, layer_id, **kwargs):
         # Make RotaryEmbedding nodes; returns (cos_cache_name, sin_cache_name)
@@ -3105,6 +3102,17 @@ class Model:
             sinks_name = f"model.layers.{layer_id}.attn.sinks"
             self.make_initializer(attention.sinks, sinks_name, to=self.io_dtype)
 
+        # Fused GQA QK-norm weights are convention-named (like `sinks`) and are only fed to
+        # GroupQueryAttention when the fused path is active. Otherwise `make_qk_norm` emits
+        # separate SimplifiedLayerNorm nodes and no norm weights are passed into the op.
+        q_norm_weight = k_norm_weight = ""
+        if (
+            self.attention_attrs["q_norm"]
+            and self.attention_attrs["k_norm"]
+            and self.is_fused_qk_norm_gqa_supported()
+        ):
+            q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
+
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
@@ -3120,8 +3128,8 @@ class Model:
             cos_cache=cos_cache_name,
             sin_cache=sin_cache_name,
             sinks=sinks_name,
-            q_norm_weight=self.attention_attrs["q_norm_weight"],
-            k_norm_weight=self.attention_attrs["k_norm_weight"],
+            q_norm_weight=q_norm_weight,
+            k_norm_weight=k_norm_weight,
             qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
             **kwargs,
         )

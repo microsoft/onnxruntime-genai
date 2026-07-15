@@ -28,6 +28,7 @@ Model = base_module.Model
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
     make_group_query_attention = Model.make_group_query_attention
+    get_qk_norm_weight_names = Model.get_qk_norm_weight_names
 
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
@@ -81,3 +82,15 @@ def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():
     )
 
     assert model.nodes[-1]["attributes"]["qk_norm_epsilon"] == 1e-6
+
+
+def test_get_qk_norm_weight_names_follows_convention():
+    # The fused GQA path derives the Q/K norm weight names by convention (like `sinks`)
+    # instead of storing them in attention_attrs; the initializer creation and the GQA
+    # input must agree on these names.
+    model = _FakeGQAModel("cuda")
+
+    assert model.get_qk_norm_weight_names(3) == (
+        "model.layers.3.attn.q_norm.layernorm.weight",
+        "model.layers.3.attn.k_norm.layernorm.weight",
+    )

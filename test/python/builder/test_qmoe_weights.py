@@ -167,30 +167,14 @@ def _load_builder_cli_module(monkeypatch):
 )
 def test_use_fp4_moe_extra_option_is_boolean(monkeypatch, raw_value, expected):
     builder = _load_builder_cli_module(monkeypatch)
-    options = builder.parse_extra_options([f"use_fp4_moe={raw_value}"], "cuda")
+    options = builder.parse_extra_options([f"use_fp4_moe={raw_value}"], "int4", "cuda")
     assert options["use_fp4_moe"] is expected
 
 
-def test_use_fp4_moe_requires_qmoe_precision():
-    if not hasattr(base_module.ir, "Graph"):
-        pytest.skip("onnx_ir graph API is not available")
-
-    config = types.SimpleNamespace(
-        max_position_embeddings=16,
-        intermediate_size=32,
-        hidden_size=16,
-        num_attention_heads=2,
-        num_hidden_layers=1,
-        vocab_size=100,
-        hidden_act="silu",
-        _name_or_path="test",
-        architectures=["TestForCausalLM"],
-    )
-
+def test_use_fp4_moe_requires_qmoe_precision(monkeypatch):
+    builder = _load_builder_cli_module(monkeypatch)
     with pytest.raises(ValueError, match="use_fp4_moe requires precision=int4"):
-        Model(
-            config, base_module.ir.DataType.FLOAT16, base_module.ir.DataType.FLOAT16, "cuda", ".", {"use_fp4_moe": True}
-        )
+        builder.parse_extra_options(["use_fp4_moe=true"], "fp16", "cuda")
 
 
 def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
