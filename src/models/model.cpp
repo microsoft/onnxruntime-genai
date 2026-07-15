@@ -318,7 +318,7 @@ static void ResolveFallbackTagId(int32_t& id, const std::string& model_type,
   if (id >= 0) return;
 
   static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
-      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
+      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
       {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
       {"phi3", {{"tool_call_start", "<|tool_call|>"}, {"tool_call_end", "<|/tool_call|>"}}},
       {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
