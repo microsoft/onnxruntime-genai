@@ -23,6 +23,7 @@
 #include "parakeet.h"
 #include "parakeet_processor.h"
 #include "nemotron_speech.h"
+#include "nemotron_parse.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -891,6 +892,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
+  if (config->model.type == "nemotron_parse")
+    return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))

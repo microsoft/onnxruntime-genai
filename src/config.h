@@ -316,8 +316,12 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string prefill_filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+
+      std::string cache_update_mode;
+      int prefill_sequence_length{};
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -353,6 +357,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string cache_write_indices;
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -378,6 +383,7 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
+        std::string cross_present_key_names, cross_present_value_names;
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)

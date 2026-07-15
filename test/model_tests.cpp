@@ -29,6 +29,27 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
 };
 
+TEST(ModelTests, NemotronParseConfig) {
+  const auto config_path =
+      fs::path{__FILE__}.parent_path() / "configs" / "nemotron-parse";
+  Generators::Config config{config_path, std::string_view{}};
+
+  EXPECT_EQ(config.model.type, "nemotron_parse");
+  EXPECT_EQ(config.model.context_length, 1032);
+  EXPECT_EQ(config.model.vision.num_visual_tokens, 3201);
+  EXPECT_EQ(config.model.vision.outputs.image_features,
+            "encoder_hidden_states");
+  EXPECT_EQ(config.model.decoder.prefill_filename, "decoder_prefill.onnx");
+  EXPECT_EQ(config.model.decoder.cache_update_mode, "tensor_scatter");
+  EXPECT_EQ(config.model.decoder.prefill_sequence_length, 8);
+  EXPECT_EQ(config.model.decoder.inputs.cache_write_indices,
+            "cache_write_indices");
+  EXPECT_EQ(config.model.decoder.outputs.cross_present_key_names,
+            "cross_present.%d.key");
+  EXPECT_EQ(config.model.decoder.outputs.cross_present_value_names,
+            "cross_present.%d.value");
+}
+
 #if USE_DML
 TEST(ModelTests, DMLAdapterSelection) {
 #if 0  // TEST_PHI2 TODO: Remove this? Can't access the device directly anymore.
