@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
@@ -170,10 +171,16 @@ size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
 }
 
 size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return 0;
+  }
   return (*p)[sequence].size();
 }
 
 const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return nullptr;
+  }
   return (*p)[sequence].data();
 }
 
@@ -758,9 +765,19 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
+  if (shape_dims_count > 0 && shape_dims == nullptr)
+    throw std::runtime_error("shape_dims must not be null when shape_dims_count is non-zero");
   auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
-  for (size_t i = 0; i < shape_dims_count; i++)
-    byte_count *= shape_dims[i];
+  for (size_t i = 0; i < shape_dims_count; i++) {
+    if (shape_dims[i] < 0)
+      throw std::runtime_error("shape dimension must be non-negative");
+    if (static_cast<uint64_t>(shape_dims[i]) > std::numeric_limits<size_t>::max())
+      throw std::runtime_error("shape dimension exceeds size_t range");
+    const size_t dim = static_cast<size_t>(shape_dims[i]);
+    if (dim != 0 && byte_count > std::numeric_limits<size_t>::max() / dim)
+      throw std::runtime_error("tensor byte count overflow");
+    byte_count *= dim;
+  }
   std::unique_ptr<OrtValue> ort_tensor;
   if (data)
     ort_tensor = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);

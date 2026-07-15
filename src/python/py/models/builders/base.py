@@ -88,7 +88,11 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
-        self.hf_remote = extra_options.get("hf_remote", True)
+        # Default to False so transformers `from_pretrained()` calls do not
+        # execute arbitrary Python from a Hugging Face repository unless the
+        # caller has explicitly opted in via `hf_remote=true` in
+        # `--extra_options`. See the security note in builder.py.
+        self.hf_remote = extra_options.get("hf_remote", False)
         self.extra_options = extra_options
 
         # States for building the model
