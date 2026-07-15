@@ -481,7 +481,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 
 Supported base values are: `default`, `rtn`, `k_quant`.
 
-The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus a `mixed_precision_config`.
+The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus a `matmul_mixed_precision`.
 
 ##### Mixed Precision
 
@@ -489,19 +489,19 @@ This scenario is for when you want to quantize selected MatMul groups with a dif
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default mixed_precision_config=last_matmul:int8
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default matmul_mixed_precision=last_matmul:int8
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=k_quant mixed_precision_config=last_matmul:int8,mixed_layers:int8
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=k_quant matmul_mixed_precision=last_matmul:int8,mixed_layers:int8
 ```
 
-`mixed_precision_config` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
+`matmul_mixed_precision` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
 
 - `last_matmul`: The last MatMul, such as `/lm_head/MatMul` (the single largest, output-sensitive weight).
 - `mixed_layers`: The most quantization-sensitive layers, using the mixed strategy from llama.cpp.
 - `linear_attn`: Linear-attention projections and their MLPs, for hybrid attention models.
 
-Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `mixed_precision_config` is orthogonal to `int4_algo_config` and can be combined with any base method.
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `matmul_mixed_precision` is orthogonal to `int4_algo_config` and can be combined with any base method.
 
 ##### Use QDQ Pattern for Quantization
 

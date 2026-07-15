@@ -483,14 +483,14 @@ def get_args():
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
                     rtn = RTN algorithm for int4 quantization.
                     k_quant = k_quant algorithm for int4 quantization.
-                    The following legacy compound values are still accepted as aliases (base method + mixed_precision_config):
-                    rtn_last = rtn + mixed_precision_config=last_matmul:int8.
-                    k_quant_last = k_quant + mixed_precision_config=last_matmul:int8.
-                    k_quant_mixed = k_quant + mixed_precision_config=last_matmul:int8,mixed_layers:int8.
-                    k_quant_linear = k_quant + mixed_precision_config=last_matmul:int8,linear_attn:int8.
-                mixed_precision_config = Quantize selected MatMul groups with a different quant type than the int4 body.
+                    The following legacy compound values are still accepted as aliases (base method + matmul_mixed_precision):
+                    rtn_last = rtn + matmul_mixed_precision=last_matmul:int8.
+                    k_quant_last = k_quant + matmul_mixed_precision=last_matmul:int8.
+                    k_quant_mixed = k_quant + matmul_mixed_precision=last_matmul:int8,mixed_layers:int8.
+                    k_quant_linear = k_quant + matmul_mixed_precision=last_matmul:int8,linear_attn:int8.
+                matmul_mixed_precision = Quantize selected MatMul groups with a different quant type than the int4 body.
                     Format is a comma-separated list of 'selector:quant_type' pairs, e.g.
-                    mixed_precision_config=last_matmul:int8,mixed_layers:int8,linear_attn:int4
+                    matmul_mixed_precision=last_matmul:int8,mixed_layers:int8,linear_attn:int4
                     Selectors:
                     last_matmul = the last MatMul (e.g. /lm_head/MatMul), the single largest, output-sensitive weight.
                     mixed_layers = the most quantization-sensitive MatMuls (llama.cpp mixed strategy: first/last eighth of layers plus every third layer's qkv_proj/v_proj/down_proj).

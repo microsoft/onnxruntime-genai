@@ -538,7 +538,7 @@ class Model:
         pass
 
     # Legacy compound `int4_algo_config` names that predate the decoupled config. They map to a base
-    # method plus `mixed_precision_config` entries so existing recipes keep producing identical models.
+    # method plus `matmul_mixed_precision` entries so existing recipes keep producing identical models.
     LEGACY_INT4_ALGO_ALIASES = {
         "rtn_last": ("rtn", {"last_matmul": "int8"}),
         "k_quant_last": ("k_quant", {"last_matmul": "int8"}),
@@ -546,11 +546,11 @@ class Model:
         "k_quant_linear": ("k_quant", {"last_matmul": "int8", "linear_attn": "int8"}),
     }
 
-    # `mixed_precision_config` maps a node-group selector to the quantization type applied to that group
+    # `matmul_mixed_precision` maps a node-group selector to the quantization type applied to that group
     # (instead of the int4 body). Using a quant-type name rather than a bare bit count lets new schemes
     # such as fp8/fp4 be added without introducing a new option.
-    MIXED_PRECISION_SELECTORS = ("last_matmul", "mixed_layers", "linear_attn")
-    MIXED_PRECISION_QUANT_TYPES = {
+    MATMUL_MIXED_PRECISION_SELECTORS = ("last_matmul", "mixed_layers", "linear_attn")
+    MATMUL_MIXED_PRECISION_QUANT_TYPES = {
         "int4": 4,
         "int8": 8,
     }
@@ -559,10 +559,10 @@ class Model:
         # Decouple the int4 quantization *method* (how weights are rounded) from the
         # *mixed-precision placement* (which MatMuls use a different quant type than the
         # int4 body). The base method is one of {"default", "rtn", "k_quant"}; placement is
-        # resolved from `mixed_precision_config` in `resolve_int4_quant_config`. Legacy
+        # resolved from `matmul_mixed_precision` in `resolve_int4_quant_config`. Legacy
         # compound names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
         self.resolve_int4_quant_config(self.extra_options)
-        self.make_mixed_precision_config(self.mixed_precision_config)
+        self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
         )
@@ -620,13 +620,13 @@ class Model:
         # where rtn* = rtn, rtn_last
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
-        if not hasattr(self, "quantization_algo") or not hasattr(self, "mixed_precision_config"):
+        if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
             self.resolve_int4_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
-        placement = self.mixed_precision_config
+        placement = self.matmul_mixed_precision
 
         last_matmul_type = placement.get("last_matmul")
-        bits = self.MIXED_PRECISION_QUANT_TYPES[last_matmul_type] if last_matmul_type else 4
+        bits = self.MATMUL_MIXED_PRECISION_QUANT_TYPES[last_matmul_type] if last_matmul_type else 4
         is_symmetric = self.quant_attrs["is_symmetric"]
 
         if base_method == "rtn" or (base_method == "default" and bits != 4):
@@ -817,8 +817,8 @@ class Model:
         """Split `int4_algo_config` into a base method and a mixed-precision map.
 
         Sets ``self.quantization_algo`` (one of ``{"default", "rtn", "k_quant"}``) and
-        ``self.mixed_precision_config`` (a dict mapping node-group selectors to a quant type,
-        e.g. ``{"last_matmul": "int8"}``). Explicit ``mixed_precision_config`` entries take
+        ``self.matmul_mixed_precision`` (a dict mapping node-group selectors to a quant type,
+        e.g. ``{"last_matmul": "int8"}``). Explicit ``matmul_mixed_precision`` entries take
         precedence over the defaults implied by a legacy compound name.
         """
         algo = extra_options.get("int4_algo_config", "default")
@@ -829,14 +829,14 @@ class Model:
             base_method, implied = self.LEGACY_INT4_ALGO_ALIASES[algo]
             placement.update(implied)
 
-        placement.update(self.normalize_mixed_precision_config(extra_options.get("mixed_precision_config", {})))
+        placement.update(self.normalize_matmul_mixed_precision(extra_options.get("matmul_mixed_precision", {})))
 
         self.quantization_algo = base_method
-        self.mixed_precision_config = placement
+        self.matmul_mixed_precision = placement
 
     @classmethod
-    def normalize_mixed_precision_config(cls, value):
-        """Normalize a `mixed_precision_config` value into a ``{selector: quant_type}`` dict.
+    def normalize_matmul_mixed_precision(cls, value):
+        """Normalize a `matmul_mixed_precision` value into a ``{selector: quant_type}`` dict.
 
         Accepts either an already-parsed dict or a ``"selector:quant_type[,...]"`` string
         (e.g. ``"last_matmul:int8,linear_attn:int4"``). Validates selectors and quant types.
@@ -853,42 +853,42 @@ class Model:
                     continue
                 if ":" not in entry:
                     raise ValueError(
-                        f"mixed_precision_config entries must be 'selector:quant_type', got '{entry}'."
+                        f"matmul_mixed_precision entries must be 'selector:quant_type', got '{entry}'."
                     )
                 selector, quant_type = entry.split(":", 1)
                 items.append((selector.strip(), quant_type.strip()))
 
         normalized = {}
         for selector, quant_type in items:
-            if selector not in cls.MIXED_PRECISION_SELECTORS:
+            if selector not in cls.MATMUL_MIXED_PRECISION_SELECTORS:
                 raise ValueError(
-                    f"mixed_precision_config selector must be one of {list(cls.MIXED_PRECISION_SELECTORS)}, "
+                    f"matmul_mixed_precision selector must be one of {list(cls.MATMUL_MIXED_PRECISION_SELECTORS)}, "
                     f"got '{selector}'."
                 )
-            if quant_type not in cls.MIXED_PRECISION_QUANT_TYPES:
+            if quant_type not in cls.MATMUL_MIXED_PRECISION_QUANT_TYPES:
                 raise ValueError(
-                    f"mixed_precision_config quant type must be one of {sorted(cls.MIXED_PRECISION_QUANT_TYPES)}, "
+                    f"matmul_mixed_precision quant type must be one of {sorted(cls.MATMUL_MIXED_PRECISION_QUANT_TYPES)}, "
                     f"got '{quant_type}'."
                 )
             normalized[selector] = quant_type
         return normalized
 
-    def make_mixed_precision_config(self, placement):
+    def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
 
         `placement` maps selectors ("last_matmul", "mixed_layers", "linear_attn") to a quant
         type (e.g. "int8"). Each selected MatMul is emitted with that type's bit-width, so a
-        new type only needs an entry in ``MIXED_PRECISION_QUANT_TYPES``.
+        new type only needs an entry in ``MATMUL_MIXED_PRECISION_QUANT_TYPES``.
         """
         customized_weight_config = {}
 
         last_matmul = placement.get("last_matmul")
         if last_matmul:
-            customized_weight_config["/lm_head/MatMul"] = {"bits": self.MIXED_PRECISION_QUANT_TYPES[last_matmul]}
+            customized_weight_config["/lm_head/MatMul"] = {"bits": self.MATMUL_MIXED_PRECISION_QUANT_TYPES[last_matmul]}
 
         mixed_layers = placement.get("mixed_layers")
         if mixed_layers:
-            bits = self.MIXED_PRECISION_QUANT_TYPES[mixed_layers]
+            bits = self.MATMUL_MIXED_PRECISION_QUANT_TYPES[mixed_layers]
             # Mixed precision from llama.cpp: promote the most quantization-sensitive MatMuls.
             # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
             layers_to_upgrade = [
@@ -905,7 +905,7 @@ class Model:
 
         linear_attn = placement.get("linear_attn")
         if linear_attn and hasattr(self, "layer_types"):
-            bits = self.MIXED_PRECISION_QUANT_TYPES[linear_attn]
+            bits = self.MATMUL_MIXED_PRECISION_QUANT_TYPES[linear_attn]
             # Promote linear attention projections and their MLPs.
             # Linear attention recurrence accumulates quantization errors across
             # the full sequence (no softmax normalization).

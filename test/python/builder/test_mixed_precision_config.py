@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Unit tests for the `mixed_precision_config` extra option in the model builder.
+"""Unit tests for the `matmul_mixed_precision` extra option in the model builder.
 
-`mixed_precision_config` decouples *which* MatMul groups are upgraded (selectors
+`matmul_mixed_precision` decouples *which* MatMul groups are upgraded (selectors
 ``last_matmul`` / ``mixed_layers`` / ``linear_attn``) from *what* quant type they use
 (``int4`` / ``int8``, extensible to fp8/fp4). It replaces the removed per-target int8
 boolean flags while keeping the pre-existing compound ``int4_algo_config`` aliases
@@ -40,42 +40,42 @@ Model = base_module.Model
 
 
 # ---------------------------------------------------------------------------
-# normalize_mixed_precision_config
+# normalize_matmul_mixed_precision
 # ---------------------------------------------------------------------------
 
 
 def test_normalize_parses_selector_quant_type_string():
-    result = Model.normalize_mixed_precision_config("last_matmul:int8,mixed_layers:int8,linear_attn:int4")
+    result = Model.normalize_matmul_mixed_precision("last_matmul:int8,mixed_layers:int8,linear_attn:int4")
     assert result == {"last_matmul": "int8", "mixed_layers": "int8", "linear_attn": "int4"}
 
 
 def test_normalize_tolerates_whitespace_and_empty_entries():
-    result = Model.normalize_mixed_precision_config(" last_matmul : int8 , , linear_attn:int4 ")
+    result = Model.normalize_matmul_mixed_precision(" last_matmul : int8 , , linear_attn:int4 ")
     assert result == {"last_matmul": "int8", "linear_attn": "int4"}
 
 
 def test_normalize_accepts_dict_passthrough():
-    assert Model.normalize_mixed_precision_config({"last_matmul": "int8"}) == {"last_matmul": "int8"}
+    assert Model.normalize_matmul_mixed_precision({"last_matmul": "int8"}) == {"last_matmul": "int8"}
 
 
 def test_normalize_empty_returns_empty_dict():
-    assert Model.normalize_mixed_precision_config("") == {}
-    assert Model.normalize_mixed_precision_config({}) == {}
+    assert Model.normalize_matmul_mixed_precision("") == {}
+    assert Model.normalize_matmul_mixed_precision({}) == {}
 
 
 def test_normalize_rejects_missing_colon():
     with pytest.raises(ValueError, match="must be 'selector:quant_type'"):
-        Model.normalize_mixed_precision_config("last_matmul")
+        Model.normalize_matmul_mixed_precision("last_matmul")
 
 
 def test_normalize_rejects_unknown_selector():
     with pytest.raises(ValueError, match="selector must be one of"):
-        Model.normalize_mixed_precision_config("first_matmul:int8")
+        Model.normalize_matmul_mixed_precision("first_matmul:int8")
 
 
 def test_normalize_rejects_unknown_quant_type():
     with pytest.raises(ValueError, match="quant type must be one of"):
-        Model.normalize_mixed_precision_config("last_matmul:int6")
+        Model.normalize_matmul_mixed_precision("last_matmul:int6")
 
 
 # ---------------------------------------------------------------------------
@@ -87,57 +87,55 @@ def test_resolve_base_method_only_has_no_mixed_precision():
     model = Model.__new__(Model)
     model.resolve_int4_quant_config({"int4_algo_config": "k_quant"})
     assert model.quantization_algo == "k_quant"
-    assert model.mixed_precision_config == {}
+    assert model.matmul_mixed_precision == {}
 
 
-def test_resolve_reads_mixed_precision_config_string():
+def test_resolve_reads_matmul_mixed_precision_string():
     model = Model.__new__(Model)
     model.resolve_int4_quant_config(
-        {"int4_algo_config": "default", "mixed_precision_config": "last_matmul:int8,linear_attn:int4"}
+        {"int4_algo_config": "default", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"}
     )
     assert model.quantization_algo == "default"
-    assert model.mixed_precision_config == {"last_matmul": "int8", "linear_attn": "int4"}
+    assert model.matmul_mixed_precision == {"last_matmul": "int8", "linear_attn": "int4"}
 
 
 def test_resolve_expands_legacy_compound_alias():
     model = Model.__new__(Model)
     model.resolve_int4_quant_config({"int4_algo_config": "k_quant_mixed"})
     assert model.quantization_algo == "k_quant"
-    assert model.mixed_precision_config == {"last_matmul": "int8", "mixed_layers": "int8"}
+    assert model.matmul_mixed_precision == {"last_matmul": "int8", "mixed_layers": "int8"}
 
 
 def test_resolve_explicit_config_overrides_legacy_alias_defaults():
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config(
-        {"int4_algo_config": "k_quant_last", "mixed_precision_config": "last_matmul:int4"}
-    )
+    model.resolve_int4_quant_config({"int4_algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"})
     assert model.quantization_algo == "k_quant"
     # Explicit last_matmul:int4 overrides the alias-implied last_matmul:int8.
-    assert model.mixed_precision_config == {"last_matmul": "int4"}
+    assert model.matmul_mixed_precision == {"last_matmul": "int4"}
 
 
 # ---------------------------------------------------------------------------
-# make_mixed_precision_config -> customized_weight_config
+# make_matmul_mixed_precision -> customized_weight_config
 # ---------------------------------------------------------------------------
 
 
 def test_make_config_empty_placement_yields_empty_config():
     model = Model.__new__(Model)
-    model.make_mixed_precision_config({})
+    model.make_matmul_mixed_precision({})
     assert model.int4_customized_weight_config == {}
 
 
 @pytest.mark.parametrize("quant_type,expected_bits", [("int8", 8), ("int4", 4)])
 def test_make_config_last_matmul_uses_quant_type_bits(quant_type, expected_bits):
     model = Model.__new__(Model)
-    model.make_mixed_precision_config({"last_matmul": quant_type})
+    model.make_matmul_mixed_precision({"last_matmul": quant_type})
     assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": expected_bits}}
 
 
 def test_make_config_mixed_layers_upgrades_sensitive_matmuls():
     model = Model.__new__(Model)
     model.num_layers = 8
-    model.make_mixed_precision_config({"mixed_layers": "int8"})
+    model.make_matmul_mixed_precision({"mixed_layers": "int8"})
 
     cfg = model.int4_customized_weight_config
     assert cfg  # non-empty
@@ -151,7 +149,7 @@ def test_make_config_mixed_layers_upgrades_sensitive_matmuls():
 def test_make_config_linear_attn_upgrades_linear_layers_only():
     model = Model.__new__(Model)
     model.layer_types = ["linear_attention", "full_attention"]
-    model.make_mixed_precision_config({"linear_attn": "int8"})
+    model.make_matmul_mixed_precision({"linear_attn": "int8"})
 
     cfg = model.int4_customized_weight_config
     assert all(entry == {"bits": 8} for entry in cfg.values())
@@ -164,7 +162,7 @@ def test_make_config_linear_attn_upgrades_linear_layers_only():
 def test_make_config_supports_distinct_types_per_selector():
     model = Model.__new__(Model)
     model.num_layers = 8
-    model.make_mixed_precision_config({"last_matmul": "int8", "mixed_layers": "int4"})
+    model.make_matmul_mixed_precision({"last_matmul": "int8", "mixed_layers": "int4"})
 
     cfg = model.int4_customized_weight_config
     assert cfg["/lm_head/MatMul"] == {"bits": 8}
