@@ -1,0 +1,49 @@
+{
+  "model": {
+    "type": "nemotron_parse",
+    "bos_token_id": 2,
+    "eos_token_id": 2,
+    "pad_token_id": 1,
+    "context_length": 1032,
+    "vocab_size": 52352,
+    "vision": {
+      "filename": "encoder.onnx",
+      "inputs": {"pixel_values": "pixel_values"},
+      "outputs": {"image_features": "encoder_hidden_states"},
+      "num_visual_tokens": 3201
+    },
+    "decoder": {
+      "filename": "decoder.onnx",
+      "prefill_filename": "decoder_prefill.onnx",
+      "cache_update_mode": "tensor_scatter",
+      "prefill_sequence_length": 8,
+      "hidden_size": 1024,
+      "head_size": 64,
+      "num_attention_heads": 16,
+      "num_hidden_layers": 10,
+      "num_key_value_heads": 16,
+      "inputs": {
+        "input_ids": "decoder_input_ids",
+        "attention_mask": "decoder_attention_mask",
+        "encoder_hidden_states": "encoder_hidden_states",
+        "cache_write_indices": "cache_write_indices",
+        "past_key_names": "past_key_values.%d.key",
+        "past_value_names": "past_key_values.%d.value",
+        "cross_past_key_names": "cross_past_key_values.%d.key",
+        "cross_past_value_names": "cross_past_key_values.%d.value"
+      },
+      "outputs": {
+        "logits": "logits",
+        "present_key_names": "present.%d.key",
+        "present_value_names": "present.%d.value",
+        "cross_present_key_names": "cross_present.%d.key",
+        "cross_present_value_names": "cross_present.%d.value"
+      }
+    }
+  },
+  "search": {
+    "max_length": 1032,
+    "num_beams": 1,
+    "past_present_share_buffer": true
+  }
+}
