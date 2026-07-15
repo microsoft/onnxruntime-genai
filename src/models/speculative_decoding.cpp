@@ -147,23 +147,6 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
     throw std::runtime_error(
         "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
         std::to_string(params.search.num_beams) + ".");
-
-  // No support for repetition_penalty and min_length; 
-  // needs cross-position bookkeeping that isn't implemented yet.
-  if (params.search.repetition_penalty != 1.0f)
-    throw std::runtime_error(
-        "Speculative decoding does not support repetition_penalty != 1.0 in this release. Got " +
-        std::to_string(params.search.repetition_penalty) + ".");
-  if (params.search.min_length > 0)
-    throw std::runtime_error(
-        "Speculative decoding does not support min_length > 0 in this release. Got min_length=" +
-        std::to_string(params.search.min_length) + ".");
-
-  // No support for guidance in this release; applies a grammar mask and commits tokens one at a time. The speculative
-  // loop bypasses Generator::ComputeLogits, so guidance would be silently ignored -> reject it.
-  if (!params.guidance_type.empty() && !params.guidance_data.empty())
-    throw std::runtime_error(
-        "Speculative decoding does not support constrained decoding (guidance) in this release.");
 }
 
 // Run() - prefill path (called via Generator::AppendTokens -> ComputeLogits).
@@ -175,8 +158,7 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
   const int vocab_size = params_->config.model.vocab_size;
   auto draft_logits = draft_state_->Run(total_length, next_tokens, next_indices);
   auto cpu_draft = draft_logits.CopyDeviceToCpu();
-  draft_pending_probs_.assign(cpu_draft.data(), cpu_draft.data() + vocab_size);
-  Softmax(draft_pending_probs_, 1.0f);
+  draft_pending_logits_.assign(cpu_draft.data(), cpu_draft.data() + vocab_size);
   draft_pending_valid_ = true;
   return target_state_->Run(total_length, next_tokens, next_indices);
 }
@@ -184,6 +166,56 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
 void SpeculativeDecodingState::RewindTo(size_t index) {
   target_state_->RewindTo(index);
   draft_state_->RewindTo(index);
+  // draft_pending_logits_ is stale after a rewind and must not seed the next proposal. 
+  // Invalidate it -> refresh it. Check draft_pending_valid_ and throws if it is 
+  // ever consumed while stale.
+  draft_pending_valid_ = false;
+}
+
+OrtValue* SpeculativeDecodingState::GetInput(const char* name) {
+  if (auto* input = target_state_->GetInput(name))
+    return input;
+  return draft_state_->GetInput(name);
+}
+
+OrtValue* SpeculativeDecodingState::GetOutput(const char* name) {
+  if (auto* output = target_state_->GetOutput(name))
+    return output;
+  return draft_state_->GetOutput(name);
+}
+
+void SpeculativeDecodingState::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  // Apply the adapter only to the target; the draft may be a different, incompatible model.
+  target_state_->SetActiveAdapter(adapters, adapter_name);
+}
+
+void SpeculativeDecodingState::SetRunOption(const char* key, const char* value) {
+  if (key == nullptr || value == nullptr)
+    throw std::runtime_error("Speculative decoding runtime option key and value must not be null.");
+
+  const bool terminate = std::strcmp(key, "terminate_session") == 0;
+  if (terminate && std::strcmp(value, "1") == 0)
+    State::SetRunOption(key, value);
+
+  target_state_->SetRunOption(key, value);
+  draft_state_->SetRunOption(key, value);
+
+  if (terminate && std::strcmp(value, "0") == 0)
+    State::SetRunOption(key, value);
+}
+
+void SpeculativeDecodingState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  const auto target_names = model_.target_model().session_info_.GetInputNames();
+  const auto draft_names = model_.draft_model().session_info_.GetInputNames();
+  for (const auto& extra_input : extra_inputs) {
+    const bool target_has_input = std::find(target_names.begin(), target_names.end(), extra_input.name) != target_names.end();
+    const bool draft_has_input = std::find(draft_names.begin(), draft_names.end(), extra_input.name) != draft_names.end();
+    if (!target_has_input && !draft_has_input)
+      throw std::runtime_error("Speculative decoding model input '" + extra_input.name + "' was not found in the target or draft model.");
+  }
+
+  target_state_->SetExtraInputs(extra_inputs);
+  draft_state_->SetExtraInputs(extra_inputs);
 }
 
 }  // namespace Generators

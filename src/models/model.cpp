@@ -853,7 +853,7 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   // Speculative decoding wraps two decoder-only models (target + draft) under single model.
-  if (config->model.type == "speculative")
+  if (ModelType::UsesDraftModelSpeculation(config->model.type, config->model.draft.filename))
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())

@@ -47,6 +47,16 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUint64,   // maps to c type uint64_t
 };
 
+/** An immutable snapshot of speculative decoding statistics. */
+@interface OGASpeculativeStats : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+- (uint64_t)getCount:(NSString*)name error:(NSError**)error;
+- (double)getNumber:(NSString*)name error:(NSError**)error;
+- (BOOL)getBool:(NSString*)name error:(NSError**)error;
+
+@end
+
 /**
  * An ORT GenAI config.
  */
@@ -311,6 +321,25 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (BOOL)getSearchBool:(NSString*)key
                 error:(NSError**)error;
+
+/**
+ * Set a numerical speculative decoding option.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setSpeculativeNumber:(NSString*)key
+                doubleValue:(double)value
+                      error:(NSError**)error;
+
+/**
+ * Get a numerical speculative decoding option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (double)getSpeculativeNumber:(NSString*)key
+                        error:(NSError**)error;
 @end
 
 /**
@@ -422,6 +451,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (size_t)sequenceCountAtIndex:(size_t)index
                          error:(NSError**)error;
+
+/** Get an immutable snapshot of the accumulated speculative decoding statistics. */
+- (nullable OGASpeculativeStats*)getSpeculativeStatsWithError:(NSError**)error;
 
 /**
  * Clean up the resource before process exits.

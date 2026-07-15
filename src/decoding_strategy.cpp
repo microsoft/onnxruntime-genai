@@ -20,10 +20,10 @@ SpeculativeStats DecodingStrategy::GetStats() const {
 
 // Factory
 std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
-  const auto& model_type = generator.model_->config_->model.type;
-  if (ModelType::IsTransducer(model_type))
+  const auto& model = generator.model_->config_->model;
+  if (ModelType::IsTransducer(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
-  if (ModelType::IsSpeculative(model_type))
+  if (ModelType::UsesDraftModelSpeculation(model.type, model.draft.filename))
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   return std::make_unique<StandardDecodingStrategy>();
 }

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -35,6 +36,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void Step(Generator& g) final;
   SpeculativeStats GetStats() const final;
   void Reset() final;
+  void PrepareForAppend(Generator& g) final;
+  bool TryGetExternalLogits(Generator& g, DeviceSpan<float>& logits) final;
+  void PrepareForSetLogits(Generator& g) final;
 
  protected:
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
@@ -52,13 +56,22 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Stats accumulators.
   std::size_t rounds_{};
+  std::size_t completed_rounds_{};
+  std::size_t interrupted_rounds_{};
   std::size_t draft_proposed_{};
+  std::size_t draft_evaluated_{};
   std::size_t draft_accepted_{};
   std::size_t corrections_{};
   std::size_t bonuses_{};
+  std::size_t tokens_queued_{};
+  std::size_t tokens_emitted_{};
+  std::size_t tokens_discarded_{};
+  std::size_t draft_runs_{};
+  std::size_t target_runs_{};
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
+  float total_reconciliation_ms_{};
   std::size_t reanchor_runs_{};
 
   // Runtime vocab-size sanity check.
@@ -68,6 +81,10 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   std::mt19937 rng_;
   bool rng_seeded_{false};
 
+  // Grammar-forced tokens carried from a prior guidance round, read by Propose so it can place them
+  // first in the verify batch (the grammar is already advanced past them).
+  const std::deque<int32_t>& GuidanceFFCarry() const { return ff_carry_; }
+
  private:
   // Each Step emits one token. RunRound does a whole round's compute up front and buffers the
   // committed tokens; DrainOne hands them out one per call; FinalizeRound runs the deferred
@@ -75,10 +92,44 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void RunRound(Generator& g);
   void DrainOne(Generator& g);
   void FinalizeRound(Generator& g);
-  void EmitToken(Generator& g, int32_t tok);
+  bool EmitToken(Generator& g, int32_t tok);
+  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported);
+  void FinishRound();
+  void DiscardPendingTokens();
+  void ClearPendingExternalLogits();
+
+  // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
+  // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
+  // sampling. Runs instead of the normal batched path.
+  void RunGuidanceRound(Generator& g, const Proposal& proposal, int seed_length, int K,
+                        float propose_ms);
+
+  // Cleans up after a guidance round and returns the target's logits for the next position. Keeps
+  // the accepted tokens already in the cache and feeds the rest back one at a time; also refreshes
+  // the draft's saved logits.
+  DeviceSpan<float> FinalizeGuidanceRound(Generator& g);
+
+  // Rewinds both inner caches to floor and replays the committed tokens from there to the current
+  // length; lines both caches back up with the committed sequence. Used when AppendTokens resumes.
+  DeviceSpan<float> ReplayCommittedTail(Generator& g, int floor, bool record_stats = true);
+  void PrepareForSetLogits(Generator& g, bool record_stats);
 
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
+  bool round_active_{};
+  bool active_round_discarded_{};
+
+  // K histogram for rounds that follow the standard geometric acceptance formula.
+  std::array<std::size_t, 17> formula_k_counts_{};
+  std::size_t formula_rounds_{};
+
+  // Raw target rows corresponding to accepted tokens in pending_. These let get_logits inspect the
+  // next-token logits without discarding speculative lookahead or advancing RNG/model state.
+  DeviceSpan<float> pending_target_logits_;
+  int pending_target_logits_row0_{};
+  int current_target_logits_row_{-1};
+  int emitted_direct_tokens_{};
+  int cached_direct_tokens_{};
 
   // Round context saved by RunRound.
   Proposal saved_proposal_;
@@ -88,6 +139,28 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   int saved_K_{};
   bool reanchor_pending_{false};
 
+  // Guidance round context - the committed token set (accepted prefix + correction + fast-forward
+  // tokens), saved so FinalizeGuidanceRound can re-anchor the caches.
+  std::vector<int32_t> saved_committed_;
+
+  // Grammar-forced tokens the round could not fit in its K budget, carried to the next round and
+  // emitted first (the grammar is already advanced past them).
+  std::deque<int32_t> ff_carry_;
+
+  // How many leading committed tokens were part of the target verify batch (so their KV is already
+  // built). FinalizeGuidanceRound only replays committed tokens past this point.
+  int saved_verify_prefix_{};
+
+  // The last verify row for the committed prefix, reused as the next round's pos0 when nothing needs
+  // replaying (avoids an extra target pass).
+  std::vector<float> saved_last_row_;
+
+  // Set while a round has left the inner KV caches out of sync with the committed sequence (mid round/deferred fold).
+  bool round_dirty_{false};
+
+  // True when the round just run was a guidance round.
+  bool guidance_round_{false};
+
   // Re-anchor fold: instead of giving the round's committed token its own target forward, 
   // we tack it onto the front of the next round's verify batch. Saves
   // one full target run per round.
@@ -95,9 +168,6 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // is_multiple_tokens_ = true if the target returns one logits row per token (required for the fold).
   bool is_multiple_tokens_{false};
   std::optional<int32_t> pending_anchor_token_{};
-
-  // Reusable one-hot logit row used to commit a single token.
-  DeviceSpan<float> onehot_buf_;
 
   // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits. 
   std::unique_ptr<OrtValue> verify_logits_fp32_;

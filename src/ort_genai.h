@@ -65,6 +65,30 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
+struct OgaSpeculativeStats : OgaAbstract {
+  uint64_t GetCount(const char* name) const {
+    uint64_t value;
+    OgaCheckResult(OgaSpeculativeStatsGetCount(this, name, &value));
+    return value;
+  }
+
+  double GetNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaSpeculativeStatsGetNumber(this, name, &value));
+    return value;
+  }
+
+  bool GetBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaSpeculativeStatsGetBool(this, name, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroySpeculativeStats(reinterpret_cast<OgaSpeculativeStats*>(p));
+  }
+};
+
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
 
@@ -445,7 +469,7 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
-  void SetSpeculativeOption(const char* name, double value) {
+  void SetSpeculativeNumber(const char* name, double value) {
     OgaCheckResult(OgaGeneratorParamsSetSpeculativeNumber(this, name, value));
   }
 
@@ -535,10 +559,10 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_GetSequenceData(this, index);
   }
 
-  OgaSpeculativeStats GetSpeculativeStats() const {
-    OgaSpeculativeStats stats{};
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
     OgaCheckResult(OgaGenerator_GetSpeculativeStats(this, &stats));
-    return stats;
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
   std::unique_ptr<OgaTensor> GetInput(const char* name) {

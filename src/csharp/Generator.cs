@@ -89,6 +89,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public SpeculativeStats GetSpeculativeStats()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetSpeculativeStats(_generatorHandle, out IntPtr stats));
+            return new SpeculativeStats(stats);
+        }
+
         /// <summary>
         /// Fetches and returns the input tensor with the given name.
         /// Throw on error

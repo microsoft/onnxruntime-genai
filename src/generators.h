@@ -118,6 +118,7 @@ struct Generator : LeakChecked<Generator> {
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
+  void PrepareForSetLogits();
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
 

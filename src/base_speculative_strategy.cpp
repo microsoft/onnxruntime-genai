@@ -3,15 +3,42 @@
 #include "base_speculative_strategy.h"
 
 #include <algorithm>
+#include <deque>
 #include <stdexcept>
+#include <vector>
 
 #include "generators.h"
 #include "search.h"
 #include "softmax.h"
 #include "speculative_sampling.h"
+#include "constrained_logits_processor.h"
 #include "models/speculative_decoding.h"
 
 namespace Generators {
+
+namespace {
+
+int32_t RowArgmax(std::span<const float> logits) {
+  return static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
+}
+
+void SelectProposalToken(std::span<const float> logits, int index, bool greedy,
+                         int top_k, float top_p, float temperature, int vocab_size,
+                         SampledCategorical& sampled, std::mt19937& rng,
+                         SpeculativeDecodingStrategy::Proposal& proposal) {
+  if (greedy) {
+    proposal.tokens[index] = RowArgmax(logits);
+    return;
+  }
+
+  ComputeSampledCategorical(logits, top_k, top_p, temperature, sampled);
+  proposal.probs[index] = ScatterToFullVocab(sampled, vocab_size);
+  std::discrete_distribution<int> distribution(proposal.probs[index].begin(),
+                                               proposal.probs[index].end());
+  proposal.tokens[index] = static_cast<int32_t>(distribution(rng));
+}
+
+}  // namespace
 
 // Validate the downcast before binding the non-null reference member
 static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
@@ -24,15 +51,18 @@ static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
 
 BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{RequireSpeculativeState(g)} {}
 
-// Propose K draft tokens. 
+// Propose K draft tokens.
 // Greedy: argmax, probs empty.
 // Sampling: token i drawn from draft's truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
-// draft_pending_probs_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
+// draft_pending_logits_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
+// Each draft row is put through the same min-length / repetition penalties the target rows get
+// (BaseSpeculativeStrategy shares the helpers in sampling_distribution.h), so the draft approximates the
+// penalized target: acceptance stays high and self-speculative greedy stays exact.
 SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     Generator& g, int K, int seed_length) {
   if (!spec_state_.draft_pending_valid())
     throw std::runtime_error(
-        "BaseSpeculativeStrategy::Propose: draft pending probs not initialized. "
+        "BaseSpeculativeStrategy::Propose: draft pending logits not initialized. "
         "AppendTokens must be called before GenerateNextToken.");
 
   const auto& params = *g.search_->params_;
@@ -41,45 +71,102 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   const auto& search = params.search;
   const bool greedy = g.IsGreedySampling();
 
+  // Penalty context: apply exactly what the target rows will receive (see RunRound), so the
+  // draft's proposal distribution matches the penalized target it is verified against.
+  const float repetition_penalty = search.repetition_penalty;
+  const int min_length = search.min_length;
+  std::span<const int32_t> eos_ids{params.config.model.eos_token_id};
+  LogitsPenaltyProcessor penalty_processor{vocab_size, repetition_penalty, min_length, eos_ids};
+
+  // The committed sequence so far (length seed_length); grows as we chain draft tokens. Only
+  // materialized when penalties are active so the default path stays allocation-free.
+  std::vector<int32_t> prefix;
+  if (penalty_processor.IsActive()) {
+    auto seed = g.search_->GetSequence(0).CopyDeviceToCpu();
+    prefix.assign(seed.begin(), seed.end());
+  }
+
+  // Guidance - clone the grammar cursor so we can look ahead over K positions
+  // without disturbing the verify cursor.
+  const bool guidance_active = (g.guidance_logits_processor_ != nullptr);
+  std::unique_ptr<ConstrainedLogitsProcessor> draft_grammar;
+  DeviceSpan<float> guidance_buf;
+  if (guidance_active) {
+    draft_grammar = g.guidance_logits_processor_->Clone();
+    guidance_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
+  }
   Proposal proposal;
   proposal.tokens.resize(K);
   if (!greedy)
     // greedy-match leaves probs empty
-    proposal.probs.resize(K);  
+    proposal.probs.resize(K);
 
-  auto argmax = [](std::span<const float> v) {
-    return static_cast<int32_t>(std::max_element(v.begin(), v.end()) - v.begin());
-  };
+  SampledCategorical sampled;
 
-  // d_0 from the carried-over pending probs.
-  if (greedy) {
-    proposal.tokens[0] = argmax(spec_state_.draft_pending_probs());
-  } else {
-    proposal.probs[0] = SamplingDistributionFromProbs(
-        spec_state_.draft_pending_probs(), search.top_k, search.top_p,
-        search.temperature);
-    std::discrete_distribution<int> dist(proposal.probs[0].begin(), proposal.probs[0].end());
-    proposal.tokens[0] = static_cast<int32_t>(dist(rng_));
+  auto single_buf = params.p_device->Allocate<int32_t>(1);
+
+  if (guidance_active) {
+    // Walk the clone forward over K positions. At each free position the draft
+    // predicts a grammar-masked token; committing it may force a span of fast-forward tokens, which
+    // we inject straight into the proposal (counted in K) so the target verifies them in the same
+    // batched pass. Anything past K carries to the next round. 
+    std::deque<int32_t> ff_queue(GuidanceFFCarry().begin(), GuidanceFFCarry().end());
+    // logits for position 0
+    std::vector<float> pending(spec_state_.draft_pending_logits().begin(),
+                               spec_state_.draft_pending_logits().end());
+    for (int i = 0; i < K; i++) {
+      if (!ff_queue.empty()) {
+        // forced token: no draft prediction, no distribution
+        proposal.tokens[i] = ff_queue.front();
+        ff_queue.pop_front();
+        if (!greedy) proposal.probs[i].clear();
+      } else {
+        auto row = penalty_processor.Apply({pending.data(), pending.size()}, seed_length + i, prefix);
+        auto gb = guidance_buf.CpuSpan();
+        std::copy(row.begin(), row.end(), gb.begin());
+        guidance_buf.CopyCpuToDevice();
+        draft_grammar->ProcessLogits(guidance_buf);
+        auto masked = guidance_buf.CopyDeviceToCpu();
+        SelectProposalToken({masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
+                            search.top_k, search.top_p, search.temperature, vocab_size,
+                            sampled, rng_, proposal);
+        const int32_t chosen = proposal.tokens[i];
+        if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
+          int32_t c = chosen;
+          draft_grammar->CommitTokens({&c, 1});
+          for (int32_t f : draft_grammar->GetFFTokens(0)) ff_queue.push_back(f);
+        }
+      }
+      if (penalty_processor.IsActive()) prefix.push_back(proposal.tokens[i]);
+      // Advance the draft over this token so the next free position is predicted in context.
+      if (i + 1 < K) {
+        single_buf.CpuSpan()[0] = proposal.tokens[i];
+        single_buf.CopyCpuToDevice();
+        auto lgt = spec_state_.draft_state().Run(seed_length + i + 1, single_buf, {});
+        draft_runs_++;
+        auto cpu = lgt.CopyDeviceToCpu();
+        pending.assign(cpu.data(), cpu.data() + vocab_size);
+      }
+    }
+    return proposal;
   }
 
-  // d_1..d_{K-1}: feed the previous draft token through the draft model.
-  auto single_buf = params.p_device->Allocate<int32_t>(1);
-  SampledCategorical sampled;
+  // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
+  SelectProposalToken(penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix),
+                      0, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+                      sampled, rng_, proposal);
   for (int i = 1; i < K; i++) {
+    if (penalty_processor.IsActive())
+      prefix.push_back(proposal.tokens[i - 1]);
     single_buf.CpuSpan()[0] = proposal.tokens[i - 1];
     single_buf.CopyCpuToDevice();
     auto lgt = spec_state_.draft_state().Run(seed_length + i, single_buf, {});
+    draft_runs_++;
     auto cpu = lgt.CopyDeviceToCpu();
-    std::span<const float> logits{cpu.data(), static_cast<size_t>(vocab_size)};
-    if (greedy) {
-      proposal.tokens[i] = argmax(logits);
-    } else {
-      ComputeSampledCategorical(logits, search.top_k, search.top_p,
-                                search.temperature, sampled);
-      proposal.probs[i] = ScatterToFullVocab(sampled, vocab_size);
-      std::discrete_distribution<int> dist(proposal.probs[i].begin(), proposal.probs[i].end());
-      proposal.tokens[i] = static_cast<int32_t>(dist(rng_));
-    }
+    SelectProposalToken(
+        penalty_processor.Apply({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
+        i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+        sampled, rng_, proposal);
   }
 
   return proposal;
@@ -110,6 +197,7 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
     single_buf.CpuSpan()[0] = proposal.tokens[K - 1];
     single_buf.CopyCpuToDevice();
     spec_state_.draft_state().Run(seed_length + K, single_buf, {});
+    draft_runs_++;
     draft_kv_len = seed_length + K;
   }
 
@@ -120,10 +208,10 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   single_buf.CpuSpan()[0] = final_token;
   single_buf.CopyCpuToDevice();
   auto draft_lgt = spec_state_.draft_state().Run(seed_length + n_direct + 1, single_buf, {});
+  draft_runs_++;
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
-  std::vector<float> draft_probs(cpu_draft.data(), cpu_draft.data() + vocab_size);
-  Softmax(draft_probs, 1.0f);
-  spec_state_.set_draft_pending_probs(std::move(draft_probs));
+  // Reuse the pending-logits buffer instead of allocating a fresh vocab-sized vector each round.
+  spec_state_.assign_draft_pending_logits(cpu_draft.data(), static_cast<size_t>(vocab_size));
 }
 
 }  // namespace Generators

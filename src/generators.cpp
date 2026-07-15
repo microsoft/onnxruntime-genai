@@ -523,6 +523,11 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  // Continuous decoding - let the decoding strategy realign any deferred per-round state with the
+  // committed sequence before we append on top (nothing for standard decoding + initial
+  // prefill; speculative -> reconcile two inner KV caches).
+  strategy_->PrepareForAppend(*this);
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
@@ -658,6 +663,10 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
   computed_logits_ = true;
 }
 
+void Generator::PrepareForSetLogits() {
+  strategy_->PrepareForSetLogits(*this);
+}
+
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -689,6 +698,10 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  DeviceSpan<float> strategy_logits;
+  if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
+    return strategy_logits;
+  }
   if (!computed_logits_) {
     ComputeLogits(search_->GetNextTokens());
   }

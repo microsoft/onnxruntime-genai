@@ -14,6 +14,84 @@
 
 namespace Generators {
 
+// --- Logits penalties (min-length + repetition) -------------------------------------------
+// Shared CPU logits-processing helpers used by both standard search (Search_Cpu) and speculative
+// decoding, so the two paths apply identical penalties to a single logits row.
+
+// Mask the end-of-stream tokens (set to lowest float) while the sequence is shorter than
+// min_length, so EOS cannot be selected yet. Mirrors Search_Cpu::ApplyMinLength for one row.
+// current_length is the sequence length *before* the token this row predicts is appended.
+inline void ApplyMinLengthToLogits(std::span<float> logits, int current_length, int min_length,
+                                   std::span<const int32_t> eos_token_ids) {
+  if (current_length >= min_length)
+    return;
+  const int vocab_size = static_cast<int>(logits.size());
+  for (auto eos : eos_token_ids) {
+    if (eos >= 0 && eos < vocab_size)
+      logits[static_cast<size_t>(eos)] = std::numeric_limits<float>::lowest();
+  }
+}
+
+// Divide/multiply the logit of every token that already appears in prefix (matching HF's
+// convention: score < 0 -> score * penalty, else score / penalty). Mirrors
+// Search_Cpu::ApplyRepetitionPenalty for one row. visited is a reusable vocab-sized scratch
+// buffer (grown on first use, left all-false on return so it can be reused across rows).
+inline void ApplyRepetitionPenaltyToLogits(std::span<float> logits, std::span<const int32_t> prefix,
+                                           float penalty, std::vector<bool>& visited) {
+  if (penalty == 1.0f)
+    return;
+  const int vocab_size = static_cast<int>(logits.size());
+  if (static_cast<int>(visited.size()) < vocab_size)
+    visited.assign(static_cast<size_t>(vocab_size), false);
+
+  for (const auto& word_id : prefix) {
+    if (word_id >= 0 && word_id < vocab_size && !visited[word_id]) {
+      visited[word_id] = true;
+      const float score = logits[static_cast<size_t>(word_id)];
+      logits[static_cast<size_t>(word_id)] = (score < 0 ? score * penalty : score / penalty);
+    }
+  }
+
+  // Reset only the flags we touched (O(prefix), not O(vocab)).
+  for (const auto& word_id : prefix) {
+    if (word_id >= 0 && word_id < vocab_size)
+      visited[word_id] = false;
+  }
+}
+
+struct LogitsPenaltyProcessor {
+  LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
+                         std::span<const int32_t> eos_token_ids)
+      : repetition_penalty_{repetition_penalty},
+        min_length_{min_length},
+        eos_token_ids_{eos_token_ids},
+        active_{repetition_penalty != 1.0f || min_length > 0} {
+    if (active_)
+      logits_buffer_.resize(static_cast<size_t>(vocab_size));
+  }
+
+  bool IsActive() const { return active_; }
+
+  std::span<const float> Apply(std::span<const float> logits, int current_length,
+                               std::span<const int32_t> prefix) {
+    if (!active_)
+      return logits;
+
+    std::copy(logits.begin(), logits.end(), logits_buffer_.begin());
+    ApplyMinLengthToLogits(logits_buffer_, current_length, min_length_, eos_token_ids_);
+    ApplyRepetitionPenaltyToLogits(logits_buffer_, prefix, repetition_penalty_, repetition_visited_);
+    return logits_buffer_;
+  }
+
+ private:
+  float repetition_penalty_;
+  int min_length_;
+  std::span<const int32_t> eos_token_ids_;
+  bool active_;
+  std::vector<bool> repetition_visited_;
+  std::vector<float> logits_buffer_;
+};
+
 // Migrated from search.cpp so speculative decoding can share nucleus selection; only change: static -> inline.
 //
 // Find the minimal nucleus of tokens whose cumulative probability >= p using

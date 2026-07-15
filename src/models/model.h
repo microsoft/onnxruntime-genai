@@ -37,8 +37,8 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
-  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
-  void SetRunOption(const char* key, const char* value);
+  virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+  virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 

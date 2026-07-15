@@ -66,6 +66,11 @@ struct ModelType {
     return model_type == "speculative";
   }
 
+  inline static bool UsesDraftModelSpeculation(const std::string& model_type,
+                                               const std::string& draft_filename) {
+    return IsSpeculative(model_type) || !draft_filename.empty();
+  }
+
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
