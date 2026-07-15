@@ -54,6 +54,15 @@ namespace {
 
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
+constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+// Session-option config keys whose values are file/folder path references. When a model is loaded
+// from a package these may be sha256: shared-asset URIs or relative paths, so their values are
+// resolved against the model root (Config::ResolvePath) before reaching ORT.
+bool IsPathValuedSessionOption(std::string_view key) {
+  return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
+         key == kOrtSessionOptionEpContextFilePath;
+}
 
 }  // namespace
 
@@ -335,7 +344,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
@@ -703,7 +712,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
   for (auto& config_entry : config_session_options.config_entries) {
-    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
+      const std::string resolved = config_->ResolvePath(config_entry.second).string();
+      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
+    } else {
+      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    }
   }
 
   // Register custom ops libraries only if explicitly configured
@@ -822,11 +836,15 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // For models loaded from memory that reference external data files, tell ORT where to find them
-    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
-    const fs::path external_initializers_path = fs::absolute(config_->config_path);
-    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
-                                    external_initializers_path.string().c_str());
+    // For models loaded from memory that reference external data files, ORT has no model
+    // directory to resolve them against. Default the external-initializers folder to the config
+    // directory, but only when the config did not already set it (a genai_config session option,
+    // resolved in CreateSessionOptionsFromConfig, takes precedence).
+    if (!session_options->HasConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath)) {
+      const fs::path external_initializers_path = fs::absolute(config_->config_path);
+      session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                      external_initializers_path.string().c_str());
+    }
     return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
@@ -873,6 +891,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
     auto load = OpenAndSelectVariant(ort_env, path, ep_str);
     auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
     config->package_root = load.package_root;
+    // Delegate genai_config path resolution to ORT's package resolver, capturing the package
+    // context to keep it alive for the lifetime of the config.
+    auto package_context = load.context;
+    config->package_resolver = [package_context](const fs::path& base_dir,
+                                                 std::string_view value) -> fs::path {
+      return fs::path{package_context->ResolveStringRef(base_dir.string(), std::string{value},
+                                                        /*must_exist=*/false)};
+    };
     return config;
 #else
     throw std::runtime_error(
