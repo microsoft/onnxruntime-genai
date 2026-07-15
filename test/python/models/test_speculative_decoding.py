@@ -91,7 +91,7 @@ def _write_config(directory: Path, config: dict) -> str:
     return os.fspath(directory)
 
 
-def _make_tiny_phi3_spec_model(
+def _make_tiny_draft_spec_model(
         directory: Path, model_type: str, context_length: int,
         draft_switch_at: int | None = None) -> str:
     onnx = pytest.importorskip("onnx")
@@ -500,12 +500,26 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
 
 
 class TestSpeculativeGeneration:
+    def test_draft_enables_speculation_for_regular_model_type(self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "llama_with_draft", "llama", context_length=16)
+        model = og.Model(path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=8)
+        params.set_speculative_options(max_draft_tokens=4)
+        gen = og.Generator(model, params)
+        gen.append_tokens(np.array([[3]], dtype=np.int32))
+
+        gen.generate_next_token()
+
+        assert gen.get_speculative_stats()["rounds"] == 1
+
     @pytest.mark.parametrize(
         ("model_type", "threshold"),
         [("phi3", 4097), ("phimoe", 4097), ("phi3small", 8193)])
     def test_phi3_with_draft_reprefills_at_rope_threshold(
             self, tmp_path, model_type, threshold):
-        path = _make_tiny_phi3_spec_model(
+        path = _make_tiny_draft_spec_model(
             tmp_path / model_type, model_type, threshold + 8)
         model = og.Model(path)
         params = og.GeneratorParams(model)
@@ -528,7 +542,7 @@ class TestSpeculativeGeneration:
 
     def test_phi3_reanchors_before_final_short_rope_token(self, tmp_path):
         threshold = 4097
-        path = _make_tiny_phi3_spec_model(
+        path = _make_tiny_draft_spec_model(
             tmp_path / "phi3_reanchor", "phi3", threshold + 8,
             draft_switch_at=threshold - 2)
         model = og.Model(path)

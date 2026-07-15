@@ -66,8 +66,9 @@ struct ModelType {
     return model_type == "speculative";
   }
 
-  inline static bool IsPhi3Family(const std::string& model_type) {
-    return model_type == "phi3" || model_type == "phimoe" || model_type == "phi3small";
+  inline static bool UsesDraftModelSpeculation(const std::string& model_type,
+                                               const std::string& draft_filename) {
+    return IsSpeculative(model_type) || !draft_filename.empty();
   }
 
   inline static bool IsMMM(const std::string& model_type) {
