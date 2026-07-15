@@ -33,9 +33,9 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
-  // Add caller prompt/continuation tokens. Different than CommitToken:
-  // CommitToken - commits already-specified tokens to the sequence, applying EOS/max-length bookkeeping.
-  // AppendTokens - adds caller-provided tokens (prompts/continuation) to sequence, without applying EOS/max-length bookkeeping.
+  // Note: unlike CommitToken (commits an already-selected generated token and applies EOS, padding,
+  // and max-length handling), AppendTokens ingests prompt/continuation tokens. It
+  // skips generated-token EOS/padding handling.
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };
   // To be used for rewind
   virtual void RewindTo(size_t index) { assert(false); };
