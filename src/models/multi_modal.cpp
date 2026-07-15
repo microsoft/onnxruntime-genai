@@ -1023,6 +1023,15 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
 
+void DecoderState::RewindTo(size_t index) {
+  if (position_inputs_)
+    position_inputs_->RewindTo(index);
+  if (kv_cache_)
+    kv_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -1179,6 +1188,13 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
                              "\" output. Build the decoder with --extra_options include_hidden_states=true.");
   }
   return audio_output_->SampleFrame(*hidden_states);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  if (decoder_state_)
+    decoder_state_->RewindTo(index);
+  if (index == 0)
+    is_prompt_ = true;
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
