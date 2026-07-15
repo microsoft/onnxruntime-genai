@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "../filesystem.h"
@@ -16,6 +17,9 @@ bool IsModelPackage(const fs::path& path);
 struct PackageLoadResult {
   fs::path package_root;
   fs::path variant_dir;
+  // The opened package context, kept alive so genai_config path references (e.g. "sha256:"
+  // shared-asset refs) can be resolved on demand through ORT's package resolver.
+  std::shared_ptr<OrtModelPackageContext> context;
 };
 
 // Opens a package and selects the variant for its single component. When `explicit_ep` is

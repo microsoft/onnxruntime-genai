@@ -680,6 +680,12 @@ inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_k
   return *this;
 }
 
+inline bool OrtSessionOptions::HasConfigEntry(const char* config_key) const {
+  int out = 0;
+  Ort::ThrowOnError(Ort::api->HasSessionConfigEntry(this, config_key, &out));
+  return out != 0;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::AddInitializer(const char* name, const OrtValue& ort_val) {
   Ort::ThrowOnError(Ort::api->AddInitializer(this, name, &ort_val));
   return *this;
@@ -1560,6 +1566,7 @@ inline const ModelPackageApi& GetModelPackageApi() {
     f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
     f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
     f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
+    f.ModelPackage_ResolveStringRef = GENAI_MP_V28_FN(ModelPackage_ResolveStringRef);
     f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
     f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
     f.ModelPackageComponent_GetSelectedVariantFolderPath =
@@ -1620,6 +1627,15 @@ inline std::string OrtModelPackageContext::GetVariantEpName(const char* componen
   const char* ep = nullptr;
   Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(this, component_name, variant_name, &ep));
   return (ep == nullptr) ? std::string{} : std::string{ep};
+}
+
+inline std::string OrtModelPackageContext::ResolveStringRef(const std::string& base_dir,
+                                                            const std::string& input,
+                                                            bool must_exist) const {
+  const char* resolved = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_ResolveStringRef(
+      this, base_dir.empty() ? nullptr : base_dir.c_str(), input.c_str(), must_exist ? 1 : 0, &resolved));
+  return (resolved == nullptr) ? std::string{} : std::string{resolved};
 }
 
 inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(
