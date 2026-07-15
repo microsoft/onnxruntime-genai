@@ -69,7 +69,6 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         "enable_cuda_graph",
         "enable_webgpu_graph",
         "use_8bits_moe",
-        "use_fp4_moe",
         "use_qdq",
         "use_webgpu_fp32",
         "use_cuda_bf16",
@@ -115,15 +114,31 @@ def check_extra_options(kv_pairs, precision, execution_provider):
             f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {kv_pairs['matmulnbits_weights_prepacked']}."
         )
 
-    if kv_pairs.get("use_fp4_moe", False):
-        if kv_pairs.get("use_8bits_moe", False):
-            raise ValueError("use_fp4_moe and use_8bits_moe are mutually exclusive.")
-        if execution_provider != "cuda":
-            raise ValueError(f"use_fp4_moe is only supported on the CUDA EP, got ep='{execution_provider}'.")
-        if not (precision == "int4" and kv_pairs.get("int4_is_symmetric", True)):
+    # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
+    # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
+    supported_moe_quant_types = {"int4", "int8", "mxfp4"}
+
+    # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
+    if "use_8bits_moe" in kv_pairs:
+        print("WARNING: 'use_8bits_moe' is deprecated. Use 'moe_quant_type=int8' (or 'moe_quant_type=int4') instead.")
+        if "moe_quant_type" not in kv_pairs:
+            kv_pairs["moe_quant_type"] = "int8" if kv_pairs["use_8bits_moe"] else "int4"
+
+    if "moe_quant_type" in kv_pairs:
+        moe_quant_type = kv_pairs["moe_quant_type"]
+        if moe_quant_type not in supported_moe_quant_types:
             raise ValueError(
-                "use_fp4_moe requires precision=int4 with symmetric INT4 quantization so the model exports QMoE."
+                f"moe_quant_type must be one of {sorted(supported_moe_quant_types)}, got '{moe_quant_type}'."
             )
+        if moe_quant_type == "mxfp4":
+            if execution_provider != "cuda":
+                raise ValueError(
+                    f"moe_quant_type=mxfp4 is only supported on the CUDA EP, got ep='{execution_provider}'."
+                )
+            if not (precision == "int4" and kv_pairs.get("int4_is_symmetric", True)):
+                raise ValueError(
+                    "moe_quant_type=mxfp4 requires precision=int4 with symmetric INT4 quantization so the model exports QMoE."
+                )
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -517,13 +532,16 @@ def get_args():
                     This affects attention mask reformatting and position IDs handling.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                moe_quant_type = int4/int8/mxfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
+                    int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
+                    mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
+                        4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
+                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 with symmetric
+                        INT4 quantization, and is only supported on the CUDA EP.
+                    This single option replaces the older per-type flags so new schemes can be added without a new flag.
+                use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
-                use_fp4_moe = Use FP4 (MXFP4) quantization for MoE layers on the CUDA EP. Default is false.
-                    If true, the QMoE op uses MXFP4 weights (quant_type="fp4", expert_weight_bits=4, block_size=32):
-                    4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
-                    Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON.
-                    Mutually exclusive with use_8bits_moe. Only supported on the CUDA EP.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

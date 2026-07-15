@@ -515,28 +515,30 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 ```
 
-##### Use 8 Bits Quantization in QMoE
+##### Choose the MoE Quantization Type in QMoE
 
-This scenario is for when you want to use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values are `int4` (default), `int8`, and `mxfp4`:
+
+- `int4`: 4-bit integer QMoE weights (`expert_weight_bits=4`, `quant_type="int"`).
+- `int8`: 8-bit integer QMoE weights (`expert_weight_bits=8`, `quant_type="int"`).
+- `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` with symmetric INT4 quantization, and is only supported on the CUDA EP.
+
+This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
 
 ```bash
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+# From wheel (8-bit integer QMoE):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
 
-# From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+# From source (8-bit integer QMoE):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
 ```
 
-##### Use FP4 Quantization in QMoE
-
-This scenario is for when you want to use FP4 (MXFP4) quantization for MoE layers on the CUDA EP. Default is false. When enabled, the QMoE op uses MXFP4 weights (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. This requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, only applies to the CUDA EP, and is mutually exclusive with `use_8bits_moe`.
-
 ```bash
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_fp4_moe=true
+# From wheel (MXFP4 QMoE on CUDA):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 
-# From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_fp4_moe=true
+# From source (MXFP4 QMoE on CUDA):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 ```
 
 #### FP32 I/O for WebGPU EP

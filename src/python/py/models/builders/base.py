@@ -104,7 +104,6 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
-        use_fp4_moe = extra_options.get("use_fp4_moe", False)
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -288,10 +287,25 @@ class Model:
         moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        # FP4 (MXFP4) is a 4-bit format; INT8 path is disabled when FP4 is requested.
-        expert_weight_bits = 4 if use_fp4_moe else (8 if extra_options.get("use_8bits_moe", False) else 4)
-        # QMoE quantization type: "int" (default INT4/INT8) or "fp4" (MXFP4).
-        moe_quant_type = "fp4" if use_fp4_moe else "int"
+        # MoE quantization scheme selected via extra_options["moe_quant_type"]. This single option replaces
+        # the older per-type flags. Supported values map to (expert_weight_bits, QMoE quant_type):
+        #   "int4"  -> (4, "int")  INT4 QMoE (default)
+        #   "int8"  -> (8, "int")  INT8 QMoE
+        #   "mxfp4" -> (4, "fp4")  MXFP4 QMoE (CUDA-only)
+        moe_quant_type = extra_options.get("moe_quant_type")
+        if moe_quant_type is None:
+            # Backward compatibility with the deprecated `use_8bits_moe` flag.
+            moe_quant_type = "int8" if extra_options.get("use_8bits_moe", False) else "int4"
+        moe_quant_settings = {
+            "int4": (4, "int"),
+            "int8": (8, "int"),
+            "mxfp4": (4, "fp4"),
+        }
+        if moe_quant_type not in moe_quant_settings:
+            raise ValueError(
+                f"Unsupported moe_quant_type '{moe_quant_type}'. Supported: {sorted(moe_quant_settings)}."
+            )
+        expert_weight_bits, qmoe_quant_type = moe_quant_settings[moe_quant_type]
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -311,7 +325,7 @@ class Model:
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": moe_quant_type,                    # QMoE quantization type: "int" (INT4/INT8) or "fp4" (MXFP4).
+            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8) or "fp4" (MXFP4).
         }
 
         # LM head-specific variables

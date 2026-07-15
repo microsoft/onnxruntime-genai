@@ -674,7 +674,7 @@ class GPTOSSModel(Model):
         has_quark_experts = self.has_quark_experts(mlp.experts)
         is_fp4_moe = self.moe_attrs.get("quant_type") == "fp4"
         if is_fp4_moe and has_quark_experts:
-            raise ValueError("use_fp4_moe is not supported with pre-quantized Quark GPT-OSS experts.")
+            raise ValueError("moe_quant_type=mxfp4 is not supported with pre-quantized Quark GPT-OSS experts.")
 
         # Make router nodes
         router_basename = f"{basename}/router/MatMul"
