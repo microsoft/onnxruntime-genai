@@ -59,6 +59,39 @@ inline void ApplyRepetitionPenaltyToLogits(std::span<float> logits, std::span<co
   }
 }
 
+struct LogitsPenaltyProcessor {
+  LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
+                         std::span<const int32_t> eos_token_ids)
+      : repetition_penalty_{repetition_penalty},
+        min_length_{min_length},
+        eos_token_ids_{eos_token_ids},
+        active_{repetition_penalty != 1.0f || min_length > 0} {
+    if (active_)
+      logits_buffer_.resize(static_cast<size_t>(vocab_size));
+  }
+
+  bool IsActive() const { return active_; }
+
+  std::span<const float> Apply(std::span<const float> logits, int current_length,
+                               std::span<const int32_t> prefix) {
+    if (!active_)
+      return logits;
+
+    std::copy(logits.begin(), logits.end(), logits_buffer_.begin());
+    ApplyMinLengthToLogits(logits_buffer_, current_length, min_length_, eos_token_ids_);
+    ApplyRepetitionPenaltyToLogits(logits_buffer_, prefix, repetition_penalty_, repetition_visited_);
+    return logits_buffer_;
+  }
+
+ private:
+  float repetition_penalty_;
+  int min_length_;
+  std::span<const int32_t> eos_token_ids_;
+  bool active_;
+  std::vector<bool> repetition_visited_;
+  std::vector<float> logits_buffer_;
+};
+
 // Migrated from search.cpp so speculative decoding can share nucleus selection; only change: static -> inline.
 //
 // Find the minimal nucleus of tokens whose cumulative probability >= p using
