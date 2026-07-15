@@ -298,6 +298,11 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
 
+#ifdef _WIN32
+  // Peak GPU memory usage sampled while a generator (and its KV cache) is still alive.
+  benchmark::utils::GpuMemoryInfo gpu_mem = {};
+#endif
+
   // Select the "middle" iteration index (0-based) for optional ORT profiling.
   //   n=1 -> 0, n=2 -> 1, n=3 -> 1, n=4 -> 2, ...
   const size_t profile_iter_index = opts.num_iterations / 2;
@@ -356,16 +361,21 @@ void RunBenchmark(const benchmark::Options& opts) {
         }
       }
     }
-  }
 
 #ifdef _WIN32
-  // Capture GPU memory before releasing the generator (while KV cache is still allocated)
-  const auto gpu_mem = benchmark::utils::GetGpuMemoryUsage();
+    // Capture GPU memory while the generator (and its KV cache) is still alive. When
+    // --reuse_generator is not set, new_gen is destroyed at the end of each iteration,
+    // so sampling here (and keeping the peak) reflects actual KV cache usage.
+    {
+      const auto iter_mem = benchmark::utils::GetGpuMemoryUsage();
+      gpu_mem.dedicated = std::max(gpu_mem.dedicated, iter_mem.dedicated);
+      gpu_mem.shared = std::max(gpu_mem.shared, iter_mem.shared);
+    }
 #endif
+  }
 
   // Release the generator before printing results
   generator.reset();
-  new_gen.reset();
 
   {
     std::cout << "Batch size: " << opts.batch_size
