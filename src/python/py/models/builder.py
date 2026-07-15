@@ -77,9 +77,6 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
-        "last_matmul_weight_int8",
-        "int8_mixed_layers",
-        "int8_linear_attn",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -137,7 +134,9 @@ def check_extra_options(kv_pairs, precision, execution_provider):
                 )
             if not (precision == "int4" and kv_pairs.get("int4_is_symmetric", True)):
                 raise ValueError(
-                    "moe_quant_type=mxfp4 requires precision=int4 with symmetric INT4 quantization so the model exports QMoE."
+                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the int4 build "
+                    "precision is what exports the quantized QMoE op, and mxfp4 only sets the MoE expert weights to "
+                    "the FP4 encoding."
                 )
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
@@ -484,17 +483,20 @@ def get_args():
                     default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
                     rtn = RTN algorithm for int4 quantization.
                     k_quant = k_quant algorithm for int4 quantization.
-                    The following legacy compound values are still accepted as aliases (base method + int8 placement flags):
-                    rtn_last = rtn + last_matmul_weight_int8=true.
-                    k_quant_last = k_quant + last_matmul_weight_int8=true.
-                    k_quant_mixed = k_quant + last_matmul_weight_int8=true + int8_mixed_layers=true.
-                    k_quant_linear = k_quant + last_matmul_weight_int8=true + int8_linear_attn=true.
-                last_matmul_weight_int8 = Quantize the last MatMul (e.g. /lm_head/MatMul) as int8 instead of int4. Default is false.
+                    The following legacy compound values are still accepted as aliases (base method + mixed_precision_config):
+                    rtn_last = rtn + mixed_precision_config=last_matmul:int8.
+                    k_quant_last = k_quant + mixed_precision_config=last_matmul:int8.
+                    k_quant_mixed = k_quant + mixed_precision_config=last_matmul:int8,mixed_layers:int8.
+                    k_quant_linear = k_quant + mixed_precision_config=last_matmul:int8,linear_attn:int8.
+                mixed_precision_config = Quantize selected MatMul groups with a different quant type than the int4 body.
+                    Format is a comma-separated list of 'selector:quant_type' pairs, e.g.
+                    mixed_precision_config=last_matmul:int8,mixed_layers:int8,linear_attn:int4
+                    Selectors:
+                    last_matmul = the last MatMul (e.g. /lm_head/MatMul), the single largest, output-sensitive weight.
+                    mixed_layers = the most quantization-sensitive MatMuls (llama.cpp mixed strategy: first/last eighth of layers plus every third layer's qkv_proj/v_proj/down_proj).
+                    linear_attn = linear-attention projections and their MLPs (for hybrid attention models like Qwen3.5).
+                    Quant types: 'int4', 'int8'. Using a quant-type name (not a bare bit count) lets new schemes (e.g. fp8/fp4) be added without a new option.
                     Orthogonal to int4_algo_config; can be combined with any base method ('default', 'rtn', 'k_quant').
-                int8_mixed_layers = Promote the most quantization-sensitive MatMuls (llama.cpp mixed strategy: first/last eighth of layers plus every third layer's qkv_proj/v_proj/down_proj) to int8. Default is false.
-                    Orthogonal to int4_algo_config; can be combined with any base method.
-                int8_linear_attn = Promote linear-attention projections and their MLPs to int8 (for hybrid attention models like Qwen3.5). Default is false.
-                    Orthogonal to int4_algo_config; can be combined with any base method.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').

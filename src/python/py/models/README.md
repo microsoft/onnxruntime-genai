@@ -481,27 +481,27 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 
 Supported base values are: `default`, `rtn`, `k_quant`.
 
-The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus int8 bit-placement flags.
+The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus a `mixed_precision_config`.
 
-##### Int8 Bit Placement
+##### Mixed Precision
 
-This scenario is for when you want to promote selected MatMul weights from int4 to int8 independently from the base quantization algorithm.
+This scenario is for when you want to quantize selected MatMul groups with a different quant type than the int4 body, independently from the base quantization algorithm.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default last_matmul_weight_int8=true
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default mixed_precision_config=last_matmul:int8
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=k_quant int8_mixed_layers=true
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=k_quant mixed_precision_config=last_matmul:int8,mixed_layers:int8
 ```
 
-Supported flags are:
+`mixed_precision_config` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
 
-- `last_matmul_weight_int8`: Quantize the last MatMul, such as `/lm_head/MatMul`, as int8 instead of int4.
-- `int8_mixed_layers`: Promote quantization-sensitive layers to int8 using the mixed strategy from llama.cpp.
-- `int8_linear_attn`: Promote linear-attention projections and their MLPs to int8 for hybrid attention models.
+- `last_matmul`: The last MatMul, such as `/lm_head/MatMul` (the single largest, output-sensitive weight).
+- `mixed_layers`: The most quantization-sensitive layers, using the mixed strategy from llama.cpp.
+- `linear_attn`: Linear-attention projections and their MLPs, for hybrid attention models.
 
-These flags are orthogonal to `int4_algo_config` and can be combined with any base method.
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `mixed_precision_config` is orthogonal to `int4_algo_config` and can be combined with any base method.
 
 ##### Use QDQ Pattern for Quantization
 

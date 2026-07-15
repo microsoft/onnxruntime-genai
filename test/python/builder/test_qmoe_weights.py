@@ -173,12 +173,6 @@ def test_moe_quant_type_rejects_invalid_value(monkeypatch):
         builder.parse_extra_options(["moe_quant_type=fp8"], "int4", "cuda")
 
 
-def test_use_fp4_moe_is_removed(monkeypatch):
-    builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match="'use_fp4_moe' has been removed"):
-        builder.parse_extra_options(["use_fp4_moe=true"], "int4", "cuda")
-
-
 def test_use_8bits_moe_maps_to_moe_quant_type(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
     options = builder.parse_extra_options(["use_8bits_moe=true"], "int4", "cuda")
@@ -187,7 +181,7 @@ def test_use_8bits_moe_maps_to_moe_quant_type(monkeypatch):
 
 def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires precision=int4"):
+    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with precision=int4"):
         builder.parse_extra_options(["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 

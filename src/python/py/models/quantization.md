@@ -2,19 +2,19 @@
 
 This document describes the INT4 weight-only quantization methods exposed by the
 ONNX Runtime GenAI model builder via the `int4_algo_config` extra option, and the
-**orthogonal int8 bit-placement flags** that can be combined with any base method.
+**orthogonal `mixed_precision_config`** that can be combined with any base method.
 
 All methods quantize the constant weight `B` of `MatMul` nodes block-wise (default
 block size 32, set with `int4_block_size`) into a `MatMulNBits` contrib op. They are
 all *round-to-nearest* (RTN) — none of them use calibration data or error feedback
 (unlike GPTQ/AWQ/HQQ).
 
-## Design: method vs. bit placement
+## Design: method vs. mixed precision
 
 A quantization configuration has two independent parts:
 
 1. **Base method** — *how* each weight block is rounded (the scale/rounding math).
-2. **Bit placement** — *which* MatMuls are upgraded from int4 to int8.
+2. **Mixed precision** — *which* MatMuls use a different quant type than the int4 body.
 
 These used to be entangled in compound names (e.g. `rtn_last` = `rtn` + int8 LM head,
 `k_quant_mixed` = `k_quant` + int8 on sensitive layers). They are now decoupled:
@@ -22,12 +22,21 @@ These used to be entangled in compound names (e.g. `rtn_last` = `rtn` + int8 LM 
 | Concept | Option | Values |
 | --- | --- | --- |
 | Base method | `int4_algo_config` | `default`, `rtn`, `k_quant` |
-| Int8 last MatMul (LM head) | `last_matmul_weight_int8` | `true` / `false` |
-| Int8 sensitive layers (llama.cpp mixed) | `int8_mixed_layers` | `true` / `false` |
-| Int8 linear-attention layers | `int8_linear_attn` | `true` / `false` |
+| Mixed precision | `mixed_precision_config` | comma-separated `selector:quant_type` pairs |
 
-The bit-placement flags can be combined with **any** base method. For example
-`int4_algo_config=rtn` + `last_matmul_weight_int8=true` is equivalent to the legacy `rtn_last`.
+`mixed_precision_config` maps a node-group **selector** to a **quant type**:
+
+| Selector | Nodes upgraded |
+| --- | --- |
+| `last_matmul` | The last MatMul (LM head), the single largest, output-sensitive weight |
+| `mixed_layers` | The most quantization-sensitive MatMuls (llama.cpp mixed strategy) |
+| `linear_attn` | Linear-attention projections and their MLPs (hybrid attention models) |
+
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare
+bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option.
+
+`mixed_precision_config` can be combined with **any** base method. For example
+`int4_algo_config=rtn` + `mixed_precision_config=last_matmul:int8` is equivalent to the legacy `rtn_last`.
 
 ## Base methods
 
@@ -48,10 +57,11 @@ are named `*.weight_Q4` / `*.weight_scales`.
 > Note: the `DefaultWeightOnlyQuantizer` applies a **single global** bit-width per
 > pass and its config (`DefaultWeightOnlyQuantConfig`) does not accept a per-node
 > `customized_weight_config` (unlike RTN/k-quant, which honor per-node bits in one
-> pass). To support int8 bit placement on top of `default`, the builder quantizes the
-> int4 body first (excluding the int8 nodes) and then upgrades just those nodes in a
-> second **DEFAULT (bits=8)** pass (see `to_nbits`). The int4 body remains byte-identical
-> to a plain `default` model, and the int8 nodes use the same MLAS quantizer as the body.
+> pass). To support mixed precision on top of `default`, the builder quantizes the
+> int4 body first (excluding the upgraded nodes) and then upgrades just those nodes,
+> grouped by their target bit-width, in one **DEFAULT** pass per distinct width (see
+> `to_nbits`). The int4 body remains byte-identical to a plain `default` model, and the
+> upgraded nodes use the same MLAS quantizer as the body.
 >
 > The DEFAULT (MLAS) symmetric 8-bit format stores unsigned uint8 offset-by-128 with
 > **signed** per-block scales. The `MatMulNBits` CUDA kernels consume negative scales
@@ -90,7 +100,7 @@ range 8.
 ### `k_quant`
 Uses `KQuantWeightOnlyQuantConfig` → Neural Compressor's k-quant (a more elaborate
 per-block scaling derived from llama.cpp's K-quants). Honors per-node
-`customized_weight_config`, so int8 bit placement works in a single pass.
+`customized_weight_config`, so mixed-precision placement works in a single pass.
 
 ## CUDA MatMulNBits weight prepacking
 
@@ -141,23 +151,26 @@ ORT-side QMoE tests. Keep the two copies in sync. Longer term, this helper shoul
 move into ONNX Runtime quantization tooling so genai can import the shared
 implementation directly.
 
-## Int8 bit-placement flags
+## Mixed precision (`mixed_precision_config`)
 
-### `last_matmul_weight_int8` (legacy `_last`)
-Upgrades the last MatMul (e.g. `/lm_head/MatMul`) to 8 bits. The LM head is the single largest weight and is
-output-sensitive, so int8 here costs ~0.27 GiB but is cheap relative to the body.
+`mixed_precision_config` is a comma-separated list of `selector:quant_type` pairs, e.g.
+`mixed_precision_config=last_matmul:int8,mixed_layers:int8,linear_attn:int4`.
+
+### `last_matmul` (legacy `_last`)
+Upgrades the last MatMul (e.g. `/lm_head/MatMul`). The LM head is the single largest weight and is
+output-sensitive, so `int8` here costs ~0.27 GiB but is cheap relative to the body.
 Combinable with any base method.
 
-### `int8_mixed_layers` (legacy `k_quant_mixed`)
-Promotes the most quantization-sensitive MatMuls to int8, following llama.cpp's mixed
+### `mixed_layers` (legacy `k_quant_mixed`)
+Promotes the most quantization-sensitive MatMuls, following llama.cpp's mixed
 strategy: for the first and last eighth of layers, plus every third layer, the
-`attn/qkv_proj`, `attn/v_proj`, and `mlp/down_proj` MatMuls become int8.
+`attn/qkv_proj`, `attn/v_proj`, and `mlp/down_proj` MatMuls are upgraded.
 
-### `int8_linear_attn` (legacy `k_quant_linear`)
+### `linear_attn` (legacy `k_quant_linear`)
 For hybrid attention models (e.g. Qwen3.5), promotes the linear-attention projections
-(`in_proj_*`, `out_proj`) and their MLP (`gate_proj`, `up_proj`, `down_proj`) to int8.
+(`in_proj_*`, `out_proj`) and their MLP (`gate_proj`, `up_proj`, `down_proj`).
 Linear-attention recurrence accumulates quantization error across the sequence (no
-softmax normalization), so int8 helps there.
+softmax normalization), so a higher-precision quant type helps there.
 
 ## Legacy aliases (still supported)
 
@@ -166,21 +179,21 @@ expand to a base method plus flags, producing identical models:
 
 | Legacy value | Equivalent |
 | --- | --- |
-| `rtn_last` | `int4_algo_config=rtn` + `last_matmul_weight_int8=true` |
-| `k_quant_last` | `int4_algo_config=k_quant` + `last_matmul_weight_int8=true` |
-| `k_quant_mixed` | `int4_algo_config=k_quant` + `last_matmul_weight_int8=true` + `int8_mixed_layers=true` |
-| `k_quant_linear` | `int4_algo_config=k_quant` + `last_matmul_weight_int8=true` + `int8_linear_attn=true` |
+| `rtn_last` | `int4_algo_config=rtn` + `mixed_precision_config=last_matmul:int8` |
+| `k_quant_last` | `int4_algo_config=k_quant` + `mixed_precision_config=last_matmul:int8` |
+| `k_quant_mixed` | `int4_algo_config=k_quant` + `mixed_precision_config=last_matmul:int8,mixed_layers:int8` |
+| `k_quant_linear` | `int4_algo_config=k_quant` + `mixed_precision_config=last_matmul:int8,linear_attn:int8` |
 
-Only the legacy aliases (`k_quant_last`, `k_quant_mixed`, `k_quant_linear`) and/or an explicit `last_matmul_weight_int8=true` flag upgrade the LM head; the bare `k_quant` base method does not imply any int8 placement.
+Only the legacy aliases (`k_quant_last`, `k_quant_mixed`, `k_quant_linear`) and/or an explicit `mixed_precision_config=last_matmul:int8` upgrade the LM head; the bare `k_quant` base method does not imply any mixed precision.
 
 ## Examples
 
 ```bash
 # default body (best int4 accuracy) + int8 LM head
 python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
-  --extra_options int4_algo_config=default last_matmul_weight_int8=true int4_block_size=32
+  --extra_options int4_algo_config=default mixed_precision_config=last_matmul:int8 int4_block_size=32
 
 # rtn body + int8 LM head (== legacy rtn_last)
 python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
-  --extra_options int4_algo_config=rtn last_matmul_weight_int8=true
+  --extra_options int4_algo_config=rtn mixed_precision_config=last_matmul:int8
 ```
