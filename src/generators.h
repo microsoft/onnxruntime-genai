@@ -33,6 +33,7 @@
 #include "config.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "speculative_stats.h"
 #include "tensor.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
@@ -44,6 +45,13 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+
+}  // namespace Generators
+
+#include "decoding_strategy.h"
+
+namespace Generators {
+
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -78,10 +86,13 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   std::shared_ptr<const Model> model_;
   const Config& config;                  // Aliases model-owned Config; kept alive by model_
   Config::Search search{config.search};  // Copy of the search parameters from the config
+  Config::Speculative speculative{config.speculative};  // Runtime copy; overrides config default
 
   // Query the params to get the value set for a param
   double GetSearchNumber(std::string_view name) const;
   bool GetSearchBool(std::string_view name) const;
+  void SetSpeculativeNumber(std::string_view name, double value);
+  double GetSpeculativeNumber(std::string_view name) const;
 
   int max_batch_size{0};
   bool use_graph_capture{};
@@ -127,6 +138,13 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+  // Returns zero-filled stats when the model is not speculative.
+  SpeculativeStats GetSpeculativeStats() const;
+
+  // True when sampling reduces to greedy/argmax selection (do_sample off, top_k == 1, or
+  // temperature == 0). Computed once at construction so callers don't re-derive it.
+  bool IsGreedySampling() const;
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
@@ -146,6 +164,11 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+
+  std::unique_ptr<DecodingStrategy> strategy_;
+  friend struct StandardDecodingStrategy;
+  friend struct TransducerDecodingStrategy;
+  friend struct SpeculativeDecodingStrategy;
 };
 
 struct OrtGlobals {

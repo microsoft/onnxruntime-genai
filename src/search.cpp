@@ -1,5 +1,6 @@
 #include "generators.h"
 #include "softmax.h"
+#include "sampling_distribution.h"
 #include "search.h"
 #include "beam_search_scorer.h"
 #include "cpu/interface.h"
@@ -175,132 +176,25 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
-  k = std::min(k, vocab_size);
-  std::vector<int> indices(vocab_size);
-  std::vector<float> top_k_scores(k);
+  SampledCategorical dist;  // reused across the batch loop
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
-    // Find the top K scores
-    std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    for (int i = 0; i < k; i++)
-      top_k_scores[i] = scores[indices[i]];
-    // Sample a token from the top K
-    Softmax(top_k_scores, temperature);
-    std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
-    SetNextToken(batch_id, indices[dis(gen_)]);
+    ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();
 }
 
-// Find the minimal nucleus of tokens whose cumulative probability >= p using
-// adaptive partial sort with a log-space tail bound. This avoids computing the
-// global softmax partition function (O(V) exp() calls) by bounding the unsorted
-// tail probability at each step.
-//
-// At sorted position i, all V-i-1 remaining elements have score <= scores[indices[i]]
-// (by sort order within the prefix, and by partial_sort guarantee beyond it). So:
-//   tail_sum <= (V - i - 1) * exp((scores[indices[i]] - max_score) * inv_temp)
-// The cumulative probability lower bound is:
-//   prefix_sum / (prefix_sum + tail_bound)
-// When this exceeds p, the true cumulative (which is >= this bound) also exceeds p.
-//
-// The nucleus found may include a few extra tokens compared to exact global softmax,
-// but is always a valid nucleus (true cumulative prob >= p). For typical peaked LLM
-// distributions, the bound is tight and the result is identical.
-static int FindNucleus(std::span<const float> scores, std::span<int32_t> indices,
-                       float p, float max_score, float inv_temp) {
-  const int vocab_size = static_cast<int>(scores.size());
-
-  // Start small (16) to minimize wasted work when the top few tokens dominate
-  // (common at low temperature). Grow 4× to avoid O(V log V) full-sort fallback
-  // that a 2× growth with a hard cap would require for flat distributions.
-  constexpr int kInitialCandidateCount = 16;
-  constexpr int kCandidateCountGrowthFactor = 4;
-
-  std::iota(indices.begin(), indices.end(), 0);
-
-  int sorted_count = 0;
-  int k = std::min(kInitialCandidateCount, vocab_size);
-  float prefix_exp_sum = 0.0f;
-  int cutoff_index = 0;
-
-  while (k <= vocab_size) {
-    // Partial sort: place the top-k elements (by score, descending) at indices[0..k-1].
-    // Only the range [sorted_count, k) is newly sorted; [0, sorted_count) is already done.
-    std::partial_sort(indices.begin() + sorted_count, indices.begin() + k, indices.end(),
-                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-    // Accumulate exp() for newly sorted elements and check the tail bound.
-    cutoff_index = k;
-    for (int i = sorted_count; i < k; ++i) {
-      float exp_i = std::exp((scores[indices[i]] - max_score) * inv_temp);
-      prefix_exp_sum += exp_i;
-
-      // Upper bound on remaining elements: all V-i-1 unsorted entries have score <= current.
-      float tail_bound = static_cast<float>(vocab_size - i - 1) * exp_i;
-      if (prefix_exp_sum >= p * (prefix_exp_sum + tail_bound)) {
-        cutoff_index = i + 1;
-        break;
-      }
-    }
-    sorted_count = k;
-
-    if (cutoff_index < k || k == vocab_size)
-      break;
-
-    k = std::min(k * kCandidateCountGrowthFactor, vocab_size);
-  }
-
-  // When the vocabulary is small enough that the tail bound may be loose,
-  // compute the exact cutoff using the true partition function.
-  // For large V this path is never reached (tail bound is tight for peaked distributions).
-  if (vocab_size <= kInitialCandidateCount * kCandidateCountGrowthFactor) {
-    // Ensure all elements are sorted for exact computation
-    if (sorted_count < vocab_size) {
-      std::partial_sort(indices.begin() + sorted_count, indices.begin() + vocab_size, indices.end(),
-                        [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-    }
-    float global_exp_sum = 0.0f;
-    for (int i = 0; i < vocab_size; ++i) {
-      global_exp_sum += std::exp((scores[indices[i]] - max_score) * inv_temp);
-    }
-    float cum = 0.0f;
-    for (int i = 0; i < vocab_size; ++i) {
-      cum += std::exp((scores[indices[i]] - max_score) * inv_temp);
-      if (cum >= p * global_exp_sum) {
-        return i + 1;
-      }
-    }
-  }
-
-  return cutoff_index;
-}
-
-// Top-P (nucleus) sampling using adaptive partial sort with tail-bound
-// early termination.
-//
-// Instead of a separate O(V) pass to compute the global softmax partition
-// function (max + sum-of-exp over the full vocabulary), FindNucleus uses
-// a conservative upper bound on the unsorted tail to determine when the
-// nucleus is complete. This eliminates ~V calls to std::exp() per token
-// (e.g., ~128K for typical LLM vocabularies).
-//
-// Additional optimizations:
-//   - Buffers (indices, top_logits) are allocated once outside the batch loop.
-//   - Softmax for final sampling is computed only over the nucleus.
-//   - discrete_distribution is constructed over the nucleus only.
+// Top-P (nucleus) sampling; nucleus selection shared with speculative decoding via ComputeSampledCategorical.
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
-
-  // Buffers allocated once outside the batch loop to avoid per-call heap allocations.
-  std::vector<int32_t> indices(vocab_size);
-  std::vector<float> top_logits;
+  SampledCategorical dist;  // reused across the batch loop
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -308,25 +202,10 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     }
 
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
-
-    float inv_temp = 1.0f / temperature;
-    float max_score = *std::max_element(scores.begin(), scores.end());
-
-    // Find the nucleus via adaptive partial sort with tail-bound early termination.
-    int cutoff_index = FindNucleus(scores, indices, p, max_score, inv_temp);
-
-    // Re-normalize the nucleus probabilities and sample a token.
-    top_logits.resize(cutoff_index);
-    for (int i = 0; i < cutoff_index; ++i) {
-      top_logits[i] = scores[indices[i]] * inv_temp;
-    }
-    Softmax(top_logits, 1.0f);
-
-    std::discrete_distribution<> dist(top_logits.begin(), top_logits.end());
-    int32_t sampled_index = dist(gen_);
-    int32_t token = indices[sampled_index];
-
-    SetNextToken(batch_id, token);
+    // top_k=0 -> pure nucleus path.
+    ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();
@@ -334,60 +213,18 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   assert(temperature > 0.0f);
-
-  // Clamp k to vocab_size to prevent out-of-bounds access in partial_sort
-  k = std::min(k, params_->config.model.vocab_size);
-
-  // --- Buffers allocated once to avoid re-allocations in the batch loop ---
-  std::vector<int32_t> indices(params_->config.model.vocab_size);
-
-  // Buffer for the top-k logits
-  std::vector<float> top_k_logits;
-  top_k_logits.reserve(k);
-
-  // Buffer for probabilities used in Top-P filtering
-  std::vector<float> temp_probs;
-  temp_probs.reserve(k);
+  const int vocab_size = params_->config.model.vocab_size;
+  SampledCategorical dist;  // reused across the batch loop
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
 
-    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-
-    std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
-                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-    // 2. Populate top K logits, applying temperature.
-    top_k_logits.clear();
-    float inv_temp = 1.0f / temperature;
-    for (int i = 0; i < k; ++i) {
-      top_k_logits.push_back(scores[indices[i]] * inv_temp);
-    }
-
-    // 3. Top-p (nucleus) filtering.
-    temp_probs.assign(top_k_logits.begin(), top_k_logits.end());
-    Softmax(temp_probs, 1.0f);  // Temperature is already baked into top_k_logits
-
-    float cumulative_prob = 0.0f;
-    int cutoff_index = k;  // Default to keeping all top-k tokens
-    for (int i = 0; i < k; ++i) {
-      cumulative_prob += temp_probs[i];
-      if (cumulative_prob >= p) {
-        cutoff_index = i + 1;
-        break;
-      }
-    }
-
-    // 4. Resize logits to the nucleus, re-normalize, and sample.
-    top_k_logits.resize(cutoff_index);
-    Softmax(top_k_logits, 1.0f);
-
-    std::discrete_distribution<> dist(top_k_logits.begin(), top_k_logits.end());
-    int32_t token = indices[dist(gen_)];
-    SetNextToken(batch_id, token);
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
+    ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();

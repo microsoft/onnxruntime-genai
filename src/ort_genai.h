@@ -445,6 +445,16 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
+  void SetSpeculativeOption(const char* name, double value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeNumber(this, name, value));
+  }
+
+  double GetSpeculativeNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeNumber(this, name, &value));
+    return value;
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
@@ -523,6 +533,12 @@ struct OgaGenerator : OgaAbstract {
 
   const int32_t* GetSequenceData(size_t index) const {
     return OgaGenerator_GetSequenceData(this, index);
+  }
+
+  OgaSpeculativeStats GetSpeculativeStats() const {
+    OgaSpeculativeStats stats{};
+    OgaCheckResult(OgaGenerator_GetSpeculativeStats(this, &stats));
+    return stats;
   }
 
   std::unique_ptr<OgaTensor> GetInput(const char* name) {
