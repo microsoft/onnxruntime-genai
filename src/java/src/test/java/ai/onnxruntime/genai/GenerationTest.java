@@ -141,10 +141,11 @@ public class GenerationTest {
 
         assertEquals(params.getSearchNumber("max_length"), maxLength);
         assertEquals(params.getSearchBool("early_stopping"), true);
-        SpeculativeStats stats = generator.getSpeculativeStats();
-        assertEquals(0, stats.getRounds());
-        assertEquals(false, stats.isFormulaSupported());
-        assertEquals(0.0f, stats.getAcceptanceRate());
+        try (SpeculativeStats stats = generator.getSpeculativeStats()) {
+          assertEquals(0, stats.getCount("rounds"));
+          assertEquals(false, stats.getBool("formula_supported"));
+          assertEquals(0.0, stats.getNumber("acceptance_rate"));
+        }
         assertEquals(generator.tokenCount(), 4);
 
         while (!generator.isDone()) {

@@ -199,7 +199,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    return getSpeculativeStatsNative(nativeHandle);
+    return new SpeculativeStats(getSpeculativeStatsNative(nativeHandle));
   }
 
   /**
@@ -317,8 +317,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native int[] getSequenceNative(long nativeHandle, long sequenceIndex)
       throws GenAIException;
 
-  private native SpeculativeStats getSpeculativeStatsNative(long nativeHandle)
-      throws GenAIException;
+  private native long getSpeculativeStatsNative(long nativeHandle) throws GenAIException;
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
       throws GenAIException;

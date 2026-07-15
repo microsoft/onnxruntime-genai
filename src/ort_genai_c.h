@@ -62,6 +62,7 @@ typedef enum OgaElementType {
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
+typedef struct OgaSpeculativeStats OgaSpeculativeStats;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
@@ -666,42 +667,22 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
 
-/** \brief Speculative-decoding work, delivery, timing, and speedup statistics.
- *  Speedup fields are zero without a target baseline or when guidance is active. */
-typedef struct OgaSpeculativeStats {
-  size_t rounds;
-  size_t completed_rounds;
-  size_t interrupted_rounds;
-  size_t active_rounds;
-  size_t draft_tokens_proposed;
-  size_t draft_tokens_evaluated;
-  size_t draft_tokens_accepted;
-  size_t correction_tokens;
-  size_t bonus_tokens;
-  size_t tokens_queued;
-  size_t tokens_emitted;
-  size_t tokens_discarded;
-  size_t tokens_buffered;
-  size_t draft_forward_passes;
-  size_t target_forward_passes;
-  size_t formula_supported;
-  float total_draft_ms;
-  float total_target_ms;
-  float total_reconciliation_ms;
-  float avg_draft_ms_per_token;
-  float acceptance_rate;
-  float avg_draft_tokens_per_round;
-  float mean_emitted_tokens_per_round;
-  float expected_tokens_per_round;
-  float avg_target_ms_per_round;
-  float target_baseline_ms_per_token;
-  float target_overhead_ratio;
-  float estimated_speedup;
-  float observed_speedup;
-} OgaSpeculativeStats;
+/** \brief Creates an immutable snapshot of the accumulated speculative-decoding statistics.
+ *  Values are zero for non-speculative models. The caller must destroy the returned object. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* stats);
 
-/** \brief Fills out_stats with accumulated statistics; fields are zero for non-speculative models. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats);
+/** \brief Gets an integer counter from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
+    const OgaSpeculativeStats* stats, const char* name, uint64_t* value);
+
+/** \brief Gets a timing, rate, ratio, average, or speedup value from a statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
+    const OgaSpeculativeStats* stats, const char* name, double* value);
+
+/** \brief Gets a boolean value from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetBool(
+    const OgaSpeculativeStats* stats, const char* name, bool* value);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);

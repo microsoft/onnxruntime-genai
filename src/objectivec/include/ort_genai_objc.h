@@ -47,37 +47,15 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUint64,   // maps to c type uint64_t
 };
 
-typedef struct OGASpeculativeStats {
-  size_t rounds;
-  size_t completedRounds;
-  size_t interruptedRounds;
-  size_t activeRounds;
-  size_t draftTokensProposed;
-  size_t draftTokensEvaluated;
-  size_t draftTokensAccepted;
-  size_t correctionTokens;
-  size_t bonusTokens;
-  size_t tokensQueued;
-  size_t tokensEmitted;
-  size_t tokensDiscarded;
-  size_t tokensBuffered;
-  size_t draftForwardPasses;
-  size_t targetForwardPasses;
-  BOOL formulaSupported;
-  float totalDraftMs;
-  float totalTargetMs;
-  float totalReconciliationMs;
-  float avgDraftMsPerToken;
-  float acceptanceRate;
-  float avgDraftTokensPerRound;
-  float meanEmittedTokensPerRound;
-  float expectedTokensPerRound;
-  float avgTargetMsPerRound;
-  float targetBaselineMsPerToken;
-  float targetOverheadRatio;
-  float estimatedSpeedup;
-  float observedSpeedup;
-} OGASpeculativeStats;
+/** An immutable snapshot of speculative decoding statistics. */
+@interface OGASpeculativeStats : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+- (uint64_t)getCount:(NSString*)name error:(NSError**)error;
+- (double)getNumber:(NSString*)name error:(NSError**)error;
+- (BOOL)getBool:(NSString*)name error:(NSError**)error;
+
+@end
 
 /**
  * An ORT GenAI config.
@@ -474,9 +452,8 @@ typedef struct OGASpeculativeStats {
 - (size_t)sequenceCountAtIndex:(size_t)index
                          error:(NSError**)error;
 
-/** Get the accumulated speculative decoding statistics. */
-- (BOOL)getSpeculativeStats:(OGASpeculativeStats*)stats
-                      error:(NSError**)error;
+/** Get an immutable snapshot of the accumulated speculative decoding statistics. */
+- (nullable OGASpeculativeStats*)getSpeculativeStatsWithError:(NSError**)error;
 
 /**
  * Clean up the resource before process exits.

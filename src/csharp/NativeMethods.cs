@@ -8,40 +8,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal static class NativeMethods
     {
-        [StructLayout(LayoutKind.Sequential)]
-        internal struct OgaSpeculativeStats
-        {
-            public UIntPtr Rounds;
-            public UIntPtr CompletedRounds;
-            public UIntPtr InterruptedRounds;
-            public UIntPtr ActiveRounds;
-            public UIntPtr DraftTokensProposed;
-            public UIntPtr DraftTokensEvaluated;
-            public UIntPtr DraftTokensAccepted;
-            public UIntPtr CorrectionTokens;
-            public UIntPtr BonusTokens;
-            public UIntPtr TokensQueued;
-            public UIntPtr TokensEmitted;
-            public UIntPtr TokensDiscarded;
-            public UIntPtr TokensBuffered;
-            public UIntPtr DraftForwardPasses;
-            public UIntPtr TargetForwardPasses;
-            public UIntPtr FormulaSupported;
-            public float TotalDraftMs;
-            public float TotalTargetMs;
-            public float TotalReconciliationMs;
-            public float AvgDraftMsPerToken;
-            public float AcceptanceRate;
-            public float AvgDraftTokensPerRound;
-            public float MeanEmittedTokensPerRound;
-            public float ExpectedTokensPerRound;
-            public float AvgTargetMsPerRound;
-            public float TargetBaselineMsPerToken;
-            public float TargetOverheadRatio;
-            public float EstimatedSpeedup;
-            public float ObservedSpeedup;
-        }
-
         internal class NativeLib
         {
 #if __ANDROID__
@@ -231,7 +197,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GetSpeculativeStats(IntPtr /* const OgaGenerator* */ generator,
-                                                                                     out OgaSpeculativeStats stats);
+                                                                                     out IntPtr /* OgaSpeculativeStats* */ stats);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroySpeculativeStats(IntPtr /* OgaSpeculativeStats* */ stats);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetCount(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                                byte[] /* const char* */ name,
+                                                                                out ulong value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetNumber(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                                 byte[] /* const char* */ name,
+                                                                                 out double value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetBool(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                               byte[] /* const char* */ name,
+                                                                               out bool value);
 
         // This function returns the sequence data at the given index. The returned pointer is owned by the
         // OgaGenerator object and will be freed when the OgaGenerator object is destroyed. It is expected

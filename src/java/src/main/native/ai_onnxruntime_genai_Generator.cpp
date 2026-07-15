@@ -111,68 +111,14 @@ Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz,
   return java_int_array;
 }
 
-JNIEXPORT jobject JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Generator_getSpeculativeStatsNative(JNIEnv* env, jobject thiz, jlong native_handle) {
-  OgaSpeculativeStats stats{};
+  OgaSpeculativeStats* stats = nullptr;
   if (ThrowIfError(env, OgaGenerator_GetSpeculativeStats(
                             reinterpret_cast<const OgaGenerator*>(native_handle), &stats))) {
-    return nullptr;
+    return 0;
   }
-
-  jlong counts[] = {
-      static_cast<jlong>(stats.rounds),
-      static_cast<jlong>(stats.completed_rounds),
-      static_cast<jlong>(stats.interrupted_rounds),
-      static_cast<jlong>(stats.active_rounds),
-      static_cast<jlong>(stats.draft_tokens_proposed),
-      static_cast<jlong>(stats.draft_tokens_evaluated),
-      static_cast<jlong>(stats.draft_tokens_accepted),
-      static_cast<jlong>(stats.correction_tokens),
-      static_cast<jlong>(stats.bonus_tokens),
-      static_cast<jlong>(stats.tokens_queued),
-      static_cast<jlong>(stats.tokens_emitted),
-      static_cast<jlong>(stats.tokens_discarded),
-      static_cast<jlong>(stats.tokens_buffered),
-      static_cast<jlong>(stats.draft_forward_passes),
-      static_cast<jlong>(stats.target_forward_passes),
-      static_cast<jlong>(stats.formula_supported),
-  };
-  jfloat values[] = {
-      stats.total_draft_ms,
-      stats.total_target_ms,
-      stats.total_reconciliation_ms,
-      stats.avg_draft_ms_per_token,
-      stats.acceptance_rate,
-      stats.avg_draft_tokens_per_round,
-      stats.mean_emitted_tokens_per_round,
-      stats.expected_tokens_per_round,
-      stats.avg_target_ms_per_round,
-      stats.target_baseline_ms_per_token,
-      stats.target_overhead_ratio,
-      stats.estimated_speedup,
-      stats.observed_speedup,
-  };
-
-  jlongArray java_counts = env->NewLongArray(static_cast<jsize>(sizeof(counts) / sizeof(counts[0])));
-  jfloatArray java_values = env->NewFloatArray(static_cast<jsize>(sizeof(values) / sizeof(values[0])));
-  if (java_counts == nullptr || java_values == nullptr) {
-    return nullptr;
-  }
-  env->SetLongArrayRegion(java_counts, 0, static_cast<jsize>(sizeof(counts) / sizeof(counts[0])), counts);
-  env->SetFloatArrayRegion(java_values, 0, static_cast<jsize>(sizeof(values) / sizeof(values[0])), values);
-  if (env->ExceptionCheck()) {
-    return nullptr;
-  }
-
-  jclass stats_class = env->FindClass("ai/onnxruntime/genai/SpeculativeStats");
-  if (stats_class == nullptr) {
-    return nullptr;
-  }
-  jmethodID constructor = env->GetMethodID(stats_class, "<init>", "([J[F)V");
-  if (constructor == nullptr) {
-    return nullptr;
-  }
-  return env->NewObject(stats_class, constructor, java_counts, java_values);
+  return reinterpret_cast<jlong>(stats);
 }
 
 JNIEXPORT jint JNICALL

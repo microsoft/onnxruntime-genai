@@ -161,12 +161,14 @@ NS_ASSUME_NONNULL_BEGIN
 
   OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model params:params error:&error];
   ORTAssertNullableResultSuccessful(generator, error);
-  OGASpeculativeStats stats = {};
-  ret = [generator getSpeculativeStats:&stats error:&error];
-  ORTAssertBoolResultSuccessful(ret, error);
-  XCTAssertEqual(stats.rounds, 0);
-  XCTAssertFalse(stats.formulaSupported);
-  XCTAssertEqual(stats.acceptanceRate, 0);
+  OGASpeculativeStats* stats = [generator getSpeculativeStatsWithError:&error];
+  ORTAssertNullableResultSuccessful(stats, error);
+  XCTAssertEqual([stats getCount:@"rounds" error:&error], 0);
+  XCTAssertNil(error);
+  XCTAssertFalse([stats getBool:@"formula_supported" error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqual([stats getNumber:@"acceptance_rate" error:&error], 0);
+  XCTAssertNil(error);
 }
 
 @end

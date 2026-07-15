@@ -225,7 +225,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
                             Assert.True(generatorParams.GetSearchBool("early_stopping"));
                             Assert.Equal(4.0, generatorParams.GetSpeculativeNumber("max_draft_tokens"));
-                            Assert.Equal(default, generator.GetSpeculativeStats());
+                            using (SpeculativeStats stats = generator.GetSpeculativeStats())
+                            {
+                                Assert.Equal(0UL, stats.GetCount("rounds"));
+                                Assert.False(stats.GetBool("formula_supported"));
+                                Assert.Equal(0.0, stats.GetNumber("acceptance_rate"));
+                            }
                             Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
 
                             while (!generator.IsDone())

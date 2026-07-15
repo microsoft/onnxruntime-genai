@@ -7,6 +7,47 @@
 
 #include <stdexcept>
 
+@interface OGASpeculativeStats ()
+
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSpeculativeStats>)ptr;
+
+@end
+
+@implementation OGASpeculativeStats {
+  std::unique_ptr<OgaSpeculativeStats> _stats;
+}
+
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSpeculativeStats>)ptr {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+  _stats = std::move(ptr);
+  return self;
+}
+
+- (uint64_t)getCount:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetCount([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH(error, uint64_t(-1))
+}
+
+- (double)getNumber:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetNumber([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_DOUBLE(error)
+}
+
+- (BOOL)getBool:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetBool([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+@end
+
 @implementation OGAGenerator {
   std::unique_ptr<OgaGenerator> _generator;
 }
@@ -122,45 +163,11 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
-- (BOOL)getSpeculativeStats:(OGASpeculativeStats*)stats error:(NSError**)error {
+- (nullable OGASpeculativeStats*)getSpeculativeStatsWithError:(NSError**)error {
   try {
-    if (stats == nullptr) {
-      throw std::invalid_argument("stats must not be null.");
-    }
-
-    const auto source = _generator->GetSpeculativeStats();
-    stats->rounds = source.rounds;
-    stats->completedRounds = source.completed_rounds;
-    stats->interruptedRounds = source.interrupted_rounds;
-    stats->activeRounds = source.active_rounds;
-    stats->draftTokensProposed = source.draft_tokens_proposed;
-    stats->draftTokensEvaluated = source.draft_tokens_evaluated;
-    stats->draftTokensAccepted = source.draft_tokens_accepted;
-    stats->correctionTokens = source.correction_tokens;
-    stats->bonusTokens = source.bonus_tokens;
-    stats->tokensQueued = source.tokens_queued;
-    stats->tokensEmitted = source.tokens_emitted;
-    stats->tokensDiscarded = source.tokens_discarded;
-    stats->tokensBuffered = source.tokens_buffered;
-    stats->draftForwardPasses = source.draft_forward_passes;
-    stats->targetForwardPasses = source.target_forward_passes;
-    stats->formulaSupported = source.formula_supported != 0;
-    stats->totalDraftMs = source.total_draft_ms;
-    stats->totalTargetMs = source.total_target_ms;
-    stats->totalReconciliationMs = source.total_reconciliation_ms;
-    stats->avgDraftMsPerToken = source.avg_draft_ms_per_token;
-    stats->acceptanceRate = source.acceptance_rate;
-    stats->avgDraftTokensPerRound = source.avg_draft_tokens_per_round;
-    stats->meanEmittedTokensPerRound = source.mean_emitted_tokens_per_round;
-    stats->expectedTokensPerRound = source.expected_tokens_per_round;
-    stats->avgTargetMsPerRound = source.avg_target_ms_per_round;
-    stats->targetBaselineMsPerToken = source.target_baseline_ms_per_token;
-    stats->targetOverheadRatio = source.target_overhead_ratio;
-    stats->estimatedSpeedup = source.estimated_speedup;
-    stats->observedSpeedup = source.observed_speedup;
-    return YES;
+    return [[OGASpeculativeStats alloc] initWithCXXPointer:_generator->GetSpeculativeStats()];
   }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 + (void)shutdown {
