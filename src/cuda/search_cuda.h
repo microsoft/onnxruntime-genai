@@ -57,6 +57,10 @@ struct GreedySearch_Cuda : Search_Cuda {
   void RewindTo(size_t index) override;
 
  private:
+  void AppendTokensToSequences(DeviceSpan<int32_t>& tokens);
+  void MarkDoneAtMaxLength();
+  void FinalizeGeneratedTokens();
+
   DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;

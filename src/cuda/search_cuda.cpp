@@ -160,42 +160,39 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
                   params_->search.batch_size, k, p, temperature);
 
-  // Check for EOS
-  assert(next_tokens_.size() == eos_seen_.size());
-  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
+  FinalizeGeneratedTokens();
+}
 
-  // Append tokens
-  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-  if (!*done_cpu_) {
-    cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
-  }
+void GreedySearch_Cuda::AppendTokensToSequences(DeviceSpan<int32_t>& tokens) {
+  cuda::Launch_AppendNextTokensToSequences(tokens.Span(), sequences_.GetSequences().Span(),
+                                           params_->BatchBeamSize(), sequences_.GetSequenceLength(),
+                                           sequences_.max_length_, GetStream());
+  sequences_.AfterAppendNextTokens(tokens, params_->BatchBeamSize());
+}
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+void GreedySearch_Cuda::MarkDoneAtMaxLength() {
+  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
 }
 
-void GreedySearch_Cuda::CommitToken(int32_t token) {
-  // Speculative decoding already decided this token - place it in next_tokens_ and reuse the same
-  // EOS-check + append path SampleTopKTopP uses (skipping GetSample). batch_size is always 1 here.
-  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
-
+void GreedySearch_Cuda::FinalizeGeneratedTokens() {
+  assert(next_tokens_.size() == eos_seen_.size());
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
   CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-  if (!*done_cpu_) {
-    cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
-  }
+  if (!*done_cpu_)
+    AppendTokensToSequences(next_tokens_buffer_);
+  MarkDoneAtMaxLength();
+}
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
-  }
+void GreedySearch_Cuda::CommitToken(int32_t token) {
+  // The caller already selected this generated token, so skip sampling but retain generated-token
+  // EOS, padding, and max-length behavior. Speculative decoding only calls this with batch_size 1.
+  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+  FinalizeGeneratedTokens();
 }
 
 bool BeamSearch_Cuda::IsDone() const {
@@ -240,18 +237,13 @@ std::span<float> Search_Cuda::GetScores() {
 
 // Set user input tokens (batch_beam_size, sequence_length)
 void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
+  // Caller-provided prompt/continuation tokens are appended as input. Unlike CommitToken, they do
+  // not run generated-token EOS/padding handling, and done state is reset when capacity remains.
   ResetDone();
-
-  auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
-
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
+  AppendTokensToSequences(next_tokens);
+  MarkDoneAtMaxLength();
+  if (*done_cpu_)
     return;
-  }
 
   ResetDone();
 }
