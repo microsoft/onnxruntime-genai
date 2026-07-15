@@ -394,6 +394,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return ToPython(t.GetEosTokenIds());
       })
       .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
+      .def_property_readonly("bot_token_id", &OgaTokenizer::GetBotTokenId)
+      .def_property_readonly("eot_token_id", &OgaTokenizer::GetEotTokenId)
+      .def_property_readonly("bor_token_id", &OgaTokenizer::GetBorTokenId)
+      .def_property_readonly("eor_token_id", &OgaTokenizer::GetEorTokenId)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;

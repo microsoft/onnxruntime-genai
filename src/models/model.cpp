@@ -299,29 +299,30 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-namespace {
-
-// Fallback token strings for models whose genai_config.json doesn't yet include
-// bot/eot/bor/eor token IDs in the model section. This exists specifically for
-// Foundry Local backward compatibility with older model packages that predate
-// these config fields.
+// Fallback: if the given token ID is unset (-1), attempt to resolve it by looking up
+// a well-known token string for the model type in the tokenizer vocabulary.
+// This provides backward compatibility for Foundry Local when consuming older model
+// packages that predate the bot/eot/bor/eor config fields.
 // Keyed by model.type string from genai_config.json.
-// Inner map: tag_name -> token string (used for vocab lookup to get the ID).
-const std::string* GetFallbackTag(const std::string& model_type, const std::string& tag_name) {
+static void ResolveFallbackTagId(int32_t& id, const std::string& model_type,
+                                 const std::string& tag_name, const Tokenizer& tokenizer) {
+  if (id >= 0) return;
+
   static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
       {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
       {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
       {"phi3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}}},
       {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
   };
-  auto type_it = fallback_map.find(model_type);
-  if (type_it == fallback_map.end()) return nullptr;
-  auto tag_it = type_it->second.find(tag_name);
-  if (tag_it == type_it->second.end()) return nullptr;
-  return &tag_it->second;
-}
 
-}  // namespace
+  auto type_it = fallback_map.find(model_type);
+  if (type_it == fallback_map.end()) return;
+  auto tag_it = type_it->second.find(tag_name);
+  if (tag_it == type_it->second.end()) return;
+
+  int32_t resolved = tokenizer.TokenToTokenId(tag_it->second.c_str());
+  if (resolved >= 0) id = resolved;
+}
 
 Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
                                        eos_token_id_{config.model.eos_token_id},
@@ -338,23 +339,12 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
-  // Fallback: if bot/eot/bor/eor were not explicitly set in genai_config.json (-1),
-  // attempt to resolve them by encoding well-known token strings for the model type.
-  // This provides backward compatibility for Foundry Local when consuming older model
-  // packages that predate the bot/eot/bor/eor config fields.
+  // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   if (bot_token_id_ < 0 || eot_token_id_ < 0 || bor_token_id_ < 0 || eor_token_id_ < 0) {
-    auto try_fallback = [&](int32_t& id, const std::string& tag_name) {
-      if (id >= 0) return;
-      const auto* fallback_str = GetFallbackTag(config.model.type, tag_name);
-      if (fallback_str && !fallback_str->empty()) {
-        int32_t resolved = TokenToTokenId(fallback_str->c_str());
-        if (resolved >= 0) id = resolved;
-      }
-    };
-    try_fallback(bot_token_id_, "tool_call_start");
-    try_fallback(eot_token_id_, "tool_call_end");
-    try_fallback(bor_token_id_, "reasoning_start");
-    try_fallback(eor_token_id_, "reasoning_end");
+    ResolveFallbackTagId(bot_token_id_, config.model.type, "tool_call_start", *this);
+    ResolveFallbackTagId(eot_token_id_, config.model.type, "tool_call_end", *this);
+    ResolveFallbackTagId(bor_token_id_, config.model.type, "reasoning_start", *this);
+    ResolveFallbackTagId(eor_token_id_, config.model.type, "reasoning_end", *this);
   }
 }
 
