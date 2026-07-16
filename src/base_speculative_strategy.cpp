@@ -55,8 +55,8 @@ BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g)
       spec_state_{RequireSpeculativeState(g)} {}
 
 // Propose K draft tokens.
-// Greedy: argmax, probs empty.
-// Sampling: token i drawn from draft's truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
+// Greedy uses kGreedyMatch. Sampling uses kDraftSampling and draws token i from the draft's
+// truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
 // draft_pending_logits_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
 // Each draft row is put through the same min-length / repetition penalties the target rows get
 // (BaseSpeculativeStrategy shares the helpers in sampling_distribution.h), so the draft approximates the
@@ -98,10 +98,9 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     draft_grammar = g.guidance_logits_processor_->Clone();
     guidance_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
   }
-  Proposal proposal;
+  Proposal proposal{greedy ? ProposalMode::kGreedyMatch : ProposalMode::kDraftSampling};
   proposal.tokens.resize(K);
   if (!greedy)
-    // greedy-match leaves probs empty
     proposal.probs.resize(K);
 
   SampledCategorical sampled;

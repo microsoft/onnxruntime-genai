@@ -25,10 +25,22 @@ struct SpeculativeStats;
 // for the next round. Subclasses implement Propose (produce K tokens) and Advance (update the
 // draft's state); all shared logic (RNG, target rewind, stats, vocab check) lives here.
 struct SpeculativeDecodingStrategy : DecodingStrategy {
-  // Draft model's output. If probs is empty, accept a token when it equals the target's argmax
-  // (greedy). Otherwise probs[i] is the draft's probability distribution for token i, and the
-  // token is accepted with probability min(1, p_target/p_draft).
+  enum class ProposalMode {
+    kUnset,
+    kGreedyMatch,
+    kDraftSampling,
+    kDeterministic,
+  };
+
+  // Proposer output. The mode defines how verification interprets the tokens; probability storage
+  // is data for draft-model sampling, not an implicit behavior signal.
   struct Proposal {
+    Proposal() = default;
+    explicit Proposal(ProposalMode proposal_mode) : mode{proposal_mode} {}
+
+    bool UsesDraftProbabilities() const { return mode == ProposalMode::kDraftSampling; }
+
+    ProposalMode mode{ProposalMode::kUnset};
     std::vector<int32_t> tokens;
     std::vector<std::vector<float>> probs;
   };

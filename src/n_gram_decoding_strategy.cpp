@@ -69,7 +69,7 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
     Generator& g, int K, int seed_length) {
   (void)seed_length;
   Sync(g);
-  Proposal proposal;
+  Proposal proposal{ProposalMode::kDeterministic};
   proposal.tokens = lookup_.Propose(static_cast<size_t>(K));
   return proposal;
 }

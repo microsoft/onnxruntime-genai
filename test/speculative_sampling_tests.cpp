@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "speculative_sampling.h"
+#include "speculative_decoding_strategy.h"
 
 #include <array>
 #include <cmath>
@@ -13,6 +13,24 @@
 #include <gtest/gtest.h>
 
 namespace Generators::test {
+
+TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
+  // These intentionally inconsistent buffers prove that mode, not storage shape, selects behavior.
+  // Runtime proposal validation rejects such inconsistencies before verification.
+  SpeculativeDecodingStrategy::Proposal greedy{
+      SpeculativeDecodingStrategy::ProposalMode::kGreedyMatch};
+  greedy.probs.resize(1);
+  EXPECT_FALSE(greedy.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal sampling{
+      SpeculativeDecodingStrategy::ProposalMode::kDraftSampling};
+  EXPECT_TRUE(sampling.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal deterministic{
+      SpeculativeDecodingStrategy::ProposalMode::kDeterministic};
+  deterministic.probs.resize(1);
+  EXPECT_FALSE(deterministic.UsesDraftProbabilities());
+}
 
 // ComputeAcceptProb
 

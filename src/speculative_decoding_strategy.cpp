@@ -16,6 +16,43 @@
 namespace Generators {
 
 namespace {
+void ValidateProposal(const SpeculativeDecodingStrategy::Proposal& proposal,
+                      bool target_uses_greedy, int proposal_length) {
+  using ProposalMode = SpeculativeDecodingStrategy::ProposalMode;
+
+  switch (proposal.mode) {
+    case ProposalMode::kGreedyMatch:
+      if (!target_uses_greedy)
+        throw std::runtime_error(
+            "Speculative decoding received a greedy-match proposal for sampling verification.");
+      if (!proposal.probs.empty())
+        throw std::runtime_error(
+            "Speculative decoding greedy-match proposals must not contain probability rows.");
+      return;
+    case ProposalMode::kDraftSampling:
+      if (target_uses_greedy)
+        throw std::runtime_error(
+            "Speculative decoding received a draft-sampling proposal for greedy verification.");
+      if (static_cast<int>(proposal.probs.size()) != proposal_length)
+        throw std::runtime_error(
+            "Speculative draft returned " + std::to_string(proposal.probs.size()) +
+            " probability rows, expected " + std::to_string(proposal_length) + ".");
+      return;
+    case ProposalMode::kDeterministic:
+      if (!target_uses_greedy)
+        throw std::runtime_error(
+            "Deterministic speculative proposals do not support sampling verification yet.");
+      if (!proposal.probs.empty())
+        throw std::runtime_error(
+            "Deterministic speculative proposals must not contain probability rows.");
+      return;
+    case ProposalMode::kUnset:
+      throw std::runtime_error("Speculative decoding proposer did not set a proposal mode.");
+  }
+
+  throw std::runtime_error("Speculative decoding proposer returned an unknown proposal mode.");
+}
+
 bool IsEosToken(std::span<const int32_t> eos_token_ids, int32_t token) {
   return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) != eos_token_ids.end();
 }
@@ -325,6 +362,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         "Speculative draft returned " + std::to_string(proposal.tokens.size()) +
         " tokens, exceeding K=" + std::to_string(K) + ".");
   K = static_cast<int>(proposal.tokens.size());
+  const bool target_uses_greedy = g.IsGreedySampling();
+  ValidateProposal(proposal, target_uses_greedy, K);
   if (K == 0) {
     if (pending_anchor_token_) {
       auto anchor = params.p_device->Allocate<int32_t>(1);
@@ -339,11 +378,6 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     RunStandardDecodingStep(g);
     return;
   }
-  const bool greedy_accept = proposal.probs.empty();
-  if (!greedy_accept && static_cast<int>(proposal.probs.size()) != K)
-    throw std::runtime_error(
-        "Speculative draft returned " + std::to_string(proposal.probs.size()) +
-        " prob rows, expected K=" + std::to_string(K) + " (or 0 for greedy-match).");
 
   // Guidance - run a dedicated grammar-masked round instead of the batched path below (still uses
   // the draft proposal from above). Handles greedy and sampling.
@@ -392,7 +426,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     auto pending_cpu_pos0 = g.search_->GetLogits().CopyDeviceToCpu();
     ComputeTargetTokenSelection(
         {pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)}, seed_length, seed_prefix,
-        greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
+        target_uses_greedy, search.top_k, search.top_p, search.temperature, penalty_processor,
         scratch_sc, pos0_selection);
   }
 
@@ -459,7 +493,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     if (use_anchor) {
       prop_row0 = 1;
       ComputeTargetTokenSelection(
-          GetLogitsRow(data, 0, vocab_size), seed_length, seed_prefix, greedy_accept,
+          GetLogitsRow(data, 0, vocab_size), seed_length, seed_prefix, target_uses_greedy,
           search.top_k, search.top_p, search.temperature, penalty_processor, scratch_sc,
           pos0_selection);
     }
@@ -472,7 +506,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       if (penalty_processor.IsActive()) dist_prefix.push_back(proposal.tokens[i]);
       ComputeTargetTokenSelection(
           GetLogitsRow(data, prop_row0 + i, vocab_size), seed_length + i + 1, dist_prefix,
-          greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
+          target_uses_greedy, search.top_k, search.top_p, search.temperature, penalty_processor,
           scratch_sc, target_selections[static_cast<size_t>(i)]);
     }
   } else {
@@ -503,7 +537,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       if (penalty_processor.IsActive()) dist_prefix.push_back(proposal.tokens[i]);
       ComputeTargetTokenSelection(
           {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i + 1, dist_prefix,
-          greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
+          target_uses_greedy, search.top_k, search.top_p, search.temperature, penalty_processor,
           scratch_sc, target_selections[static_cast<size_t>(i)]);
     }
     pending_target_logits_.CopyCpuToDevice();
@@ -528,7 +562,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     bool accepted = false;
     const TargetTokenSelection& target =
         (i == 0) ? pos0_selection : target_selections[static_cast<size_t>(i - 1)];
-    if (greedy_accept) {
+    if (!proposal.UsesDraftProbabilities()) {
       accepted = (target.greedy_token == proposal.tokens[i]);
     } else {
       const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
@@ -539,7 +573,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     if (accepted) {
       n_direct++;
     } else {
-      if (greedy_accept) {
+      if (!proposal.UsesDraftProbabilities()) {
         final_token = target.greedy_token;
       } else {
         std::vector<float>& dense_t =
@@ -558,7 +592,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   }
 
   if (n_direct == K) {
-    if (greedy_accept) {
+    if (!proposal.UsesDraftProbabilities()) {
       final_token = target_selections[static_cast<size_t>(K - 1)].greedy_token;
     } else {
       std::vector<float>& dense_last = DensifyTargetTokenSelection(
@@ -815,7 +849,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   // Reusable buffer for grammar masking before shared penalty processing.
   auto mask_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
 
-  const bool sampling = !proposal.probs.empty();
+  const bool sampling = proposal.UsesDraftProbabilities();
   const auto& search = params.search;
   std::uniform_real_distribution<float> uni(0.f, 1.f);
   std::vector<float> correction_buf;  // reject path: max(0, p_target - p_draft), then normalized
