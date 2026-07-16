@@ -16,89 +16,23 @@
 namespace Generators {
 
 namespace {
-// A target verify row kept cheaply (item #2): greedy needs only the argmax id; sampling keeps the
-// truncated categorical (kept ids + renormalized probs) -- far smaller than a dense vocab-sized
-// vector -- and densifies it on demand only for the single correction/bonus row.
-struct SparseRow {
-  std::vector<int32_t> indices;
-  std::vector<float> probs;
-};
-
-int32_t RowArgmax(std::span<const float> logits) {
-  return static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
-}
-
 bool IsEosToken(std::span<const int32_t> eos_token_ids, int32_t token) {
   return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) != eos_token_ids.end();
-}
-
-void StoreTargetPrediction(std::span<const float> logits, int current_length,
-                           std::span<const int32_t> prefix, bool greedy,
-                           int top_k, float top_p, float temperature,
-                           LogitsPenaltyProcessor& penalty_processor,
-                           SampledCategorical& sampled, int32_t& argmax,
-                           SparseRow& sparse) {
-  const auto processed_logits = penalty_processor.Apply(logits, current_length, prefix);
-  if (greedy) {
-    argmax = RowArgmax(processed_logits);
-    return;
-  }
-
-  ComputeSampledCategorical(processed_logits, top_k, top_p, temperature, sampled);
-  sparse = {sampled.indices, sampled.probs};
-}
-
-void StoreTargetPredictionRow(int row, std::span<const float> logits, int current_length,
-                              std::span<const int32_t> prefix, bool greedy,
-                              int top_k, float top_p, float temperature,
-                              LogitsPenaltyProcessor& penalty_processor,
-                              SampledCategorical& sampled, std::vector<int32_t>& argmaxes,
-                              std::vector<SparseRow>& sparse_rows) {
-  const auto processed_logits = penalty_processor.Apply(logits, current_length, prefix);
-  if (greedy) {
-    argmaxes[static_cast<size_t>(row)] = RowArgmax(processed_logits);
-    return;
-  }
-
-  ComputeSampledCategorical(processed_logits, top_k, top_p, temperature, sampled);
-  sparse_rows[static_cast<size_t>(row)] = {sampled.indices, sampled.probs};
 }
 
 std::span<const float> GetLogitsRow(const float* data, int row, int vocab_size) {
   return {data + static_cast<ptrdiff_t>(row) * vocab_size, static_cast<size_t>(vocab_size)};
 }
 
-std::vector<float>& DensifySparseRow(const SparseRow& sparse, int vocab_size,
-                                    std::vector<float>& dense) {
-  dense.assign(static_cast<size_t>(vocab_size), 0.0f);
-  for (size_t i = 0; i < sparse.indices.size(); i++)
-    dense[static_cast<size_t>(sparse.indices[i])] = sparse.probs[i];
-  return dense;
-}
-
-float GetSparseProbability(const SparseRow& sparse, int32_t token) {
-  for (size_t i = 0; i < sparse.indices.size(); i++) {
-    if (sparse.indices[i] == token)
-      return sparse.probs[i];
-  }
-  return 0.0f;
-}
-
-std::vector<float> ProcessGuidanceLogits(const std::vector<float>& logits, int current_length,
-                                         std::span<const int32_t> prefix,
-                                         DeviceSpan<float> mask_buffer,
-                                         ConstrainedLogitsProcessor& guidance_processor,
-                                         LogitsPenaltyProcessor& penalty_processor) {
+std::vector<float> MaskGuidanceLogits(const std::vector<float>& logits,
+                                     DeviceSpan<float> mask_buffer,
+                                     ConstrainedLogitsProcessor& guidance_processor) {
   auto cpu_buffer = mask_buffer.CpuSpan();
   std::copy(logits.begin(), logits.end(), cpu_buffer.begin());
   mask_buffer.CopyCpuToDevice();
   guidance_processor.ProcessLogits(mask_buffer);
   auto masked_cpu = mask_buffer.CopyDeviceToCpu();
-  std::vector<float> masked(masked_cpu.begin(), masked_cpu.end());
-  const auto processed = penalty_processor.Apply(masked, current_length, prefix);
-  if (processed.data() != masked.data())
-    masked.assign(processed.begin(), processed.end());
-  return masked;
+  return {masked_cpu.begin(), masked_cpu.end()};
 }
 
 std::vector<int32_t> CommitGuidanceToken(ConstrainedLogitsProcessor& guidance_processor,
@@ -434,18 +368,11 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     seed_prefix.assign(seed.begin(), seed.end());
   }
 
-  // Cheap per-row storage (item #2): greedy keeps just the argmax id; sampling keeps the truncated
-  // categorical and densifies at most one row (the single correction/bonus) later. This replaces
-  // building K dense vocab-sized rows every round. scratch_sc is a single reused vocab scratch.
-  std::vector<int32_t> target_argmax;    // greedy: prediction after each proposal token
-  int32_t pos0_argmax = -1;              // greedy: prediction for proposal token 0
-  std::vector<SparseRow> target_sparse;  // sampling: same rows, as truncated categoricals
-  SparseRow pos0_sparse;
+  // Keep each processed target row sparse. Greedy rows store only their selected token; sampling
+  // rows store their truncated categorical and densify at most one correction/bonus row later.
+  TargetTokenSelection pos0_selection;
+  std::vector<TargetTokenSelection> target_selections(static_cast<size_t>(K));
   SampledCategorical scratch_sc;
-  if (greedy_accept)
-    target_argmax.assign(static_cast<size_t>(K), -1);
-  else
-    target_sparse.resize(static_cast<size_t>(K));
 
   // If a token is waiting from the fold, it goes at the front of this verify batch (so the
   // batch is K+1 wide instead of K). It also fills the gap left in the target's cache.
@@ -463,10 +390,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   // (it's the row produced right after the anchor token) so -> fill it in there.
   if (!use_anchor) {
     auto pending_cpu_pos0 = g.search_->GetLogits().CopyDeviceToCpu();
-    StoreTargetPrediction({pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)},
-                          seed_length, seed_prefix, greedy_accept, search.top_k, search.top_p,
-                          search.temperature, penalty_processor, scratch_sc,
-                          pos0_argmax, pos0_sparse);
+    ComputeTargetTokenSelection(
+        {pending_cpu_pos0.data(), static_cast<size_t>(vocab_size)}, seed_length, seed_prefix,
+        greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
+        scratch_sc, pos0_selection);
   }
 
   // Verify: score the anchor (when present) plus the K proposed tokens in one target pass.
@@ -531,9 +458,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     int prop_row0 = 0;
     if (use_anchor) {
       prop_row0 = 1;
-      StoreTargetPrediction(GetLogitsRow(data, 0, vocab_size), seed_length, seed_prefix,
-                            greedy_accept, search.top_k, search.top_p, search.temperature,
-                            penalty_processor, scratch_sc, pos0_argmax, pos0_sparse);
+      ComputeTargetTokenSelection(
+          GetLogitsRow(data, 0, vocab_size), seed_length, seed_prefix, greedy_accept,
+          search.top_k, search.top_p, search.temperature, penalty_processor, scratch_sc,
+          pos0_selection);
     }
     pending_target_logits_ = verify_logits;
     pending_target_logits_row0_ = prop_row0;
@@ -542,10 +470,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     if (penalty_processor.IsActive()) dist_prefix = seed_prefix;
     for (int i = 0; i < K; i++) {
       if (penalty_processor.IsActive()) dist_prefix.push_back(proposal.tokens[i]);
-      StoreTargetPredictionRow(
-          i, GetLogitsRow(data, prop_row0 + i, vocab_size), seed_length + i + 1, dist_prefix,
+      ComputeTargetTokenSelection(
+          GetLogitsRow(data, prop_row0 + i, vocab_size), seed_length + i + 1, dist_prefix,
           greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
-          scratch_sc, target_argmax, target_sparse);
+          scratch_sc, target_selections[static_cast<size_t>(i)]);
     }
   } else {
     // Pruned model - one target pass per token. Guard against out of sync cache.
@@ -573,38 +501,37 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       std::copy_n(cpu.data(), static_cast<size_t>(vocab_size),
                   cached_rows.data() + static_cast<ptrdiff_t>(i) * vocab_size);
       if (penalty_processor.IsActive()) dist_prefix.push_back(proposal.tokens[i]);
-      StoreTargetPredictionRow(
-          i, {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i + 1, dist_prefix,
+      ComputeTargetTokenSelection(
+          {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i + 1, dist_prefix,
           greedy_accept, search.top_k, search.top_p, search.temperature, penalty_processor,
-          scratch_sc, target_argmax, target_sparse);
+          scratch_sc, target_selections[static_cast<size_t>(i)]);
     }
     pending_target_logits_.CopyCpuToDevice();
   }
 
-  // Decide accept/reject for each token in order. The target prediction that judges tokens[0] is
-  // pos0 (pos0_argmax / pos0_sparse); for later tokens[i] it's row i-1. If every token is accepted,
-  // the bonus token is drawn from row K-1 (the target's next prediction).
+  // Decide accept/reject for each token in order. The target selection that judges tokens[0] is
+  // pos0_selection; for later tokens[i] it is row i-1. If every token is accepted, the bonus token
+  // is drawn from row K-1 (the target's next prediction).
   std::uniform_real_distribution<float> uni(0.f, 1.f);
 
   int n_direct = 0;
   int n_evaluated = 0;
   int32_t final_token = -1;
 
-  // Sampling-only scratch, lazily sized. DensifySparseRow expands one truncated row into a full vocab
-  // vector (identical to the old dense row, so the discrete_distribution draw is unchanged);
-  // correction_buf holds the built correction distribution. Greedy touches neither.
+  // Sampling-only scratch, lazily sized. Densification expands one truncated row into a full vocab
+  // vector; correction_buf holds the built correction distribution. Greedy touches neither.
   std::vector<float> dense_row;
   std::vector<float> correction_buf;
 
   for (int i = 0; i < K; i++) {
     n_evaluated++;
     bool accepted = false;
+    const TargetTokenSelection& target =
+        (i == 0) ? pos0_selection : target_selections[static_cast<size_t>(i - 1)];
     if (greedy_accept) {
-      const int32_t ta = (i == 0) ? pos0_argmax : target_argmax[i - 1];
-      accepted = (ta == proposal.tokens[i]);
+      accepted = (target.greedy_token == proposal.tokens[i]);
     } else {
-      const SparseRow& sr = (i == 0) ? pos0_sparse : target_sparse[i - 1];
-      const float p_t = GetSparseProbability(sr, proposal.tokens[i]);
+      const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
       const float p_d = proposal.probs[i][proposal.tokens[i]];
       accepted = (uni(rng_) < ComputeAcceptProb(p_t, p_d));
     }
@@ -613,10 +540,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       n_direct++;
     } else {
       if (greedy_accept) {
-        final_token = (i == 0) ? pos0_argmax : target_argmax[i - 1];
+        final_token = target.greedy_token;
       } else {
-        const SparseRow& sr = (i == 0) ? pos0_sparse : target_sparse[i - 1];
-        std::vector<float>& dense_t = DensifySparseRow(sr, vocab_size, dense_row);
+        std::vector<float>& dense_t =
+            DensifyTargetTokenSelection(target, vocab_size, dense_row);
         if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
         BuildCorrectionDistribution(
             {dense_t.data(), static_cast<size_t>(vocab_size)},
@@ -632,9 +559,10 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 
   if (n_direct == K) {
     if (greedy_accept) {
-      final_token = target_argmax[K - 1];
+      final_token = target_selections[static_cast<size_t>(K - 1)].greedy_token;
     } else {
-      std::vector<float>& dense_last = DensifySparseRow(target_sparse[K - 1], vocab_size, dense_row);
+      std::vector<float>& dense_last = DensifyTargetTokenSelection(
+          target_selections[static_cast<size_t>(K - 1)], vocab_size, dense_row);
       std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
       final_token = dist(rng_);
     }
@@ -890,7 +818,10 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   const bool sampling = !proposal.probs.empty();
   const auto& search = params.search;
   std::uniform_real_distribution<float> uni(0.f, 1.f);
-  std::vector<float> correction_buf;  // sampling reject scratch
+  std::vector<float> correction_buf;  // reject path: max(0, p_target - p_draft), then normalized
+  std::vector<float> dense_target;    // reject path: dense target distribution from sparse selection
+  TargetTokenSelection target_selection;
+  SampledCategorical sampled_target;
 
   // Forced tokens the grammar has already decided - prior round's overflow (ff_carry_) + each
   // accepted token's fast-forward span. A position filled from here is auto-accepted; it is in the
@@ -924,13 +855,15 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
     // Free position - judge with pos0 (first token) or the batched verify row i-1.
     n_evaluated++;
     const std::vector<float>& judge = (i == 0) ? pos0 : rows[static_cast<size_t>(i - 1)];
-    const std::vector<float> masked = ProcessGuidanceLogits(
-        judge, seed_length + i, dist_prefix, mask_buf, proc, penalty_processor);
+    const std::vector<float> masked = MaskGuidanceLogits(judge, mask_buf, proc);
+    ComputeTargetTokenSelection(
+        masked, seed_length + i, dist_prefix, !sampling, search.top_k, search.top_p,
+        search.temperature, penalty_processor, sampled_target, target_selection);
 
     if (!sampling) {
       // Greedy - accept the draft token if it matches the target's masked argmax; commit the draft's
       // own token (not a batched row).
-      const int32_t ttok = RowArgmax({masked.data(), static_cast<size_t>(vocab_size)});
+      const int32_t ttok = target_selection.greedy_token;
       if (proposal.tokens[i] == ttok) {
         committed.push_back(proposal.tokens[i]);
         verify_prefix++;
@@ -953,12 +886,8 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
     } else {
       // Sampling - speculative sampling on the masked distributions. Accept with min(1, p_t/p_d), else
       // draw the correction from the leftover max(0, p_t - p_d).
-      SampledCategorical tsc;
-      ComputeSampledCategorical({masked.data(), static_cast<size_t>(vocab_size)},
-                                search.top_k, search.top_p, search.temperature, tsc);
-      const std::vector<float> p_t = ScatterToFullVocab(tsc, vocab_size);
       const int32_t dtok = proposal.tokens[i];
-      const float accept_p = ComputeAcceptProb(p_t[static_cast<size_t>(dtok)],
+      const float accept_p = ComputeAcceptProb(GetTargetTokenProbability(target_selection, dtok),
                                                proposal.probs[i][static_cast<size_t>(dtok)]);
       if (uni(rng_) < accept_p) {
         committed.push_back(dtok);
@@ -970,6 +899,8 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       } else {
         rejected = true;
         if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
+        std::vector<float>& p_t =
+            DensifyTargetTokenSelection(target_selection, vocab_size, dense_target);
         BuildCorrectionDistribution({p_t.data(), static_cast<size_t>(vocab_size)},
                                     {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
                                     {correction_buf.data(), static_cast<size_t>(vocab_size)});
