@@ -6,11 +6,11 @@
 //      (default 500ms @ 16kHz),
 //   2. runs the per-chunk VAD verdict (IsChunkSilent),
 //   3. emits one NamedTensors per chunk with:
-//        "audio_chunk" : float32 [1, num_samples] raw audio,
+//        "audio_chunk" : float32 [1, num_samplyoes] raw audio,
 //        "is_silent"   : int64  [1] (1 iff VAD flagged this chunk silent),
 //        "is_final"    : int64  [1] (1 only on the Flush() tail chunk).
 //
-// Everything stateful — the frontend causal buffers, accumulated features,
+// Everything stateful, the frontend causal buffers, accumulated features,
 // encoder sliding window, adapter memory, incremental cross-KV cache, self-KV,
 // segment resets, and re-decode-from-BOS — lives in MoonshineStreamingState,
 // which owns all five ONNX sub-states.
@@ -30,14 +30,11 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
 
  private:
   Model& model_;
-  MoonshineStreamingModel* moonshine_model_;  // cached typed view (verified non-null in ctor)
   MoonshineConfig config_;
 
-  // Audio not yet drained into a chunk (drained chunk_samples at a time).
   std::vector<float> audio_buffer_;
 
-  // Build the {audio_chunk, is_silent, is_final} NamedTensors for one chunk of
-  // `num` samples (num may be 0 on the Flush tail).
+  // Build the {audio_chunk, is_silent, is_final} NamedTensors for one chunk.
   std::unique_ptr<NamedTensors> EmitChunk(const float* audio, size_t num,
                                           bool is_silent, bool is_final);
 };
