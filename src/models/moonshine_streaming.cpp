@@ -103,96 +103,258 @@ std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> 
 }
 
 // ----------------------------------------------------------------------------
-// Stateless session-call wrappers. These exist so callers (Processor /
-// State) don't have to know per-graph input and output names.
+// Sub-states. Each wraps a single ONNX session behind State::Run(). All
+// persistent cross-chunk state lives in the orchestrator; these sub-states
+// only register their I/O and expose setters for the per-run inputs. The
+// orchestrator is a friend, so after each Run it takes ownership of the
+// freshly-allocated output tensors (outputs_[i]) and nulls the slots.
 // ----------------------------------------------------------------------------
 
-MoonshineStreamingModel::FrontendOutputs MoonshineStreamingModel::RunFrontend(
-    OrtValue& audio_chunk,
-    OrtValue& sample_buffer,
-    OrtValue& sample_len,
-    OrtValue& conv1_buffer,
-    OrtValue& conv2_buffer,
-    OrtValue& frame_count) const {
-  const char* in_names[]  = {"audio_chunk", "sample_buffer", "sample_len",
-                             "conv1_buffer", "conv2_buffer", "frame_count"};
-  OrtValue*   in_values[] = {&audio_chunk, &sample_buffer, &sample_len,
-                             &conv1_buffer, &conv2_buffer, &frame_count};
-  const char* out_names[] = {"features", "sample_buffer_out", "sample_len_out",
-                             "conv1_buffer_out", "conv2_buffer_out", "frame_count_out"};
-  OrtValue*   out_values[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+// ---- frontend --------------------------------------------------------------
 
-  session_frontend_->Run(nullptr,
-                         in_names, in_values, 6,
-                         out_names, out_values, 6);
+MoonshineFrontendSubState::MoonshineFrontendSubState(const MoonshineStreamingModel& model,
+                                                     const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  config_ = model.moonshine_config_;
+  AllocateStateBuffers();
 
-  return FrontendOutputs{
-      std::unique_ptr<OrtValue>(out_values[0]),
-      std::unique_ptr<OrtValue>(out_values[1]),
-      std::unique_ptr<OrtValue>(out_values[2]),
-      std::unique_ptr<OrtValue>(out_values[3]),
-      std::unique_ptr<OrtValue>(out_values[4]),
-      std::unique_ptr<OrtValue>(out_values[5]),
-  };
+  // Inputs: audio_chunk (set per-run) + the 5 persistent state buffers.
+  audio_input_idx_ = inputs_.size();
+  input_names_.push_back("audio_chunk");
+  inputs_.push_back(nullptr);
+
+  sample_buffer_input_idx_ = inputs_.size();
+  input_names_.push_back("sample_buffer");
+  inputs_.push_back(sample_buffer_.get());
+
+  sample_len_input_idx_ = inputs_.size();
+  input_names_.push_back("sample_len");
+  inputs_.push_back(sample_len_.get());
+
+  conv1_buffer_input_idx_ = inputs_.size();
+  input_names_.push_back("conv1_buffer");
+  inputs_.push_back(conv1_buffer_.get());
+
+  conv2_buffer_input_idx_ = inputs_.size();
+  input_names_.push_back("conv2_buffer");
+  inputs_.push_back(conv2_buffer_.get());
+
+  frame_count_input_idx_ = inputs_.size();
+  input_names_.push_back("frame_count");
+  inputs_.push_back(frame_count_.get());
+
+  // Outputs: features + the 5 updated state buffers.
+  output_names_.push_back("features");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("sample_buffer_out");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("sample_len_out");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("conv1_buffer_out");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("conv2_buffer_out");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("frame_count_out");
+  outputs_.push_back(nullptr);
 }
 
-std::unique_ptr<OrtValue> MoonshineStreamingModel::RunEncoder(OrtValue& features) const {
-  const char* in_names[]  = {"features"};
-  OrtValue*   in_values[] = {&features};
-  const char* out_names[] = {"encoded"};
-  OrtValue*   out_values[1] = {nullptr};
-  session_encoder_->Run(nullptr,
-                        in_names, in_values, 1,
-                        out_names, out_values, 1);
-  return std::unique_ptr<OrtValue>(out_values[0]);
+void MoonshineFrontendSubState::AllocateStateBuffers() {
+  auto& alloc = model_.allocator_cpu_;
+  {
+    auto shape = std::array<int64_t, 2>{1, config_.sample_buffer_size};
+    sample_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    std::memset(sample_buffer_->GetTensorMutableData<float>(), 0,
+                static_cast<size_t>(config_.sample_buffer_size) * sizeof(float));
+  }
+  {
+    auto shape = std::array<int64_t, 1>{1};
+    sample_len_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    *sample_len_->GetTensorMutableData<int64_t>() = 0;
+  }
+  {
+    auto shape = std::array<int64_t, 3>{1, config_.conv1_channels, config_.conv1_buffer_size};
+    conv1_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    std::memset(conv1_buffer_->GetTensorMutableData<float>(), 0,
+                static_cast<size_t>(config_.conv1_channels) *
+                    static_cast<size_t>(config_.conv1_buffer_size) * sizeof(float));
+  }
+  {
+    auto shape = std::array<int64_t, 3>{1, config_.conv2_channels, config_.conv2_buffer_size};
+    conv2_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    std::memset(conv2_buffer_->GetTensorMutableData<float>(), 0,
+                static_cast<size_t>(config_.conv2_channels) *
+                    static_cast<size_t>(config_.conv2_buffer_size) * sizeof(float));
+  }
+  {
+    auto shape = std::array<int64_t, 1>{1};
+    frame_count_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    *frame_count_->GetTensorMutableData<int64_t>() = 0;
+  }
 }
 
-std::unique_ptr<OrtValue> MoonshineStreamingModel::RunAdapter(OrtValue& encoded,
-                                                              OrtValue& pos_offset) const {
-  const char* in_names[]  = {"encoded", "pos_offset"};
-  OrtValue*   in_values[] = {&encoded, &pos_offset};
-  const char* out_names[] = {"memory"};
-  OrtValue*   out_values[1] = {nullptr};
-  session_adapter_->Run(nullptr,
-                        in_names, in_values, 2,
-                        out_names, out_values, 1);
-  return std::unique_ptr<OrtValue>(out_values[0]);
+void MoonshineFrontendSubState::SetAudioInput(OrtValue* audio_chunk) {
+  inputs_[audio_input_idx_] = audio_chunk;
 }
 
-MoonshineStreamingModel::CrossKvOutputs MoonshineStreamingModel::RunCrossKv(OrtValue& memory) const {
-  const char* in_names[]  = {"memory"};
-  OrtValue*   in_values[] = {&memory};
-  const char* out_names[] = {"k_cross", "v_cross"};
-  OrtValue*   out_values[2] = {nullptr, nullptr};
-  session_cross_kv_->Run(nullptr,
-                         in_names, in_values, 1,
-                         out_names, out_values, 2);
-  return CrossKvOutputs{
-      std::unique_ptr<OrtValue>(out_values[0]),
-      std::unique_ptr<OrtValue>(out_values[1]),
-  };
+void MoonshineFrontendSubState::UpdateStateInputs() {
+  inputs_[sample_buffer_input_idx_] = sample_buffer_.get();
+  inputs_[sample_len_input_idx_] = sample_len_.get();
+  inputs_[conv1_buffer_input_idx_] = conv1_buffer_.get();
+  inputs_[conv2_buffer_input_idx_] = conv2_buffer_.get();
+  inputs_[frame_count_input_idx_] = frame_count_.get();
 }
 
-MoonshineStreamingModel::DecoderKvOutputs MoonshineStreamingModel::RunDecoderKv(
-    OrtValue& token, OrtValue& k_self, OrtValue& v_self,
-    OrtValue& k_cross, OrtValue& v_cross) const {
-  const char* in_names[]  = {"token", "k_self", "v_self", "out_k_cross", "out_v_cross"};
-  OrtValue*   in_values[] = {&token, &k_self, &v_self, &k_cross, &v_cross};
-  const char* out_names[] = {"logits", "out_k_self", "out_v_self",
-                             "out_k_cross", "out_v_cross"};
-  OrtValue*   out_values[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-  session_decoder_kv_->Run(nullptr,
-                           in_names, in_values, 5,
-                           out_names, out_values, 5);
-  // Discard the cross-KV pass-throughs; the caller already owns the inputs.
-  (void)std::unique_ptr<OrtValue>(out_values[3]);
-  (void)std::unique_ptr<OrtValue>(out_values[4]);
-  return DecoderKvOutputs{
-      std::unique_ptr<OrtValue>(out_values[0]),
-      std::unique_ptr<OrtValue>(out_values[1]),
-      std::unique_ptr<OrtValue>(out_values[2]),
-  };
+void MoonshineFrontendSubState::Reset() {
+  AllocateStateBuffers();
+  UpdateStateInputs();
 }
+
+DeviceSpan<float> MoonshineFrontendSubState::Run(int /*total_length*/,
+                                                 DeviceSpan<int32_t>& /*next_tokens*/,
+                                                 DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_frontend_);
+  return {};
+}
+
+// ---- encoder ---------------------------------------------------------------
+
+MoonshineEncoderSubState::MoonshineEncoderSubState(const MoonshineStreamingModel& model,
+                                                   const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  input_names_.push_back("features");
+  inputs_.push_back(nullptr);
+  output_names_.push_back("encoded");
+  outputs_.push_back(nullptr);
+}
+
+void MoonshineEncoderSubState::SetFeaturesInput(OrtValue* features) {
+  inputs_[0] = features;
+}
+
+DeviceSpan<float> MoonshineEncoderSubState::Run(int /*total_length*/,
+                                                DeviceSpan<int32_t>& /*next_tokens*/,
+                                                DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_encoder_);
+  return {};
+}
+
+// ---- adapter ---------------------------------------------------------------
+
+MoonshineAdapterSubState::MoonshineAdapterSubState(const MoonshineStreamingModel& model,
+                                                   const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  auto pos_shape = std::array<int64_t, 1>{1};
+  pos_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, pos_shape,
+                                       ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *pos_tensor_->GetTensorMutableData<int64_t>() = 0;
+
+  encoded_input_idx_ = inputs_.size();
+  input_names_.push_back("encoded");
+  inputs_.push_back(nullptr);
+
+  pos_input_idx_ = inputs_.size();
+  input_names_.push_back("pos_offset");
+  inputs_.push_back(pos_tensor_.get());
+
+  output_names_.push_back("memory");
+  outputs_.push_back(nullptr);
+}
+
+void MoonshineAdapterSubState::SetInputs(OrtValue* encoded, int64_t pos_offset) {
+  inputs_[encoded_input_idx_] = encoded;
+  *pos_tensor_->GetTensorMutableData<int64_t>() = pos_offset;
+  inputs_[pos_input_idx_] = pos_tensor_.get();
+}
+
+DeviceSpan<float> MoonshineAdapterSubState::Run(int /*total_length*/,
+                                                DeviceSpan<int32_t>& /*next_tokens*/,
+                                                DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_adapter_);
+  return {};
+}
+
+// ---- cross_kv --------------------------------------------------------------
+
+MoonshineCrossKvSubState::MoonshineCrossKvSubState(const MoonshineStreamingModel& model,
+                                                   const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  input_names_.push_back("memory");
+  inputs_.push_back(nullptr);
+  output_names_.push_back("k_cross");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("v_cross");
+  outputs_.push_back(nullptr);
+}
+
+void MoonshineCrossKvSubState::SetMemoryInput(OrtValue* memory) {
+  inputs_[0] = memory;
+}
+
+DeviceSpan<float> MoonshineCrossKvSubState::Run(int /*total_length*/,
+                                                DeviceSpan<int32_t>& /*next_tokens*/,
+                                                DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_cross_kv_);
+  return {};
+}
+
+// ---- decoder_kv ------------------------------------------------------------
+
+MoonshineDecoderKvSubState::MoonshineDecoderKvSubState(const MoonshineStreamingModel& model,
+                                                       const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  token_input_idx_ = inputs_.size();
+  input_names_.push_back("token");
+  inputs_.push_back(nullptr);
+
+  k_self_input_idx_ = inputs_.size();
+  input_names_.push_back("k_self");
+  inputs_.push_back(nullptr);
+
+  v_self_input_idx_ = inputs_.size();
+  input_names_.push_back("v_self");
+  inputs_.push_back(nullptr);
+
+  k_cross_input_idx_ = inputs_.size();
+  input_names_.push_back("out_k_cross");
+  inputs_.push_back(nullptr);
+
+  v_cross_input_idx_ = inputs_.size();
+  input_names_.push_back("out_v_cross");
+  inputs_.push_back(nullptr);
+
+  output_names_.push_back("logits");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("out_k_self");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("out_v_self");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("out_k_cross");
+  outputs_.push_back(nullptr);
+  output_names_.push_back("out_v_cross");
+  outputs_.push_back(nullptr);
+}
+
+void MoonshineDecoderKvSubState::SetInputs(OrtValue* token, OrtValue* k_self, OrtValue* v_self,
+                                           OrtValue* k_cross, OrtValue* v_cross) {
+  inputs_[token_input_idx_] = token;
+  inputs_[k_self_input_idx_] = k_self;
+  inputs_[v_self_input_idx_] = v_self;
+  inputs_[k_cross_input_idx_] = k_cross;
+  inputs_[v_cross_input_idx_] = v_cross;
+}
+
+DeviceSpan<float> MoonshineDecoderKvSubState::Run(int /*total_length*/,
+                                                  DeviceSpan<int32_t>& /*next_tokens*/,
+                                                  DeviceSpan<int32_t> /*next_indices*/) {
+  State::Run(*model_.session_decoder_kv_);
+  return {};
+}
+
 
 MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& model,
                                                  const GeneratorParams& params)
@@ -200,7 +362,14 @@ MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& 
       moonshine_model_{model} {
   config_ = model.moonshine_config_;
 
-  // Idle until SetExtraInputs() supplies cross-KV for a chunk.
+  // Create the five ONNX sub-states (each needs the real GeneratorParams).
+  frontend_state_ = std::make_unique<MoonshineFrontendSubState>(model, params);
+  encoder_state_ = std::make_unique<MoonshineEncoderSubState>(model, params);
+  adapter_state_ = std::make_unique<MoonshineAdapterSubState>(model, params);
+  cross_kv_state_ = std::make_unique<MoonshineCrossKvSubState>(model, params);
+  decoder_kv_state_ = std::make_unique<MoonshineDecoderKvSubState>(model, params);
+
+  // Idle until SetExtraInputs() supplies a chunk.
   chunk_done_ = true;
 
   // Pre-allocate single-token int64 tensor [1, 1].
@@ -232,24 +401,298 @@ DeviceSpan<float> MoonshineStreamingState::Run(int /*total_length*/,
 }
 
 void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  std::shared_ptr<Tensor> k_cross;
-  std::shared_ptr<Tensor> v_cross;
+  // Only cache the chunk + signals here and flag a pending run. The Generator
+  // pump may call SetExtraInputs more than once per chunk (twice on the very
+  // first chunk), so the heavy, state-mutating pipeline runs exactly once from
+  // the first StepToken() (gated by need_pipeline_run_), matching Nemotron.
+  std::shared_ptr<Tensor> audio_chunk;
+  bool is_silent = false;
   bool is_final = false;
   for (const auto& input : extra_inputs) {
-    if (input.name == "k_cross" || input.name == "out_k_cross") {
-      k_cross = input.tensor;
-    } else if (input.name == "v_cross" || input.name == "out_v_cross") {
-      v_cross = input.tensor;
+    if (input.name == "audio_chunk") {
+      audio_chunk = input.tensor;
+    } else if (input.name == "is_silent") {
+      if (input.tensor && input.tensor->ort_tensor_) {
+        is_silent = (*input.tensor->ort_tensor_->GetTensorData<int64_t>()) != 0;
+      }
     } else if (input.name == "is_final") {
       if (input.tensor && input.tensor->ort_tensor_) {
         is_final = (*input.tensor->ort_tensor_->GetTensorData<int64_t>()) != 0;
       }
     }
   }
-  if (!k_cross || !v_cross) return;  // No new chunk this call.
+  if (!audio_chunk) return;  // No new chunk this call (idempotent no-op).
 
-  k_cross_tensor_ = std::move(k_cross);
-  v_cross_tensor_ = std::move(v_cross);
+  current_audio_ = std::move(audio_chunk);
+  current_is_silent_ = is_silent;
+  current_is_final_ = is_final;
+  need_pipeline_run_ = true;
+  chunk_done_ = false;
+}
+
+void MoonshineStreamingState::RunPipeline() {
+  // Reset the per-chunk queue so any early return (dropped silence, no stable
+  // frames yet) leaves the chunk with zero committed tokens.
+  pending_tokens_.clear();
+  pending_idx_ = 0;
+  last_tokens_.clear();
+
+  // Deferred reset from a previous segment close (hard cap / VAD / Flush).
+  if (needs_reset_) {
+    ResetAccumulation();
+    needs_reset_ = false;
+  }
+
+  const float* audio = nullptr;
+  size_t num = 0;
+  if (current_audio_ && current_audio_->ort_tensor_) {
+    auto shape = current_audio_->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    num = shape.empty() ? 0 : static_cast<size_t>(shape.back());
+    if (num > 0) audio = current_audio_->ort_tensor_->GetTensorData<float>();
+  }
+
+  const bool flush = current_is_final_;
+  const bool silent = current_is_silent_;
+  bool commit_all = flush;
+
+  if (flush) {
+    // Flush: release held-back lookahead and accumulate the tail.
+    RunFrontendAndAccumulate(audio, num, /*is_final=*/true);
+    if (memory_len_ == 0) { chunk_done_ = true; return; }
+    RefreshCrossKv();
+    needs_reset_ = true;
+  } else if (silent) {
+    // VAD-based segmentation (runs the per-chunk silence verdict computed by
+    // the processor). Routing mirrors the previous processor logic:
+    const bool past_min = config_.min_segment_memory_frames > 0 &&
+                          memory_len_ >= config_.min_segment_memory_frames;
+    if (past_min) {
+      // Flush the previous speech's held-back lookahead, then break as final.
+      RunFrontendAndAccumulate(nullptr, 0, /*is_final=*/true);
+      if (memory_len_ == 0) { chunk_done_ = true; return; }
+      RefreshCrossKv();
+      needs_reset_ = true;
+      commit_all = true;
+    } else if (memory_len_ == 0) {
+      // Pre-utterance silence: skip the encoder entirely.
+      chunk_done_ = true;
+      return;
+    } else {
+      // Mid-segment short silence (< min_segment): encode normally to keep the
+      // lookahead boundary continuous.
+      RunFrontendAndAccumulate(audio, num, /*is_final=*/false);
+      if (memory_len_ == 0) { chunk_done_ = true; return; }
+      RefreshCrossKv();
+    }
+  } else {
+    // Speech (or VAD disabled).
+    RunFrontendAndAccumulate(audio, num, /*is_final=*/false);
+    if (memory_len_ == 0) { chunk_done_ = true; return; }
+    RefreshCrossKv();
+    // Hard-cap reset: if memory crossed the segment cap, commit ALL tokens and
+    // schedule a reset for the next chunk.
+    if (config_.max_segment_memory_frames > 0 &&
+        memory_len_ >= config_.max_segment_memory_frames) {
+      needs_reset_ = true;
+      commit_all = true;
+    }
+  }
+
+  DecodeAndQueue(commit_all);
+}
+
+void MoonshineStreamingState::ResetAccumulation() {
+  frontend_state_->Reset();
+  accumulated_features_.clear();
+  total_features_ = 0;
+  encoder_frames_emitted_ = 0;
+  adapter_pos_offset_ = 0;
+  accumulated_memory_.clear();
+  memory_len_ = 0;
+  cached_k_cross_.reset();
+  cached_v_cross_.reset();
+  memory_in_cross_kv_ = 0;
+  cross_kv_valid_ = false;
+}
+
+void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_t num,
+                                                       bool is_final) {
+  auto& alloc = moonshine_model_.allocator_cpu_;
+  const int encoder_dim = config_.encoder_dim;
+  const int decoder_dim = config_.decoder_dim;
+  DeviceSpan<int32_t> dummy_tokens;
+
+  // ----- frontend -------------------------------------------------------
+  // Run only when there is audio to feed (frontend audio dim must be > 0).
+  // On Flush with num==0 we skip the frontend but still release lookahead in
+  // the encoder step below via is_final.
+  if (num > 0) {
+    auto audio_shape = std::array<int64_t, 2>{1, static_cast<int64_t>(num)};
+    auto audio_tensor =
+        OrtValue::CreateTensor(alloc, audio_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    std::memcpy(audio_tensor->GetTensorMutableData<float>(), audio, num * sizeof(float));
+
+    frontend_state_->SetAudioInput(audio_tensor.get());
+    frontend_state_->UpdateStateInputs();
+    frontend_state_->Run(0, dummy_tokens);
+
+    // Take ownership of the frontend outputs. outputs_[0] is the new feature
+    // frames; outputs_[1..5] are the updated causal state buffers which cycle
+    // back into the sub-state's inputs for the next chunk.
+    std::unique_ptr<OrtValue> features{frontend_state_->outputs_[0]};
+    frontend_state_->outputs_[0] = nullptr;
+    frontend_state_->sample_buffer_.reset(frontend_state_->outputs_[1]);
+    frontend_state_->outputs_[1] = nullptr;
+    frontend_state_->sample_len_.reset(frontend_state_->outputs_[2]);
+    frontend_state_->outputs_[2] = nullptr;
+    frontend_state_->conv1_buffer_.reset(frontend_state_->outputs_[3]);
+    frontend_state_->outputs_[3] = nullptr;
+    frontend_state_->conv2_buffer_.reset(frontend_state_->outputs_[4]);
+    frontend_state_->outputs_[4] = nullptr;
+    frontend_state_->frame_count_.reset(frontend_state_->outputs_[5]);
+    frontend_state_->outputs_[5] = nullptr;
+    frontend_state_->UpdateStateInputs();
+
+    auto fshape = features->GetTensorTypeAndShapeInfo()->GetShape();
+    if (fshape.size() >= 3 && fshape[1] > 0) {
+      const int new_features = static_cast<int>(fshape[1]);
+      const float* fdata = features->GetTensorData<float>();
+      accumulated_features_.insert(accumulated_features_.end(), fdata,
+                                   fdata + static_cast<size_t>(new_features) * encoder_dim);
+      total_features_ += new_features;
+    }
+  }
+
+  // ----- encoder / adapter step -----------------------------------------
+  // Hold back the lookahead window unless this is the final chunk.
+  const int lookahead = config_.total_lookahead;
+  const int stable_count = is_final ? total_features_
+                                    : std::max(0, total_features_ - lookahead);
+  const int new_frames = stable_count - encoder_frames_emitted_;
+  if (new_frames <= 0) return;
+
+  // Encoder runs on [window_start : total_features_] for left context.
+  const int left_context = config_.left_context_frames;
+  const int window_start = std::max(0, encoder_frames_emitted_ - left_context);
+  const int window_size = total_features_ - window_start;
+  const int start_idx = encoder_frames_emitted_ - window_start;  // new frames offset in encoded.
+
+  auto enc_in_shape = std::array<int64_t, 3>{1, window_size, encoder_dim};
+  auto enc_in_tensor =
+      OrtValue::CreateTensor(alloc, enc_in_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memcpy(enc_in_tensor->GetTensorMutableData<float>(),
+              accumulated_features_.data() + static_cast<size_t>(window_start) * encoder_dim,
+              static_cast<size_t>(window_size) * encoder_dim * sizeof(float));
+
+  encoder_state_->SetFeaturesInput(enc_in_tensor.get());
+  encoder_state_->Run(0, dummy_tokens);
+  std::unique_ptr<OrtValue> encoded{encoder_state_->outputs_[0]};
+  encoder_state_->outputs_[0] = nullptr;
+
+  // Slice [:, start_idx : start_idx + new_frames] from encoded.
+  auto new_enc_shape = std::array<int64_t, 3>{1, new_frames, encoder_dim};
+  auto new_enc_tensor =
+      OrtValue::CreateTensor(alloc, new_enc_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memcpy(new_enc_tensor->GetTensorMutableData<float>(),
+              encoded->GetTensorData<float>() +
+                  static_cast<size_t>(start_idx) * encoder_dim,
+              static_cast<size_t>(new_frames) * encoder_dim * sizeof(float));
+
+  // ----- adapter --------------------------------------------------------
+  adapter_state_->SetInputs(new_enc_tensor.get(), adapter_pos_offset_);
+  adapter_state_->Run(0, dummy_tokens);
+  std::unique_ptr<OrtValue> memory_tensor{adapter_state_->outputs_[0]};
+  adapter_state_->outputs_[0] = nullptr;
+
+  // Append adapter output to accumulated memory.
+  auto mshape = memory_tensor->GetTensorTypeAndShapeInfo()->GetShape();
+  const int produced_frames = (mshape.size() >= 3) ? static_cast<int>(mshape[1]) : 0;
+  if (produced_frames > 0) {
+    const float* mdata = memory_tensor->GetTensorData<float>();
+    accumulated_memory_.insert(accumulated_memory_.end(), mdata,
+                               mdata + static_cast<size_t>(produced_frames) * decoder_dim);
+    memory_len_ += produced_frames;
+  }
+
+  encoder_frames_emitted_ = stable_count;
+  adapter_pos_offset_ += new_frames;
+  cross_kv_valid_ = false;  // memory grew; cached cross-KV needs to catch up.
+}
+
+void MoonshineStreamingState::RefreshCrossKv() {
+  if (cross_kv_valid_ || memory_len_ == 0) return;
+
+  auto& alloc = moonshine_model_.allocator_cpu_;
+  const int decoder_dim = config_.decoder_dim;
+  const int new_frames = memory_len_ - memory_in_cross_kv_;
+  DeviceSpan<int32_t> dummy_tokens;
+
+  // Run cross_kv on JUST the new memory frames (pure per-frame projection).
+  auto mem_shape = std::array<int64_t, 3>{1, new_frames, decoder_dim};
+  auto mem_tensor =
+      OrtValue::CreateTensor(alloc, mem_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  std::memcpy(mem_tensor->GetTensorMutableData<float>(),
+              accumulated_memory_.data() +
+                  static_cast<size_t>(memory_in_cross_kv_) * decoder_dim,
+              static_cast<size_t>(new_frames) * decoder_dim * sizeof(float));
+
+  cross_kv_state_->SetMemoryInput(mem_tensor.get());
+  cross_kv_state_->Run(0, dummy_tokens);
+  std::unique_ptr<OrtValue> k_new{cross_kv_state_->outputs_[0]};
+  cross_kv_state_->outputs_[0] = nullptr;
+  std::unique_ptr<OrtValue> v_new{cross_kv_state_->outputs_[1]};
+  cross_kv_state_->outputs_[1] = nullptr;
+
+  if (memory_in_cross_kv_ == 0) {
+    // First chunk of the segment: nothing to concat with.
+    cached_k_cross_ = std::make_shared<Tensor>(std::move(k_new));
+    cached_v_cross_ = std::make_shared<Tensor>(std::move(v_new));
+  } else {
+    // Concat cached [L,1,H,M_old,D] + new [L,1,H,new_frames,D] along dim 3.
+    const int L = config_.num_decoder_layers;
+    const int H = config_.num_decoder_heads;
+    const int D = config_.decoder_head_size;
+    const int M_old = memory_in_cross_kv_;
+    const int M_total = memory_len_;
+    auto concat_shape = std::array<int64_t, 5>{L, 1, H, M_total, D};
+
+    auto concat_one = [&](const float* old_data, const float* new_data) {
+      auto out =
+          OrtValue::CreateTensor(alloc, concat_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      float* dst = out->GetTensorMutableData<float>();
+      const size_t row_old = static_cast<size_t>(M_old) * D;
+      const size_t row_new = static_cast<size_t>(new_frames) * D;
+      const size_t row_total = static_cast<size_t>(M_total) * D;
+      for (int l = 0; l < L; ++l) {
+        for (int h = 0; h < H; ++h) {
+          const size_t lh = static_cast<size_t>(l) * H + h;
+          std::memcpy(dst + lh * row_total,
+                      old_data + lh * row_old,
+                      row_old * sizeof(float));
+          std::memcpy(dst + lh * row_total + row_old,
+                      new_data + lh * row_new,
+                      row_new * sizeof(float));
+        }
+      }
+      return out;
+    };
+
+    auto k_full = concat_one(cached_k_cross_->ort_tensor_->GetTensorData<float>(),
+                             k_new->GetTensorData<float>());
+    auto v_full = concat_one(cached_v_cross_->ort_tensor_->GetTensorData<float>(),
+                             v_new->GetTensorData<float>());
+    cached_k_cross_ = std::make_shared<Tensor>(std::move(k_full));
+    cached_v_cross_ = std::make_shared<Tensor>(std::move(v_full));
+  }
+
+  memory_in_cross_kv_ = memory_len_;
+  cross_kv_valid_ = true;
+}
+
+void MoonshineStreamingState::DecodeAndQueue(bool is_final) {
+  // Point the decoder at the current chunk's cross-KV for the whole pass.
+  k_cross_tensor_ = cached_k_cross_;
+  v_cross_tensor_ = cached_v_cross_;
 
   // Reset per-pass decoder state. (Self-KV gets rebuilt fresh each pass since
   // we re-decode from BOS over the full accumulated memory.)
@@ -258,20 +701,14 @@ void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extr
   pending_idx_ = 0;
   last_tokens_.clear();
 
-  // cross-KV shape is [num_decoder_layers, 1, num_decoder_heads, memory_len, head_size].
-  int64_t memory_len = 0;
-  if (k_cross_tensor_ && k_cross_tensor_->ort_tensor_) {
-    auto shape = k_cross_tensor_->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-    if (shape.size() >= 5) memory_len = shape[3];
-  }
+  int64_t memory_len = memory_len_;
 
-  // Detect new segment: if memory_len shrinks vs the previous call, the
-  // processor was Flush()'d, hit its hard memory cap, or detected a
-  // VAD-silence segment boundary — and reset its accumulated memory.
-  // Drop the per-pass commit tracking so the next pass starts from BOS,
-  // but keep `all_tokens_` so the running transcript spans segment
-  // boundaries (callers see one continuous transcript). Users who want a
-  // fresh transcript should create a new Generator.
+  // Detect new segment: if memory_len shrinks vs the previous pass, a segment
+  // was closed (hard cap / VAD silence / Flush) and accumulation was reset.
+  // Drop the per-pass commit tracking so the next pass starts from BOS, but
+  // keep `all_tokens_` so the running transcript spans segment boundaries
+  // (callers see one continuous transcript). Users who want a fresh transcript
+  // should create a new Generator.
   if (memory_len < previous_memory_len_) {
     previous_pass_tokens_.clear();
     emitted_count_ = 0;
@@ -353,6 +790,15 @@ void MoonshineStreamingState::SetExtraInputs(const std::vector<ExtraInput>& extr
 
 void MoonshineStreamingState::StepToken() {
   last_tokens_.clear();
+
+  // Run the heavy pipeline exactly once per chunk, on the first StepToken.
+  // The Generator pump may call SetExtraInputs more than once per chunk, so
+  // SetExtraInputs only caches the chunk + sets need_pipeline_run_.
+  if (need_pipeline_run_) {
+    RunPipeline();
+    need_pipeline_run_ = false;
+  }
+
   if (pending_idx_ >= pending_tokens_.size()) {
     chunk_done_ = true;
     return;
@@ -384,16 +830,26 @@ int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& token
   }
 
   // decoder_kv inputs: token[1,N], k_self, v_self, out_k_cross, out_v_cross.
-  // The cross-KV input tensors are kept alive by us for the whole chunk;
-  // RunDecoderKv discards the (pass-through) cross-KV outputs internally.
-  auto dk = moonshine_model_.RunDecoderKv(*token_input_ptr,
-                                          *k_self_,
-                                          *v_self_,
-                                          *k_cross_tensor_->ort_tensor_,
-                                          *v_cross_tensor_->ort_tensor_);
-  auto logits = std::move(dk.logits);
-  k_self_ = std::move(dk.k_self_out);
-  v_self_ = std::move(dk.v_self_out);
+  // The cross-KV input tensors are kept alive by us for the whole chunk; the
+  // decoder passes them straight through, so we discard those outputs.
+  DeviceSpan<int32_t> dummy_tokens;
+  decoder_kv_state_->SetInputs(token_input_ptr, k_self_.get(), v_self_.get(),
+                               k_cross_tensor_->ort_tensor_.get(),
+                               v_cross_tensor_->ort_tensor_.get());
+  decoder_kv_state_->Run(0, dummy_tokens);
+
+  // Outputs: logits, out_k_self, out_v_self, out_k_cross, out_v_cross.
+  std::unique_ptr<OrtValue> logits{decoder_kv_state_->outputs_[0]};
+  decoder_kv_state_->outputs_[0] = nullptr;
+  k_self_.reset(decoder_kv_state_->outputs_[1]);
+  decoder_kv_state_->outputs_[1] = nullptr;
+  v_self_.reset(decoder_kv_state_->outputs_[2]);
+  decoder_kv_state_->outputs_[2] = nullptr;
+  // Discard the pass-through cross-KV outputs (freed at scope exit).
+  std::unique_ptr<OrtValue> k_cross_out_owner{decoder_kv_state_->outputs_[3]};
+  decoder_kv_state_->outputs_[3] = nullptr;
+  std::unique_ptr<OrtValue> v_cross_out_owner{decoder_kv_state_->outputs_[4]};
+  decoder_kv_state_->outputs_[4] = nullptr;
 
   // Greedy argmax over the LAST position's logits (predicting token N).
   auto lshape = logits->GetTensorTypeAndShapeInfo()->GetShape();
@@ -411,7 +867,22 @@ int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& token
   return max_idx;
 }
 
-OrtValue* MoonshineStreamingState::GetInput(const char* /*name*/) { return nullptr; }
-OrtValue* MoonshineStreamingState::GetOutput(const char* /*name*/) { return nullptr; }
+OrtValue* MoonshineStreamingState::GetInput(const char* name) {
+  if (auto* v = frontend_state_->GetInput(name)) return v;
+  if (auto* v = encoder_state_->GetInput(name)) return v;
+  if (auto* v = adapter_state_->GetInput(name)) return v;
+  if (auto* v = cross_kv_state_->GetInput(name)) return v;
+  if (auto* v = decoder_kv_state_->GetInput(name)) return v;
+  return State::GetInput(name);
+}
+
+OrtValue* MoonshineStreamingState::GetOutput(const char* name) {
+  if (auto* v = frontend_state_->GetOutput(name)) return v;
+  if (auto* v = encoder_state_->GetOutput(name)) return v;
+  if (auto* v = adapter_state_->GetOutput(name)) return v;
+  if (auto* v = cross_kv_state_->GetOutput(name)) return v;
+  if (auto* v = decoder_kv_state_->GetOutput(name)) return v;
+  return State::GetOutput(name);
+}
 
 }  // namespace Generators

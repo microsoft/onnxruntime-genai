@@ -1,35 +1,24 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// MoonshineStreamingProcessor: real-time chunk-by-chunk streaming for the
-// official UsefulSensors Moonshine streaming export (loaded as ORT-format
-// `.ort` files; see MoonshineConfig::*_filename defaults).
+// MoonshineStreamingProcessor: DSP-only front-end for the official
+// UsefulSensors Moonshine streaming export.
 //
-// Pipeline per chunk (chunk_samples-aligned, default 500ms @ 16kHz):
-//   1. frontend  : audio → new feature frames + updated state buffers
-//                  (causal; carries sample / conv-cache state across chunks).
-//   2. accumulate: append new features to a persistent buffer.
-//   3. encoder   : run on a sliding window of accumulated features
-//                  ([encoder_frames_emitted - left_context_frames :
-//                    total_features]); slice the new-stable rows.
-//   4. adapter   : run on the new-stable rows with a monotonically
-//                  increasing pos_offset; append output to accumulated memory.
-//   5. cross_kv  : run *incrementally* on just the new memory rows
-//                  (cross_kv is a pure per-frame projection with no
-//                  cross-frame ops), then concat into the cached
-//                  [L,1,H,M,D] {k_cross,v_cross} tensors and emit them
-//                  via NamedTensors so the State can feed them to
-//                  decoder_kv on every step.
+// In the Nemotron-style architecture, this processor does NOT touch any ONNX
+// session. It only:
+//   1. buffers incoming audio and drains it chunk_samples at a time
+//      (default 500ms @ 16kHz),
+//   2. runs the per-chunk VAD verdict (IsChunkSilent),
+//   3. emits one NamedTensors per chunk with:
+//        "audio_chunk" : float32 [1, num_samples] raw audio,
+//        "is_silent"   : int64  [1] (1 iff VAD flagged this chunk silent),
+//        "is_final"    : int64  [1] (1 only on the Flush() tail chunk).
 //
-// Segment boundaries:
-//   * Hard memory cap (max_segment_memory_frames) — always active.
-//   * VAD-detected silence past min_segment_memory_frames — active when
-//     genai_config.json declares a `vad` section.
-// On either boundary, EmitCrossKv(is_final=true) is returned and a state
-// reset is scheduled for the next Process() call.
-//
-// The State (MoonshineStreamingState) is responsible for re-decoding from
-// BOS on every chunk with the current cross-KV.
+// Everything stateful — the frontend causal buffers, accumulated features,
+// encoder sliding window, adapter memory, incremental cross-KV cache, self-KV,
+// segment resets, and re-decode-from-BOS — lives in MoonshineStreamingState,
+// which owns all five ONNX sub-states. The State combines the raw is_silent
+// verdict with its own accumulated memory length to drive segmentation.
 #pragma once
 
 #include "moonshine_streaming.h"
@@ -49,68 +38,13 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
   MoonshineStreamingModel* moonshine_model_;  // cached typed view (verified non-null in ctor)
   MoonshineConfig config_;
 
-  // Audio not yet fed to the frontend (drained chunk_samples at a time).
+  // Audio not yet drained into a chunk (drained chunk_samples at a time).
   std::vector<float> audio_buffer_;
 
-  // ---- Persistent frontend state ----------------------------------------
-  // Lives for the life of the stream; reset by Flush() so the next
-  // utterance starts clean.
-  std::unique_ptr<OrtValue> sample_buffer_;
-  std::unique_ptr<OrtValue> sample_len_;
-  std::unique_ptr<OrtValue> conv1_buffer_;
-  std::unique_ptr<OrtValue> conv2_buffer_;
-  std::unique_ptr<OrtValue> frame_count_;
-
-  // ---- Persistent encoder / adapter / memory state ----------------------
-  // Accumulated encoder-input features ([total_features_, encoder_dim]).
-  std::vector<float> accumulated_features_;
-  int total_features_{0};
-  // Number of features already adapted into memory.
-  int encoder_frames_emitted_{0};
-  // Running pos_offset fed to the adapter (== total memory frames so far).
-  int64_t adapter_pos_offset_{0};
-  // Accumulated decoder memory ([memory_len_, decoder_dim]).
-  std::vector<float> accumulated_memory_;
-  int memory_len_{0};
-
-  // Cached cross-KV tensors. cross_kv is a pure per-frame projection
-  // (no positional / cross-frame ops), so we run it incrementally: when
-  // memory grows by `new_frames`, run cross_kv on just those rows and
-  // concat the result into the cached [L, 1, H, M, D] tensor. This turns
-  // the per-chunk cross-KV cost from O(memory_len) into O(new_frames).
-  std::shared_ptr<Tensor> cached_k_cross_;
-  std::shared_ptr<Tensor> cached_v_cross_;
-  int memory_in_cross_kv_{0};  // memory frames already projected into cached.
-  bool cross_kv_valid_{false};
-
-  // Set when the current chunk closed a segment (hard memory cap reached
-  // OR VAD detected silence past min_segment_memory_frames). The next
-  // Process() call resets all state before doing anything else so the new
-  // segment starts from a clean BOS. Matches upstream Moonshine's
-  // per-VAD-segment reset.
-  bool needs_reset_{false};
-
-  // ---- Helpers -----------------------------------------------------------
-  void ResetState();
-
-  /// Run the frontend on `num` samples of audio, then accumulate features
-  /// and (if any new stable frames have been produced) encoder + adapter +
-  /// append-to-memory. Sets cross_kv_valid_ = false when memory grew.
-  ///   is_final: when true, treat all accumulated features as stable (no
-  ///             lookahead held back) — used by Flush().
-  void RunFrontendAndAccumulate(const float* audio, size_t num, bool is_final);
-
-  /// If !cross_kv_valid_, run cross_kv incrementally on just the memory
-  /// rows produced since the last refresh and concat them into the cached
-  /// {k_cross, v_cross}. No-op when cross_kv is already valid or memory is
-  /// empty.
-  void RefreshCrossKv();
-
-  /// Build a NamedTensors holding the cached {k_cross, v_cross}; nullptr if
-  /// memory is empty. `is_final` is forwarded to the State via an int64[1]
-  /// "is_final" tensor so it knows to commit all tokens (vs only the
-  /// longest-common-prefix between consecutive passes).
-  std::unique_ptr<NamedTensors> EmitCrossKv(bool is_final);
+  // Build the {audio_chunk, is_silent, is_final} NamedTensors for one chunk of
+  // `num` samples (num may be 0 on the Flush tail).
+  std::unique_ptr<NamedTensors> EmitChunk(const float* audio, size_t num,
+                                          bool is_silent, bool is_final);
 };
 
 }  // namespace Generators
