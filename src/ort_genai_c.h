@@ -88,7 +88,16 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
  */
 
 /**
- * \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ * \brief Shuts down the GenAI library and releases all GenAI-owned ONNX Runtime globals.
+ *
+ * \warning Callers SHOULD invoke OgaShutdown() before process exit. If it is not called, GenAI's globals are destroyed
+ *          at static-destruction time in undefined order, which may crash.
+ *
+ * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
+ *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
+ *
+ * \note Must be the last GenAI call in the process. Any OgaModel / OgaGenerator / OgaTokenizer / etc. handles owned
+ *       by the caller must be released first.
  */
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
@@ -165,7 +174,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSe
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
- * \return The number of tokens in the sequence at the given index
+ * \return The number of tokens in the sequence at the given index. Returns 0 if
+ *         sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* sequences, size_t sequence_index);
 
@@ -175,6 +185,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
+ *         Returns nullptr if sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 

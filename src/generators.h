@@ -73,7 +73,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  const Config& config;                  // The model outlives the GeneratorParams
+  // Co-owns the model so the aliased Config below cannot be freed while this
+  // params object is alive. Null for the benchmark-only Config constructor.
+  std::shared_ptr<const Model> model_;
+  const Config& config;                  // Aliases model-owned Config; kept alive by model_
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   // Query the params to get the value set for a param
@@ -151,8 +154,14 @@ struct OrtGlobals {
   std::unique_ptr<OrtEnv> env_;
 
   struct Allocator {
-    std::unique_ptr<Ort::Allocator> allocator_;
+    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
+    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
+    // does" -- see
+    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
+    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
+    // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
+    std::unique_ptr<Ort::Allocator> allocator_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 

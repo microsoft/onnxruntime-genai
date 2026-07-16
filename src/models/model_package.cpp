@@ -72,7 +72,7 @@ bool IsModelPackage(const fs::path& path) {
 PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
                                        const fs::path& package_root,
                                        const std::string& explicit_ep) {
-  auto pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
+  std::shared_ptr<OrtModelPackageContext> pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
 
   // Single-component restriction: the package author designates "the" genai component by
   // making it the only one.
@@ -123,6 +123,8 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
   PackageLoadResult result;
   result.package_root = package_root;
   result.variant_dir = fs::path{component_ctx->GetSelectedVariantFolderPath()};
+  // Keep the package context alive so genai_config path references can be resolved later.
+  result.context = std::move(pkg_ctx);
   return result;
 }
 

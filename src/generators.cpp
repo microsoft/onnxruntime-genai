@@ -246,7 +246,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGPU";
-    case DeviceType::QNN:
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
@@ -273,8 +274,9 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
 #endif
     case DeviceType::WEBGPU:
       return GetWebGPUInterface();
-    case DeviceType::QNN:
-      return GetQNNInterface();
+    case DeviceType::QnnHtp:
+    case DeviceType::QnnGpu:
+      return GetQNNInterface(type);
     case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
     case DeviceType::RyzenAI:
@@ -288,7 +290,8 @@ GeneratorParams::GeneratorParams(const Config& config)
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
-    : config{*model.config_.get()},
+    : model_{model.shared_from_this()},
+      config{*model_->config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
       use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_scoring_} {
@@ -382,10 +385,36 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
-  if (params.search.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.search.batch_size));
+
+  constexpr int kMaxBatchSize = 32;
+  constexpr int kMaxNumBeams = 32;
+  constexpr int kMaxNumBeamsCuda = 32;
+
+  if (params.search.batch_size < 1 || params.search.batch_size > kMaxBatchSize)
+    throw std::runtime_error("batch_size (" + std::to_string(params.search.batch_size) + ") must be in [1, " + std::to_string(kMaxBatchSize) + "]");
+
+  const int max_num_beams = (params.search.num_beams > 1 &&
+                             (params.p_device->GetType() == DeviceType::CUDA || params.p_device->GetType() == DeviceType::NvTensorRtRtx))
+                                ? kMaxNumBeamsCuda
+                                : kMaxNumBeams;
+  if (params.search.num_beams < 1 || params.search.num_beams > max_num_beams)
+    throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
+  // Beam search selects the top 2*num_beams (beam, token) candidates out of
+  // num_beams*vocab_size entries in BeamSearch_Cpu::SelectTop, which requires
+  // num_beams*vocab_size >= 2*num_beams, i.e. vocab_size >= 2. A smaller
+  // vocabulary would drive an out-of-bounds partial_sort.
+  if (params.search.num_beams > 1 && params.config.model.vocab_size < 2)
+    throw std::runtime_error("vocab_size (" + std::to_string(params.config.model.vocab_size) + ") must be 2 or greater when using beam search (num_beams=" + std::to_string(params.search.num_beams) + ")");
+
+  // eos_token_id values are used directly as indices into the per-token score
+  // row (of size vocab_size), e.g. in Search::ApplyMinLength. An out-of-range
+  // value would cause an out-of-bounds write, so reject it here.
+  for (auto eos_token_id : params.config.model.eos_token_id) {
+    if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
+      throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
+  }
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
@@ -642,6 +671,11 @@ void Generator::GenerateNextToken() {
     transducer_state_->StepToken();
     return;
   }
+
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length)
+    throw std::runtime_error(
+        "GenerateNextToken called with sequence length already at max_length (" +
+        std::to_string(state_->params_->search.max_length) + ")");
 
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");

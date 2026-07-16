@@ -426,6 +426,9 @@ struct Abstract {
  */
 struct Allocator : OrtAllocator {
   static Allocator& GetWithDefaultOptions();  ///< ::OrtAllocator default instance that is owned by Onnxruntime
+  /// Wraps the internal allocator owned by `session` (forwards to OrtApi::CreateAllocator). The returned Allocator
+  /// becomes invalid when `session` is destroyed -- callers must ensure the Allocator is destroyed before the
+  /// OrtSession.
   static std::unique_ptr<Allocator> Create(const OrtSession& session, const OrtMemoryInfo& memory_info);
 
   void* Alloc(size_t size);
@@ -658,6 +661,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& DisablePerSessionThreads();  ///< Wraps OrtApi::DisablePerSessionThreads
 
   OrtSessionOptions& AddConfigEntry(const char* config_key, const char* config_value);                                                          ///< Wraps OrtApi::AddSessionConfigEntry
+  bool HasConfigEntry(const char* config_key) const;                                                                                            ///< Wraps OrtApi::HasSessionConfigEntry
   OrtSessionOptions& AddInitializer(const char* name, const OrtValue& ort_val);                                                                 ///< Wraps OrtApi::AddInitializer
   OrtSessionOptions& AddExternalInitializers(const std::vector<std::string>& names, const std::vector<std::unique_ptr<OrtValue>>& ort_values);  ///< Wraps OrtApi::AddExternalInitializers
 
@@ -808,6 +812,10 @@ struct OrtSession {
   void Run(_In_opt_ const OrtRunOptions* run_options, const OrtIoBinding&);  ///< Wraps OrtApi::RunWithBinding
 
   void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
+
+#if ORT_API_VERSION >= 27
+  void ReleaseCapturedGraph(int graph_annotation_id);  ///< Wraps OrtApi::SessionReleaseCapturedGraph (ORT 1.27+)
+#endif
 
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;
@@ -1507,6 +1515,8 @@ struct ModelPackageApi {
       ModelPackage_GetVariantNames{nullptr};
   OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
       ModelPackage_GetVariantEpName{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn
+      ModelPackage_ResolveStringRef{nullptr};
   OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
       SelectComponent{nullptr};
   OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
@@ -1548,6 +1558,14 @@ struct OrtModelPackageContext {
   /// Returns the EP name declared for a (component, variant) pair, or an empty string when
   /// the variant does not declare an EP.
   std::string GetVariantEpName(const char* component_name, const char* variant_name) const;
+
+  /// Resolves a path reference from the package to an on-disk path using the model_package
+  /// rules: a "sha256:<hex>[/tail]" content-addressed shared-asset reference (honoring
+  /// manifest overrides), or a plain relative path resolved against `base_dir` (empty
+  /// base_dir falls back to the package root). When `must_exist` is true the resolved path
+  /// must exist on disk.
+  std::string ResolveStringRef(const std::string& base_dir, const std::string& input,
+                               bool must_exist) const;
 
   std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(
       const char* component_name, const OrtModelPackageOptions& options) const;
