@@ -1,16 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Moonshine Streaming ASR — official UsefulSensors stateful 5-session
-// pipeline (frontend → encoder → adapter → cross_kv → decoder_kv).
-//
-// Following the Nemotron speech design, ALL five ONNX sessions are owned by
-// the orchestrator State (MoonshineStreamingState) as sub-states, and the
-// StreamingProcessor is reduced to a DSP-only stage: it buffers audio, runs
-// VAD, and hands the State a raw audio chunk plus per-chunk {is_silent,
-// is_final} signals. The State owns every piece of per-stream state
-// (frontend ring buffers, accumulated features / memory, incremental
-// cross-KV cache, VAD-driven segment resets) and drives the whole pipeline.
+// Moonshine Streaming ASR
 //
 // Sub-states (each a State wrapping one session):
 //   frontend  : causal audio frontend with explicit sample / conv-cache
@@ -39,11 +30,6 @@
 
 namespace Generators {
 
-// All values come from genai_config.json — the generic `model`,
-// `model.encoder`/`model.decoder` sections, and the bespoke `model.moonshine`
-// section. There are NO code defaults: every field is populated by
-// PopulateFromConfig, and a field absent from the JSON is left zero-initialized.
-// genai_config.json is the single source of truth.
 struct MoonshineConfig {
   // Audio framing.
   int chunk_samples{};  // e.g. 8000 = 500ms at 16 kHz
@@ -61,22 +47,15 @@ struct MoonshineConfig {
   int decoder_head_size{};
   int decoder_dim{};
 
-  // Frontend state shapes (from streaming_config.json).
   int sample_buffer_size{};
   int conv1_channels{};
   int conv1_buffer_size{};
   int conv2_channels{};
   int conv2_buffer_size{};
 
-  // Encoder sliding-window geometry. The encoder has lookahead and requires
-  // `left_context_frames` of past context per chunk. Lookahead is held back
-  // from the "stable" frame count until Flush().
   int total_lookahead{};
   int left_context_frames{};
 
-  // Decoder token-emission cap. Per chunk, tokens are limited to
-  //   min(ceil(memory_len * seconds_per_memory_frame * tokens_per_second), max_seq_len)
-  // (matching the official moonshine streaming reference impl).
   int max_seq_len{};
   float tokens_per_second{};
   float seconds_per_memory_frame{};
@@ -98,9 +77,6 @@ struct MoonshineConfig {
   // to disable VAD-based segmentation entirely (hard cap still applies).
   int min_segment_memory_frames{};
 
-  // Pipeline component filenames. All 5 are loaded from
-  // genai_config.json's `model.moonshine` section — there are no defaults.
-  // PopulateFromConfig throws if any is missing.
   std::string frontend_filename;
   std::string encoder_filename;
   std::string adapter_filename;
@@ -131,15 +107,7 @@ struct MoonshineStreamingModel : Model {
   MoonshineConfig moonshine_config_;
 };
 
-// ---------------------------------------------------------------------------
-// Per-stream sub-states. Each wraps one ONNX session using the shared State
-// I/O machinery (input_names_/inputs_ + output_names_/outputs_ + State::Run).
-// All persistent cross-chunk state lives in the orchestrator
-// (MoonshineStreamingState), which is a friend of each sub-state so it can
-// take ownership of freshly-allocated output tensors after every Run.
-// ---------------------------------------------------------------------------
-
-/// frontend: audio → new feature frames + updated causal state buffers.
+/// frontend: audio to new feature frames + updated causal state buffers.
 struct MoonshineFrontendSubState : State {
   MoonshineFrontendSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
 
@@ -179,7 +147,7 @@ struct MoonshineFrontendSubState : State {
   void AllocateStateBuffers();
 };
 
-/// encoder: stateless sliding-window attention. features → encoded.
+/// encoder: stateless sliding-window attention. features => encoded.
 struct MoonshineEncoderSubState : State {
   MoonshineEncoderSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
 
@@ -193,7 +161,7 @@ struct MoonshineEncoderSubState : State {
   const MoonshineStreamingModel& model_;
 };
 
-/// adapter: (encoded, pos_offset) → memory. Adds positional encoding.
+/// adapter: (encoded, pos_offset) => memory. Adds positional encoding.
 struct MoonshineAdapterSubState : State {
   MoonshineAdapterSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
 
@@ -210,7 +178,7 @@ struct MoonshineAdapterSubState : State {
   size_t pos_input_idx_{};
 };
 
-/// cross_kv: memory → (k_cross, v_cross). Pure per-frame projection.
+/// cross_kv: memory => (k_cross, v_cross). Pure per-frame projection.
 struct MoonshineCrossKvSubState : State {
   MoonshineCrossKvSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
 
@@ -226,7 +194,7 @@ struct MoonshineCrossKvSubState : State {
 
 /// decoder_kv: one autoregressive step over a [1, N] token input.
 /// (token, k_self, v_self, out_k_cross, out_v_cross)
-///   → (logits, out_k_self, out_v_self, out_k_cross, out_v_cross).
+///   => (logits, out_k_self, out_v_self, out_k_cross, out_v_cross).
 struct MoonshineDecoderKvSubState : State {
   MoonshineDecoderKvSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
 
