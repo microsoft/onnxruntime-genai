@@ -151,6 +151,14 @@ def extract_gsm8k_answer(text):
     return numbers[-1].replace(",", "") if numbers else None
 
 
+def trim_gsm8k_completion(completion):
+    for stop in ("\nQuestion:", "\n\nQuestion", "\n\n\n"):
+        index = completion.find(stop)
+        if index != -1:
+            completion = completion[:index]
+    return completion
+
+
 def gsm8k_answers_equal(prediction, reference):
     if prediction is None:
         return False
@@ -293,6 +301,7 @@ def score_completion(item, token_ids, timeout, cache, decode):
             "quality_metric": "",
             "quality_score": "",
             "quality_prediction": "",
+            "quality_reference_answer": "",
             "quality_detail": "",
         }
 
@@ -302,13 +311,14 @@ def score_completion(item, token_ids, timeout, cache, decode):
 
     completion = decode(token_ids)
     if metric == "accuracy":
-        prediction = extract_gsm8k_answer(completion)
+        prediction = extract_gsm8k_answer(trim_gsm8k_completion(completion))
         result = {
             "quality_metric": metric,
             "quality_score": gsm8k_answers_equal(
                 prediction, item["reference_answer"]
             ),
             "quality_prediction": prediction or "",
+            "quality_reference_answer": item["reference_answer"],
             "quality_detail": "",
         }
     elif metric == "pass@1":
@@ -321,6 +331,7 @@ def score_completion(item, token_ids, timeout, cache, decode):
             "quality_metric": metric,
             "quality_score": bool(outcome["passed"]),
             "quality_prediction": "",
+            "quality_reference_answer": "",
             "quality_detail": outcome["result"],
         }
     else:
@@ -404,6 +415,7 @@ CSV_COLUMNS = [
     "quality_metric",
     "quality_score",
     "quality_prediction",
+    "quality_reference_answer",
     "quality_detail",
     "quality_transition",
     "prompt_id",
@@ -520,6 +532,12 @@ def format_quality(quality):
     return f"{result}({prediction})" if prediction else result
 
 
+def format_quality_with_reference(quality):
+    result = format_quality(quality)
+    reference = quality["quality_reference_answer"]
+    return f"{result} expected={reference}" if reference else result
+
+
 def print_detailed_run(item, rep, baseline, row):
     print(
         f"  {item['task']}/{item['question_id']} n={row['ngram_size']} "
@@ -553,8 +571,8 @@ def print_detailed_run(item, rep, baseline, row):
     )
     if row["quality_metric"]:
         print(
-            f"    quality: baseline={format_quality(baseline['quality'])} "
-            f"ngram={format_quality(row)} "
+            f"    quality: baseline={format_quality_with_reference(baseline['quality'])} "
+            f"ngram={format_quality_with_reference(row)} "
             f"transition={row['quality_transition']}"
         )
 
@@ -1271,7 +1289,7 @@ def main():
                     f"decode={decode_rate:.2f} tok/s e2e={e2e_rate:.2f} tok/s "
                     f"tokens={result['new_tokens']} prefill={result['prefill_s']:.4f}s "
                     f"decode_time={result['decode_s']:.4f}s "
-                    f"quality={format_quality(quality)}",
+                    f"quality={format_quality_with_reference(quality)}",
                     flush=True,
                 )
         baselines[prompt_index] = {
@@ -1289,7 +1307,7 @@ def main():
                 f"decode={baselines[prompt_index]['decode_rate']:.2f} tok/s "
                 f"e2e={baselines[prompt_index]['e2e_rate']:.2f} tok/s "
                 f"tokens={len(reference_tail)} "
-                f"quality={format_quality(baseline_quality)}",
+                f"quality={format_quality_with_reference(baseline_quality)}",
                 flush=True,
             )
         write_results(rows, csv_path, json_path)
@@ -1480,8 +1498,8 @@ def main():
                         f"type={representative['divergence_type']}"
                     )
                     print(
-                        f"    quality: baseline={format_quality(baseline['quality'])} "
-                        f"ngram={format_quality(representative)} "
+                        f"    quality: baseline={format_quality_with_reference(baseline['quality'])} "
+                        f"ngram={format_quality_with_reference(representative)} "
                         f"transition={representative['quality_transition'] or 'not_scored'}",
                         flush=True,
                     )
