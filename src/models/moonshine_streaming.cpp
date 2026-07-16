@@ -20,37 +20,38 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   const auto& dec = m.decoder;
   const auto& ms  = m.moonshine;
 
-  if (m.chunk_samples > 0) chunk_samples = m.chunk_samples;
-  if (m.bos_token_id > 0) bos_token_id = m.bos_token_id;
+  // genai_config.json is the single source of truth: every field is taken
+  // directly from the parsed config. There are no C++ defaults — a field
+  // absent from the JSON is left zero-initialized.
+  chunk_samples = m.chunk_samples;
+  bos_token_id = m.bos_token_id;
   if (!m.eos_token_id.empty()) eos_token_id = m.eos_token_id[0];
 
-  if (enc.hidden_size > 0) {
-    encoder_dim = enc.hidden_size;
-    // Frontend geometry derives from the encoder hidden size. Upstream
-    // Moonshine sets d_model_frontend = encoder_dim, and the frontend's
-    // expansion factor is 2 (c1 = 2 * d_model_frontend).
-    conv1_channels = enc.hidden_size;
-    conv2_channels = 2 * enc.hidden_size;
-  }
-  if (dec.hidden_size > 0) decoder_dim = dec.hidden_size;
-  if (dec.num_hidden_layers > 0) num_decoder_layers = dec.num_hidden_layers;
-  if (dec.num_attention_heads > 0) num_decoder_heads = dec.num_attention_heads;
-  if (dec.head_size > 0) decoder_head_size = dec.head_size;
+  // Encoder/frontend geometry comes from the generic encoder section.
+  // Upstream Moonshine sets d_model_frontend = encoder_dim, and the
+  // frontend's expansion factor is 2 (c1 = 2 * d_model_frontend).
+  encoder_dim = enc.hidden_size;
+  conv1_channels = enc.hidden_size;
+  conv2_channels = 2 * enc.hidden_size;
 
-  // Per-variant tuning from the moonshine section. Sentinel 0 (the
-  // struct's default) means "not present in JSON, keep the C++ default".
-  if (ms.sample_buffer_size > 0)        sample_buffer_size        = ms.sample_buffer_size;
-  if (ms.conv1_buffer_size > 0)         conv1_buffer_size         = ms.conv1_buffer_size;
-  if (ms.conv2_buffer_size > 0)         conv2_buffer_size         = ms.conv2_buffer_size;
-  if (ms.total_lookahead > 0)           total_lookahead           = ms.total_lookahead;
-  if (ms.left_context_frames > 0)       left_context_frames       = ms.left_context_frames;
-  if (ms.max_seq_len > 0)               max_seq_len               = ms.max_seq_len;
-  if (ms.tokens_per_second > 0.0f)      tokens_per_second         = ms.tokens_per_second;
-  if (ms.seconds_per_memory_frame > 0.0f) seconds_per_memory_frame = ms.seconds_per_memory_frame;
-  if (ms.max_segment_memory_frames > 0) max_segment_memory_frames = ms.max_segment_memory_frames;
-  if (ms.min_segment_memory_frames > 0) min_segment_memory_frames = ms.min_segment_memory_frames;
+  // Decoder geometry from the generic decoder section.
+  decoder_dim = dec.hidden_size;
+  num_decoder_layers = dec.num_hidden_layers;
+  num_decoder_heads = dec.num_attention_heads;
+  decoder_head_size = dec.head_size;
 
-  // Pipeline filenames — all 5 must be present in the moonshine config block.
+  // Per-variant tuning from the moonshine section.
+  sample_buffer_size        = ms.sample_buffer_size;
+  conv1_buffer_size         = ms.conv1_buffer_size;
+  conv2_buffer_size         = ms.conv2_buffer_size;
+  total_lookahead           = ms.total_lookahead;
+  left_context_frames       = ms.left_context_frames;
+  max_seq_len               = ms.max_seq_len;
+  tokens_per_second         = ms.tokens_per_second;
+  seconds_per_memory_frame  = ms.seconds_per_memory_frame;
+  max_segment_memory_frames = ms.max_segment_memory_frames;
+  min_segment_memory_frames = ms.min_segment_memory_frames;
+
   auto require = [](const std::string& s, const char* field) {
     if (s.empty()) {
       throw std::runtime_error(
@@ -447,13 +448,21 @@ void MoonshineStreamingState::RunPipeline() {
 
   const bool flush = current_is_final_;
   const bool silent = current_is_silent_;
-  bool commit_all = flush;
+
+  // Encode the chunk and refresh cross-KV. Returns false (and marks the chunk
+  // done) when nothing has accumulated yet, so callers can bail early.
+  // Captures only `this` — it touches members (RunFrontendAndAccumulate,
+  // memory_len_, chunk_done_, RefreshCrossKv), not any enclosing locals.
+  auto encode_chunk = [this](const float* a, size_t n, bool is_final) -> bool {
+    RunFrontendAndAccumulate(a, n, is_final);
+    if (memory_len_ == 0) { chunk_done_ = true; return false; }
+    RefreshCrossKv();
+    return true;
+  };
 
   if (flush) {
     // Flush: release held-back lookahead and accumulate the tail.
-    RunFrontendAndAccumulate(audio, num, /*is_final=*/true);
-    if (memory_len_ == 0) { chunk_done_ = true; return; }
-    RefreshCrossKv();
+    if (!encode_chunk(audio, num, /*is_final=*/true)) return;
     needs_reset_ = true;
   } else if (silent) {
     // VAD-based segmentation (runs the per-chunk silence verdict computed by
@@ -462,11 +471,8 @@ void MoonshineStreamingState::RunPipeline() {
                           memory_len_ >= config_.min_segment_memory_frames;
     if (past_min) {
       // Flush the previous speech's held-back lookahead, then break as final.
-      RunFrontendAndAccumulate(nullptr, 0, /*is_final=*/true);
-      if (memory_len_ == 0) { chunk_done_ = true; return; }
-      RefreshCrossKv();
+      if (!encode_chunk(nullptr, 0, /*is_final=*/true)) return;
       needs_reset_ = true;
-      commit_all = true;
     } else if (memory_len_ == 0) {
       // Pre-utterance silence: skip the encoder entirely.
       chunk_done_ = true;
@@ -474,25 +480,23 @@ void MoonshineStreamingState::RunPipeline() {
     } else {
       // Mid-segment short silence (< min_segment): encode normally to keep the
       // lookahead boundary continuous.
-      RunFrontendAndAccumulate(audio, num, /*is_final=*/false);
-      if (memory_len_ == 0) { chunk_done_ = true; return; }
-      RefreshCrossKv();
+      if (!encode_chunk(audio, num, /*is_final=*/false)) return;
     }
   } else {
     // Speech (or VAD disabled).
-    RunFrontendAndAccumulate(audio, num, /*is_final=*/false);
-    if (memory_len_ == 0) { chunk_done_ = true; return; }
-    RefreshCrossKv();
-    // Hard-cap reset: if memory crossed the segment cap, commit ALL tokens and
-    // schedule a reset for the next chunk.
+    if (!encode_chunk(audio, num, /*is_final=*/false)) return;
+    // Hard-cap: once memory crosses the segment cap, schedule a reset for the
+    // next chunk (which also commits all tokens — see below).
     if (config_.max_segment_memory_frames > 0 &&
         memory_len_ >= config_.max_segment_memory_frames) {
       needs_reset_ = true;
-      commit_all = true;
     }
   }
 
-  DecodeAndQueue(commit_all);
+  // A segment closes exactly when we've scheduled an accumulation reset; on
+  // close we commit every decoded token as final. So needs_reset_ doubles as
+  // the "commit all" signal here — no separate flag needed.
+  DecodeAndQueue(/*is_final=*/needs_reset_);
 }
 
 void MoonshineStreamingState::ResetAccumulation() {

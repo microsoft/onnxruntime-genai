@@ -321,9 +321,10 @@ struct Config {
     // required for `model.type == "streaming_enc_dec_asr"`; the loader
     // throws if any is empty.
     //
-    // The numeric fields default to 0 (sentinel for "unset"); MoonshineConfig
-    // falls back to its C++ default for any field left at 0. To keep the
-    // genai_config.json self-documenting, shipping configs list every field.
+    // The numeric fields default to 0 here purely as an "unset" sentinel; the
+    // authoritative values are supplied by genai_config.json and copied
+    // verbatim into MoonshineConfig (there are no C++ fallback defaults).
+    // Shipping configs must therefore list every field.
     struct Moonshine {
       std::string frontend_filename;
       std::string encoder_filename;

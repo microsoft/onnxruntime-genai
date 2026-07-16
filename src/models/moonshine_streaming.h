@@ -39,62 +39,64 @@
 
 namespace Generators {
 
+// All values come from genai_config.json — the generic `model`,
+// `model.encoder`/`model.decoder` sections, and the bespoke `model.moonshine`
+// section. There are NO code defaults: every field is populated by
+// PopulateFromConfig, and a field absent from the JSON is left zero-initialized.
+// genai_config.json is the single source of truth.
 struct MoonshineConfig {
   // Audio framing.
-  int chunk_samples{8000};  // 500ms at 16 kHz
+  int chunk_samples{};  // e.g. 8000 = 500ms at 16 kHz
 
   // Tokens.
-  int bos_token_id{1};
-  int eos_token_id{2};
+  int bos_token_id{};
+  int eos_token_id{};
 
   // Encoder geometry (frontend output / encoder hidden dim).
-  int encoder_dim{768};
+  int encoder_dim{};
 
   // Decoder geometry (from decoder_kv self-KV shape [layers,1,heads,T,head_size]).
-  int num_decoder_layers{14};
-  int num_decoder_heads{10};
-  int decoder_head_size{64};
-  int decoder_dim{640};
+  int num_decoder_layers{};
+  int num_decoder_heads{};
+  int decoder_head_size{};
+  int decoder_dim{};
 
   // Frontend state shapes (from streaming_config.json).
-  int sample_buffer_size{79};
-  int conv1_channels{768};
-  int conv1_buffer_size{4};
-  int conv2_channels{1536};
-  int conv2_buffer_size{4};
+  int sample_buffer_size{};
+  int conv1_channels{};
+  int conv1_buffer_size{};
+  int conv2_channels{};
+  int conv2_buffer_size{};
 
   // Encoder sliding-window geometry. The encoder has lookahead and requires
-  // `left_context_frames` of past context per chunk. Both are read from the
-  // genai_config.json moonshine section (the 224 default matches the medium
-  // model: depth=14 × lookahead=16). Lookahead is held back from the "stable"
-  // frame count until Flush().
-  int total_lookahead{16};
-  int left_context_frames{224};
+  // `left_context_frames` of past context per chunk. Lookahead is held back
+  // from the "stable" frame count until Flush().
+  int total_lookahead{};
+  int left_context_frames{};
 
   // Decoder token-emission cap. Per chunk, tokens are limited to
-  //   min(ceil(memory_len * 0.020s * 6.5 tok/s), max_seq_len)
+  //   min(ceil(memory_len * seconds_per_memory_frame * tokens_per_second), max_seq_len)
   // (matching the official moonshine streaming reference impl).
-  int max_seq_len{448};
-  float tokens_per_second{6.5f};
-  float seconds_per_memory_frame{0.020f};
+  int max_seq_len{};
+  float tokens_per_second{};
+  float seconds_per_memory_frame{};
 
   // Hard-cap on accumulated memory before forcing a state reset. Mirrors
-  // upstream Moonshine's `vad_max_segment_duration` (they use 15s; we use
-  // 10s for slightly tighter O(N^2) bounds). Without this, the parallel
+  // upstream Moonshine's `vad_max_segment_duration`. Without this, the parallel
   // teacher-forcing per chunk costs O(emitted_tokens) which sums to O(N^2)
-  // over the full audio. With the cap, each "segment" is independent and
-  // the AR loop stays small. 500 frames = 10s @ 50fps. Set <=0 to disable.
-  int max_segment_memory_frames{500};
+  // over the full audio. With the cap, each "segment" is independent and the
+  // AR loop stays small (e.g. 500 frames = 10s @ 50fps). Set <=0 to disable.
+  int max_segment_memory_frames{};
 
   // Minimum accumulated memory before VAD-detected silence is allowed to
   // trigger a segment break. Below this threshold, silent chunks are dropped
   // (treated as pre/inter-utterance pause) but do NOT cut the segment — we
   // want enough committed speech behind us that an early-segment short
   // silence (e.g. comma-pause, breath) doesn't fragment the transcript.
-  // After this threshold, any silent chunk triggers an is_final flush + reset.
-  // 250 frames = 5s @ 50fps. Only active when VAD is enabled; set <=0 to
-  // disable VAD-based segmentation entirely (hard cap still applies).
-  int min_segment_memory_frames{250};
+  // After this threshold, any silent chunk triggers an is_final flush + reset
+  // (e.g. 250 frames = 5s @ 50fps). Only active when VAD is enabled; set <=0
+  // to disable VAD-based segmentation entirely (hard cap still applies).
+  int min_segment_memory_frames{};
 
   // Pipeline component filenames. All 5 are loaded from
   // genai_config.json's `model.moonshine` section — there are no defaults.
