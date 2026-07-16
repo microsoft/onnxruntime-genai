@@ -670,6 +670,11 @@ void Generator::GenerateNextToken() {
     return;
   }
 
+  if (search_->GetSequenceLength() >= state_->params_->search.max_length)
+    throw std::runtime_error(
+        "GenerateNextToken called with sequence length already at max_length (" +
+        std::to_string(state_->params_->search.max_length) + ")");
+
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
