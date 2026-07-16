@@ -1,11 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// MoonshineStreamingProcessor: DSP-only front-end for the official
-// UsefulSensors Moonshine streaming export.
-//
-// In the Nemotron-style architecture, this processor does NOT touch any ONNX
-// session. It only:
+// This processor:
 //   1. buffers incoming audio and drains it chunk_samples at a time
 //      (default 500ms @ 16kHz),
 //   2. runs the per-chunk VAD verdict (IsChunkSilent),
@@ -17,8 +13,7 @@
 // Everything stateful — the frontend causal buffers, accumulated features,
 // encoder sliding window, adapter memory, incremental cross-KV cache, self-KV,
 // segment resets, and re-decode-from-BOS — lives in MoonshineStreamingState,
-// which owns all five ONNX sub-states. The State combines the raw is_silent
-// verdict with its own accumulated memory length to drive segmentation.
+// which owns all five ONNX sub-states.
 #pragma once
 
 #include "moonshine_streaming.h"
