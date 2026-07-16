@@ -57,10 +57,43 @@ from transformers import (
 )
 
 
+# Soft-deprecated extra_options names, kept as aliases for backward compatibility
+# so existing consumers (e.g. Olive recipes) that still pass the old `int4_*`
+# names keep working. Maps old name -> new name. Remove after consumers migrate.
+_DEPRECATED_EXTRA_OPTION_ALIASES = {
+    "int4_accuracy_level": "accuracy_level",
+    "int4_block_size": "block_size",
+    "int4_is_symmetric": "is_symmetric",
+    "int4_op_types_to_quantize": "op_types_to_quantize",
+    "int4_nodes_to_exclude": "nodes_to_exclude",
+    "int4_algo_config": "algo_config",
+}
+
+
+def apply_deprecated_extra_option_aliases(kv_pairs):
+    """
+    Rename any deprecated extra_options keys to their new names in-place.
+
+    If both the old and new names are provided, the new name wins. Emits a
+    deprecation warning for each old name encountered.
+    """
+    for old_name, new_name in _DEPRECATED_EXTRA_OPTION_ALIASES.items():
+        if old_name not in kv_pairs:
+            continue
+        print(
+            f"WARNING: extra_option '{old_name}' is deprecated and will be removed in a future release. "
+            f"Please use '{new_name}' instead."
+        )
+        kv_pairs.setdefault(new_name, kv_pairs[old_name])
+        del kv_pairs[old_name]
+
+
 def check_extra_options(kv_pairs, precision, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
+    apply_deprecated_extra_option_aliases(kv_pairs)
+
     bools = [
         "is_symmetric",
         "exclude_embeds",
@@ -194,6 +227,10 @@ def create_model(
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
+
+    # Normalize any deprecated extra_options names for direct API callers (the CLI
+    # path already handles this in check_extra_options).
+    apply_deprecated_extra_option_aliases(extra_options)
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -422,6 +459,7 @@ def get_args():
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
                 The options below control weight-only MatMulNBits quantization for both `--precision int4` and `--precision int8`.
+                    (The former `int4_`-prefixed names, e.g. `int4_algo_config`, are deprecated aliases that still work but will be removed in a future release.)
                 accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.

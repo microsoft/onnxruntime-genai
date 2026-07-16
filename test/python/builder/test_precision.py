@@ -180,3 +180,42 @@ def test_int4_with_qdq_is_allowed():
     # QDQ is only rejected for int8; int4 still supports it.
     builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
 
+
+# ---------------------------------------------------------------------------
+# Deprecated `int4_*` extra_option names still work as soft-deprecated aliases.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "old_name, new_name",
+    [
+        ("int4_accuracy_level", "accuracy_level"),
+        ("int4_block_size", "block_size"),
+        ("int4_is_symmetric", "is_symmetric"),
+        ("int4_op_types_to_quantize", "op_types_to_quantize"),
+        ("int4_nodes_to_exclude", "nodes_to_exclude"),
+        ("int4_algo_config", "algo_config"),
+    ],
+)
+def test_deprecated_alias_is_renamed_to_new_name(old_name, new_name):
+    kv_pairs = {old_name: "value"}
+    builder_module.apply_deprecated_extra_option_aliases(kv_pairs)
+    assert old_name not in kv_pairs
+    assert kv_pairs[new_name] == "value"
+
+
+def test_new_name_wins_when_both_provided():
+    kv_pairs = {"int4_algo_config": "old", "algo_config": "new"}
+    builder_module.apply_deprecated_extra_option_aliases(kv_pairs)
+    assert kv_pairs == {"algo_config": "new"}
+
+
+def test_check_extra_options_applies_deprecated_aliases():
+    # Old name flows through check_extra_options and is parsed like the new one.
+    kv_pairs = {"int4_is_symmetric": "false", "int4_op_types_to_quantize": "MatMul/Gather"}
+    builder_module.check_extra_options(kv_pairs, "int4", "cpu")
+    assert "int4_is_symmetric" not in kv_pairs
+    assert kv_pairs["is_symmetric"] is False
+    assert kv_pairs["op_types_to_quantize"] == ("MatMul", "Gather")
+
+
