@@ -154,8 +154,8 @@ namespace {
 // The quantizer packs each head into (1 + head_size / indices_per_word) u32 words: one fp32 scale followed by
 // head_size values quantized to 4 or 8 bits (4-bit: 8 values/u32, 8-bit: 4 values/u32).
 // The tensor dimension depends on the element type.
-// If kv_cache_quantization_bits is enabled with an invalid head_size (< 8 or non-power-of-2), this throws.
-// throws instead of silently falling back.
+// If kv_cache_quantization_bits is enabled with an invalid head_size (< 8 or non-power-of-2),
+// this throws instead of silently falling back.
 //
 // NOTE: this is the allocator side of a contract that ONNX shape inference cannot express
 // (it still reports the uncompressed head_size). The same formula lives in the WebGPU kernel
