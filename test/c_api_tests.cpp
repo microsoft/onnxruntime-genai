@@ -288,6 +288,23 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
+TEST(CAPITests, SequencesOutOfBoundsAccess) {
+  auto sequences = OgaSequences::Create();
+
+  std::vector<int32_t> tokens{100, 200, 300};
+  sequences->Append(tokens.data(), tokens.size());
+
+  ASSERT_EQ(sequences->Count(), 1u);
+  EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
+  EXPECT_NE(sequences->SequenceData(0), nullptr);
+
+  // Out-of-bounds indices must not read past the underlying storage.
+  EXPECT_EQ(sequences->SequenceCount(1), 0u);
+  EXPECT_EQ(sequences->SequenceData(1), nullptr);
+  EXPECT_EQ(sequences->SequenceCount(1000), 0u);
+  EXPECT_EQ(sequences->SequenceData(1000), nullptr);
+}
+
 TEST(CAPITests, MaxLength) {
   // Batch size 1 case
   std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
@@ -1122,6 +1139,77 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
+// Regression test: a top_k value larger than the model's vocab_size must be
+// rejected at generator creation time instead of triggering an out-of-bounds
+// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+TEST(CAPITests, TopKExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  // Chosen to sit well above typical vocabulary sizes (and above Phi-2's known
+  // vocab_size) so it reliably exceeds the model's vocab_size.
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test for the combined Top-K + Top-P sampling path.
+TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("top_p", 0.6f);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test: a GeneratorParams created from a model must keep that model
+// alive, so destroying the model handle before creating the generator does not
+// cause a use-after-free (GeneratorParams aliases the model-owned Config, and
+// Generator::Generator calls model.shared_from_this()).
+TEST(CAPITests, CreateGeneratorAfterDestroyModel) {
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(PHI2_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  ASSERT_NE(params, nullptr);
+
+  // Drop the external reference to the model by destroying its handle. Because
+  // params co-owns the underlying Model (and its Config) via shared ownership,
+  // the object itself stays alive, so dereferencing the raw model pointer below
+  // remains valid. This does NOT imply the handle is generally usable after
+  // OgaDestroyModel; it is valid here only because another owner keeps it alive.
+  OgaDestroyModel(model);
+
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+}
+
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
@@ -1242,6 +1330,70 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
+}
+
+// Regression test for the concurrency use-after-free / data race in the
+// adapter lifecycle. Prior to serializing Adapters ops with a mutex,
+// concurrent LoadAdapter/UnloadAdapter/SetActiveAdapter calls could race on
+// Adapter::ref_count_ and on the underlying unordered_map, producing lost
+// updates and a TOCTOU window where UnloadAdapter would erase an adapter
+// that another thread had just acquired.
+//
+// This test hammers the Adapters API from multiple threads. It is not
+// deterministic about which operations succeed (a concurrent UnloadAdapter
+// may legitimately throw "Adapter still in use" or "Adapter not found",
+// and a concurrent LoadAdapter of the same name may throw "already loaded")
+// but under TSAN/ASAN and in stress mode it reliably catches the pre-fix
+// races. Here we simply assert that no thread crashes or leaves the
+// Adapters map in an inconsistent state.
+TEST(CAPITests, AdaptersConcurrentLoadUnload) {
+  auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
+  auto adapters = OgaAdapters::Create(*model);
+
+  constexpr int kIterations = 50;
+  constexpr int kThreadsPerRole = 4;
+
+  const char* adapter_path_a = MODEL_PATH "multiple_adapters/adapter_0.onnx_adapter";
+  const char* adapter_path_b = MODEL_PATH "multiple_adapters/adapter_1.onnx_adapter";
+
+  auto swallow = [](auto&& fn) {
+    try {
+      fn();
+    } catch (const std::exception&) {
+      // Concurrent load/unload can legitimately throw (already loaded /
+      // not found / still in use). We only care that state stays consistent.
+    }
+  };
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadsPerRole * 2);
+
+  for (int t = 0; t < kThreadsPerRole; ++t) {
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->LoadAdapter(adapter_path_a, "adapter_a"); });
+        swallow([&] { adapters->LoadAdapter(adapter_path_b, "adapter_b"); });
+      }
+    });
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+        swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+      }
+    });
+  }
+
+  for (auto& th : threads) th.join();
+
+  // Drain any adapters left loaded so we end in a known state. These may
+  // throw "not found" depending on which thread won the last unload; that's
+  // fine, we just want to prove the API remains usable and consistent.
+  swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+  swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+
+  // After draining, a fresh load/unload cycle must still succeed cleanly.
+  adapters->LoadAdapter(adapter_path_a, "adapter_a");
+  adapters->UnloadAdapter("adapter_a");
 }
 #endif  // TEST_PHI2 && !USE_DML
 

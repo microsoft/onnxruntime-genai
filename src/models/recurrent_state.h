@@ -30,7 +30,8 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
 
-  // WebGPU cannot alias input/output buffers, so it uses separate past/present\n  // with swap. All other EPs share buffers for stable addresses.
+  // Mirrors past_present_share_buffer config: true means inputs alias outputs (same allocation,
+  // stable handles for graph capture). False uses separate past/present buffers with per-step swap.
   bool share_buffers_{false};
   size_t input_index_{~0U};
   size_t output_index_{~0U};
