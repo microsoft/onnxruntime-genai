@@ -39,9 +39,6 @@ void ValidateProposal(const SpeculativeDecodingStrategy::Proposal& proposal,
             " probability rows, expected " + std::to_string(proposal_length) + ".");
       return;
     case ProposalMode::kDeterministic:
-      if (!target_uses_greedy)
-        throw std::runtime_error(
-            "Deterministic speculative proposals do not support sampling verification yet.");
       if (!proposal.probs.empty())
         throw std::runtime_error(
             "Deterministic speculative proposals must not contain probability rows.");
@@ -375,7 +372,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       round_dirty_ = false;
     }
     total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
-    RunStandardDecodingStep(g);
+    RunStandardDecodingStep(g, proposal.mode == ProposalMode::kDeterministic ? &rng_ : nullptr);
     return;
   }
 
@@ -552,55 +549,69 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   int n_evaluated = 0;
   int32_t final_token = -1;
 
-  // Sampling-only scratch, lazily sized. Densification expands one truncated row into a full vocab
-  // vector; correction_buf holds the built correction distribution. Greedy touches neither.
+  // Draft-sampling scratch, lazily sized. Densification expands one truncated row into a full
+  // vocab vector; correction_buf holds the built correction distribution.
   std::vector<float> dense_row;
   std::vector<float> correction_buf;
 
-  for (int i = 0; i < K; i++) {
-    n_evaluated++;
-    bool accepted = false;
-    const TargetTokenSelection& target =
-        (i == 0) ? pos0_selection : target_selections[static_cast<size_t>(i - 1)];
-    if (!proposal.UsesDraftProbabilities()) {
-      accepted = (target.greedy_token == proposal.tokens[i]);
-    } else {
-      const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
-      const float p_d = proposal.probs[i][proposal.tokens[i]];
-      accepted = (uni(rng_) < ComputeAcceptProb(p_t, p_d));
+  if (!target_uses_greedy && proposal.mode == ProposalMode::kDeterministic) {
+    const DeterministicProposalVerification result = VerifyDeterministicProposal(
+        proposal.tokens, pos0_selection, target_selections, rng_);
+    n_direct = result.accepted_count;
+    n_evaluated = result.evaluated_count;
+    final_token = result.final_token;
+    if (result.used_bonus)
+      bonuses_++;
+    else
+      corrections_++;
+  } else {
+    for (int i = 0; i < K; i++) {
+      n_evaluated++;
+      bool accepted = false;
+      const TargetTokenSelection& target =
+          (i == 0) ? pos0_selection : target_selections[static_cast<size_t>(i - 1)];
+      if (target_uses_greedy) {
+        accepted = (target.greedy_token == proposal.tokens[i]);
+      } else {
+        const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
+        const float p_d = proposal.probs[i][proposal.tokens[i]];
+        accepted = (uni(rng_) < ComputeAcceptProb(p_t, p_d));
+      }
+
+      if (accepted) {
+        n_direct++;
+      } else {
+        if (target_uses_greedy) {
+          final_token = target.greedy_token;
+        } else {
+          std::vector<float>& dense_t =
+              DensifyTargetTokenSelection(target, vocab_size, dense_row);
+          if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
+          BuildCorrectionDistribution(
+              {dense_t.data(), static_cast<size_t>(vocab_size)},
+              {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
+              {correction_buf.data(), static_cast<size_t>(vocab_size)});
+          std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
+          final_token = dist(rng_);
+        }
+        corrections_++;
+        break;
+      }
     }
 
-    if (accepted) {
-      n_direct++;
-    } else {
-      if (!proposal.UsesDraftProbabilities()) {
-        final_token = target.greedy_token;
+    if (n_direct == K) {
+      const TargetTokenSelection& bonus_target =
+          target_selections[static_cast<size_t>(K - 1)];
+      if (target_uses_greedy) {
+        final_token = bonus_target.greedy_token;
       } else {
-        std::vector<float>& dense_t =
-            DensifyTargetTokenSelection(target, vocab_size, dense_row);
-        if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-        BuildCorrectionDistribution(
-            {dense_t.data(), static_cast<size_t>(vocab_size)},
-            {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-            {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
+        std::vector<float>& dense_last =
+            DensifyTargetTokenSelection(bonus_target, vocab_size, dense_row);
+        std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
         final_token = dist(rng_);
       }
-      corrections_++;
-      break;
+      bonuses_++;
     }
-  }
-
-  if (n_direct == K) {
-    if (!proposal.UsesDraftProbabilities()) {
-      final_token = target_selections[static_cast<size_t>(K - 1)].greedy_token;
-    } else {
-      std::vector<float>& dense_last = DensifyTargetTokenSelection(
-          target_selections[static_cast<size_t>(K - 1)], vocab_size, dense_row);
-      std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
-      final_token = dist(rng_);
-    }
-    bonuses_++;
   }
 
   // Queue the committed tokens (n_direct accepted + 1 correction/bonus) for DrainOne to emit one

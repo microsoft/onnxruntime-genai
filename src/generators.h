@@ -17,6 +17,7 @@
 #include <numeric>
 #include <optional>
 #include <queue>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -167,7 +168,7 @@ struct Generator : LeakChecked<Generator> {
   friend struct StandardDecodingStrategy;
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
-  friend void RunStandardDecodingStep(Generator& g);
+  friend void RunStandardDecodingStep(Generator& g, std::mt19937* sampling_rng);
 };
 
 struct OrtGlobals {

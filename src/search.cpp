@@ -188,8 +188,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist, gen_));
   }
   if (!done_)
     AppendNextTokensToSequences();
@@ -208,8 +207,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     // top_k=0 -> pure nucleus path.
     ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist, gen_));
   }
   if (!done_)
     AppendNextTokensToSequences();
@@ -227,8 +225,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
 
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist, gen_));
   }
   if (!done_)
     AppendNextTokensToSequences();

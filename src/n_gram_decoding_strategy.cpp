@@ -22,8 +22,6 @@ int ValidateAndGetNGramSize(Generator& g) {
     throw std::runtime_error("N-gram decoding requires batch_size=1 in this release.");
   if (params.search.num_beams != 1)
     throw std::runtime_error("N-gram decoding does not support beam search in this release.");
-  if (!g.IsGreedySampling())
-    throw std::runtime_error("N-gram decoding supports greedy decoding only in this release.");
   if (g.guidance_logits_processor_)
     throw std::runtime_error("N-gram decoding does not support guidance in this release.");
   if (!ModelType::IsLLM(model.type) || ModelType::IsLFM2(model.type) ||

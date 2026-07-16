@@ -4,12 +4,13 @@
 
 #include "generators.h"
 #include "logging.h"
+#include "sampling_distribution.h"
 #include "search.h"
 #include "constrained_logits_processor.h"
 
 namespace Generators {
 
-void RunStandardDecodingStep(Generator& g) {
+void RunStandardDecodingStep(Generator& g, std::mt19937* sampling_rng) {
   if (g.search_->GetSequenceLength() == 0 && !g.computed_logits_)
     throw std::runtime_error(
         "GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or "
@@ -41,6 +42,14 @@ void RunStandardDecodingStep(Generator& g) {
   }
 
   g.last_action_ = Generator::Action::generated;
+  if (sampling_rng && g.sampling_method_ != Generator::SamplingMethod::kGreedy) {
+    SampledCategorical categorical;
+    const auto scores = g.search_->GetLogits().CopyDeviceToCpu();
+    ComputeSampledCategorical(scores, search.top_k, search.top_p, search.temperature, categorical);
+    g.search_->CommitToken(SampleCategoricalToken(categorical, *sampling_rng));
+    return;
+  }
+
   switch (g.sampling_method_) {
     case Generator::SamplingMethod::kGreedy:
       g.search_->SelectTop();

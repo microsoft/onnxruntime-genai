@@ -29,11 +29,9 @@ def _generator(model_path, prompt, max_length, *, ngram_size=0,
                max_draft_tokens=4, **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=max_length,
-        **search_options,
-    )
+    options = {"do_sample": False, "max_length": max_length}
+    options.update(search_options)
+    params.set_search_options(**options)
     if ngram_size:
         params.set_speculative_options(
             ngram_size=ngram_size,
@@ -177,15 +175,79 @@ class TestNGramDecoding:
         assert result[:len(committed)] == committed
         assert result[len(committed):len(committed) + len(appended)] == appended
 
-    def test_sampling_is_rejected(self, qwen3_model_path):
-        model = og.Model(qwen3_model_path)
-        params = og.GeneratorParams(model)
-        params.set_search_options(
-            do_sample=True,
-            top_k=20,
-            temperature=0.6,
-            max_length=len(_PROMPT) + 4,
+    def test_sampling_lookup_miss_uses_canonical_rng(self, qwen3_model_path):
+        max_length = len(_PROMPT) + 4
+        search_options = {
+            "do_sample": True,
+            "top_k": 0,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 42,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _PROMPT, max_length, **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _PROMPT,
+            max_length,
+            ngram_size=16,
+            **search_options,
         )
-        params.set_speculative_options(ngram_size=3)
-        with pytest.raises(Exception, match="greedy"):
-            og.Generator(model, params)
+
+        assert actual == expected
+        assert stats["rounds"] == 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"top_k": 20, "temperature": 0.6},
+            {"top_k": 0, "top_p": 0.8, "temperature": 0.9},
+            {"top_k": 20, "top_p": 0.8, "temperature": 0.7,
+             "repetition_penalty": 1.1},
+            {"top_k": 20, "temperature": 0.7,
+             "min_length": len(_REPETITIVE_PROMPT) + 8},
+        ],
+    )
+    def test_sampling_matches_standard_with_fixed_seed(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        options = {
+            "do_sample": True,
+            "random_seed": 1234,
+            **search_options,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **options,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+
+    def test_sampling_is_deterministic_for_fixed_seed(self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        options = {
+            "do_sample": True,
+            "top_k": 20,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 5678,
+        }
+
+        first, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, **options)
+        second, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, **options)
+
+        assert first == second

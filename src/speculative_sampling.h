@@ -50,6 +50,41 @@ inline float GetTargetTokenProbability(const TargetTokenSelection& selection, in
   return 0.0f;
 }
 
+inline int32_t SampleTargetToken(const TargetTokenSelection& selection, std::mt19937& rng) {
+  return SampleCategoricalToken(selection.indices, selection.probs, rng);
+}
+
+struct DeterministicProposalVerification {
+  int accepted_count{};
+  int evaluated_count{};
+  int32_t final_token{-1};
+  bool used_bonus{};
+};
+
+inline DeterministicProposalVerification VerifyDeterministicProposal(
+    std::span<const int32_t> proposal_tokens,
+    const TargetTokenSelection& first_target,
+    std::span<const TargetTokenSelection> subsequent_targets,
+    std::mt19937& rng) {
+  if (proposal_tokens.empty() || subsequent_targets.size() < proposal_tokens.size())
+    throw std::invalid_argument(
+        "Deterministic proposal verification requires one proposal and next-target row per token.");
+
+  DeterministicProposalVerification result;
+  for (size_t i = 0; i < proposal_tokens.size(); i++) {
+    const TargetTokenSelection& target = i == 0 ? first_target : subsequent_targets[i - 1];
+    result.evaluated_count++;
+    result.final_token = SampleTargetToken(target, rng);
+    if (result.final_token != proposal_tokens[i])
+      return result;
+    result.accepted_count++;
+  }
+
+  result.final_token = SampleTargetToken(subsequent_targets[proposal_tokens.size() - 1], rng);
+  result.used_bonus = true;
+  return result;
+}
+
 inline std::vector<float>& DensifyTargetTokenSelection(const TargetTokenSelection& selection,
                                                        int vocab_size,
                                                        std::vector<float>& dense) {

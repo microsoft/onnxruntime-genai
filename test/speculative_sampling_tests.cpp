@@ -229,6 +229,84 @@ TEST(SpeculativeSamplingTest, TargetSamplingSelectionDensifiesSparseCategorical)
   EXPECT_NEAR(std::accumulate(dense.begin(), dense.end(), 0.0f), 1.0f, 1e-6f);
 }
 
+TEST(SpeculativeSamplingTest, DeterministicProposalAcceptsMatchingSampleAndDrawsBonus) {
+  TargetTokenSelection first;
+  first.indices = {7};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 9);
+  EXPECT_TRUE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalMismatchCommitsSampledTarget) {
+  TargetTokenSelection first;
+  first.indices = {5};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 0);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 5);
+  EXPECT_FALSE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalStopsDrawingAfterFirstMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1, 2};
+  first.probs = {0.4f, 0.6f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {3, 4};
+  subsequent[0].probs = {0.3f, 0.7f};
+  subsequent[1].indices = {5, 6};
+  subsequent[1].probs = {0.2f, 0.8f};
+  std::array<int32_t, 2> proposal{99, 4};
+  std::mt19937 actual_rng{1234};
+  std::mt19937 expected_rng{1234};
+  SampleTargetToken(first, expected_rng);
+
+  const auto result =
+      VerifyDeterministicProposal(proposal, first, subsequent, actual_rng);
+
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_FALSE(result.used_bonus);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalDoesNotDrawBonusAfterLaterMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 9};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 2);
+  EXPECT_EQ(result.final_token, 2);
+  EXPECT_FALSE(result.used_bonus);
+}
+
 // ---------------------------------------------------------------------------
 // Boundary settings for ComputeSampledCategorical. Standard decode (search.cpp's
 // SampleTop*) and speculative decoding both build their truncated distribution
