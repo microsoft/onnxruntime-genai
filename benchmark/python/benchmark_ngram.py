@@ -4,9 +4,11 @@
 # --------------------------------------------------------------------------
 """Benchmark n-gram speculative decoding locally or in ep-cert.
 
-Compares standard greedy decoding with model-free n-gram speculative decoding
-on identical prompts. MT-Bench measures broad speed behavior, while optional
-GSM8K and HumanEval suites add task-level accuracy and pass@1 measurements.
+Compares standard decoding with model-free n-gram speculative decoding on
+identical prompts. Greedy decoding is the default; sampling can be selected
+with fixed seeds and configurable search controls. MT-Bench measures broad
+speed behavior, while optional GSM8K and HumanEval suites add task-level
+accuracy and pass@1 measurements.
 The script reuses model resolution, chat-template handling, and local-build
 import logic from benchmark_speculative.py, but requires only one target model.
 
@@ -24,6 +26,11 @@ Examples:
     python benchmark_ngram.py --model 4b \
         --suites mtbench,gsm8k,humaneval --gsm8k-problems 50 \
         --humaneval-problems 20 --max-new-tokens 512 --allow-code-execution
+
+    # Exercise sampling with two fixed seeds and verify reproducibility.
+    python benchmark_ngram.py --model 4b --builtin --modes sampling \
+        --sampling-seeds 0,1 --temperature 0.7 --top-k 20 --top-p 0.95 \
+        --repetition-penalty 1.0 --reps 2
 
 Run ``benchmark_ngram.py -h`` for all options.
 """
@@ -134,6 +141,19 @@ def parse_suites(parser, value):
             f"choose from {', '.join(sorted(SUPPORTED_SUITES))}"
         )
     return list(dict.fromkeys(suites))
+
+
+def parse_modes(parser, value):
+    modes = [item.strip().lower() for item in value.split(",") if item.strip()]
+    if not modes:
+        parser.error("--modes must contain at least one value")
+    unknown = sorted(set(modes) - {"greedy", "sampling"})
+    if unknown:
+        parser.error(
+            f"--modes contains unsupported values: {', '.join(unknown)}; "
+            "choose from greedy,sampling"
+        )
+    return list(dict.fromkeys(modes))
 
 
 def extract_gsm8k_answer(text):
@@ -341,15 +361,36 @@ def score_completion(item, token_ids, timeout, cache, decode):
     return result
 
 
-def run_once(og, model, token_ids, max_new_tokens, ngram_size=0, max_draft_tokens=0):
-    """Run one greedy generation and return timing, output, and native stats."""
+def run_once(
+    og,
+    model,
+    token_ids,
+    max_new_tokens,
+    mode="greedy",
+    seed=0,
+    sampling_options=None,
+    ngram_size=0,
+    max_draft_tokens=0,
+):
+    """Run one generation and return timing, output, and native stats."""
     import numpy as np
 
     params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=len(token_ids) + max_new_tokens,
-    )
+    search_options = {
+        "do_sample": mode == "sampling",
+        "max_length": len(token_ids) + max_new_tokens,
+    }
+    if mode == "sampling":
+        sampling_options = sampling_options or {}
+        search_options.update(
+            temperature=sampling_options["temperature"],
+            top_k=sampling_options["top_k"],
+            top_p=sampling_options["top_p"],
+            repetition_penalty=sampling_options["repetition_penalty"],
+            min_length=len(token_ids) + sampling_options["min_new_tokens"],
+            random_seed=seed,
+        )
+    params.set_search_options(**search_options)
     if ngram_size:
         params.set_speculative_options(
             ngram_size=ngram_size,
@@ -409,6 +450,15 @@ CSV_COLUMNS = [
     "device",
     "genai_version",
     "python_version",
+    "mode",
+    "seed",
+    "temperature",
+    "top_k",
+    "top_p",
+    "repetition_penalty",
+    "min_new_tokens",
+    "reproducibility_checked",
+    "reproducible",
     "task",
     "subcategory",
     "question_id",
@@ -538,9 +588,15 @@ def format_quality_with_reference(quality):
     return f"{result} expected={reference}" if reference else result
 
 
+def format_seed(mode, seed):
+    return str(seed) if mode == "sampling" else "-"
+
+
 def print_detailed_run(item, rep, baseline, row):
+    seed_text = f" seed={row['seed']}" if row["mode"] == "sampling" else ""
     print(
-        f"  {item['task']}/{item['question_id']} n={row['ngram_size']} "
+        f"  {item['task']}/{item['question_id']} mode={row['mode']}{seed_text} "
+        f"n={row['ngram_size']} "
         f"K={row['K']} rep={rep + 1}"
     )
     print(
@@ -597,7 +653,9 @@ def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_
     exact = sum(bool(row["exact_match"]) for row in config_rows)
     regressions = sum(row["speedup_decode"] < 1.0 for row in config_rows)
     print(
-        f"\n  [progress {completed}/{total} n={ngram_size} K={max_draft_tokens}] "
+        f"\n  [progress {completed}/{total} mode={config_rows[0]['mode']} "
+        f"seed={format_seed(config_rows[0]['mode'], config_rows[0]['seed'])} "
+        f"n={ngram_size} K={max_draft_tokens}] "
         f"decode speedup median={statistics.median(speedups):.2f}x "
         f"p10={percentile(speedups, 10):.2f}x "
         f"p90={percentile(speedups, 90):.2f}x; "
@@ -636,7 +694,7 @@ def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_
     print(flush=True)
 
 
-def print_summary(rows, ngram_sizes, draft_lengths, context):
+def print_summary_group(rows, ngram_sizes, draft_lengths, context):
     tasks = list(dict.fromkeys(
         row["task"] for row in rows if row["decoder"] == "ngram"
     ))
@@ -667,6 +725,7 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
     print(
         f"model={context['model']}  EP={context['provider']}  "
         f"device={context['device'] or '-'}  prompts={context['prompts']}  "
+        f"mode={context['mode']}  seed={format_seed(context['mode'], context['seed'])}  "
         f"reps={context['reps']}  max_new={context['max_new']}  "
         f"peak_process_rss={context['peak_rss']:.2f} GiB"
     )
@@ -800,10 +859,16 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
             )
 
     print("\n* Input-guided task: prompt reuse can increase n-gram proposal coverage.")
-    print(
-        "Exact measures bit-identical greedy output. Batched verification can diverge "
-        "from sequential greedy due to floating-point accumulation order."
-    )
+    if context["mode"] == "greedy":
+        print(
+            "Exact measures bit-identical greedy output. Batched verification can diverge "
+            "from sequential greedy due to floating-point accumulation order."
+        )
+    else:
+        print(
+            "Exact/match compare paired fixed-seed sampling paths for diagnostics only; "
+            "different valid samples are not a correctness failure."
+        )
 
     quality_tasks = list(dict.fromkeys(
         row["task"] for row in rows
@@ -872,6 +937,25 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
     print("=" * width)
 
 
+def print_summary(rows, ngram_sizes, draft_lengths, context):
+    groups = list(dict.fromkeys(
+        (row["mode"], row["seed"])
+        for row in rows
+        if row["decoder"] == "ngram"
+    ))
+    for mode, seed in groups:
+        selected = [
+            row for row in rows
+            if row["mode"] == mode and row["seed"] == seed
+        ]
+        print_summary_group(
+            selected,
+            ngram_sizes,
+            draft_lengths,
+            {**context, "mode": mode, "seed": seed},
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -905,6 +989,26 @@ def main():
                         help="measured repetitions per prompt/configuration")
     parser.add_argument("--warmup", type=int, default=1,
                         help="warmup generations per decoder configuration")
+    parser.add_argument(
+        "--modes",
+        default="greedy",
+        help="comma-separated decoding modes: greedy,sampling",
+    )
+    parser.add_argument(
+        "--sampling-seeds",
+        default="0",
+        help="comma-separated fixed seeds; used only when sampling is selected",
+    )
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="sampling temperature")
+    parser.add_argument("--top-k", type=int, default=20,
+                        help="sampling top-k; 0 disables top-k filtering")
+    parser.add_argument("--top-p", type=float, default=0.95,
+                        help="sampling nucleus probability")
+    parser.add_argument("--repetition-penalty", type=float, default=1.0,
+                        help="sampling repetition penalty")
+    parser.add_argument("--min-new-tokens", type=int, default=0,
+                        help="minimum new tokens before EOS is allowed in sampling mode")
     parser.add_argument(
         "--suites",
         default="mtbench",
@@ -1047,6 +1151,24 @@ def main():
         parser.error("--humaneval-timeout must be positive")
     if args.progress_every < 0:
         parser.error("--progress-every cannot be negative")
+    modes = parse_modes(parser, args.modes)
+    sampling_seeds = []
+    if "sampling" in modes:
+        sampling_seeds = parse_int_list(
+            parser, args.sampling_seeds, "--sampling-seeds", 0, 2**31 - 1
+        )
+        if args.temperature <= 0:
+            parser.error("--temperature must be positive")
+        if args.top_k < 0:
+            parser.error("--top-k cannot be negative")
+        if args.top_k == 1:
+            parser.error("--top-k 1 is greedy decoding; use --modes greedy instead")
+        if not 0 < args.top_p <= 1:
+            parser.error("--top-p must be in (0, 1]")
+        if args.repetition_penalty <= 0:
+            parser.error("--repetition-penalty must be positive")
+        if not 0 <= args.min_new_tokens <= args.max_new_tokens:
+            parser.error("--min-new-tokens must be in [0, --max-new-tokens]")
     suites = parse_suites(parser, args.suites)
     if "humaneval" in suites and not args.allow_code_execution:
         parser.error(
@@ -1146,13 +1268,32 @@ def main():
         "genai_version": getattr(og, "__version__", ""),
         "python_version": sys.version.split()[0],
     }
+    sampling_options = {
+        "temperature": args.temperature,
+        "top_k": args.top_k,
+        "top_p": args.top_p,
+        "repetition_penalty": args.repetition_penalty,
+        "min_new_tokens": args.min_new_tokens,
+    }
+    run_configs = []
+    if "greedy" in modes:
+        run_configs.append(("greedy", 0))
+    if "sampling" in modes:
+        run_configs.extend(("sampling", seed) for seed in sampling_seeds)
 
     print(f"onnxruntime_genai={og.__file__}")
     print(f"model={model_path}")
     print(
         f"suites={suites}  prompts={len(prompt_items)}  ngram_sizes={ngram_sizes}  "
-        f"K={draft_lengths}  max_new={args.max_new_tokens}  reps={args.reps}"
+        f"K={draft_lengths}  modes={modes}  sampling_seeds={sampling_seeds}  "
+        f"max_new={args.max_new_tokens}  reps={args.reps}"
     )
+    if "sampling" in modes:
+        print(
+            f"sampling: temperature={args.temperature} top_k={args.top_k} "
+            f"top_p={args.top_p} repetition_penalty={args.repetition_penalty} "
+            f"min_new_tokens={args.min_new_tokens}"
+        )
     print(
         f"execution_provider={provider or 'cpu'}  device={args.device or '-'}  "
         f"device_dir={device_dir or '-'}  use_winml={use_winml}"
@@ -1195,331 +1336,442 @@ def main():
             "options. Rebuild this branch before running the benchmark."
         ) from error
 
-    if args.warmup:
-        print("Warming standard decoding ...", flush=True)
-        for _ in range(args.warmup):
-            run_once(og, model, encoded[0], min(16, args.max_new_tokens))
-
     rows = []
     baselines = {}
     quality_cache = {}
     benchmark_start = time.perf_counter()
+    warmup_tokens = min(
+        args.max_new_tokens,
+        max(16, args.min_new_tokens if "sampling" in modes else 0),
+    )
 
-    for prompt_index, (item, token_ids) in enumerate(zip(prompt_items, encoded)):
-        decode_rates = []
-        e2e_rates = []
-        prefill_times = []
-        decode_times = []
-        reference_tail = None
-        baseline_quality = None
-        for rep in range(args.reps):
-            result = run_once(
-                og, model, token_ids, args.max_new_tokens
-            )
-            decode_rate = (
-                result["new_tokens"] / result["decode_s"]
-                if result["decode_s"] else 0.0
-            )
-            e2e_time = result["prefill_s"] + result["decode_s"]
-            e2e_rate = result["new_tokens"] / e2e_time if e2e_time else 0.0
-            decode_rates.append(decode_rate)
-            e2e_rates.append(e2e_rate)
-            prefill_times.append(result["prefill_s"])
-            decode_times.append(result["decode_s"])
-            if reference_tail is None:
-                reference_tail = result["tail"]
-            elif reference_tail != result["tail"]:
-                raise RuntimeError(
-                    f"standard greedy output changed across repetitions for "
-                    f"prompt {prompt_index}"
-                )
-            quality = score_completion(
-                item,
-                result["tail"],
-                args.humaneval_timeout,
-                quality_cache,
-                tokenizer.decode,
-            )
-            baseline_quality = quality
-            rows.append({
-                **run_metadata,
-                "task": item["task"],
-                "subcategory": item["subcategory"],
-                "question_id": item["question_id"],
-                **quality,
-                "quality_transition": "",
-                "prompt_id": prompt_index,
-                "rep": rep,
-                "decoder": "standard",
-                "ngram_size": "",
-                "K": "",
-                "prompt_tokens": len(token_ids),
-                "new_tokens": result["new_tokens"],
-                "prefill_s": round(result["prefill_s"], 6),
-                "decode_s": round(result["decode_s"], 6),
-                "decode_tok_s": round(decode_rate, 4),
-                "e2e_tok_s": round(e2e_rate, 4),
-                "speedup_decode": "",
-                "speedup_e2e": "",
-                "exact_match": "",
-                "token_match_rate": "",
-                "first_difference": "",
-                "divergence_type": "",
-                "rounds": "",
-                "draft_proposed": "",
-                "draft_evaluated": "",
-                "draft_accepted": "",
-                "acceptance_rate": "",
-                "mean_accepted_tokens_per_round": "",
-                "mean_emitted_tokens_per_round": "",
-                "corrections": "",
-                "bonuses": "",
-                "draft_forward_passes": "",
-                "target_forward_passes": "",
-                "target_passes_per_token": "",
-                "total_draft_ms": "",
-                "total_target_ms": "",
-                "observed_speedup_estimate": "",
-                "peak_process_rss_gib": "",
-            })
-            if args.log_level == "detailed":
-                print(
-                    f"  [baseline {prompt_index + 1}/{len(prompt_items)}] "
-                    f"{item['task']}/{item['question_id']} rep={rep + 1}: "
-                    f"decode={decode_rate:.2f} tok/s e2e={e2e_rate:.2f} tok/s "
-                    f"tokens={result['new_tokens']} prefill={result['prefill_s']:.4f}s "
-                    f"decode_time={result['decode_s']:.4f}s "
-                    f"quality={format_quality_with_reference(quality)}",
-                    flush=True,
-                )
-        baselines[prompt_index] = {
-            "decode_rate": statistics.median(decode_rates),
-            "e2e_rate": statistics.median(e2e_rates),
-            "prefill_s": statistics.median(prefill_times),
-            "decode_s": statistics.median(decode_times),
-            "tail": reference_tail,
-            "quality": baseline_quality,
-        }
-        if args.log_level == "progress":
+    for mode, seed in run_configs:
+        seed_value = seed if mode == "sampling" else ""
+        if args.warmup:
             print(
-                f"[baseline {prompt_index + 1}/{len(prompt_items)}] "
-                f"{item['task']}/{item['question_id']}: "
-                f"decode={baselines[prompt_index]['decode_rate']:.2f} tok/s "
-                f"e2e={baselines[prompt_index]['e2e_rate']:.2f} tok/s "
-                f"tokens={len(reference_tail)} "
-                f"quality={format_quality_with_reference(baseline_quality)}",
+                f"Warming standard {mode} decoding"
+                f"{f' (seed={seed})' if mode == 'sampling' else ''} ...",
                 flush=True,
             )
-        write_results(rows, csv_path, json_path)
+            for _ in range(args.warmup):
+                run_once(
+                    og,
+                    model,
+                    encoded[0],
+                    warmup_tokens,
+                    mode=mode,
+                    seed=seed,
+                    sampling_options=sampling_options,
+                )
 
-    total_configs = len(ngram_sizes) * len(draft_lengths)
-    config_index = 0
-    for ngram_size in ngram_sizes:
-        for max_draft_tokens in draft_lengths:
-            config_rows = []
-            config_index += 1
-            print(
-                f"\n[config {config_index}/{total_configs}] "
-                f"n={ngram_size}, K={max_draft_tokens}",
-                flush=True,
-            )
-            if args.warmup:
-                for _ in range(args.warmup):
-                    run_once(
-                        og,
-                        model,
-                        encoded[0],
-                        min(16, args.max_new_tokens),
-                        ngram_size,
-                        max_draft_tokens,
+        for prompt_index, (item, token_ids) in enumerate(zip(prompt_items, encoded)):
+            decode_rates = []
+            e2e_rates = []
+            prefill_times = []
+            decode_times = []
+            reference_tail = None
+            baseline_quality = None
+            for rep in range(args.reps):
+                result = run_once(
+                    og,
+                    model,
+                    token_ids,
+                    args.max_new_tokens,
+                    mode=mode,
+                    seed=seed,
+                    sampling_options=sampling_options,
+                )
+                decode_rate = (
+                    result["new_tokens"] / result["decode_s"]
+                    if result["decode_s"] else 0.0
+                )
+                e2e_time = result["prefill_s"] + result["decode_s"]
+                e2e_rate = result["new_tokens"] / e2e_time if e2e_time else 0.0
+                decode_rates.append(decode_rate)
+                e2e_rates.append(e2e_rate)
+                prefill_times.append(result["prefill_s"])
+                decode_times.append(result["decode_s"])
+                if reference_tail is None:
+                    reference_tail = result["tail"]
+                elif reference_tail != result["tail"]:
+                    raise RuntimeError(
+                        f"standard {mode} output was not reproducible for "
+                        f"prompt {prompt_index}, seed {seed}"
                     )
-
-            for prompt_index, (item, token_ids) in enumerate(
-                zip(prompt_items, encoded)
-            ):
-                baseline = baselines[prompt_index]
-                measured_speedups = []
-                measured_acceptance = []
-                measured_exact = []
-                prompt_rows = []
-                for rep in range(args.reps):
-                    result = run_once(
-                        og,
-                        model,
-                        token_ids,
-                        args.max_new_tokens,
-                        ngram_size,
-                        max_draft_tokens,
-                    )
-                    stats = result["stats"]
-                    decode_rate = (
-                        result["new_tokens"] / result["decode_s"]
-                        if result["decode_s"] else 0.0
-                    )
-                    e2e_time = result["prefill_s"] + result["decode_s"]
-                    e2e_rate = result["new_tokens"] / e2e_time if e2e_time else 0.0
-                    speedup_decode = (
-                        decode_rate / baseline["decode_rate"]
-                        if baseline["decode_rate"] else 0.0
-                    )
-                    speedup_e2e = (
-                        e2e_rate / baseline["e2e_rate"]
-                        if baseline["e2e_rate"] else 0.0
-                    )
-                    comparison = compare_tokens(
-                        baseline["tail"], result["tail"]
-                    )
-                    quality = score_completion(
-                        item,
-                        result["tail"],
-                        args.humaneval_timeout,
-                        quality_cache,
-                        tokenizer.decode,
-                    )
-                    quality_transition = classify_quality_transition(
-                        baseline["quality"], quality
-                    )
-                    divergence_type = classify_divergence(
-                        comparison, len(baseline["tail"]), len(result["tail"])
-                    )
-                    rounds = int(stats.get("rounds", 0))
-                    proposed = int(stats.get("draft_tokens_proposed", 0))
-                    evaluated = int(stats.get("draft_tokens_evaluated", 0))
-                    accepted = int(stats.get("draft_tokens_accepted", 0))
-                    target_passes = int(stats.get("target_forward_passes", 0))
-                    mean_accepted = accepted / rounds if rounds else 0.0
-                    target_passes_per_token = (
-                        target_passes / result["new_tokens"]
-                        if result["new_tokens"] else 0.0
-                    )
-
-                    measured_speedups.append(speedup_decode)
-                    measured_acceptance.append(
-                        float(stats.get("acceptance_rate", 0.0))
-                    )
-                    measured_exact.append(comparison["exact_match"])
-                    row = {
-                        **run_metadata,
-                        "task": item["task"],
-                        "subcategory": item["subcategory"],
-                        "question_id": item["question_id"],
-                        **quality,
-                        "quality_transition": quality_transition,
-                        "prompt_id": prompt_index,
-                        "rep": rep,
-                        "decoder": "ngram",
-                        "ngram_size": ngram_size,
-                        "K": max_draft_tokens,
-                        "prompt_tokens": len(token_ids),
-                        "new_tokens": result["new_tokens"],
-                        "prefill_s": round(result["prefill_s"], 6),
-                        "decode_s": round(result["decode_s"], 6),
-                        "decode_tok_s": round(decode_rate, 4),
-                        "e2e_tok_s": round(e2e_rate, 4),
-                        "speedup_decode": round(speedup_decode, 4),
-                        "speedup_e2e": round(speedup_e2e, 4),
-                        "exact_match": comparison["exact_match"],
-                        "token_match_rate": round(
-                            comparison["token_match_rate"], 6
-                        ),
-                        "first_difference": comparison["first_difference"],
-                        "divergence_type": divergence_type,
-                        "rounds": rounds,
-                        "draft_proposed": proposed,
-                        "draft_evaluated": evaluated,
-                        "draft_accepted": accepted,
-                        "acceptance_rate": round(
-                            float(stats.get("acceptance_rate", 0.0)), 6
-                        ),
-                        "mean_accepted_tokens_per_round": round(
-                            mean_accepted, 6
-                        ),
-                        "mean_emitted_tokens_per_round": round(
-                            float(stats.get(
-                                "mean_emitted_tokens_per_round",
-                                result["new_tokens"] / rounds if rounds else 0.0,
-                            )),
-                            6,
-                        ),
-                        "corrections": int(stats.get("correction_tokens", 0)),
-                        "bonuses": int(stats.get("bonus_tokens", 0)),
-                        "draft_forward_passes": int(
-                            stats.get("draft_forward_passes", 0)
-                        ),
-                        "target_forward_passes": target_passes,
-                        "target_passes_per_token": round(
-                            target_passes_per_token, 6
-                        ),
-                        "total_draft_ms": round(
-                            float(stats.get("total_draft_ms", 0.0)), 6
-                        ),
-                        "total_target_ms": round(
-                            float(stats.get("total_target_ms", 0.0)), 6
-                        ),
-                        "observed_speedup_estimate": round(
-                            float(stats.get("observed_speedup", 0.0)), 6
-                        ),
-                        "peak_process_rss_gib": "",
-                    }
-                    rows.append(row)
-                    config_rows.append(row)
-                    prompt_rows.append(row)
-                    if args.log_level == "detailed":
-                        print_detailed_run(item, rep, baseline, row)
-                    if (
-                        args.log_completions_on_mismatch
-                        and not comparison["exact_match"]
-                    ):
-                        print_mismatch_completions(
-                            tokenizer, baseline["tail"], result["tail"]
-                        )
-
-                if args.log_level in ("progress", "detailed"):
-                    representative = prompt_rows[0]
+                quality = score_completion(
+                    item,
+                    result["tail"],
+                    args.humaneval_timeout,
+                    quality_cache,
+                    tokenizer.decode,
+                )
+                baseline_quality = quality
+                rows.append({
+                    **run_metadata,
+                    "mode": mode,
+                    "seed": seed_value,
+                    "temperature": args.temperature if mode == "sampling" else "",
+                    "top_k": args.top_k if mode == "sampling" else "",
+                    "top_p": args.top_p if mode == "sampling" else "",
+                    "repetition_penalty": (
+                        args.repetition_penalty if mode == "sampling" else ""
+                    ),
+                    "min_new_tokens": args.min_new_tokens if mode == "sampling" else "",
+                    "reproducibility_checked": mode == "sampling",
+                    "reproducible": True if mode == "sampling" else "",
+                    "task": item["task"],
+                    "subcategory": item["subcategory"],
+                    "question_id": item["question_id"],
+                    **quality,
+                    "quality_transition": "",
+                    "prompt_id": prompt_index,
+                    "rep": rep,
+                    "decoder": "standard",
+                    "ngram_size": "",
+                    "K": "",
+                    "prompt_tokens": len(token_ids),
+                    "new_tokens": result["new_tokens"],
+                    "prefill_s": round(result["prefill_s"], 6),
+                    "decode_s": round(result["decode_s"], 6),
+                    "decode_tok_s": round(decode_rate, 4),
+                    "e2e_tok_s": round(e2e_rate, 4),
+                    "speedup_decode": "",
+                    "speedup_e2e": "",
+                    "exact_match": "",
+                    "token_match_rate": "",
+                    "first_difference": "",
+                    "divergence_type": "",
+                    "rounds": "",
+                    "draft_proposed": "",
+                    "draft_evaluated": "",
+                    "draft_accepted": "",
+                    "acceptance_rate": "",
+                    "mean_accepted_tokens_per_round": "",
+                    "mean_emitted_tokens_per_round": "",
+                    "corrections": "",
+                    "bonuses": "",
+                    "draft_forward_passes": "",
+                    "target_forward_passes": "",
+                    "target_passes_per_token": "",
+                    "total_draft_ms": "",
+                    "total_target_ms": "",
+                    "observed_speedup_estimate": "",
+                    "peak_process_rss_gib": "",
+                })
+                if args.log_level == "detailed":
                     print(
-                        f"  {item['task']}/{item['question_id']}: "
-                        f"decode={statistics.median(measured_speedups):.2f}x "
-                        f"e2e={statistics.median(row['speedup_e2e'] for row in prompt_rows):.2f}x "
-                        f"baseline={baseline['decode_rate']:.2f} tok/s "
-                        f"ngram={statistics.median(row['decode_tok_s'] for row in prompt_rows):.2f} tok/s"
-                    )
-                    print(
-                        f"    spec: accept={statistics.median(measured_acceptance):.1%} "
-                        f"accepted/round={statistics.median(row['mean_accepted_tokens_per_round'] for row in prompt_rows):.2f} "
-                        f"emitted/round={statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
-                        f"target_passes/token={statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
-                    )
-                    print(
-                        f"    output: baseline={len(baseline['tail'])} tokens "
-                        f"ngram={representative['new_tokens']} tokens "
-                        f"exact={sum(measured_exact)}/{len(measured_exact)} "
-                        f"match={statistics.median(row['token_match_rate'] for row in prompt_rows):.1%} "
-                        f"first_diff={representative['first_difference']} "
-                        f"type={representative['divergence_type']}"
-                    )
-                    print(
-                        f"    quality: baseline={format_quality_with_reference(baseline['quality'])} "
-                        f"ngram={format_quality_with_reference(representative)} "
-                        f"transition={representative['quality_transition'] or 'not_scored'}",
+                        f"  [baseline {prompt_index + 1}/{len(prompt_items)}] "
+                        f"{item['task']}/{item['question_id']} mode={mode} "
+                        f"seed={format_seed(mode, seed_value)} rep={rep + 1}: "
+                        f"decode={decode_rate:.2f} tok/s e2e={e2e_rate:.2f} tok/s "
+                        f"tokens={result['new_tokens']} prefill={result['prefill_s']:.4f}s "
+                        f"decode_time={result['decode_s']:.4f}s "
+                        f"quality={format_quality_with_reference(quality)}",
                         flush=True,
                     )
-                completed = prompt_index + 1
-                if (
-                    args.log_level in ("progress", "detailed")
-                    and args.progress_every
-                    and (
-                        completed % args.progress_every == 0
-                        or completed == len(prompt_items)
+            if mode == "sampling" and args.reps == 1:
+                reproducibility_result = run_once(
+                    og,
+                    model,
+                    token_ids,
+                    args.max_new_tokens,
+                    mode=mode,
+                    seed=seed,
+                    sampling_options=sampling_options,
+                )
+                if reproducibility_result["tail"] != reference_tail:
+                    raise RuntimeError(
+                        f"standard sampling output was not reproducible for "
+                        f"prompt {prompt_index}, seed {seed}"
                     )
+            baseline_key = (mode, seed, prompt_index)
+            baselines[baseline_key] = {
+                "decode_rate": statistics.median(decode_rates),
+                "e2e_rate": statistics.median(e2e_rates),
+                "prefill_s": statistics.median(prefill_times),
+                "decode_s": statistics.median(decode_times),
+                "tail": reference_tail,
+                "quality": baseline_quality,
+            }
+            if args.log_level == "progress":
+                print(
+                    f"[baseline {prompt_index + 1}/{len(prompt_items)}] "
+                    f"{item['task']}/{item['question_id']} mode={mode} "
+                    f"seed={format_seed(mode, seed_value)}: "
+                    f"decode={baselines[baseline_key]['decode_rate']:.2f} tok/s "
+                    f"e2e={baselines[baseline_key]['e2e_rate']:.2f} tok/s "
+                    f"tokens={len(reference_tail)} "
+                    f"quality={format_quality_with_reference(baseline_quality)}",
+                    flush=True,
+                )
+            write_results(rows, csv_path, json_path)
+
+    total_configs = len(run_configs) * len(ngram_sizes) * len(draft_lengths)
+    config_index = 0
+    for mode, seed in run_configs:
+        seed_value = seed if mode == "sampling" else ""
+        for ngram_size in ngram_sizes:
+            for max_draft_tokens in draft_lengths:
+                config_rows = []
+                config_index += 1
+                print(
+                    f"\n[config {config_index}/{total_configs}] mode={mode}, "
+                    f"seed={format_seed(mode, seed_value)}, "
+                    f"n={ngram_size}, K={max_draft_tokens}",
+                    flush=True,
+                )
+                if args.warmup:
+                    for _ in range(args.warmup):
+                        run_once(
+                            og,
+                            model,
+                            encoded[0],
+                            warmup_tokens,
+                            mode=mode,
+                            seed=seed,
+                            sampling_options=sampling_options,
+                            ngram_size=ngram_size,
+                            max_draft_tokens=max_draft_tokens,
+                        )
+
+                for prompt_index, (item, token_ids) in enumerate(
+                    zip(prompt_items, encoded)
                 ):
-                    print_progress_summary(
-                        config_rows,
-                        completed,
-                        len(prompt_items),
-                        ngram_size,
-                        max_draft_tokens,
-                    )
-                write_results(rows, csv_path, json_path)
+                    baseline = baselines[(mode, seed, prompt_index)]
+                    measured_speedups = []
+                    measured_acceptance = []
+                    measured_exact = []
+                    prompt_rows = []
+                    reference_ngram_tail = None
+                    for rep in range(args.reps):
+                        result = run_once(
+                            og,
+                            model,
+                            token_ids,
+                            args.max_new_tokens,
+                            mode=mode,
+                            seed=seed,
+                            sampling_options=sampling_options,
+                            ngram_size=ngram_size,
+                            max_draft_tokens=max_draft_tokens,
+                        )
+                        if reference_ngram_tail is None:
+                            reference_ngram_tail = result["tail"]
+                        elif reference_ngram_tail != result["tail"]:
+                            raise RuntimeError(
+                                f"n-gram {mode} output was not reproducible for "
+                                f"prompt {prompt_index}, seed {seed}, "
+                                f"n={ngram_size}, K={max_draft_tokens}"
+                            )
+                        stats = result["stats"]
+                        decode_rate = (
+                            result["new_tokens"] / result["decode_s"]
+                            if result["decode_s"] else 0.0
+                        )
+                        e2e_time = result["prefill_s"] + result["decode_s"]
+                        e2e_rate = (
+                            result["new_tokens"] / e2e_time if e2e_time else 0.0
+                        )
+                        speedup_decode = (
+                            decode_rate / baseline["decode_rate"]
+                            if baseline["decode_rate"] else 0.0
+                        )
+                        speedup_e2e = (
+                            e2e_rate / baseline["e2e_rate"]
+                            if baseline["e2e_rate"] else 0.0
+                        )
+                        comparison = compare_tokens(
+                            baseline["tail"], result["tail"]
+                        )
+                        quality = score_completion(
+                            item,
+                            result["tail"],
+                            args.humaneval_timeout,
+                            quality_cache,
+                            tokenizer.decode,
+                        )
+                        quality_transition = classify_quality_transition(
+                            baseline["quality"], quality
+                        )
+                        divergence_type = classify_divergence(
+                            comparison, len(baseline["tail"]), len(result["tail"])
+                        )
+                        rounds = int(stats.get("rounds", 0))
+                        proposed = int(stats.get("draft_tokens_proposed", 0))
+                        evaluated = int(stats.get("draft_tokens_evaluated", 0))
+                        accepted = int(stats.get("draft_tokens_accepted", 0))
+                        target_passes = int(stats.get("target_forward_passes", 0))
+                        mean_accepted = accepted / rounds if rounds else 0.0
+                        target_passes_per_token = (
+                            target_passes / result["new_tokens"]
+                            if result["new_tokens"] else 0.0
+                        )
+
+                        measured_speedups.append(speedup_decode)
+                        measured_acceptance.append(
+                            float(stats.get("acceptance_rate", 0.0))
+                        )
+                        measured_exact.append(comparison["exact_match"])
+                        row = {
+                            **run_metadata,
+                            "mode": mode,
+                            "seed": seed_value,
+                            "temperature": (
+                                args.temperature if mode == "sampling" else ""
+                            ),
+                            "top_k": args.top_k if mode == "sampling" else "",
+                            "top_p": args.top_p if mode == "sampling" else "",
+                            "repetition_penalty": (
+                                args.repetition_penalty if mode == "sampling" else ""
+                            ),
+                            "min_new_tokens": (
+                                args.min_new_tokens if mode == "sampling" else ""
+                            ),
+                            "reproducibility_checked": (
+                                mode == "sampling"
+                            ),
+                            "reproducible": (
+                                True if mode == "sampling" else ""
+                            ),
+                            "task": item["task"],
+                            "subcategory": item["subcategory"],
+                            "question_id": item["question_id"],
+                            **quality,
+                            "quality_transition": quality_transition,
+                            "prompt_id": prompt_index,
+                            "rep": rep,
+                            "decoder": "ngram",
+                            "ngram_size": ngram_size,
+                            "K": max_draft_tokens,
+                            "prompt_tokens": len(token_ids),
+                            "new_tokens": result["new_tokens"],
+                            "prefill_s": round(result["prefill_s"], 6),
+                            "decode_s": round(result["decode_s"], 6),
+                            "decode_tok_s": round(decode_rate, 4),
+                            "e2e_tok_s": round(e2e_rate, 4),
+                            "speedup_decode": round(speedup_decode, 4),
+                            "speedup_e2e": round(speedup_e2e, 4),
+                            "exact_match": comparison["exact_match"],
+                            "token_match_rate": round(
+                                comparison["token_match_rate"], 6
+                            ),
+                            "first_difference": comparison["first_difference"],
+                            "divergence_type": divergence_type,
+                            "rounds": rounds,
+                            "draft_proposed": proposed,
+                            "draft_evaluated": evaluated,
+                            "draft_accepted": accepted,
+                            "acceptance_rate": round(
+                                float(stats.get("acceptance_rate", 0.0)), 6
+                            ),
+                            "mean_accepted_tokens_per_round": round(
+                                mean_accepted, 6
+                            ),
+                            "mean_emitted_tokens_per_round": round(
+                                float(stats.get(
+                                    "mean_emitted_tokens_per_round",
+                                    result["new_tokens"] / rounds if rounds else 0.0,
+                                )),
+                                6,
+                            ),
+                            "corrections": int(stats.get("correction_tokens", 0)),
+                            "bonuses": int(stats.get("bonus_tokens", 0)),
+                            "draft_forward_passes": int(
+                                stats.get("draft_forward_passes", 0)
+                            ),
+                            "target_forward_passes": target_passes,
+                            "target_passes_per_token": round(
+                                target_passes_per_token, 6
+                            ),
+                            "total_draft_ms": round(
+                                float(stats.get("total_draft_ms", 0.0)), 6
+                            ),
+                            "total_target_ms": round(
+                                float(stats.get("total_target_ms", 0.0)), 6
+                            ),
+                            "observed_speedup_estimate": round(
+                                float(stats.get("observed_speedup", 0.0)), 6
+                            ),
+                            "peak_process_rss_gib": "",
+                        }
+                        rows.append(row)
+                        config_rows.append(row)
+                        prompt_rows.append(row)
+                        if args.log_level == "detailed":
+                            print_detailed_run(item, rep, baseline, row)
+                        if (
+                            args.log_completions_on_mismatch
+                            and not comparison["exact_match"]
+                        ):
+                            print_mismatch_completions(
+                                tokenizer, baseline["tail"], result["tail"]
+                            )
+
+                    if mode == "sampling" and args.reps == 1:
+                        reproducibility_result = run_once(
+                            og,
+                            model,
+                            token_ids,
+                            args.max_new_tokens,
+                            mode=mode,
+                            seed=seed,
+                            sampling_options=sampling_options,
+                            ngram_size=ngram_size,
+                            max_draft_tokens=max_draft_tokens,
+                        )
+                        if reproducibility_result["tail"] != reference_ngram_tail:
+                            raise RuntimeError(
+                                f"n-gram sampling output was not reproducible for "
+                                f"prompt {prompt_index}, seed {seed}, "
+                                f"n={ngram_size}, K={max_draft_tokens}"
+                            )
+
+                    if args.log_level in ("progress", "detailed"):
+                        representative = prompt_rows[0]
+                        print(
+                            f"  {item['task']}/{item['question_id']}: "
+                            f"decode={statistics.median(measured_speedups):.2f}x "
+                            f"e2e={statistics.median(row['speedup_e2e'] for row in prompt_rows):.2f}x "
+                            f"baseline={baseline['decode_rate']:.2f} tok/s "
+                            f"ngram={statistics.median(row['decode_tok_s'] for row in prompt_rows):.2f} tok/s"
+                        )
+                        print(
+                            f"    spec: accept={statistics.median(measured_acceptance):.1%} "
+                            f"accepted/round={statistics.median(row['mean_accepted_tokens_per_round'] for row in prompt_rows):.2f} "
+                            f"emitted/round={statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
+                            f"target_passes/token={statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
+                        )
+                        print(
+                            f"    output: baseline={len(baseline['tail'])} tokens "
+                            f"ngram={representative['new_tokens']} tokens "
+                            f"exact={sum(measured_exact)}/{len(measured_exact)} "
+                            f"match={statistics.median(row['token_match_rate'] for row in prompt_rows):.1%} "
+                            f"first_diff={representative['first_difference']} "
+                            f"type={representative['divergence_type']}"
+                        )
+                        print(
+                            f"    quality: baseline={format_quality_with_reference(baseline['quality'])} "
+                            f"ngram={format_quality_with_reference(representative)} "
+                            f"transition={representative['quality_transition'] or 'not_scored'}",
+                            flush=True,
+                        )
+                    completed = prompt_index + 1
+                    if (
+                        args.log_level in ("progress", "detailed")
+                        and args.progress_every
+                        and (
+                            completed % args.progress_every == 0
+                            or completed == len(prompt_items)
+                        )
+                    ):
+                        print_progress_summary(
+                            config_rows,
+                            completed,
+                            len(prompt_items),
+                            ngram_size,
+                            max_draft_tokens,
+                        )
+                    write_results(rows, csv_path, json_path)
 
     monitor.stop()
     for row in rows:
