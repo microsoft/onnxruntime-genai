@@ -148,10 +148,20 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
+// Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
+// add-on) are unloaded on teardown.
+struct LibraryHandle;
+
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+
+  // Get-or-create the DeviceInterface for a device type. The interface is owned by this
+  // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
+  // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
+  DeviceInterface* GetDeviceInterface(DeviceType type);
 
   struct Allocator {
     // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
@@ -176,6 +186,19 @@ struct OrtGlobals {
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
+
+  DeviceInterface* LoadCudaInterface(DeviceType type);
+
+  std::mutex device_interfaces_mutex_;
+  // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
+  // module-owned interface (DML). Rebuilt each env cycle.
+  std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
+  // In-process interfaces owned directly by genai (CPU / WebGPU / QNN / OpenVINO / RyzenAI).
+  std::vector<std::unique_ptr<DeviceInterface>> owned_interfaces_;
+  // The genai CUDA add-on library (onnxruntime-genai-cuda). Holds the loaded library so that
+  // unloading it (on teardown) runs the add-on's static destructors. The interface pointer it
+  // provides is non-owning and lives in device_interfaces_.
+  std::unique_ptr<LibraryHandle> cuda_library_;
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
