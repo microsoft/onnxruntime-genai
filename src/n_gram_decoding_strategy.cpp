@@ -51,8 +51,18 @@ NGramDecodingStrategy::NGramDecodingStrategy(Generator& g)
       lookup_{ValidateAndGetNGramSize(g)} {}
 
 void NGramDecodingStrategy::Sync(Generator& g) {
-  auto committed = g.search_->GetSequence(0).CopyDeviceToCpu();
-  lookup_.Sync(committed);
+  auto committed = g.search_->GetSequence(0);
+  const size_t indexed_length = lookup_.HistorySize();
+
+  if (committed.size() < indexed_length) {
+    lookup_.Reset(committed.CopyDeviceToCpu());
+    return;
+  }
+  if (committed.size() == indexed_length)
+    return;
+
+  auto suffix = committed.subspan(indexed_length, committed.size() - indexed_length);
+  lookup_.Append(suffix.CopyDeviceToCpu());
 }
 
 SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
@@ -85,7 +95,7 @@ void NGramDecodingStrategy::ReconcileProposer(Generator& g,
   (void)floor;
   (void)committed_length;
   (void)record_stats;
-  lookup_.Sync(committed);
+  lookup_.Reset(committed);
 }
 
 void NGramDecodingStrategy::FinalizeGuidanceProposer(
@@ -101,7 +111,7 @@ void NGramDecodingStrategy::FinalizeGuidanceProposer(
 }
 
 void NGramDecodingStrategy::ResetProposer() {
-  lookup_.Clear();
+  lookup_.Reset();
 }
 
 }  // namespace Generators

@@ -19,15 +19,15 @@ class NGramLookup {
       throw std::runtime_error("NGramLookup requires ngram_size >= 2.");
   }
 
-  void Sync(std::span<const int32_t> committed) {
-    const bool extends_history =
-        committed.size() >= history_.size() &&
-        std::equal(history_.begin(), history_.end(), committed.begin());
-    if (!extends_history)
-      Clear();
+  void Append(std::span<const int32_t> committed_suffix) {
+    for (int32_t token : committed_suffix)
+      AppendToken(token);
+  }
 
-    for (size_t i = history_.size(); i < committed.size(); i++)
-      Append(committed[i]);
+  void Reset(std::span<const int32_t> committed = {}) {
+    history_.clear();
+    occurrences_.clear();
+    Append(committed);
   }
 
   std::vector<int32_t> Propose(size_t max_tokens) const {
@@ -45,11 +45,6 @@ class NGramLookup {
             history_.begin() + static_cast<ptrdiff_t>(continuation + count)};
   }
 
-  void Clear() {
-    history_.clear();
-    occurrences_.clear();
-  }
-
   int NGramSize() const { return ngram_size_; }
   size_t HistorySize() const { return history_.size(); }
 
@@ -65,7 +60,7 @@ class NGramLookup {
     }
   };
 
-  void Append(int32_t token) {
+  void AppendToken(int32_t token) {
     history_.push_back(token);
     if (history_.size() <= key_length_)
       return;
