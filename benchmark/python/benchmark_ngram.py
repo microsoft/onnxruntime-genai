@@ -405,6 +405,7 @@ CSV_COLUMNS = [
     "quality_score",
     "quality_prediction",
     "quality_detail",
+    "quality_transition",
     "prompt_id",
     "rep",
     "decoder",
@@ -421,6 +422,7 @@ CSV_COLUMNS = [
     "exact_match",
     "token_match_rate",
     "first_difference",
+    "divergence_type",
     "rounds",
     "draft_proposed",
     "draft_evaluated",
@@ -467,6 +469,153 @@ def geometric_mean(values):
     if not values:
         return None
     return math.exp(sum(math.log(value) for value in values) / len(values))
+
+
+def percentile(values, percent):
+    values = sorted(values)
+    if not values:
+        return None
+    position = (len(values) - 1) * percent / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[lower]
+    weight = position - lower
+    return values[lower] * (1 - weight) + values[upper] * weight
+
+
+def classify_divergence(comparison, expected_length, actual_length):
+    if comparison["exact_match"]:
+        return "exact"
+    if comparison["first_difference"] == min(expected_length, actual_length):
+        return "length_only"
+    return "token_divergence"
+
+
+def classify_quality_transition(baseline_quality, ngram_quality):
+    if not baseline_quality["quality_metric"]:
+        return ""
+    baseline_correct = bool(baseline_quality["quality_score"])
+    ngram_correct = bool(ngram_quality["quality_score"])
+    if baseline_correct and ngram_correct:
+        return "both_correct"
+    if baseline_correct:
+        return "baseline_only"
+    if ngram_correct:
+        return "ngram_only"
+    baseline_prediction = baseline_quality["quality_prediction"]
+    ngram_prediction = ngram_quality["quality_prediction"]
+    if baseline_prediction and baseline_prediction == ngram_prediction:
+        return "both_wrong_same_prediction"
+    if baseline_prediction and ngram_prediction:
+        return "both_wrong_different_prediction"
+    return "both_wrong"
+
+
+def format_quality(quality):
+    if not quality["quality_metric"]:
+        return "not_scored"
+    result = "correct" if quality["quality_score"] else "wrong"
+    prediction = quality["quality_prediction"]
+    return f"{result}({prediction})" if prediction else result
+
+
+def print_detailed_run(item, rep, baseline, row):
+    print(
+        f"  {item['task']}/{item['question_id']} n={row['ngram_size']} "
+        f"K={row['K']} rep={rep + 1}"
+    )
+    print(
+        f"    speed: decode={row['speedup_decode']:.2f}x "
+        f"e2e={row['speedup_e2e']:.2f}x "
+        f"baseline={baseline['decode_rate']:.2f} tok/s "
+        f"ngram={row['decode_tok_s']:.2f} tok/s"
+    )
+    print(
+        f"    timing: prefill={row['prefill_s']:.4f}s "
+        f"decode={row['decode_s']:.4f}s "
+        f"e2e={row['prefill_s'] + row['decode_s']:.4f}s"
+    )
+    print(
+        f"    output: baseline={len(baseline['tail'])} tokens "
+        f"ngram={row['new_tokens']} exact={row['exact_match']} "
+        f"first_diff={row['first_difference']} "
+        f"match={row['token_match_rate']:.1%} "
+        f"type={row['divergence_type']}"
+    )
+    print(
+        f"    spec: accept={row['acceptance_rate']:.1%} "
+        f"proposed={row['draft_proposed']} evaluated={row['draft_evaluated']} "
+        f"accepted={row['draft_accepted']} rounds={row['rounds']} "
+        f"accepted/round={row['mean_accepted_tokens_per_round']:.2f} "
+        f"emitted/round={row['mean_emitted_tokens_per_round']:.2f} "
+        f"target_passes/token={row['target_passes_per_token']:.3f}"
+    )
+    if row["quality_metric"]:
+        print(
+            f"    quality: baseline={format_quality(baseline['quality'])} "
+            f"ngram={format_quality(row)} "
+            f"transition={row['quality_transition']}"
+        )
+
+
+def print_mismatch_completions(tokenizer, baseline_tokens, ngram_tokens):
+    limit = 2000
+    baseline_text = tokenizer.decode(baseline_tokens)
+    ngram_text = tokenizer.decode(ngram_tokens)
+    if len(baseline_text) > limit:
+        baseline_text = baseline_text[:limit] + "... [truncated]"
+    if len(ngram_text) > limit:
+        ngram_text = ngram_text[:limit] + "... [truncated]"
+    print("    baseline completion:")
+    print(baseline_text)
+    print("    n-gram completion:")
+    print(ngram_text)
+
+
+def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_tokens):
+    speedups = [row["speedup_decode"] for row in config_rows]
+    acceptance = [row["acceptance_rate"] for row in config_rows]
+    exact = sum(bool(row["exact_match"]) for row in config_rows)
+    regressions = sum(row["speedup_decode"] < 1.0 for row in config_rows)
+    print(
+        f"\n  [progress {completed}/{total} n={ngram_size} K={max_draft_tokens}] "
+        f"decode speedup median={statistics.median(speedups):.2f}x "
+        f"p10={percentile(speedups, 10):.2f}x "
+        f"p90={percentile(speedups, 90):.2f}x; "
+        f"regressions={regressions}/{len(config_rows)}; "
+        f"acceptance median={statistics.median(acceptance):.1%}; "
+        f"exact={exact}/{len(config_rows)}"
+    )
+    quality_rows = [
+        row for row in config_rows
+        if row["quality_metric"] and row["rep"] == 0
+    ]
+    if quality_rows:
+        transitions = {}
+        for row in quality_rows:
+            transitions[row["quality_transition"]] = (
+                transitions.get(row["quality_transition"], 0) + 1
+            )
+        baseline_correct = sum(
+            row["quality_transition"] in ("both_correct", "baseline_only")
+            for row in quality_rows
+        )
+        ngram_correct = sum(
+            row["quality_transition"] in ("both_correct", "ngram_only")
+            for row in quality_rows
+        )
+        count = len(quality_rows)
+        transition_text = ", ".join(
+            f"{name}={value}" for name, value in sorted(transitions.items())
+        )
+        print(
+            f"    quality: baseline={baseline_correct / count:.1%} "
+            f"ngram={ngram_correct / count:.1%} "
+            f"delta={(ngram_correct - baseline_correct) / count:+.1%}; "
+            f"{transition_text}"
+        )
+    print(flush=True)
 
 
 def print_summary(rows, ngram_sizes, draft_lengths, context):
@@ -533,10 +682,10 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
         for n in ngram_sizes for k in draft_lengths
     ))
 
-    print("\nConfiguration details (medians across all measured rows)")
+    print("\nPerformance distribution across all measured rows")
     print(
-        f"  {'config':12}{'speedup':>10}{'accept':>10}{'accepted/r':>12}"
-        f"{'emit/r':>10}{'exact':>9}{'target/tok':>12}"
+        f"  {'config':12}{'mean':>8}{'p10':>8}{'p50':>8}{'p90':>8}"
+        f"{'geomean':>10}{'>1x':>8}{'e2e p50':>10}"
     )
     for ngram_size in ngram_sizes:
         for max_draft_tokens in draft_lengths:
@@ -548,8 +697,41 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
             ]
             if not selected:
                 continue
-            speedup = statistics.median(row["speedup_decode"] for row in selected)
+            speedups = [row["speedup_decode"] for row in selected]
+            e2e_speedups = [row["speedup_e2e"] for row in selected]
+            faster = sum(value > 1.0 for value in speedups) / len(speedups)
+            print(
+                f"  {f'n={ngram_size}/K={max_draft_tokens}':12}"
+                f"{statistics.mean(speedups):>8.2f}"
+                f"{percentile(speedups, 10):>8.2f}"
+                f"{statistics.median(speedups):>8.2f}"
+                f"{percentile(speedups, 90):>8.2f}"
+                f"{geometric_mean(speedups):>10.2f}"
+                f"{faster:>8.0%}"
+                f"{statistics.median(e2e_speedups):>10.2f}"
+            )
+
+    print("\nSpeculation efficiency and correctness")
+    print(
+        f"  {'config':12}{'accept':>9}{'weighted':>10}{'accepted/r':>12}"
+        f"{'emit/r':>9}{'target/tok':>11}{'exact':>8}{'match':>9}"
+    )
+    for ngram_size in ngram_sizes:
+        for max_draft_tokens in draft_lengths:
+            selected = [
+                row for row in rows
+                if row["decoder"] == "ngram"
+                and row["ngram_size"] == ngram_size
+                and row["K"] == max_draft_tokens
+            ]
+            if not selected:
+                continue
             acceptance = statistics.median(row["acceptance_rate"] for row in selected)
+            total_accepted = sum(row["draft_accepted"] for row in selected)
+            total_evaluated = sum(row["draft_evaluated"] for row in selected)
+            weighted_acceptance = (
+                total_accepted / total_evaluated if total_evaluated else 0.0
+            )
             accepted_per_round = statistics.median(
                 row["mean_accepted_tokens_per_round"] for row in selected
             )
@@ -560,14 +742,50 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
             target_per_token = statistics.median(
                 row["target_passes_per_token"] for row in selected
             )
+            token_match = statistics.median(
+                row["token_match_rate"] for row in selected
+            )
             print(
                 f"  {f'n={ngram_size}/K={max_draft_tokens}':12}"
-                f"{speedup:>10.2f}{acceptance:>10.0%}{accepted_per_round:>12.2f}"
-                f"{emitted_per_round:>10.2f}{exact:>9.0%}{target_per_token:>12.3f}"
+                f"{acceptance:>9.1%}{weighted_acceptance:>10.1%}"
+                f"{accepted_per_round:>12.2f}{emitted_per_round:>9.2f}"
+                f"{target_per_token:>11.3f}{exact:>8.1%}{token_match:>9.1%}"
+            )
+            divergence_counts = {}
+            for row in selected:
+                divergence_counts[row["divergence_type"]] = (
+                    divergence_counts.get(row["divergence_type"], 0) + 1
+                )
+            counts = ", ".join(
+                f"{name}={value}" for name, value in sorted(divergence_counts.items())
+            )
+            mismatch_positions = [
+                row["first_difference"] for row in selected
+                if not row["exact_match"] and row["first_difference"] >= 0
+            ]
+            first_diff = (
+                f"{statistics.median(mismatch_positions):.0f}"
+                if mismatch_positions else "-"
+            )
+            print(
+                f"    totals: proposed={sum(row['draft_proposed'] for row in selected)} "
+                f"evaluated={total_evaluated} accepted={total_accepted} "
+                f"rounds={sum(row['rounds'] for row in selected)} "
+                f"corrections={sum(row['corrections'] for row in selected)} "
+                f"bonuses={sum(row['bonuses'] for row in selected)} "
+                f"target_passes={sum(row['target_forward_passes'] for row in selected)}"
+            )
+            print(
+                f"    timing: draft={sum(row['total_draft_ms'] for row in selected):.1f}ms "
+                f"target={sum(row['total_target_ms'] for row in selected):.1f}ms; "
+                f"mismatch_first_diff_p50={first_diff}; {counts}"
             )
 
     print("\n* Input-guided task: prompt reuse can increase n-gram proposal coverage.")
-    print("Exact must be 100% for every supported deterministic greedy configuration.")
+    print(
+        "Exact measures bit-identical greedy output. Batched verification can diverge "
+        "from sequential greedy due to floating-point accumulation order."
+    )
 
     quality_tasks = list(dict.fromkeys(
         row["task"] for row in rows
@@ -612,6 +830,27 @@ def print_summary(rows, ngram_sizes, draft_lengths, context):
                 f"{baseline:>11.1%} " if baseline is not None else f"{'-':>12}"
             )
             print(f"  {task:18}{metric:>12}{baseline_text}{''.join(cells)}")
+            for ngram_size in ngram_sizes:
+                for max_draft_tokens in draft_lengths:
+                    transitions = {}
+                    for row in task_rows:
+                        if (
+                            row["decoder"] == "ngram"
+                            and row["ngram_size"] == ngram_size
+                            and row["K"] == max_draft_tokens
+                        ):
+                            transitions[row["quality_transition"]] = (
+                                transitions.get(row["quality_transition"], 0) + 1
+                            )
+                    if transitions:
+                        details = ", ".join(
+                            f"{name}={value}"
+                            for name, value in sorted(transitions.items())
+                        )
+                        print(
+                            f"    {task} n={ngram_size}/K={max_draft_tokens}: "
+                            f"{details}"
+                        )
     print("=" * width)
 
 
@@ -715,6 +954,23 @@ def main():
         action="store_true",
         help="required for HumanEval; executes generated Python in human-eval's guard",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["summary", "progress", "detailed"],
+        default="progress",
+        help="console detail: final summary only, periodic progress, or every repetition",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="print a rolling summary every N prompts; 0 disables periodic summaries",
+    )
+    parser.add_argument(
+        "--log-completions-on-mismatch",
+        action="store_true",
+        help="log decoded baseline/n-gram outputs for non-exact generations",
+    )
     parser.add_argument("--use-installed", action="store_true",
                         help="use installed onnxruntime-genai instead of the local build")
     parser.add_argument(
@@ -771,6 +1027,8 @@ def main():
         parser.error("--humaneval-problems cannot be negative")
     if args.humaneval_timeout <= 0:
         parser.error("--humaneval-timeout must be positive")
+    if args.progress_every < 0:
+        parser.error("--progress-every cannot be negative")
     suites = parse_suites(parser, args.suites)
     if "humaneval" in suites and not args.allow_code_execution:
         parser.error(
@@ -932,7 +1190,10 @@ def main():
     for prompt_index, (item, token_ids) in enumerate(zip(prompt_items, encoded)):
         decode_rates = []
         e2e_rates = []
+        prefill_times = []
+        decode_times = []
         reference_tail = None
+        baseline_quality = None
         for rep in range(args.reps):
             result = run_once(
                 og, model, token_ids, args.max_new_tokens
@@ -945,6 +1206,8 @@ def main():
             e2e_rate = result["new_tokens"] / e2e_time if e2e_time else 0.0
             decode_rates.append(decode_rate)
             e2e_rates.append(e2e_rate)
+            prefill_times.append(result["prefill_s"])
+            decode_times.append(result["decode_s"])
             if reference_tail is None:
                 reference_tail = result["tail"]
             elif reference_tail != result["tail"]:
@@ -959,12 +1222,14 @@ def main():
                 quality_cache,
                 tokenizer.decode,
             )
+            baseline_quality = quality
             rows.append({
                 **run_metadata,
                 "task": item["task"],
                 "subcategory": item["subcategory"],
                 "question_id": item["question_id"],
                 **quality,
+                "quality_transition": "",
                 "prompt_id": prompt_index,
                 "rep": rep,
                 "decoder": "standard",
@@ -981,6 +1246,7 @@ def main():
                 "exact_match": "",
                 "token_match_rate": "",
                 "first_difference": "",
+                "divergence_type": "",
                 "rounds": "",
                 "draft_proposed": "",
                 "draft_evaluated": "",
@@ -998,23 +1264,41 @@ def main():
                 "observed_speedup_estimate": "",
                 "peak_process_rss_gib": "",
             })
+            if args.log_level == "detailed":
+                print(
+                    f"  [baseline {prompt_index + 1}/{len(prompt_items)}] "
+                    f"{item['task']}/{item['question_id']} rep={rep + 1}: "
+                    f"decode={decode_rate:.2f} tok/s e2e={e2e_rate:.2f} tok/s "
+                    f"tokens={result['new_tokens']} prefill={result['prefill_s']:.4f}s "
+                    f"decode_time={result['decode_s']:.4f}s "
+                    f"quality={format_quality(quality)}",
+                    flush=True,
+                )
         baselines[prompt_index] = {
             "decode_rate": statistics.median(decode_rates),
             "e2e_rate": statistics.median(e2e_rates),
+            "prefill_s": statistics.median(prefill_times),
+            "decode_s": statistics.median(decode_times),
             "tail": reference_tail,
+            "quality": baseline_quality,
         }
-        print(
-            f"[baseline {prompt_index + 1}/{len(prompt_items)}] "
-            f"{item['task']}/{item['question_id']}: "
-            f"{baselines[prompt_index]['decode_rate']:.2f} tok/s",
-            flush=True,
-        )
+        if args.log_level == "progress":
+            print(
+                f"[baseline {prompt_index + 1}/{len(prompt_items)}] "
+                f"{item['task']}/{item['question_id']}: "
+                f"decode={baselines[prompt_index]['decode_rate']:.2f} tok/s "
+                f"e2e={baselines[prompt_index]['e2e_rate']:.2f} tok/s "
+                f"tokens={len(reference_tail)} "
+                f"quality={format_quality(baseline_quality)}",
+                flush=True,
+            )
         write_results(rows, csv_path, json_path)
 
     total_configs = len(ngram_sizes) * len(draft_lengths)
     config_index = 0
     for ngram_size in ngram_sizes:
         for max_draft_tokens in draft_lengths:
+            config_rows = []
             config_index += 1
             print(
                 f"\n[config {config_index}/{total_configs}] "
@@ -1039,6 +1323,7 @@ def main():
                 measured_speedups = []
                 measured_acceptance = []
                 measured_exact = []
+                prompt_rows = []
                 for rep in range(args.reps):
                     result = run_once(
                         og,
@@ -1073,6 +1358,12 @@ def main():
                         quality_cache,
                         tokenizer.decode,
                     )
+                    quality_transition = classify_quality_transition(
+                        baseline["quality"], quality
+                    )
+                    divergence_type = classify_divergence(
+                        comparison, len(baseline["tail"]), len(result["tail"])
+                    )
                     rounds = int(stats.get("rounds", 0))
                     proposed = int(stats.get("draft_tokens_proposed", 0))
                     evaluated = int(stats.get("draft_tokens_evaluated", 0))
@@ -1089,12 +1380,13 @@ def main():
                         float(stats.get("acceptance_rate", 0.0))
                     )
                     measured_exact.append(comparison["exact_match"])
-                    rows.append({
+                    row = {
                         **run_metadata,
                         "task": item["task"],
                         "subcategory": item["subcategory"],
                         "question_id": item["question_id"],
                         **quality,
+                        "quality_transition": quality_transition,
                         "prompt_id": prompt_index,
                         "rep": rep,
                         "decoder": "ngram",
@@ -1113,6 +1405,7 @@ def main():
                             comparison["token_match_rate"], 6
                         ),
                         "first_difference": comparison["first_difference"],
+                        "divergence_type": divergence_type,
                         "rounds": rounds,
                         "draft_proposed": proposed,
                         "draft_evaluated": evaluated,
@@ -1124,7 +1417,10 @@ def main():
                             mean_accepted, 6
                         ),
                         "mean_emitted_tokens_per_round": round(
-                            float(stats.get("mean_emitted_tokens_per_round", 0.0)),
+                            float(stats.get(
+                                "mean_emitted_tokens_per_round",
+                                result["new_tokens"] / rounds if rounds else 0.0,
+                            )),
                             6,
                         ),
                         "corrections": int(stats.get("correction_tokens", 0)),
@@ -1146,15 +1442,65 @@ def main():
                             float(stats.get("observed_speedup", 0.0)), 6
                         ),
                         "peak_process_rss_gib": "",
-                    })
+                    }
+                    rows.append(row)
+                    config_rows.append(row)
+                    prompt_rows.append(row)
+                    if args.log_level == "detailed":
+                        print_detailed_run(item, rep, baseline, row)
+                    if (
+                        args.log_completions_on_mismatch
+                        and not comparison["exact_match"]
+                    ):
+                        print_mismatch_completions(
+                            tokenizer, baseline["tail"], result["tail"]
+                        )
 
-                print(
-                    f"  {item['task']}/{item['question_id']}: "
-                    f"x{statistics.median(measured_speedups):.2f}, "
-                    f"accept={statistics.median(measured_acceptance):.0%}, "
-                    f"exact={sum(measured_exact)}/{len(measured_exact)}",
-                    flush=True,
-                )
+                if args.log_level in ("progress", "detailed"):
+                    representative = prompt_rows[0]
+                    print(
+                        f"  {item['task']}/{item['question_id']}: "
+                        f"decode={statistics.median(measured_speedups):.2f}x "
+                        f"e2e={statistics.median(row['speedup_e2e'] for row in prompt_rows):.2f}x "
+                        f"baseline={baseline['decode_rate']:.2f} tok/s "
+                        f"ngram={statistics.median(row['decode_tok_s'] for row in prompt_rows):.2f} tok/s"
+                    )
+                    print(
+                        f"    spec: accept={statistics.median(measured_acceptance):.1%} "
+                        f"accepted/round={statistics.median(row['mean_accepted_tokens_per_round'] for row in prompt_rows):.2f} "
+                        f"emitted/round={statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
+                        f"target_passes/token={statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
+                    )
+                    print(
+                        f"    output: baseline={len(baseline['tail'])} tokens "
+                        f"ngram={representative['new_tokens']} tokens "
+                        f"exact={sum(measured_exact)}/{len(measured_exact)} "
+                        f"match={statistics.median(row['token_match_rate'] for row in prompt_rows):.1%} "
+                        f"first_diff={representative['first_difference']} "
+                        f"type={representative['divergence_type']}"
+                    )
+                    print(
+                        f"    quality: baseline={format_quality(baseline['quality'])} "
+                        f"ngram={format_quality(representative)} "
+                        f"transition={representative['quality_transition'] or 'not_scored'}",
+                        flush=True,
+                    )
+                completed = prompt_index + 1
+                if (
+                    args.log_level in ("progress", "detailed")
+                    and args.progress_every
+                    and (
+                        completed % args.progress_every == 0
+                        or completed == len(prompt_items)
+                    )
+                ):
+                    print_progress_summary(
+                        config_rows,
+                        completed,
+                        len(prompt_items),
+                        ngram_size,
+                        max_draft_tokens,
+                    )
                 write_results(rows, csv_path, json_path)
 
     monitor.stop()
