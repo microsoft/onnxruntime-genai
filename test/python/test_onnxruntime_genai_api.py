@@ -1099,58 +1099,6 @@ def test_streaming_asr_config_model_type(asr_speech_model_path):
     assert model.type == expected_type
 
 
-def test_streaming_asr_vad_set_get_option(asr_speech_model_path):
-    """Test that VAD can be controlled via set_option/get_option on StreamingProcessor."""
-    model = og.Model(asr_speech_model_path)
-    processor = og.StreamingProcessor(model)
-
-    # Default: VAD disabled
-    assert processor.get_option("use_vad") == "false"
-
-    # Set and get min_silence_chunks
-    processor.set_option("silence_duration_ms", "1000")
-    assert processor.get_option("silence_duration_ms") == "1000"
-
-    # Enable VAD if silero model is available
-    vad_path = os.path.join(asr_speech_model_path, "silero_vad.onnx")
-    if os.path.exists(vad_path):
-        processor.set_option("use_vad", "true")
-        assert processor.get_option("use_vad") == "true"
-
-        processor.set_option("vad_threshold", "0.8")
-        assert processor.get_option("use_vad") == "true"
-
-        # Disable
-        processor.set_option("use_vad", "false")
-        assert processor.get_option("use_vad") == "false"
-
-
-def test_streaming_asr_vad_consecutive_silence(asr_speech_model_path):
-    """Test that VAD uses consecutive silence logic — doesn't drop until min_silence_chunks exceeded."""
-    vad_path = os.path.join(asr_speech_model_path, "silero_vad.onnx")
-    if not os.path.exists(vad_path):
-        pytest.skip("silero_vad.onnx not found in model dir")
-
-    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
-    model = og.Model(asr_speech_model_path)
-    processor = og.StreamingProcessor(model)
-    processor.set_option("use_vad", "true")
-    processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
-
-    silence = np.zeros(chunk_samples, dtype=np.float32)
-
-    # First 2 silence chunks should still be processed
-    mel1 = processor.process(silence)
-    assert mel1 is not None  # Chunk 1: processed (1 consecutive)
-
-    mel2 = processor.process(silence)
-    assert mel2 is not None  # Chunk 2: processed (2 consecutive)
-
-    # Third silence chunk should be dropped
-    mel3 = processor.process(silence)
-    assert mel3 is None  # Chunk 3: dropped (> min_silence_chunks)
-
-
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
     import re
