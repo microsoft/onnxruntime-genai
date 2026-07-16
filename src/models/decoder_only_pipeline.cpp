@@ -5,6 +5,7 @@
 #include "../logging.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
+#include "validate_config_path.h"
 #include "windowed_kv_cache.h"
 
 namespace Generators {
@@ -70,6 +71,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
+    ValidateConfigPath(model_.config_->model.decoder.pipeline[id_].filename, "pipeline filename");
     const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
         OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
                            model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
