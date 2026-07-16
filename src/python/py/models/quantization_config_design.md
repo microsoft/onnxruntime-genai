@@ -163,7 +163,7 @@ empty object means "no quantization, I/O follows `io_dtype`".
     "lm_head":    { "type": "int8" },                        // role shortcut
 
     "moe": {                        // MoE expert weights (QMoE)
-      "type": "mxfp4",             // int4 | int8 | mxfp4 | nvfp4 | fp8_* ...
+      "type": "mxfp4",             // any dtype from §4, or "none" for dense MoE
       "block_size": 32,
       "weights_prepacked": -1       // CUDA QMoE layout (-1 auto | 0 | 1)
     },
@@ -195,6 +195,78 @@ The model's activation/I/O dtype is set independently of the weight quant type. 
 the key fix for problem #2: `weights.type=int8` + `io_dtype=bf16` is now expressible. EP
 constraints still apply and are validated (e.g. fp16 I/O is unsupported on the CPU EP;
 bf16 I/O only on CUDA), reusing the logic in `set_io_dtype()`.
+
+### 5.3 Auxiliary models and MTP
+
+Some architectures export an auxiliary graph alongside the main decoder. Qwen3.6 MTP is
+the motivating example: `mtp.onnx` consumes a hidden state produced by the main graph and
+contains its own attention and MoE weights. `auxiliary_models` configures those graphs by
+name:
+
+```jsonc
+{
+  "quantization": {
+    "io_dtype": "fp16",
+    "weights": { "type": "int4", "block_size": 32 },
+    "moe": { "type": "nvfp4" },
+
+    "auxiliary_models": {
+      "mtp": {
+        "enabled": true,
+        "moe": { "type": "int8", "block_size": 32 }
+      }
+    }
+  }
+}
+```
+
+An auxiliary-model object accepts `enabled` plus the same weight-bearing targets as the
+parent (`weights`, `embeddings`, `lm_head`, `moe`, and `runtime`). Omitted targets inherit
+the fully resolved parent target; supplied target objects override only their supplied fields.
+The example therefore uses the main model's int4 dense-weight policy but uses int8 QMoE
+for MTP experts. This is intentional: an auxiliary graph may have different weight storage
+or latency/acceptance requirements from the main decoder.
+
+`io_dtype` is deliberately not an auxiliary-model override. Graphs connected by a tensor
+boundary, such as the main decoder's hidden-state output and MTP's hidden-state input, must
+use a compatible I/O dtype. A builder must reject an auxiliary configuration that would
+require a conversion at that boundary unless it explicitly emits that conversion as part of
+the graph contract.
+
+The config describes the requested **output** representation, not an assumption about the
+checkpoint. The builder resolves each graph and target against its own source namespace:
+
+- Native pre-quantized weights may be repacked without re-quantization only when the
+  matching auxiliary namespace contains the complete format-specific tensors. For NVFP4,
+  this means the E2M1 weights, E4M3 block scales, and FP32 global scale for that auxiliary
+  projection.
+- BF16/FP16 auxiliary weights are quantized by the selected output quantizer. For the
+  current Qwen3.6 Model Optimizer checkpoint, MTP routed experts are BF16 fused
+  `gate_up_proj` and `down_proj` tensors, so an MTP `moe.type=int4` or `int8` uses the
+  regular QMoE quantizer.
+- A native main-model tensor must never be used as a fallback for a missing auxiliary
+  tensor. In particular, `model.language_model.layers.0` is not a substitute for
+  `mtp.layers.0`.
+- If the requested dtype has no source representation and no implemented quantizer, export
+  fails with a diagnostic. For example, MTP `moe.type=nvfp4` requires native MTP NVFP4
+  tensors or a BF16-to-NVFP4 quantizer; it must not silently select the main model's NVFP4
+  experts.
+
+The canonical JSON spelling is `auxiliary_models.mtp.moe.type`. For the flat
+`--extra_options` bridge, the corresponding key is `mtp_moe_quant_type`, mirroring the
+main model's `moe_quant_type`:
+
+```text
+--extra_options enable_mtp=true mtp_moe_quant_type=int8
+```
+
+`mtp.moe_quant_type` is not used as a flat option: dotted paths belong to structured JSON,
+while flat extra-option keys remain underscore-separated. `mtp_head_int8` and
+`mtp_head_fp16` are deprecated compatibility aliases, not part of the new surface.
+`mtp_head_int8=true` desugars to `mtp_moe_quant_type=int8`. `mtp_head_fp16=true` is a
+compound legacy preset because it disables both dense-weight and MoE quantization for MTP;
+its structured equivalent is `auxiliary_models.mtp.weights.type=none` plus
+`auxiliary_models.mtp.moe.type=none`.
 
 ## 6. Per-node / per-layer overrides
 
@@ -306,6 +378,8 @@ Every current option desugars deterministically; models remain byte-identical.
 | `qmoe_weights_prepacked` | `moe.weights_prepacked` |
 | `matmulnbits_weights_prepacked` | `runtime.matmulnbits_weights_prepacked` |
 | `use_qdq` | `runtime.use_qdq` |
+| `enable_mtp=true` | `auxiliary_models.mtp.enabled=true` |
+| `mtp_moe_quant_type` | `auxiliary_models.mtp.moe.type` |
 
 Deprecation is *soft*: legacy options keep working, emit no warning initially, and can be
 warned/removed on a later major version.
@@ -367,6 +441,26 @@ warned/removed on a later major version.
 "quantization": { "weights": { "type": "int4" }, "kv_cache": { "type": "fp8_e4m3" } }
 ```
 
+**(h) Qwen3.6 native-NVFP4 main model with an INT8 MTP head:**
+
+```jsonc
+"quantization": {
+  "io_dtype": "fp16",
+  "weights": { "type": "int4", "block_size": 32 },
+  "moe": { "type": "nvfp4" },
+  "auxiliary_models": {
+    "mtp": {
+      "enabled": true,
+      "moe": { "type": "int8", "block_size": 32 }
+    }
+  }
+}
+```
+
+The main routed experts can be copied from the Model Optimizer NVFP4 checkpoint, while
+the BF16 MTP experts are quantized independently. The MTP graph still uses the main
+graph's `io_dtype` at the hidden-state boundary.
+
 ## 11. Implementation & migration plan
 
 Staged so each step is independently shippable and testable.
@@ -387,11 +481,16 @@ Staged so each step is independently shippable and testable.
 4. **CLI/entry points** — add `--config` and `quant_config` handling in
    [builder.py](builder.py); make `--precision` a preset that seeds `io_dtype` +
    `weights.type`. Validate in `check_extra_options`.
-5. **Olive passthrough** — add the `quantization` param to Olive's `ModelBuilder` pass;
+5. **Auxiliary-model consumption** — add `auxiliary_models` resolution after parent
+  targets have been normalized. Qwen3.6 MTP must receive a resolved MTP config, use a
+  Model Optimizer checkpoint reader that can inspect the `mtp.*` namespace, and select
+  native repacking only for matching MTP tensors. Add a BF16-to-NVFP4 path before
+  permitting `auxiliary_models.mtp.moe.type=nvfp4` for a BF16 MTP source.
+6. **Olive passthrough** — add the `quantization` param to Olive's `ModelBuilder` pass;
    document it in `olive-recipes`.
-6. **Docs** — fold the option reference into [quantization.md](quantization.md) and link
+7. **Docs** — fold the option reference into [quantization.md](quantization.md) and link
    this design; add the JSON examples.
-7. **New dtypes** (incremental, behind the same surface): fp8_e4m3/e5m2, mxfp8, nvfp4,
+8. **New dtypes** (incremental, behind the same surface): fp8_e4m3/e5m2, mxfp8, nvfp4,
    then KV-cache quant (§8). Each is a descriptor-table entry + the corresponding
    quantizer path; no option-surface change.
 
@@ -401,6 +500,10 @@ Staged so each step is independently shippable and testable.
   `test_qmoe_weights.py`) must pass unchanged after step 3.
 - A byte-identity check: build a small model with a legacy option set and with its
   desugared `quantization` JSON; assert the two ONNX outputs are identical.
+- MTP coverage must use different values for the main decoder's layer 0 experts and
+  `mtp.layers.0` experts, then verify `mtp.onnx` uses only the latter. Include one BF16
+  MTP fixture (regular int4/int8 QMoE quantization) and one native-NVFP4 MTP fixture
+  (lossless repacking).
 
 ## 12. Open questions
 
@@ -412,3 +515,6 @@ Staged so each step is independently shippable and testable.
 3. Naming: `weights` vs `dense` vs `matmul` for the dense-weight target. Proposed:
    `weights`.
 4. Separate K/V KV-cache settings — defer until a concrete need appears.
+5. Should `auxiliary_models` remain a named map (proposed) or become a list with explicit
+  graph filenames? A named map matches the stable GenAI config role (`mtp`) and keeps
+  recipes independent of emitted filenames.
