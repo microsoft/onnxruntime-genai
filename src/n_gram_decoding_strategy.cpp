@@ -7,6 +7,8 @@
 #include "generators.h"
 #include "models/model.h"
 #include "models/model_type.h"
+#include "openvino/interface.h"
+#include "qnn/interface.h"
 #include "search.h"
 
 namespace Generators {
@@ -14,35 +16,38 @@ namespace Generators {
 namespace {
 
 int ValidateAndGetNGramSize(Generator& g) {
-  const auto& params = *g.search_->params_;
-  const auto& model = g.model_->config_->model;
-  const int ngram_size = params.speculative.ngram_size;
-
-  if (params.search.batch_size != 1)
-    throw std::runtime_error("N-gram decoding requires batch_size=1 in this release.");
-  if (params.search.num_beams != 1)
-    throw std::runtime_error("N-gram decoding does not support beam search in this release.");
-  if (g.guidance_logits_processor_)
-    throw std::runtime_error("N-gram decoding does not support guidance in this release.");
-  if (!ModelType::IsLLM(model.type) || ModelType::IsLFM2(model.type) ||
-      !model.decoder.pipeline.empty() || !model.vision.filename.empty() ||
-      !model.speech.filename.empty())
-    throw std::runtime_error(
-        "N-gram decoding requires a plain decoder-only text model in this release.");
-  if ((model.decoder.sliding_window && model.decoder.sliding_window->slide_key_value_cache) ||
-      !model.decoder.layer_types.empty())
-    throw std::runtime_error(
-        "N-gram decoding requires a rewindable KV cache; sliding-window and hybrid state models "
-        "are not supported in this release.");
-  if (g.model_->IsPruned())
-    throw std::runtime_error(
-        "N-gram decoding requires target logits for every verified token; pruned last-token-only "
-        "logits are not supported in this release.");
-
-  return ngram_size;
+  ValidateNGramDecoding(*g.model_, *g.search_->params_);
+  return g.search_->params_->speculative.ngram_size;
 }
 
 }  // namespace
+
+void ValidateNGramDecoding(const Model& model, const GeneratorParams& params) {
+  const auto& config = model.config_->model;
+  const bool uses_sliding_kv_cache =
+      config.decoder.sliding_window &&
+      config.decoder.sliding_window->slide_key_value_cache;
+  const bool is_plain_decoder_only_text =
+      ModelType::IsLLM(config.type) && !ModelType::IsLFM2(config.type) &&
+      config.decoder.pipeline.empty() && config.vision.filename.empty() &&
+      config.speech.filename.empty();
+
+  NGramDecodingCapabilities capabilities;
+  capabilities.batch_size = params.search.batch_size;
+  capabilities.num_beams = params.search.num_beams;
+  capabilities.num_return_sequences = params.search.num_return_sequences;
+  capabilities.uses_guidance =
+      !params.guidance_type.empty() || !params.guidance_data.empty();
+  capabilities.uses_draft_model =
+      ModelType::UsesDraftModelSpeculation(config.type, config.draft.filename);
+  capabilities.is_plain_decoder_only_text = is_plain_decoder_only_text;
+  capabilities.uses_sliding_kv_cache = uses_sliding_kv_cache;
+  capabilities.uses_hybrid_state = !config.decoder.layer_types.empty();
+  capabilities.uses_model_managed_state =
+      IsOpenVINOStatefulModel(model) || IsQNNStatefulModel(model);
+  capabilities.has_pruned_logits = is_plain_decoder_only_text && model.IsPruned();
+  ValidateNGramDecodingCapabilities(capabilities);
+}
 
 NGramDecodingStrategy::NGramDecodingStrategy(Generator& g)
     : SpeculativeDecodingStrategy{*g.state_, *g.model_},

@@ -65,22 +65,31 @@ inline DeterministicProposalVerification VerifyDeterministicProposal(
     std::span<const int32_t> proposal_tokens,
     const TargetTokenSelection& first_target,
     std::span<const TargetTokenSelection> subsequent_targets,
-    std::mt19937& rng) {
+    std::mt19937& rng,
+    std::vector<std::mt19937>* states_after_draw = nullptr) {
   if (proposal_tokens.empty() || subsequent_targets.size() < proposal_tokens.size())
     throw std::invalid_argument(
         "Deterministic proposal verification requires one proposal and next-target row per token.");
+  if (states_after_draw) {
+    states_after_draw->clear();
+    states_after_draw->reserve(proposal_tokens.size() + 1);
+  }
 
   DeterministicProposalVerification result;
   for (size_t i = 0; i < proposal_tokens.size(); i++) {
     const TargetTokenSelection& target = i == 0 ? first_target : subsequent_targets[i - 1];
     result.evaluated_count++;
     result.final_token = SampleTargetToken(target, rng);
+    if (states_after_draw)
+      states_after_draw->push_back(rng);
     if (result.final_token != proposal_tokens[i])
       return result;
     result.accepted_count++;
   }
 
   result.final_token = SampleTargetToken(subsequent_targets[proposal_tokens.size() - 1], rng);
+  if (states_after_draw)
+    states_after_draw->push_back(rng);
   result.used_bonus = true;
   return result;
 }

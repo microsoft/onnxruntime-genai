@@ -27,9 +27,6 @@ std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
     return std::make_unique<TransducerDecodingStrategy>(generator);
   const bool uses_draft_model = ModelType::UsesDraftModelSpeculation(model.type, model.draft.filename);
   const bool uses_ngram = generator.search_->params_->speculative.ngram_size > 0;
-  if (uses_draft_model && uses_ngram)
-    throw std::runtime_error(
-        "N-gram decoding cannot be combined with draft-model speculative decoding.");
   if (uses_draft_model)
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   if (uses_ngram)

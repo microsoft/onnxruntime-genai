@@ -247,6 +247,34 @@ TEST(SpeculativeSamplingTest, DeterministicProposalAcceptsMatchingSampleAndDraws
   EXPECT_TRUE(result.used_bonus);
 }
 
+TEST(SpeculativeSamplingTest, DeterministicProposalCapturesRngStateAfterEachQueuedToken) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 2};
+  std::mt19937 actual_rng{42};
+  std::mt19937 expected_rng{42};
+  std::vector<std::mt19937> states_after_draw;
+
+  const auto result = VerifyDeterministicProposal(
+      proposal, first, subsequent, actual_rng, &states_after_draw);
+
+  ASSERT_TRUE(result.used_bonus);
+  ASSERT_EQ(states_after_draw.size(), 3u);
+  SampleTargetToken(first, expected_rng);
+  EXPECT_EQ(states_after_draw[0], expected_rng);
+  SampleTargetToken(subsequent[0], expected_rng);
+  EXPECT_EQ(states_after_draw[1], expected_rng);
+  SampleTargetToken(subsequent[1], expected_rng);
+  EXPECT_EQ(states_after_draw[2], expected_rng);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
 TEST(SpeculativeSamplingTest, DeterministicProposalMismatchCommitsSampledTarget) {
   TargetTokenSelection first;
   first.indices = {5};

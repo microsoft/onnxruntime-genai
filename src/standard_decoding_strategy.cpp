@@ -4,13 +4,12 @@
 
 #include "generators.h"
 #include "logging.h"
-#include "sampling_distribution.h"
 #include "search.h"
 #include "constrained_logits_processor.h"
 
 namespace Generators {
 
-void RunStandardDecodingStep(Generator& g, std::mt19937* sampling_rng) {
+void RunStandardDecodingStep(Generator& g) {
   if (g.search_->GetSequenceLength() == 0 && !g.computed_logits_)
     throw std::runtime_error(
         "GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or "
@@ -42,26 +41,18 @@ void RunStandardDecodingStep(Generator& g, std::mt19937* sampling_rng) {
   }
 
   g.last_action_ = Generator::Action::generated;
-  if (sampling_rng && g.sampling_method_ != Generator::SamplingMethod::kGreedy) {
-    SampledCategorical categorical;
-    const auto scores = g.search_->GetLogits().CopyDeviceToCpu();
-    ComputeSampledCategorical(scores, search.top_k, search.top_p, search.temperature, categorical);
-    g.search_->CommitToken(SampleCategoricalToken(categorical, *sampling_rng));
-    return;
-  }
-
   switch (g.sampling_method_) {
     case Generator::SamplingMethod::kGreedy:
       g.search_->SelectTop();
       return;
     case Generator::SamplingMethod::kTopKTopP:
-      g.search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+      g.search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature, g.rng_);
       return;
     case Generator::SamplingMethod::kTopK:
-      g.search_->SampleTopK(search.top_k, search.temperature);
+      g.search_->SampleTopK(search.top_k, search.temperature, g.rng_);
       return;
     case Generator::SamplingMethod::kTopP:
-      g.search_->SampleTopP(search.top_p, search.temperature);
+      g.search_->SampleTopP(search.top_p, search.temperature, g.rng_);
       return;
     default:
       throw std::runtime_error("Unknown sampling method");

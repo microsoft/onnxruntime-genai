@@ -15,6 +15,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "decoding_strategy.h"
+#include "n_gram_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -382,7 +383,24 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return params.p_device->CreateGreedy(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+std::mt19937 CreateRandomGenerator(int random_seed) {
+  if (random_seed >= 0)
+    return std::mt19937{static_cast<uint32_t>(random_seed)};
+
+  std::random_device random_device;
+  std::array<uint32_t, std::mt19937::state_size> seed_data;
+  for (uint32_t& value : seed_data)
+    value = random_device();
+  std::seed_seq seed_sequence(seed_data.begin(), seed_data.end());
+  return std::mt19937{seed_sequence};
+}
+
+Generator::Generator(const Model& model, const GeneratorParams& params)
+    : model_{model.shared_from_this()},
+      rng_{CreateRandomGenerator(params.search.random_seed)} {
+  if (params.speculative.ngram_size > 0)
+    ValidateNGramDecoding(model, params);
+
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {

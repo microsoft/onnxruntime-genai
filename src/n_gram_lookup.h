@@ -36,10 +36,10 @@ class NGramLookup {
 
     const auto key = MakeKey(history_.size() - key_length_);
     const auto occurrence = occurrences_.find(key);
-    if (occurrence == occurrences_.end() || occurrence->second.empty())
+    if (occurrence == occurrences_.end())
       return {};
 
-    const size_t continuation = occurrence->second.back() + key_length_;
+    const size_t continuation = occurrence->second + key_length_;
     const size_t count = std::min(max_tokens, history_.size() - continuation);
     return {history_.begin() + static_cast<ptrdiff_t>(continuation),
             history_.begin() + static_cast<ptrdiff_t>(continuation + count)};
@@ -66,7 +66,7 @@ class NGramLookup {
       return;
 
     const size_t newly_eligible_start = history_.size() - key_length_ - 1;
-    occurrences_[MakeKey(newly_eligible_start)].push_back(newly_eligible_start);
+    occurrences_[MakeKey(newly_eligible_start)] = newly_eligible_start;
   }
 
   std::vector<int32_t> MakeKey(size_t start) const {
@@ -77,7 +77,7 @@ class NGramLookup {
   int ngram_size_;
   size_t key_length_;
   std::vector<int32_t> history_;
-  std::unordered_map<std::vector<int32_t>, std::vector<size_t>, KeyHash> occurrences_;
+  std::unordered_map<std::vector<int32_t>, size_t, KeyHash> occurrences_;
 };
 
 }  // namespace Generators

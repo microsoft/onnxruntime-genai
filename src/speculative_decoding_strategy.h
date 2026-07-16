@@ -23,7 +23,7 @@ struct SpeculativeStats;
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
 // model verifies them in one pass, matching tokens are accepted, and the target is re-anchored
 // for the next round. Subclasses implement Propose (produce K tokens) and Advance (update the
-// draft's state); all shared logic (RNG, target rewind, stats, vocab check) lives here.
+// draft's state); shared verification borrows the Generator-owned RNG.
 struct SpeculativeDecodingStrategy : DecodingStrategy {
   enum class ProposalMode {
     kUnset,
@@ -112,10 +112,6 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Runtime vocab-size sanity check.
   bool vocab_check_done_{false};
 
-  // Shared RNG for draft sampling + accept/correction/bonus draws.
-  std::mt19937 rng_;
-  bool rng_seeded_{false};
-
   // Grammar-forced tokens carried from a prior guidance round, read by Propose so it can place them
   // first in the verify batch (the grammar is already advanced past them).
   const std::deque<int32_t>& GuidanceFFCarry() const { return ff_carry_; }
@@ -151,6 +147,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
+  std::deque<std::mt19937> pending_rng_states_;
   bool round_active_{};
   bool active_round_discarded_{};
 

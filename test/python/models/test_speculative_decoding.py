@@ -514,6 +514,38 @@ class TestSpeculativeGeneration:
 
         assert gen.get_speculative_stats()["rounds"] == 1
 
+    def test_interleaved_sampled_generators_have_independent_rng_streams(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "interleaved_sampling", "llama", context_length=24)
+        prompt = [3]
+        max_length = 16
+        seed = 1357
+        expected, _ = _sample(
+            path, prompt, max_length, seed, k=4, top_k=5, temperature=0.8)
+
+        def make_generator():
+            model = og.Model(path)
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                do_sample=True, max_length=max_length, random_seed=seed,
+                top_k=5, temperature=0.8)
+            params.set_speculative_options(max_draft_tokens=4)
+            generator = og.Generator(model, params)
+            generator.append_tokens(np.array([prompt], dtype=np.int32))
+            return generator
+
+        first = make_generator()
+        second = make_generator()
+        while not first.is_done() or not second.is_done():
+            if not first.is_done():
+                first.generate_next_token()
+            if not second.is_done():
+                second.generate_next_token()
+
+        assert [int(token) for token in first.get_sequence(0)] == expected
+        assert [int(token) for token in second.get_sequence(0)] == expected
+
     @pytest.mark.parametrize(
         ("model_type", "threshold"),
         [("phi3", 4097), ("phimoe", 4097), ("phi3small", 8193)])

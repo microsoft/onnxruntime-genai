@@ -161,6 +161,7 @@ struct Generator : LeakChecked<Generator> {
                               kTopP,
                               kTopKTopP };
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  std::mt19937 rng_;
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 
@@ -168,7 +169,8 @@ struct Generator : LeakChecked<Generator> {
   friend struct StandardDecodingStrategy;
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
-  friend void RunStandardDecodingStep(Generator& g, std::mt19937* sampling_rng);
+  friend struct BaseSpeculativeStrategy;
+  friend void RunStandardDecodingStep(Generator& g);
 };
 
 struct OrtGlobals {
@@ -224,5 +226,6 @@ void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source,
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
+std::mt19937 CreateRandomGenerator(int random_seed);
 
 }  // namespace Generators

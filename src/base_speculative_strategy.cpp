@@ -131,7 +131,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         auto masked = guidance_buf.CopyDeviceToCpu();
         SelectProposalToken({masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
                             search.top_k, search.top_p, search.temperature, vocab_size,
-                            sampled, rng_, proposal);
+                            sampled, g.rng_, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
           int32_t c = chosen;
@@ -156,7 +156,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
   SelectProposalToken(penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix),
                       0, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
-                      sampled, rng_, proposal);
+                      sampled, g.rng_, proposal);
   for (int i = 1; i < K; i++) {
     if (penalty_processor.IsActive())
       prefix.push_back(proposal.tokens[i - 1]);
@@ -168,7 +168,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     SelectProposalToken(
         penalty_processor.Apply({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
         i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
-        sampled, rng_, proposal);
+        sampled, g.rng_, proposal);
   }
 
   return proposal;
