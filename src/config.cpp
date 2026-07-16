@@ -1489,6 +1489,16 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return false;
       } else if (provider_options->name == "DML") {
+        // Graph capture defaults to ON for DML but can be opted out via the
+        // provider option "enable_graph_capture": "0". Captured-command-list
+        // replay computes wrong logits on some D3D12 devices (observed on the
+        // Xbox Series S Dev-Mode driver: deterministic garbage from the same
+        // model that is correct on CPU EP and on non-captured ORT sessions).
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && (value.second == "0" || value.second == "false")) {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
