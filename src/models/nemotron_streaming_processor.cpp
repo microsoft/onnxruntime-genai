@@ -6,7 +6,6 @@
 
 #include "../generators.h"
 #include "nemotron_streaming_processor.h"
-#include "moonshine_streaming_processor.h"
 
 namespace Generators {
 
@@ -142,13 +141,6 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   cache_pos_ = (cache_pos_ + frames_to_cache) % cache_size;
 
   return processed_signal;
-}
-
-std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
-  if (ModelType::IsStreamingEncDecASR(model.config_->model.type)) {
-    return std::make_unique<MoonshineStreamingProcessor>(model);
-  }
-  return std::make_unique<NemotronStreamingProcessor>(model);
 }
 
 }  // namespace Generators

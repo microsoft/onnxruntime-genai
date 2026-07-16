@@ -7,6 +7,8 @@
 
 #include "../generators.h"
 #include "streaming_processor.h"
+#include "nemotron_streaming_processor.h"
+#include "moonshine_streaming_processor.h"
 
 namespace Generators {
 
@@ -126,6 +128,17 @@ std::string StreamingProcessor::GetOption(const char* key) const {
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }
+}
+
+// Factory / dispatch point: maps a model type to its concrete streaming
+// processor. Kept here (rather than in either concrete .cpp) so neither
+// concrete processor translation unit has to depend on the other; adding a
+// new streaming model type only touches this function.
+std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
+  if (ModelType::IsStreamingEncDecASR(model.config_->model.type)) {
+    return std::make_unique<MoonshineStreamingProcessor>(model);
+  }
+  return std::make_unique<NemotronStreamingProcessor>(model);
 }
 
 }  // namespace Generators
