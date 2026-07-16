@@ -41,7 +41,6 @@ namespace Generators {
 
 struct MoonshineConfig {
   // Audio framing.
-  int sample_rate{16000};
   int chunk_samples{8000};  // 500ms at 16 kHz
 
   // Tokens.
@@ -65,9 +64,10 @@ struct MoonshineConfig {
   int conv2_buffer_size{4};
 
   // Encoder sliding-window geometry. The encoder has lookahead and requires
-  // `left_context_frames` of past context per chunk. For the medium model,
-  // depth=14 → left_context_frames = 16 * 14 = 224. Lookahead is held back
-  // from the "stable" frame count until Flush().
+  // `left_context_frames` of past context per chunk. Both are read from the
+  // genai_config.json moonshine section (the 224 default matches the medium
+  // model: depth=14 × lookahead=16). Lookahead is held back from the "stable"
+  // frame count until Flush().
   int total_lookahead{16};
   int left_context_frames{224};
 

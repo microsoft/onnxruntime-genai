@@ -20,7 +20,6 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   const auto& dec = m.decoder;
   const auto& ms  = m.moonshine;
 
-  if (m.sample_rate > 0) sample_rate = m.sample_rate;
   if (m.chunk_samples > 0) chunk_samples = m.chunk_samples;
   if (m.bos_token_id > 0) bos_token_id = m.bos_token_id;
   if (!m.eos_token_id.empty()) eos_token_id = m.eos_token_id[0];
@@ -34,12 +33,7 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
     conv2_channels = 2 * enc.hidden_size;
   }
   if (dec.hidden_size > 0) decoder_dim = dec.hidden_size;
-  if (dec.num_hidden_layers > 0) {
-    num_decoder_layers = dec.num_hidden_layers;
-    // Encoder left-context = total_lookahead * depth (depth == decoder layers
-    // in moonshine since enc/dec depths match).
-    left_context_frames = total_lookahead * dec.num_hidden_layers;
-  }
+  if (dec.num_hidden_layers > 0) num_decoder_layers = dec.num_hidden_layers;
   if (dec.num_attention_heads > 0) num_decoder_heads = dec.num_attention_heads;
   if (dec.head_size > 0) decoder_head_size = dec.head_size;
 
