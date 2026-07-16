@@ -33,6 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
+from .quant_config import QuantConfig, desugar_int4_algo_config, resolve_dtype
 
 
 class Model:
@@ -287,35 +288,34 @@ class Model:
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
         }
 
+        # Structured quantization config: parse the flat extra_options into a single QuantConfig
+        # (weights / moe / runtime), then source every quantization knob below from it so there is a
+        # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
+        # exported models remain byte-identical to the flat-option path.
+        self.quant_config = QuantConfig.from_extra_options(
+            extra_options,
+            precision=self.onnx_dtype_to_precision(self.onnx_dtype),
+            execution_provider=self.ep,
+        )
+
         # MoE-specific variables
         moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        # MoE quantization scheme selected via extra_options["moe_quant_type"]. This single option replaces
-        # the older per-type flags. Supported values map to (expert_weight_bits, QMoE quant_type):
+        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
+        # (expert_weight_bits, QMoE quant_type):
         #   "int4"  -> (4, "int")  INT4 QMoE (default)
         #   "int8"  -> (8, "int")  INT8 QMoE
         #   "mxfp4" -> (4, "fp4")  MXFP4 QMoE (CUDA-only)
-        moe_quant_type = extra_options.get("moe_quant_type")
-        if moe_quant_type is None:
-            # Backward compatibility with the deprecated `use_8bits_moe` flag.
-            moe_quant_type = "int8" if extra_options.get("use_8bits_moe", False) else "int4"
-        moe_quant_settings = {
-            "int4": (4, "int"),
-            "int8": (8, "int"),
-            "mxfp4": (4, "fp4"),
-        }
-        if moe_quant_type not in moe_quant_settings:
-            raise ValueError(
-                f"Unsupported moe_quant_type '{moe_quant_type}'. Supported: {sorted(moe_quant_settings)}."
-            )
-        expert_weight_bits, qmoe_quant_type = moe_quant_settings[moe_quant_type]
+        moe_descriptor = resolve_dtype(self.quant_config.moe.type)
+        expert_weight_bits = moe_descriptor.bits
+        qmoe_quant_type = "fp4" if moe_descriptor.kind == "mx" else "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
         # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
         # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
-        weights_prepacked = int(extra_options.get("qmoe_weights_prepacked", -1))
+        weights_prepacked = self.quant_config.moe.weights_prepacked
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
@@ -341,28 +341,26 @@ class Model:
         }
         self.make_lm_head_init(config)
 
-        # Quantization-specific variables (INT4, INT8, etc.)
-        self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
+        # Quantization-specific variables (INT4, INT8, etc.) — all sourced from `self.quant_config`.
+        weights_cfg = self.quant_config.weights
+        self.matmul_block_size = weights_cfg.block_size
         # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
-        self.matmulnbits_weights_prepacked = int(extra_options.get("matmulnbits_weights_prepacked", 0))
-        # MXFP4 mandates a block size of 32; ignore any user override for FP4 QMoE.
-        if self.moe_attrs.get("quant_type") == "fp4":
-            self.qmoe_block_size = 32
-        else:
-            self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"trt-rtx"} else 32))
+        self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
+        # QMoE block size (MXFP4 is pinned to a block size of 32 inside MoEConfig).
+        self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
-            "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
+            "accuracy_level": weights_cfg.accuracy_level,
             "qmoe_block_size": self.qmoe_block_size,
             "qdq_block_size": int(self.matmul_block_size),
-            "is_symmetric": extra_options.get("int4_is_symmetric", True),
-            "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
-            "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
+            "is_symmetric": weights_cfg.symmetric,
+            "op_types_to_quantize": weights_cfg.op_types,
+            "nodes_to_exclude": [override.match["name"] for override in weights_cfg.overrides if override.exclude],
             "algo_config": None,  # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
-            "use_qdq": extra_options.get("use_qdq", False),
+            "use_qdq": self.quant_config.runtime.use_qdq,
         }
         self.make_quant_init(config)
 
@@ -541,23 +539,33 @@ class Model:
     def make_lm_head_init(self, config):
         pass
 
-    # Legacy compound `int4_algo_config` names that predate the decoupled config. They map to a base
-    # method plus `matmul_mixed_precision` entries so existing recipes keep producing identical models.
-    LEGACY_INT4_ALGO_ALIASES = {
-        "rtn_last": ("rtn", {"last_matmul": "int8"}),
-        "k_quant_last": ("k_quant", {"last_matmul": "int8"}),
-        "k_quant_mixed": ("k_quant", {"last_matmul": "int8", "mixed_layers": "int8"}),
-        "k_quant_linear": ("k_quant", {"last_matmul": "int8", "linear_attn": "int8"}),
-    }
-
     # `matmul_mixed_precision` maps a node-group selector to the quantization type applied to that group
     # (instead of the int4 body). Using a quant-type name rather than a bare bit count lets new schemes
-    # such as fp8/fp4 be added without introducing a new option.
+    # such as fp8/fp4 be added without introducing a new option. The legacy compound `int4_algo_config`
+    # names (e.g. "rtn_last", "k_quant_mixed") are desugared into these selectors by
+    # `quant_config.desugar_int4_algo_config`, the single source of truth for both surfaces.
     MATMUL_MIXED_PRECISION_SELECTORS = ("last_matmul", "mixed_layers", "linear_attn")
     MATMUL_MIXED_PRECISION_QUANT_TYPES = {
         "int4": 4,
         "int8": 8,
     }
+
+    @staticmethod
+    def onnx_dtype_to_precision(onnx_dtype):
+        """Map the resolved ONNX weight dtype to a `QuantConfig` precision string.
+
+        Only used to seed the QuantConfig's `weights.type` / `io_dtype`; the builder's numeric
+        quantization knobs are read from the resolved config, not from this precision.
+        """
+        return {
+            ir.DataType.INT4: "int4",
+            ir.DataType.UINT4: "int4",
+            ir.DataType.INT8: "int8",
+            ir.DataType.UINT8: "int8",
+            ir.DataType.BFLOAT16: "bf16",
+            ir.DataType.FLOAT16: "fp16",
+            ir.DataType.FLOAT: "fp32",
+        }.get(onnx_dtype, "fp16")
 
     def make_quant_init(self, config):
         # Decouple the int4 quantization *method* (how weights are rounded) from the
@@ -820,21 +828,15 @@ class Model:
     def resolve_int4_quant_config(self, extra_options):
         """Split `int4_algo_config` into a base method and a mixed-precision map.
 
-        Sets ``self.quantization_algo`` (one of ``{"default", "rtn", "k_quant"}``) and
-        ``self.matmul_mixed_precision`` (a dict mapping node-group selectors to a quant type,
-        e.g. ``{"last_matmul": "int8"}``). Explicit ``matmul_mixed_precision`` entries take
-        precedence over the defaults implied by a legacy compound name.
+        Uses the shared `desugar_int4_algo_config` helper (the same desugaring `QuantConfig`
+        applies), so both surfaces stay consistent. Sets ``self.quantization_algo`` (one of
+        ``{"default", "rtn", "k_quant"}``) and ``self.matmul_mixed_precision`` (a dict mapping
+        node-group selectors to a quant type, e.g. ``{"last_matmul": "int8"}``). Explicit
+        ``matmul_mixed_precision`` entries take precedence over the defaults implied by a legacy
+        compound name. An unknown base method is passed through unchanged and rejected later
+        (in `make_algo_config` / `make_tied_quantized_embedding_input_names`).
         """
-        algo = extra_options.get("int4_algo_config", "default")
-
-        base_method = algo
-        placement = {}
-        if algo in self.LEGACY_INT4_ALGO_ALIASES:
-            base_method, implied = self.LEGACY_INT4_ALGO_ALIASES[algo]
-            placement.update(implied)
-
-        placement.update(self.normalize_matmul_mixed_precision(extra_options.get("matmul_mixed_precision", {})))
-
+        base_method, placement = desugar_int4_algo_config(extra_options)
         self.quantization_algo = base_method
         self.matmul_mixed_precision = placement
 
