@@ -216,7 +216,6 @@ void GenAiTelemetry::Initialize() {
 }
 
 void GenAiTelemetry::Shutdown() {
-  s_instance_destroyed.store(true);
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   std::lock_guard<std::mutex> lock(init_mutex_);
   if (!initialized_.load()) return;
@@ -245,6 +244,7 @@ void GenAiTelemetry::Shutdown() {
 #endif
 }
 GenAiTelemetry::~GenAiTelemetry() {
+  s_instance_destroyed.store(true);
   Shutdown();
 }
 

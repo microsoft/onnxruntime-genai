@@ -14,6 +14,7 @@
 // cycle.
 
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -21,6 +22,7 @@
 
 #include "ort_genai.h"
 #include "generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
+#include "telemetry/telemetry.h"
 #if USE_DML
 #include "dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
 #endif
@@ -145,6 +147,7 @@ TEST(ReInitTests, ShutdownReInitCycle) {
     }
 
     OgaShutdown();  // full teardown: env + all created device interfaces + add-on libraries
+    EXPECT_FALSE(Generators::GenAiTelemetry::IsDestroyed());
   }
 }
 
@@ -205,6 +208,13 @@ TEST(ReInitTests, DmlInterfaceNotCachedAcrossReload) {
 #endif  // USE_DML
 
 int main(int argc, char** argv) {
+  // Suppress telemetry before any Oga call, including across each re-initialization cycle.
+#if defined(_WIN32)
+  _putenv_s("ORT_RUNNING_UNIT_TESTS", "1");
+#else
+  setenv("ORT_RUNNING_UNIT_TESTS", "1", 1);
+#endif
+
   ::testing::InitGoogleTest(&argc, argv);
 
   // --ep_dir <dir>: also register plugin EP libraries found under <dir> (recursive).
