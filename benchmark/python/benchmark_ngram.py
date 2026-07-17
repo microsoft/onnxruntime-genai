@@ -719,13 +719,16 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
     )
 
     width = 88
+    seed_label = context.get(
+        "seed_label", format_seed(context["mode"], context["seed"])
+    )
     print("\n" + "=" * width)
     print("N-GRAM SPECULATIVE DECODING SUMMARY".center(width))
     print("=" * width)
     print(
         f"model={context['model']}  EP={context['provider']}  "
         f"device={context['device'] or '-'}  prompts={context['prompts']}  "
-        f"mode={context['mode']}  seed={format_seed(context['mode'], context['seed'])}  "
+        f"mode={context['mode']}  seed={seed_label}  "
         f"reps={context['reps']}  max_new={context['max_new']}  "
         f"peak_process_rss={context['peak_rss']:.2f} GiB"
     )
@@ -938,21 +941,28 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
 
 
 def print_summary(rows, ngram_sizes, draft_lengths, context):
-    groups = list(dict.fromkeys(
-        (row["mode"], row["seed"])
-        for row in rows
-        if row["decoder"] == "ngram"
+    modes = list(dict.fromkeys(
+        row["mode"] for row in rows if row["decoder"] == "ngram"
     ))
-    for mode, seed in groups:
+    for mode in modes:
         selected = [
             row for row in rows
-            if row["mode"] == mode and row["seed"] == seed
+            if row["mode"] == mode
         ]
         print_summary_group(
             selected,
             ngram_sizes,
             draft_lengths,
-            {**context, "mode": mode, "seed": seed},
+            {
+                **context,
+                "mode": mode,
+                "seed": None,
+                "seed_label": (
+                    "-"
+                    if mode == "greedy"
+                    else "all configured seeds"
+                ),
+            },
         )
 
 
