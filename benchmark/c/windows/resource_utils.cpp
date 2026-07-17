@@ -7,6 +7,9 @@
 #include <psapi.h>
 #include <dxgi1_4.h>
 
+// dxgi.lib ships with the Windows SDK and is available with the Visual Studio toolset.
+#pragma comment(lib, "dxgi.lib")
+
 #include <stdexcept>
 #include <string>
 

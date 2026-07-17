@@ -5,6 +5,7 @@
 #include "model.h"
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../config_utils.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include <algorithm>
@@ -310,8 +311,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
 
-  // Detect KV cache quantization configuration from provider options.
-  const int kv_cache_quantization_bits = GetKvCacheQuantizationBits(model_.config_->model.decoder.session_options);
+  // Detect KV cache quantization configuration from the active provider's options.
+  const int kv_cache_quantization_bits = GetKvCacheQuantizationBits(model_.config_->model.decoder.session_options,
+                                                                    to_string(model_.p_device_->GetType()));
 
   // When KV cache quantization is enabled, compute the compressed KV cache head dimension.
   if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
