@@ -454,23 +454,36 @@ def register_execution_providers(og, use_winml: bool, ep_library_path: str | Non
                                  ep_name: str | None) -> None:
     """Register plug-in execution providers with onnxruntime-genai.
 
-    With ``use_winml`` the Windows ML catalog is queried and every ready provider
-    (e.g. OpenVINO for Intel GPU/NPU) is registered; otherwise an explicit
-    ``ep_library_path`` is loaded. CPU / follow_config needs neither.
+    With ``use_winml`` the requested provider is resolved through the Windows ML
+    catalog and registered; otherwise an explicit ``ep_library_path`` is loaded.
+    CPU / follow_config needs neither.
     """
     if use_winml:
+        if not ep_name:
+            raise RuntimeError("An execution-provider name is required with --use-winml.")
         try:
             from windowsml import EpCatalog
         except ImportError as e:
             raise RuntimeError(
-                "windowsml is required to register the OpenVINO EP via Windows ML. "
+                "windowsml is required to register execution providers via Windows ML. "
                 "Install it with `pip install windowsml`.") from e
         with EpCatalog() as catalog:
-            for prov in catalog.find_all_providers():
-                prov.ensure_ready()
-                if prov.library_path:
-                    og.register_execution_provider_library(prov.name, prov.library_path)
-                    print(f"  registered WinML EP: {prov.name}")
+            providers = catalog.find_all_providers()
+            provider = next(
+                (prov for prov in providers if prov.name.casefold() == ep_name.casefold()),
+                None,
+            )
+            if provider is None:
+                available = ", ".join(sorted(prov.name for prov in providers)) or "none"
+                raise RuntimeError(
+                    f"Windows ML did not find requested EP '{ep_name}'. "
+                    f"Available providers: {available}.")
+            provider.ensure_ready()
+            if not provider.library_path:
+                raise RuntimeError(
+                    f"Windows ML EP '{ep_name}' did not provide a library path.")
+            og.register_execution_provider_library(provider.name, provider.library_path)
+            print(f"  registered WinML EP: {provider.name}")
     elif ep_library_path and ep_name:
         og.register_execution_provider_library(ep_name, ep_library_path)
         print(f"  registered {ep_name} from {ep_library_path}")
