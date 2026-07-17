@@ -266,37 +266,127 @@ const char* DeviceIdStatusString(DeviceIdStatus s) {
 }
 
 #if defined(_WIN32)
+class ScopedWinHandle {
+ public:
+  explicit ScopedWinHandle(HANDLE handle = nullptr) : handle_{handle} {}
+  ~ScopedWinHandle() {
+    if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+  }
+
+  ScopedWinHandle(const ScopedWinHandle&) = delete;
+  ScopedWinHandle& operator=(const ScopedWinHandle&) = delete;
+
+  HANDLE Get() const { return handle_; }
+
+ private:
+  HANDLE handle_{};
+};
+
+class ScopedDeviceIdMutex {
+ public:
+  ScopedDeviceIdMutex() {
+    HANDLE token{};
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+    ScopedWinHandle token_handle{token};
+
+    DWORD size = 0;
+    GetTokenInformation(token_handle.Get(), TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> token_info(size);
+    if (size == 0 ||
+        !GetTokenInformation(token_handle.Get(), TokenUser, token_info.data(), size, &size)) {
+      return;
+    }
+
+    const auto* token_user = reinterpret_cast<const TOKEN_USER*>(token_info.data());
+    if (!IsValidSid(token_user->User.Sid)) return;
+    const DWORD sid_size = GetLengthSid(token_user->User.Sid);
+    uint64_t sid_hash = 14695981039346656037ULL;
+    const auto* sid_bytes = static_cast<const unsigned char*>(token_user->User.Sid);
+    for (DWORD i = 0; i < sid_size; ++i) {
+      sid_hash ^= sid_bytes[i];
+      sid_hash *= 1099511628211ULL;
+    }
+
+    std::array<wchar_t, 96> mutex_name{};
+    _snwprintf_s(mutex_name.data(), mutex_name.size(), _TRUNCATE,
+                 L"Global\\Microsoft.DeveloperTools.OnnxRuntime.DeviceId.%016llx",
+                 static_cast<unsigned long long>(sid_hash));
+
+    handle_ = CreateMutexW(nullptr, FALSE, mutex_name.data());
+    if (handle_ == nullptr) return;
+
+    const DWORD wait_result = WaitForSingleObject(handle_, 1000);
+    acquired_ = wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED;
+  }
+
+  ~ScopedDeviceIdMutex() {
+    if (acquired_) ReleaseMutex(handle_);
+    if (handle_ != nullptr) CloseHandle(handle_);
+  }
+
+  ScopedDeviceIdMutex(const ScopedDeviceIdMutex&) = delete;
+  ScopedDeviceIdMutex& operator=(const ScopedDeviceIdMutex&) = delete;
+
+  explicit operator bool() const { return acquired_; }
+
+ private:
+  HANDLE handle_{};
+  bool acquired_{};
+};
+
 // Read (or create) the persistent device id in the Windows registry at
 // HKCU\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime : deviceid (REG_SZ), matching Olive and the
 // wider Microsoft AI dev-tools family so a machine reports one shared device id. HKCU is per-user;
-// the raw UUID is never sent (callers hash it) and can be reset by deleting the value. Never throws.
+// the raw UUID is never sent (callers hash it) and can be reset by deleting the value.
 std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
   static constexpr const char* kSubKey = "SOFTWARE\\Microsoft\\DeveloperTools\\.onnxruntime";
   static constexpr const char* kValueName = "deviceid";
 
   bool corrupted = false;  // a value was present but not a valid UUID
-  HKEY key{};
-  if (RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
-    char buf[256]{};
-    DWORD type = 0;
-    DWORD size = sizeof(buf);
-    const LSTATUS query =
-        RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &size);
-    RegCloseKey(key);
-    if (query == ERROR_SUCCESS && type == REG_SZ && size > 0) {
-      // A REG_SZ value is not guaranteed to include its terminating null within `size`.
-      buf[(size < sizeof(buf)) ? size : (sizeof(buf) - 1)] = '\0';
-      std::string existing(buf);
-      while (!existing.empty() && (existing.back() == '\0' || existing.back() == '\r' ||
-                                   existing.back() == '\n' || existing.back() == ' ')) {
-        existing.pop_back();
+  const auto read_existing = [&]() -> std::string {
+    HKEY key{};
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
+      char buf[256]{};
+      DWORD type = 0;
+      DWORD size = sizeof(buf);
+      const LSTATUS query =
+          RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &size);
+      RegCloseKey(key);
+      if (query == ERROR_SUCCESS && type == REG_SZ && size > 0) {
+        // A REG_SZ value is not guaranteed to include its terminating null within `size`.
+        buf[(size < sizeof(buf)) ? size : (sizeof(buf) - 1)] = '\0';
+        std::string existing(buf);
+        while (!existing.empty() && (existing.back() == '\0' || existing.back() == '\r' ||
+                                     existing.back() == '\n' || existing.back() == ' ')) {
+          existing.pop_back();
+        }
+        if (IsValidUuid(existing)) return existing;
+        corrupted = true;  // present but invalid -> regenerate
       }
-      if (IsValidUuid(existing)) {
-        status = DeviceIdStatus::Existing;
-        return existing;
-      }
-      corrupted = true;  // present but invalid -> regenerate
     }
+    return {};
+  };
+
+  if (std::string existing = read_existing(); !existing.empty()) {
+    status = DeviceIdStatus::Existing;
+    return existing;
+  }
+
+  ScopedDeviceIdMutex mutex;
+  if (!mutex) {
+    if (std::string existing = read_existing(); !existing.empty()) {
+      status = DeviceIdStatus::Existing;
+      return existing;
+    }
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+
+  // Another process may have published the value while this process waited.
+  corrupted = false;
+  if (std::string existing = read_existing(); !existing.empty()) {
+    status = DeviceIdStatus::Existing;
+    return existing;
   }
 
   std::string uuid = GenerateUuidV4();
