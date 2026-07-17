@@ -194,6 +194,54 @@ struct LFM2Cache : KeyValueCache {
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
 
+// A static-scatter KV cache for mobius-exported static-cache decoders.
+//
+// The model pre-allocates each layer's KV as a fixed 3D buffer
+// [batch, max_seq_len, kv_hidden] and writes new rows in place via opset-24
+// TensorScatter (driven by the write_indices / nonpad_kv_seqlen inputs produced
+// in input_ids.cpp), reading them back through Attention. Because the scatter is
+// in place, past and present share one buffer: Add() binds key_cache.{i} and
+// updated_key_cache.{i} to the same OrtValue, and Update() is a no-op (mirroring
+// DefaultKeyValueCache's past_present_share_buffer path). RewindTo() is NOT
+// supported and throws: the write_indices/nonpad_kv_seqlen index stream lives in
+// InputIDs with no rewind hook, so rewinding would silently desynchronize it.
+//
+// Distinct from DefaultKeyValueCache in two ways. (1) Layout: it consumes
+// mobius's 3D emission directly (vs the 4D [batch, num_kv_heads, seq, head_dim]
+// layout), and kv_hidden may vary per layer (e.g. Gemma-4 sliding GQA 8*256 vs
+// global MQA 1*512), read from each layer's own declared input shape.
+// (2) RewindTo: DefaultKeyValueCache rewinds by reshaping its buffers, whereas
+// this cache THROWS (rewind is unsupported), because the write_indices /
+// nonpad_kv_seqlen index stream lives in InputIDs with no rewind hook and a
+// silent no-op would desynchronize it.
+struct StaticScatterKeyValueCache : KeyValueCache {
+  StaticScatterKeyValueCache(State& state);
+
+  // True if the model declares BOTH static-scatter driver inputs (write_indices
+  // and nonpad_kv_seqlen); kept in lockstep with the producer gate in input_ids.
+  static bool IsStaticScatterCache(const Model& model);
+
+  void Add() override;
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void RewindTo(size_t index) override;
+
+ private:
+  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
+  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
+
+  State& state_;
+  const Model& model_{state_.model_};
+  int layer_count_;
+
+  // Auto-discovered KV layer indices (sparse for hybrid models).
+  std::vector<int> kv_layer_indices_;
+  ONNXTensorElementDataType type_;
+
+  // One shared past/present buffer per key and per value tensor (2 per layer).
+  std::vector<std::unique_ptr<OrtValue>> caches_;
+  std::vector<std::string> input_name_strings_, output_name_strings_;
+};
+
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
 
 }  // namespace Generators

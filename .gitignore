@@ -39,6 +39,7 @@ examples/csharp/ModelChat/models
 !test/models/qwen2-5-vl/*
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
+!test/models/static-scatter-bias-decoder/*
 !test/models/whisper/*
 
 .ipynb_checkpoints/
