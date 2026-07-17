@@ -267,24 +267,24 @@ struct MoonshineStreamingState : TransducerState {
   std::unique_ptr<MoonshineCrossKvSubState> cross_kv_state_;
   std::unique_ptr<MoonshineDecoderKvSubState> decoder_kv_state_;
 
-  // ---- Current chunk signals (set by SetExtraInputs, consumed once by the
-  // first StepToken() via RunPipeline) -----------------------------------
   std::shared_ptr<Tensor> current_audio_;  // [1, num_samples] float32
   bool current_is_silent_{false};
   bool current_is_final_{false};
   bool need_pipeline_run_{false};
 
   // ---- Accumulated encoder / adapter / memory state ---------------------
-  // Accumulated encoder-input features ([total_features_, encoder_dim]).
+  // Accumulated frontend output ([frontend_frames_produced_, encoder_dim]).
+  // Grows every chunk, including the held-back lookahead tail.
   std::vector<float> accumulated_features_;
-  int total_features_{0};
-  // Number of features already adapted into memory.
-  int encoder_frames_emitted_{0};
-  // Running pos_offset fed to the adapter (== total memory frames so far).
-  int64_t adapter_pos_offset_{0};
-  // Accumulated decoder memory ([memory_len_, decoder_dim]).
+  int frontend_frames_produced_{0};
+  // Features already pushed through the encoder + adapter into memory.
+  // Trails frontend_frames_produced_ by total_lookahead until the flush
+  // chunk, when the two converge. Also serves as the pos_offset value we
+  // hand the adapter (numerically identical here — 1:1 adapter).
+  int frames_committed_{0};
+  // Accumulated decoder memory ([memory_frames_, decoder_dim]).
   std::vector<float> accumulated_memory_;
-  int memory_len_{0};
+  int memory_frames_{0};
 
   // Cached cross-KV tensors, grown incrementally (cross_kv is a pure
   // per-frame projection): when memory grows by `new_frames`, run cross_kv
@@ -329,10 +329,10 @@ struct MoonshineStreamingState : TransducerState {
   // delta-emission so we never emit a token twice.
   size_t emitted_count_{0};
 
-  // Memory length of the previous chunk's cross-KV. Used to detect a new
-  // utterance (memory shrinks back to a small value after a segment break)
-  // so we can reset the commit tracking.
-  int64_t previous_memory_len_{0};
+  // Memory frame count of the previous chunk's cross-KV. Used to detect a
+  // new utterance (memory shrinks back to a small value after a segment
+  // break) so we can reset the commit tracking.
+  int64_t previous_memory_frames_{0};
 
   // Runs the full frontend→encoder→adapter→cross_kv→decode pipeline for the
   // cached chunk exactly once. Invoked by the first StepToken() after a new
@@ -361,12 +361,24 @@ struct MoonshineStreamingState : TransducerState {
   /// memory, cross-KV cache) so the next chunk starts a fresh segment.
   void ResetAccumulation();
 
-  /// Run decoder_kv with `tokens` as input (length >= 1). decoder_kv accepts
-  /// a dynamic seq dim, so this is one call regardless of length. Updates
-  /// k_self_/v_self_ (grown by `tokens.size()`) and returns the argmax of
-  /// the LAST position's logits — i.e. the predicted token that would come
-  /// after `tokens`.
+  /// Run decoder_kv over the token sequence `tokens` in one parallel call
+  /// (used to teacher-force the committed prefix each chunk). decoder_kv
+  /// accepts a dynamic seq dim, so this is one call regardless of length.
+  /// Updates k_self_/v_self_ (grown by `tokens.size()`) and returns the
+  /// argmax of the LAST position's logits — i.e. the predicted token that
+  /// would come after `tokens`.
   int RunDecoderForward(const std::vector<int64_t>& tokens);
+
+  /// Single-token AR step. Writes `token` into the pre-allocated [1,1]
+  /// token_tensor_ (no per-step heap allocation) and runs the decoder once.
+  /// Same return contract as RunDecoderForward.
+  int RunDecoderStep(int64_t token);
+
+  /// Shared tail used by both entry points. decoder_kv inputs must already
+  /// be set; runs one pass, adopts outputs into k_self_/v_self_, and
+  /// returns greedy argmax over the LAST position's logits.
+  int RunDecoderAndArgmax();
+
   void ResetSelfKv();
 };
 

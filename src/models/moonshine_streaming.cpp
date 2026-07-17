@@ -465,10 +465,10 @@ void MoonshineStreamingState::RunPipeline() {
   // Encode the chunk and refresh cross-KV. Returns false (and marks the chunk
   // done) when nothing has accumulated yet, so callers can bail early.
   // Captures only `this` — it touches members (RunFrontendAndAccumulate,
-  // memory_len_, chunk_done_, RefreshCrossKv), not any enclosing locals.
+  // memory_frames_, chunk_done_, RefreshCrossKv), not any enclosing locals.
   auto encode_chunk = [this](const float* a, size_t n, bool is_final) -> bool {
     RunFrontendAndAccumulate(a, n, is_final);
-    if (memory_len_ == 0) { chunk_done_ = true; return false; }
+    if (memory_frames_ == 0) { chunk_done_ = true; return false; }
     RefreshCrossKv();
     return true;
   };
@@ -481,12 +481,12 @@ void MoonshineStreamingState::RunPipeline() {
     // VAD-based segmentation (runs the per-chunk silence verdict computed by
     // the processor). Routing mirrors the previous processor logic:
     const bool past_min = config_.min_segment_memory_frames > 0 &&
-                          memory_len_ >= config_.min_segment_memory_frames;
+                          memory_frames_ >= config_.min_segment_memory_frames;
     if (past_min) {
       // Flush the previous speech's held-back lookahead, then break as final.
       if (!encode_chunk(nullptr, 0, /*is_final=*/true)) return;
       needs_reset_ = true;
-    } else if (memory_len_ == 0) {
+    } else if (memory_frames_ == 0) {
       // Pre-utterance silence: skip the encoder entirely.
       chunk_done_ = true;
       return;
@@ -501,7 +501,7 @@ void MoonshineStreamingState::RunPipeline() {
     // Hard-cap: once memory crosses the segment cap, schedule a reset for the
     // next chunk (which also commits all tokens — see below).
     if (config_.max_segment_memory_frames > 0 &&
-        memory_len_ >= config_.max_segment_memory_frames) {
+        memory_frames_ >= config_.max_segment_memory_frames) {
       needs_reset_ = true;
     }
   }
@@ -515,11 +515,10 @@ void MoonshineStreamingState::RunPipeline() {
 void MoonshineStreamingState::ResetAccumulation() {
   frontend_state_->Reset();
   accumulated_features_.clear();
-  total_features_ = 0;
-  encoder_frames_emitted_ = 0;
-  adapter_pos_offset_ = 0;
+  frontend_frames_produced_ = 0;
+  frames_committed_ = 0;
   accumulated_memory_.clear();
-  memory_len_ = 0;
+  memory_frames_ = 0;
   cached_k_cross_.reset();
   cached_v_cross_.reset();
   memory_in_cross_kv_ = 0;
@@ -564,23 +563,23 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
       const float* fdata = features->GetTensorData<float>();
       accumulated_features_.insert(accumulated_features_.end(), fdata,
                                    fdata + static_cast<size_t>(new_features) * encoder_dim);
-      total_features_ += new_features;
+      frontend_frames_produced_ += new_features;
     }
   }
 
   // ----- encoder / adapter step -----------------------------------------
   // Hold back the lookahead window unless this is the final chunk.
   const int lookahead = config_.total_lookahead;
-  const int stable_count = is_final ? total_features_
-                                    : std::max(0, total_features_ - lookahead);
-  const int new_frames = stable_count - encoder_frames_emitted_;
+  const int stable_count = is_final ? frontend_frames_produced_
+                                    : std::max(0, frontend_frames_produced_ - lookahead);
+  const int new_frames = stable_count - frames_committed_;
   if (new_frames <= 0) return;
 
-  // Encoder runs on [window_start : total_features_] for left context.
+  // Encoder runs on [window_start : frontend_frames_produced_] for left context.
   const int left_context = config_.left_context_frames;
-  const int window_start = std::max(0, encoder_frames_emitted_ - left_context);
-  const int window_size = total_features_ - window_start;
-  const int start_idx = encoder_frames_emitted_ - window_start;  // new frames offset in encoded.
+  const int window_start = std::max(0, frames_committed_ - left_context);
+  const int window_size = frontend_frames_produced_ - window_start;
+  const int start_idx = frames_committed_ - window_start;  // new frames offset in encoded.
 
   auto enc_in_shape = std::array<int64_t, 3>{1, window_size, encoder_dim};
   auto enc_in_tensor =
@@ -603,7 +602,9 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
               static_cast<size_t>(new_frames) * encoder_dim * sizeof(float));
 
   // ----- adapter --------------------------------------------------------
-  adapter_state_->SetInputs(new_enc_tensor.get(), adapter_pos_offset_);
+  // pos_offset == frames_committed_ so far (== count of memory frames when
+  // adapter is 1:1, which it is here). No separate counter needed.
+  adapter_state_->SetInputs(new_enc_tensor.get(), static_cast<int64_t>(frames_committed_));
   adapter_state_->Run(0, dummy_tokens);
   auto memory_tensor = AdoptOutput(adapter_state_->outputs_[0]);
 
@@ -614,20 +615,19 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
     const float* mdata = memory_tensor->GetTensorData<float>();
     accumulated_memory_.insert(accumulated_memory_.end(), mdata,
                                mdata + static_cast<size_t>(produced_frames) * decoder_dim);
-    memory_len_ += produced_frames;
+    memory_frames_ += produced_frames;
   }
 
-  encoder_frames_emitted_ = stable_count;
-  adapter_pos_offset_ += new_frames;
+  frames_committed_ = stable_count;
   cross_kv_valid_ = false;  // memory grew; cached cross-KV needs to catch up.
 }
 
 void MoonshineStreamingState::RefreshCrossKv() {
-  if (cross_kv_valid_ || memory_len_ == 0) return;
+  if (cross_kv_valid_ || memory_frames_ == 0) return;
 
   auto& alloc = moonshine_model_.allocator_cpu_;
   const int decoder_dim = config_.decoder_dim;
-  const int new_frames = memory_len_ - memory_in_cross_kv_;
+  const int new_frames = memory_frames_ - memory_in_cross_kv_;
   DeviceSpan<int32_t> dummy_tokens;
 
   // Run cross_kv on JUST the new memory frames (pure per-frame projection).
@@ -654,7 +654,7 @@ void MoonshineStreamingState::RefreshCrossKv() {
     const int H = config_.num_decoder_heads;
     const int D = config_.decoder_head_size;
     const int M_old = memory_in_cross_kv_;
-    const int M_total = memory_len_;
+    const int M_total = memory_frames_;
     auto concat_shape = std::array<int64_t, 5>{L, 1, H, M_total, D};
 
     auto concat_one = [&](const float* old_data, const float* new_data) {
@@ -686,7 +686,7 @@ void MoonshineStreamingState::RefreshCrossKv() {
     cached_v_cross_ = std::make_shared<Tensor>(std::move(v_full));
   }
 
-  memory_in_cross_kv_ = memory_len_;
+  memory_in_cross_kv_ = memory_frames_;
   cross_kv_valid_ = true;
 }
 
@@ -702,28 +702,28 @@ void MoonshineStreamingState::DecodeAndQueue(bool commit_all) {
   pending_idx_ = 0;
   last_tokens_.clear();
 
-  int64_t memory_len = memory_len_;
+  int64_t memory_frames = memory_frames_;
 
-  // Detect new segment: if memory_len shrinks vs the previous pass, a segment
-  // was closed (hard cap / VAD silence / Flush) and accumulation was reset.
-  // Drop the per-pass commit tracking so the next pass starts from BOS, but
-  // keep `all_tokens_` so the running transcript spans segment boundaries
-  // (callers see one continuous transcript). Users who want a fresh transcript
-  // should create a new Generator.
-  if (memory_len < previous_memory_len_) {
+  // Detect new segment: if memory_frames shrinks vs the previous pass, a
+  // segment was closed (hard cap / VAD silence / Flush) and accumulation was
+  // reset. Drop the per-pass commit tracking so the next pass starts from
+  // BOS, but keep `all_tokens_` so the running transcript spans segment
+  // boundaries (callers see one continuous transcript). Users who want a
+  // fresh transcript should create a new Generator.
+  if (memory_frames < previous_memory_frames_) {
     previous_pass_tokens_.clear();
     emitted_count_ = 0;
   }
-  previous_memory_len_ = memory_len;
+  previous_memory_frames_ = memory_frames;
 
-  if (memory_len <= 0) {
+  if (memory_frames <= 0) {
     chunk_done_ = true;
     return;
   }
 
   // Per-chunk token cap (matches the official moonshine streaming impl).
   const float duration_sec =
-      static_cast<float>(memory_len) * config_.seconds_per_memory_frame;
+      static_cast<float>(memory_frames) * config_.seconds_per_memory_frame;
   const int cap = static_cast<int>(std::ceil(duration_sec * config_.tokens_per_second));
   const int max_tokens = std::min(cap, config_.max_seq_len);
 
@@ -732,8 +732,7 @@ void MoonshineStreamingState::DecodeAndQueue(bool commit_all) {
   // previous pass is invalid. But the model accepts a dynamic seq dim on
   // its token input, so we can teacher-force the already-committed prefix
   // in ONE parallel decoder call instead of `emitted_count_` sequential AR
-  // steps — turning the per-chunk O(emitted_count) decoder calls into O(1)
-  // for the prefix, then a small AR loop for the new suffix.
+  // steps.
   std::vector<int32_t> current_pass;
   current_pass.reserve(static_cast<size_t>(max_tokens));
 
@@ -755,15 +754,14 @@ void MoonshineStreamingState::DecodeAndQueue(bool commit_all) {
   for (int i = 0; i < suffix_budget; ++i) {
     if (next_tok == config_.eos_token_id) break;
     current_pass.push_back(static_cast<int32_t>(next_tok));
-    next_tok = RunDecoderForward(std::vector<int64_t>{static_cast<int64_t>(next_tok)});
+    next_tok = RunDecoderStep(next_tok);
   }
 
   // Compute the new "committed" frontier:
   //   * commit_all (segment close: hard cap / VAD silence / Flush): commit
   //     every token of the current pass.
   //   * otherwise: commit up to the longest-common-prefix with the previous
-  //     pass — beyond that point, the model might still rewrite, so hold
-  //     those tokens back until a future chunk confirms them.
+  //     pass.
   size_t commit_end;
   if (commit_all) {
     commit_end = current_pass.size();
@@ -777,9 +775,7 @@ void MoonshineStreamingState::DecodeAndQueue(bool commit_all) {
   }
 
   // Emit only the slice (emitted_count_ .. commit_end] we haven't emitted
-  // yet. Guard against monotonicity violations (commit_end shouldn't go
-  // backwards once tokens are emitted, but if it does — e.g. model retracts
-  // an earlier token — we silently skip rather than try to "un-emit").
+  // yet. Guard against monotonicity violations.
   if (commit_end > emitted_count_ && commit_end <= current_pass.size()) {
     pending_tokens_.assign(
         current_pass.begin() + static_cast<std::ptrdiff_t>(emitted_count_),
@@ -815,34 +811,39 @@ void MoonshineStreamingState::StepToken() {
 
 int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& tokens) {
   const int64_t n = static_cast<int64_t>(tokens.size());
-  // Build a [1, N] int64 token tensor. For N==1, reuse the preallocated
-  // token_tensor_ to save an allocation per AR step.
-  OrtValue* token_input_ptr;
-  std::unique_ptr<OrtValue> owned_multi_tok;
-  if (n == 1) {
-    *token_tensor_->GetTensorMutableData<int64_t>() = tokens[0];
-    token_input_ptr = token_tensor_.get();
-  } else {
-    auto shape = std::array<int64_t, 2>{1, n};
-    owned_multi_tok = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
-                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    std::memcpy(owned_multi_tok->GetTensorMutableData<int64_t>(),
-                tokens.data(), static_cast<size_t>(n) * sizeof(int64_t));
-    token_input_ptr = owned_multi_tok.get();
-  }
+  // Build a [1, N] int64 token tensor. Used for the teacher-forcing pass
+  // over the committed prefix at the start of each chunk.
+  auto shape = std::array<int64_t, 2>{1, n};
+  auto tok_tensor = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  std::memcpy(tok_tensor->GetTensorMutableData<int64_t>(),
+              tokens.data(), static_cast<size_t>(n) * sizeof(int64_t));
 
-  // decoder_kv inputs: token[1,N], k_self, v_self, out_k_cross, out_v_cross.
-  // The cross-KV input tensors are kept alive by us for the whole chunk; the
-  // decoder passes them straight through, so we discard those outputs.
-  DeviceSpan<int32_t> dummy_tokens;
-  decoder_kv_state_->SetInputs(token_input_ptr, k_self_.get(), v_self_.get(),
+  decoder_kv_state_->SetInputs(tok_tensor.get(), k_self_.get(), v_self_.get(),
                                k_cross_tensor_->ort_tensor_.get(),
                                v_cross_tensor_->ort_tensor_.get());
+  return RunDecoderAndArgmax();
+}
+
+int MoonshineStreamingState::RunDecoderStep(int64_t token) {
+  // Reuse the pre-allocated [1, 1] token_tensor_ to skip a heap alloc per
+  // AR step.
+  *token_tensor_->GetTensorMutableData<int64_t>() = token;
+  decoder_kv_state_->SetInputs(token_tensor_.get(), k_self_.get(), v_self_.get(),
+                               k_cross_tensor_->ort_tensor_.get(),
+                               v_cross_tensor_->ort_tensor_.get());
+  return RunDecoderAndArgmax();
+}
+
+int MoonshineStreamingState::RunDecoderAndArgmax() {
+  // decoder_kv inputs must already be set. Runs the session, updates self-KV
+  // in place, and returns greedy argmax over the LAST position's logits.
+  // The cross-KV input tensors are kept alive by us for the whole chunk;
+  // the decoder passes them straight through, so we discard those outputs.
+  DeviceSpan<int32_t> dummy_tokens;
   decoder_kv_state_->Run(0, dummy_tokens);
 
   // Outputs: logits, out_k_self, out_v_self, out_k_cross, out_v_cross.
-  // The pass-through cross-KV outputs are discarded (freed at scope exit)
-  // — we keep our own copies alive for the whole chunk.
   auto logits  = AdoptOutput(decoder_kv_state_->outputs_[0]);
   k_self_      = AdoptOutput(decoder_kv_state_->outputs_[1]);
   v_self_      = AdoptOutput(decoder_kv_state_->outputs_[2]);
