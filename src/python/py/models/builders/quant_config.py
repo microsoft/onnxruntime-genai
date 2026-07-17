@@ -388,7 +388,11 @@ class QuantConfig:
         # --- moe ---------------------------------------------------------
         moe_quant_type = extra_options.get("moe_quant_type")
         if moe_quant_type is None:
-            moe_quant_type = "int8" if extra_options.get("use_8bits_moe", False) else "int4"
+            # int8 precision quantizes MoE experts to 8-bit to match the dense weights.
+            if precision == "int8" or extra_options.get("use_8bits_moe", False):
+                moe_quant_type = "int8"
+            else:
+                moe_quant_type = "int4"
         # QMoE default block size: 128 on TRT-RTX, 32 elsewhere (mxfp4 is pinned to 32 in MoEConfig).
         default_moe_block = 128 if execution_provider == "trt-rtx" else 32
         moe = MoEConfig(

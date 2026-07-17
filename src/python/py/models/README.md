@@ -368,7 +368,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 #### Quantization Options
 
-These options apply when exporting quantized models (for example `-p int4`).
+These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights (and quantizes MoE experts to 8-bit to match).
 
 ##### Accuracy Level
 
@@ -514,6 +514,8 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 ```
+
+This option is not supported with `-p int8` because 8-bit `MatMulNBits` is QOperator-only.
 
 ##### Choose the MoE Quantization Type in QMoE
 

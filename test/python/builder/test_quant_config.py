@@ -286,6 +286,14 @@ def test_extra_options_moe_quant_type_and_use_8bits_moe():
     assert cfg.moe.type == "int4"
 
 
+def test_extra_options_int8_precision_defaults_moe_to_int8():
+    # int8 precision quantizes MoE experts to 8-bit to match the dense weights.
+    assert QuantConfig.from_extra_options({}, precision="int8").moe.type == "int8"
+    assert QuantConfig.from_extra_options({}, precision="int8").weights.type == "int8"
+    # An explicit moe_quant_type still wins for int8 precision.
+    assert QuantConfig.from_extra_options({"moe_quant_type": "int4"}, precision="int8").moe.type == "int4"
+
+
 def test_extra_options_runtime_and_prepack_knobs():
     cfg = QuantConfig.from_extra_options(
         {

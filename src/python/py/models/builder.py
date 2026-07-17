@@ -152,6 +152,12 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         )
         kv_pairs["enable_webgpu_graph"] = False
 
+    if precision == "int8" and kv_pairs.get("use_qdq", False):
+        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
+        raise NotImplementedError(
+            "int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default)."
+        )
+
 
 def parse_extra_options(kv_items, precision, execution_provider):
     """
@@ -187,11 +193,14 @@ def parse_hf_token(hf_token):
 
 
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
-    int4_cpu = precision == "int4" and execution_provider == "cpu"
+    # int4/int8 weight-only quantization builds a float graph and quantizes the weights at save time.
+    # On the CPU EP the I/O stays FP32; on GPU/WebGPU it follows the usual FP16 default (int8 must not
+    # be forced to FP32 I/O everywhere).
+    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
     bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
-    if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
+    if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
         return ir.DataType.FLOAT
 
@@ -206,6 +215,9 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
     if precision == "int4":
         return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
+
+    if precision == "int8":
+        return ir.DataType.INT8 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT8
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -427,7 +439,7 @@ def get_args():
         "-p",
         "--precision",
         required=True,
-        choices=["int4", "bf16", "fp16", "fp32"],
+        choices=["int4", "int8", "bf16", "fp16", "fp32"],
         help="Precision of model",
     )
 
@@ -436,7 +448,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU, INT8 WebGPU)",
     )
 
     parser.add_argument(
@@ -568,7 +580,7 @@ def get_args():
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU, INT8 CPU, INT8 WebGPU"
     )
     return args
 

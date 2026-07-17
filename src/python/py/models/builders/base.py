@@ -298,8 +298,12 @@ class Model:
             execution_provider=self.ep,
         )
 
+        # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes the dense weights
+        # to 8-bit MatMulNBits at save time, mirroring the int4 path (onnx_dtype INT4/UINT4).
+        quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
+
         # MoE-specific variables
-        moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
+        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
@@ -356,6 +360,7 @@ class Model:
             "accuracy_level": weights_cfg.accuracy_level,
             "qmoe_block_size": self.qmoe_block_size,
             "qdq_block_size": int(self.matmul_block_size),
+            "bits": 8 if quantize_to_8bits else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision).
             "is_symmetric": weights_cfg.symmetric,
             "op_types_to_quantize": weights_cfg.op_types,
             "nodes_to_exclude": [override.match["name"] for override in weights_cfg.overrides if override.exclude],
@@ -595,14 +600,17 @@ class Model:
             and not self.prune_lm_head
         )
 
-        # Determine if embeddings and lm_head will be quantized or not
+        # Determine if embeddings and lm_head will be quantized or not.
+        # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
+        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
+        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
             self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
         quantized_lm_head = (
-            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            matmul_is_quantized
             and "MatMul" in self.quant_attrs["op_types_to_quantize"]
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
@@ -977,6 +985,7 @@ class Model:
 
             quant_int4 = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
+                bits=self.quant_attrs["bits"],
                 block_size=self.quant_attrs["qdq_block_size"],
                 is_symmetric=self.quant_attrs["is_symmetric"],
                 accuracy_level=self.quant_attrs["accuracy_level"],
@@ -1006,6 +1015,7 @@ class Model:
         else:
             quant = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
+                bits=self.quant_attrs["bits"],
                 block_size=self.quant_attrs["qdq_block_size"],
                 is_symmetric=self.quant_attrs["is_symmetric"],
                 accuracy_level=self.quant_attrs["accuracy_level"],
@@ -1089,7 +1099,7 @@ class Model:
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
             model = self.to_nbits()
         else:
             model = self.model
@@ -1458,7 +1468,7 @@ class Model:
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
             if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_nbits_qdq(matmul, basename, root_input, **kwargs)
             else:
@@ -1663,7 +1673,7 @@ class Model:
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
@@ -1671,7 +1681,7 @@ class Model:
     def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
             return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
