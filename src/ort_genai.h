@@ -471,6 +471,10 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_SetInputs(this, &named_tensors));
   }
 
+  void AppendInputs(OgaNamedTensors& named_tensors) {
+    OgaCheckResult(OgaGenerator_AppendInputs(this, &named_tensors));
+  }
+
   void AppendTokenSequences(const OgaSequences& sequences) {
     OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
   }

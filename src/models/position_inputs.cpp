@@ -653,6 +653,11 @@ void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_
   second_per_grid_ts_ = second_per_grid_ts;
 }
 
+void Qwen2VLPositionInputs::PrepareMultimodalAppend(int64_t position_offset) {
+  force_multimodal_update_ = true;
+  position_offset_ = position_offset;
+}
+
 void Qwen2VLPositionInputs::Add() {
   if (has_posid_input_) {
     AddPositionIDs();
@@ -804,9 +809,9 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
           position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = 0;
           position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = 0;
         } else {
-          position_data[0 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
-          position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
-          position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
+          position_data[0 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
+          position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
+          position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
           max_pos_for_batch = current_pos;
           current_pos++;  // Only increment position for non-pad tokens
         }
@@ -828,9 +833,9 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
         T w_pos = static_cast<T>(gw) + st_idx;
 
         // Vision tokens are guaranteed not to be padding
-        position_data[0 * batch_size * seq_len + b * seq_len + (ed + s)] = t_pos;
-        position_data[1 * batch_size * seq_len + b * seq_len + (ed + s)] = h_pos;
-        position_data[2 * batch_size * seq_len + b * seq_len + (ed + s)] = w_pos;
+        position_data[0 * batch_size * seq_len + b * seq_len + (ed + s)] = static_cast<T>(position_offset_ + t_pos);
+        position_data[1 * batch_size * seq_len + b * seq_len + (ed + s)] = static_cast<T>(position_offset_ + h_pos);
+        position_data[2 * batch_size * seq_len + b * seq_len + (ed + s)] = static_cast<T>(position_offset_ + w_pos);
         max_pos_for_batch = std::max({max_pos_for_batch, t_pos, h_pos, w_pos});
       }
       st = ed + vision_len;  // New start is after the vision tokens
@@ -848,9 +853,9 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
           position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = 0;
           position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = 0;
         } else {
-          position_data[0 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
-          position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
-          position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = current_pos;
+          position_data[0 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
+          position_data[1 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
+          position_data[2 * batch_size * seq_len + b * seq_len + current_token_idx] = static_cast<T>(position_offset_ + current_pos);
           max_pos_for_batch = current_pos;
           current_pos++;  // Only increment position for non-pad tokens
         }
@@ -926,7 +931,7 @@ void Qwen2VLPositionInputs::UpdateAttentionMask() {
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
-    if (is_first_update_) {
+    if (is_first_update_ || force_multimodal_update_) {
       DispatchOnType(type_, InitPositionIdsFunctor{this, next_tokens, position_ids_shape_});
     } else {
       Update3DPositionIDs(total_length - new_length);
@@ -944,6 +949,8 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   }
 
   is_first_update_ = false;
+  force_multimodal_update_ = false;
+  position_offset_ = 0;
 }
 
 void Qwen2VLPositionInputs::RewindTo(size_t index) {

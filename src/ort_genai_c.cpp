@@ -473,6 +473,13 @@ OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const Og
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_AppendInputs(OgaGenerator* generator, const OgaNamedTensors* p_named_tensors) {
+  OGA_TRY
+  generator->AppendInputs(*p_named_tensors);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* sequences) {
   OGA_TRY
 

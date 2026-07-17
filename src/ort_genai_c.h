@@ -535,6 +535,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* gene
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
 
 /**
+ * \brief Appends processed model inputs to the generator. For multimodal models, the named tensors should be produced by
+ * a MultiModalProcessor and include input_ids plus any image/audio tensors needed for the appended prompt chunk.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] named_tensors The named tensors to append.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
+
+/**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
  * \param[in] generator The generator to add the input ids to.
  * \param[in] p_sequences The input id sequences.

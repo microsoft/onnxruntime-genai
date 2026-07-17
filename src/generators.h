@@ -106,6 +106,7 @@ struct Generator : LeakChecked<Generator> {
   bool IsDone();
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
+  void AppendInputs(const NamedTensors& inputs);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();

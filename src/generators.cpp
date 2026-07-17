@@ -557,6 +557,42 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
+void Generator::AppendInputs(const NamedTensors& named_tensors) {
+  if (model_->config_->model.type != "qwen3_5" && model_->config_->model.type != "qwen3_5_moe") {
+    if (search_->GetSequenceLength() == 0) {
+      SetInputs(named_tensors);
+      return;
+    }
+    throw std::runtime_error("AppendInputs after generation is currently only supported for qwen3_5 and qwen3_5_moe.");
+  }
+
+  cpu_span<int32_t> input_ids;
+  std::vector<ExtraInput> inputs_for_this_append;
+  for (const auto& [name, tensor] : named_tensors) {
+    if (name == Config::Defaults::InputIdsName) {
+      input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                    tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+    } else {
+      [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
+      inputs_for_this_append.push_back({graph_name, tensor});
+    }
+  }
+
+  if (input_ids.size() == 0) {
+    throw std::runtime_error("AppendInputs requires input_ids.");
+  }
+
+  if (set_extra_inputs_) {
+    extra_inputs_.insert(extra_inputs_.end(), inputs_for_this_append.begin(), inputs_for_this_append.end());
+    state_->SetExtraInputs(extra_inputs_);
+    set_extra_inputs_ = false;
+  } else {
+    state_->SetExtraInputsForAppend(inputs_for_this_append, search_->GetSequenceLength());
+  }
+
+  AppendTokens(input_ids);
+}
+
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
