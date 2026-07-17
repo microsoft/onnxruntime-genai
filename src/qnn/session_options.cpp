@@ -23,7 +23,9 @@ static bool IsAllocatorAvailable(const Config& config, DeviceType device_type) {
       [](const Config::ProviderOptions& po) { return po.name == "QNN"; });
   const Config::ProviderOptions* user_provider_options =
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
-  GetQNNInterface(device_type)->ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+
+  auto* qnn_interface = GetDeviceInterface(device_type);
+  qnn_interface->ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   auto session_options = OrtSessionOptions::Create();
   if (!AppendExecutionProviderV2(*session_options, init_session_provider_options,
@@ -40,7 +42,7 @@ static bool IsAllocatorAvailable(const Config& config, DeviceType device_type) {
                                           session_options.get());
 
   try {
-    const auto memory_info = GetQNNInterface(device_type)->GetMemoryInfo();
+    const auto memory_info = qnn_interface->GetMemoryInfo();
     const auto allocator = Ort::Allocator::Create(*session, *memory_info);
     return allocator != nullptr;
   } catch (const Ort::Exception&) {

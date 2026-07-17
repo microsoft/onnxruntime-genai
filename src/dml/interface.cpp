@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/utils.h"
-#include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
 
@@ -154,11 +153,11 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
-    return GetCpuInterface()->CreateGreedy(params);
+    return GetDeviceInterface(DeviceType::CPU)->CreateGreedy(params);
   }
 
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
-    return GetCpuInterface()->CreateBeam(params);
+    return GetDeviceInterface(DeviceType::CPU)->CreateBeam(params);
   }
 
 #if 0

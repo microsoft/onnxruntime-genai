@@ -2,7 +2,6 @@
 #include "softmax.h"
 #include "search.h"
 #include "beam_search_scorer.h"
-#include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
 #include <limits>
@@ -11,7 +10,7 @@ namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      cpu_device_{*GetCpuInterface()} {
+      cpu_device_{*GetDeviceInterface(DeviceType::CPU)} {
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_ = cpu_device_.Allocate<int32_t>(batch_beam_size);
