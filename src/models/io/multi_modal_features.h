@@ -44,4 +44,17 @@ struct MultiModalFeatures {
   size_t index_{~0U};
 };
 
+// Scatters image feature rows into an embeddings buffer on the host, at the given token positions,
+// consuming the image features in order. It overwrites the text embedding rows that correspond to
+// image placeholder tokens with the produced image features.
+//
+// inputs_embeds:      mutable float embeddings tensor, shape [batch, seq, hidden] or [seq, hidden].
+// image_features:     float image features tensor, shape [num_image_tokens, hidden].
+// target_token_rows:  flat row indices (into the seq dimension) to overwrite, in order.
+//
+// Returns the number of image feature rows consumed. Throws if the hidden dimensions mismatch.
+size_t MergeImageFeaturesIntoEmbeddings(OrtValue& inputs_embeds,
+                                        const OrtValue& image_features,
+                                        std::span<const int64_t> target_token_rows);
+
 }  // namespace Generators

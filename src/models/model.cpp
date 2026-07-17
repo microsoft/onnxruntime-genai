@@ -1006,6 +1006,10 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
   return std::make_unique<Config>(path, json_overlay);
 }
 
+bool IsOpenVINOPartitioned(const Config& config) {
+  return config.model.partitioning == "openvino";
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
@@ -1031,6 +1035,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type) && IsOpenVINOPartitioned(*config)) {
+    // OpenVINO-partitioned VLMs currently use a text-only embedding graph and merge
+    // image features on the host.
+    return std::make_shared<OpenVINOMultiModalModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {

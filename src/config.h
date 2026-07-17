@@ -166,6 +166,11 @@ struct Config {
   struct Model {
     std::string type;
 
+    // Declares how the model graph was partitioned at export time. "openvino" indicates an
+    // OpenVINO-partitioned VLM (text-only embedding model + host-side image feature merge). Empty
+    // means a natively-exported model (graph-side merge). Read directly from genai_config.json
+    std::string partitioning;
+
     std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
 
     int pad_token_id{};             // The id of the padding token.
