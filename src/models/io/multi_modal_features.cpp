@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <cstring>
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/multi_modal_features.h"
@@ -126,6 +127,39 @@ void MultiModalFeatures::ReshapeFeatures(std::vector<int64_t> new_shape) {
   if (mode_ == Mode::Output && index_ != ~0U) {
     state_.outputs_[index_] = features_.get();
   }
+}
+
+size_t MergeImageFeaturesIntoEmbeddings(OrtValue& inputs_embeds,
+                                        const OrtValue& image_features,
+                                        std::span<const int64_t> target_token_rows) {
+  auto embeddings_shape = inputs_embeds.GetTensorTypeAndShapeInfo()->GetShape();
+  auto vision_shape = image_features.GetTensorTypeAndShapeInfo()->GetShape();
+
+  // Hidden size is always the last dimension for both [batch, seq, hidden]/[seq, hidden] embeddings
+  // and [num_image_tokens, hidden] image features.
+  const int64_t embedding_dim = embeddings_shape.back();
+  const int64_t vision_dim = vision_shape.back();
+  if (vision_dim != embedding_dim) {
+    throw std::runtime_error("MergeImageFeaturesIntoEmbeddings: hidden dimension mismatch - vision_dim=" +
+                             std::to_string(vision_dim) + ", embedding_dim=" + std::to_string(embedding_dim));
+  }
+
+  // Number of image feature rows, robust to [num_image_tokens, hidden] or [1, num_image_tokens, hidden].
+  int64_t vision_element_count = 1;
+  for (int64_t dim : vision_shape) vision_element_count *= dim;
+  const int64_t num_vision_tokens = vision_dim > 0 ? vision_element_count / vision_dim : 0;
+
+  float* embeddings_data = inputs_embeds.GetTensorMutableData<float>();
+  const float* vision_data = image_features.GetTensorData<float>();
+  size_t consumed = 0;
+  for (int64_t row : target_token_rows) {
+    if (consumed >= static_cast<size_t>(num_vision_tokens)) break;
+    std::memcpy(embeddings_data + (row * embedding_dim),
+                vision_data + (consumed * vision_dim),
+                vision_dim * sizeof(float));
+    ++consumed;
+  }
+  return consumed;
 }
 
 }  // namespace Generators
