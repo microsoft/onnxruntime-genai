@@ -423,7 +423,11 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       // total_length before every Run), but the DML allocator rejects
       // zero-sized buffers. Clamp the placeholder to one position so DML
       // decoder sessions without past_present_share_buffer can be created.
-      tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
+      // DML-only: on other EPs a zero-sized buffer needs no allocation, so
+      // clamping there would only add startup memory overhead.
+      if (Device().GetType() == DeviceType::DML) {
+        tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
+      }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
       if (Device().GetType() != DeviceType::WEBGPU) {
