@@ -276,32 +276,33 @@ struct MoonshineStreamingState : TransducerState {
   // Accumulated frontend output ([frontend_frames_produced_, encoder_dim]).
   // Grows every chunk, including the held-back lookahead tail.
   std::vector<float> accumulated_features_;
+
   int frontend_frames_produced_{0};
+
   // Features already pushed through the encoder + adapter into memory.
-  // Trails frontend_frames_produced_ by total_lookahead until the flush
-  // chunk, when the two converge. Also serves as the pos_offset value we
-  // hand the adapter (numerically identical here — 1:1 adapter).
   int frames_committed_{0};
-  // Accumulated decoder memory ([memory_frames_, decoder_dim]).
-  std::vector<float> accumulated_memory_;
+
+  // Accumulated adapter output ([memory_frames_, decoder_dim]), this is
+  // the tensor the decoder cross-attends to (also called "memory" in AED terminology).
+  std::vector<float> accumulated_adapter_output_;
+
   int memory_frames_{0};
 
   // Cached cross-KV tensors, grown incrementally (cross_kv is a pure
   // per-frame projection): when memory grows by `new_frames`, run cross_kv
   // on just those rows and concat into the cached [L,1,H,M,D] tensors.
+  // The cache is up-to-date iff memory_in_cross_kv_ == memory_frames_.
   std::shared_ptr<Tensor> cached_k_cross_;
   std::shared_ptr<Tensor> cached_v_cross_;
-  int memory_in_cross_kv_{0};  // memory frames already projected into cached.
-  bool cross_kv_valid_{false};
+
+  // Memory frames already projected into cached.
+  int memory_in_cross_kv_{0};
 
   // Set when the current chunk closed a segment (hard memory cap reached OR
-  // VAD detected silence past min_segment_memory_frames OR Flush). The next
-  // RunPipeline() resets all accumulation before processing the new chunk so
-  // the next segment starts from a clean BOS.
+  // VAD detected silence past min_segment_memory_frames OR Flush).
   bool needs_reset_{false};
 
-  // Current chunk's precomputed cross-attention K/V (kept alive for the
-  // duration of the chunk's decoder loop).
+  // Current chunk's precomputed cross-attention K/V
   std::shared_ptr<Tensor> k_cross_tensor_;
   std::shared_ptr<Tensor> v_cross_tensor_;
 
@@ -313,6 +314,7 @@ struct MoonshineStreamingState : TransducerState {
   // Pre-allocated [1, 1] int64 token tensor (mutated each AR step). A
   // separate [1, N] tensor is created on-the-fly when teacher-forcing the
   // committed prefix in one parallel call.
+  // Purely an optimization technique to avoid a heap alloc per AR step;
   std::unique_ptr<OrtValue> token_tensor_;
 
   // Tokens queued for incremental delivery via StepToken(). Contains the
@@ -322,7 +324,7 @@ struct MoonshineStreamingState : TransducerState {
   size_t pending_idx_{0};
 
   // Full token sequence from the previous chunk's pass. Used to compute the
-  // longest-common-prefix that has now "committed" (won't be retracted).
+  // longest-common-prefix that has now "committed" tokens.
   std::vector<int32_t> previous_pass_tokens_;
 
   // How many tokens we've already emitted in this stream. Drives the
@@ -334,10 +336,9 @@ struct MoonshineStreamingState : TransducerState {
   // break) so we can reset the commit tracking.
   int64_t previous_memory_frames_{0};
 
-  // Runs the full frontend→encoder→adapter→cross_kv→decode pipeline for the
+  // Runs the full frontend=>encoder=>adapter=>cross_kv=>decode pipeline for the
   // cached chunk exactly once. Invoked by the first StepToken() after a new
-  // chunk (gated by need_pipeline_run_). Handles VAD routing + segment
-  // resets, then queues the newly-committed tokens.
+  // chunk (gated by need_pipeline_run_).
   void RunPipeline();
 
   /// Run the frontend on `num` samples of audio, then accumulate features
@@ -346,9 +347,9 @@ struct MoonshineStreamingState : TransducerState {
   /// stable (no lookahead held back).
   void RunFrontendAndAccumulate(const float* audio, size_t num, bool is_final);
 
-  /// If !cross_kv_valid_, run cross_kv incrementally on the memory rows
-  /// produced since the last refresh and concat into cached {k_cross,
-  /// v_cross}. No-op when cross_kv is already valid or memory is empty.
+  /// If the cached cross-KV is behind the current memory, run cross_kv on
+  /// the newly-added memory rows and concat into cached {k_cross, v_cross}.
+  /// No-op when the cache already covers all memory or memory is empty.
   void RefreshCrossKv();
 
   /// Reset self-KV, run the full teacher-forced + AR decode pass over the
