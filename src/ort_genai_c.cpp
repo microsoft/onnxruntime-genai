@@ -99,6 +99,8 @@ T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
 
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+
 // Derive an aggregate model family from the model type (e.g. "qwen3_vl" -> "qwen",
 // "nemotron_speech" -> "nemotron", "phi3" -> "phi") so events can be grouped above type.
 static std::string DeriveModelFamily(const std::string& model_type) {
@@ -204,6 +206,8 @@ static Generators::ModelLoadInfo BuildModelLoadInfo(const Generators::Model& mod
 
   return info;
 }
+
+#endif  // ORTGENAI_ENABLE_TELEMETRY
 
 extern "C" {
 

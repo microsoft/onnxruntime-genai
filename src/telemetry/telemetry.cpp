@@ -426,7 +426,8 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
     event.SetProperty("tokensPerSecond", tokens_per_second);
 
     impl_->logger->LogEvent(event);
-  });
+  },
+            /*require_enabled=*/false);
 #endif
 }
 
