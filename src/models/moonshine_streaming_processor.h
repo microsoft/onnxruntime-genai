@@ -6,7 +6,7 @@
 //      (default 500ms @ 16kHz),
 //   2. runs the per-chunk VAD verdict (IsChunkSilent),
 //   3. emits one NamedTensors per chunk with:
-//        "audio_chunk" : float32 [1, num_samplyoes] raw audio,
+//        "audio_chunk" : float32 [1, num_samples] raw audio,
 //        "is_silent"   : int64  [1] (1 iff VAD flagged this chunk silent),
 //        "is_final"    : int64  [1] (1 only on the Flush() tail chunk).
 //

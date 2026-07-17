@@ -1694,10 +1694,11 @@ struct StreamingASRModel {
 };
 
 // Value-parameterized fixture so each StreamingASR test runs once per model.
-// The fixture is named CAPITests so the tests keep the original
-// CAPITests.StreamingASR* naming, e.g.
-// "StreamingASR/CAPITests.StreamingASRCreate/nemotron_speech_streaming".
-class CAPITests : public ::testing::TestWithParam<StreamingASRModel> {
+// This must be a distinct fixture from the non-parameterized CAPITests tests:
+// gtest requires all tests in a suite to share the same fixture class, so we
+// use a separate suite name here. Instantiated test names look like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming".
+class StreamingASRParamTests : public ::testing::TestWithParam<StreamingASRModel> {
  protected:
   std::string ModelPath() const { return std::string(MODEL_PATH) + GetParam().subdir; }
   size_t ChunkSamples() const { return GetParam().chunk_samples; }
@@ -1737,7 +1738,7 @@ static std::vector<float> GenerateSineWave(size_t num_samples, float frequency, 
 }
 
 // Test creating a Generator + StreamingProcessor from a streaming ASR model
-TEST_P(CAPITests, StreamingASRCreate) {
+TEST_P(StreamingASRParamTests, StreamingASRCreate) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1750,7 +1751,7 @@ TEST_P(CAPITests, StreamingASRCreate) {
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken
-TEST_P(CAPITests, StreamingASRTranscribeSilence) {
+TEST_P(StreamingASRParamTests, StreamingASRTranscribeSilence) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1768,7 +1769,7 @@ TEST_P(CAPITests, StreamingASRTranscribeSilence) {
 }
 
 // Test feeding multiple chunks and decoding via GenerateNextToken
-TEST_P(CAPITests, StreamingASRMultipleChunks) {
+TEST_P(StreamingASRParamTests, StreamingASRMultipleChunks) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1788,7 +1789,7 @@ TEST_P(CAPITests, StreamingASRMultipleChunks) {
 }
 
 // Test flush processes remaining buffered audio
-TEST_P(CAPITests, StreamingASRFlush) {
+TEST_P(StreamingASRParamTests, StreamingASRFlush) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1807,7 +1808,7 @@ TEST_P(CAPITests, StreamingASRFlush) {
 }
 
 // Test transcribing a synthetic sine wave via GenerateNextToken
-TEST_P(CAPITests, StreamingASRSineWave) {
+TEST_P(StreamingASRParamTests, StreamingASRSineWave) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1839,7 +1840,7 @@ TEST_P(CAPITests, StreamingASRSineWave) {
 }
 
 // Test raw C API for StreamingProcessor + Generator
-TEST_P(CAPITests, StreamingASRRawCAPI) {
+TEST_P(StreamingASRParamTests, StreamingASRRawCAPI) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1880,7 +1881,7 @@ TEST_P(CAPITests, StreamingASRRawCAPI) {
 }
 
 // Test VAD set_option/get_option on StreamingProcessor
-TEST_P(CAPITests, StreamingASRVadSetGetOption) {
+TEST_P(StreamingASRParamTests, StreamingASRVadSetGetOption) {
   const std::string model_path = ModelPath();
   if (!std::filesystem::exists(model_path))
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
@@ -1889,7 +1890,8 @@ TEST_P(CAPITests, StreamingASRVadSetGetOption) {
 
   // Checking whether or not the model has the components necessary to run VAD. If not, skip the test.
   // VAD requires having a "vad" section in the genai_config.json and the silero_vad.onnx file in the model directory.
-  // Even if a model is VAD-capable, VAD is disabled by default in InitializeVadFromConfig.
+  // For VAD-capable models, InitVadFromConfig automatically enables VAD (via EnableVadFromModel())
+  // when the config's vad.filename is non-empty, so use_vad starts out "true".
   const bool model_has_vad = ModelHasVad(model_path);
 
   if (!model_has_vad) {
@@ -2063,11 +2065,12 @@ TEST(StreamingASRTests, MoonshineVadSegmentation) {
 }
 
 // Run every StreamingASR* test above once per streaming ASR model. The
-// instantiation prefix "StreamingASR" combined with the CAPITests fixture keeps
-// the original CAPITests.StreamingASR* naming, with the model appended as the
-// parameter suffix (e.g. .../nemotron_speech_streaming).
+// instantiation prefix "StreamingASR" combined with the StreamingASRParamTests
+// fixture yields test names like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming",
+// with the model appended as the parameter suffix.
 INSTANTIATE_TEST_SUITE_P(
-    StreamingASR, CAPITests,
+    StreamingASR, StreamingASRParamTests,
     ::testing::Values(
         StreamingASRModel{"nemotron-speech-streaming", 8960},
         StreamingASRModel{"moonshine-streaming-small", 8000},
