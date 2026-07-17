@@ -10,6 +10,15 @@ endif()
 
 include(FetchContent)
 include(CMakeDependentOption)
+
+# Activate the vcpkg "telemetry" manifest feature when telemetry is requested.
+# Must run before project() so vcpkg installs cpp-client-telemetry during configure.
+# ENABLE_TELEMETRY is supplied on the command line (-DENABLE_TELEMETRY=ON); its
+# default (OFF) is defined later in cmake/options.cmake.
+if(ENABLE_TELEMETRY)
+  list(APPEND VCPKG_MANIFEST_FEATURES "telemetry")
+endif()
+
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
@@ -166,6 +175,12 @@ if(ENABLE_TRACING)
   add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
+if(ENABLE_TELEMETRY)
+  message(STATUS "Telemetry is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TELEMETRY)
+  include(cmake/telemetry.cmake)
+endif()
+
 find_package(Threads REQUIRED)
 
 # genai is split into an OBJECT library (all sources + their compile/link usage requirements) and
@@ -196,6 +211,54 @@ endif()
 # Bring in the object library's compiled objects and its (PUBLIC) usage requirements. PRIVATE so
 # the requirements are not re-exported to consumers of the shared library.
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
+
+target_compile_definitions(onnxruntime-genai-obj PRIVATE ORTGENAI_VERSION=\"${VERSION_INFO}\")
+
+if(ENABLE_TELEMETRY)
+  # cmake/telemetry.cmake defines onnxruntime-genai-telemetry as an INTERFACE target wrapping either the
+  # vcpkg MSTelemetry::mat target or a FetchContent-built `mat`, so this link is agnostic to the source.
+  target_link_libraries(onnxruntime-genai-obj PUBLIC onnxruntime-genai-telemetry)
+  if(WIN32)
+    target_link_libraries(onnxruntime-genai-obj PUBLIC Advapi32)
+  endif()
+
+  # Optional ingestion-token override written into a generated header in the build tree (kept off the
+  # compiler command line, so the token never appears in compile_commands.json or build logs). It may be
+  # supplied either as -DORTGENAI_TELEMETRY_TENANT_TOKEN=... or via an
+  # ORTGENAI_TELEMETRY_TENANT_TOKEN environment variable; when unset, telemetry.cpp uses the encoded
+  # in-repo default.
+  if(NOT ORTGENAI_TELEMETRY_TENANT_TOKEN AND DEFINED ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN})
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "$ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN}")
+  endif()
+  # Ignore an unexpanded build-system macro (e.g. the literal "$(ORTGENAI_TELEMETRY_TENANT_TOKEN)") so the
+  # build falls back to the in-repo default instead of embedding the macro text as a bogus token.
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN MATCHES "^\\$\\(")
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "")
+  endif()
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN)
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "#define ORTGENAI_TELEMETRY_TENANT_TOKEN \"${ORTGENAI_TELEMETRY_TENANT_TOKEN}\"")
+  else()
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "")
+  endif()
+  set(_ortgenai_telemetry_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/ortgenai_telemetry")
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ortgenai_telemetry_tenant_token.h.in"
+    "${_ortgenai_telemetry_gen_dir}/ortgenai_telemetry_tenant_token.h"
+    @ONLY)
+  target_include_directories(onnxruntime-genai-obj PRIVATE "${_ortgenai_telemetry_gen_dir}")
+
+  # The 1DS SDK (cpp-client-telemetry >= 3.10.173.1) is compiled with per-function
+  # and per-data sections, so let the linker dead-strip the (large) portion of the
+  # SDK that onnxruntime-genai never references. Combined with a static triplet
+  # (see cmake/telemetry.cmake) this keeps the binary-size added by telemetry minimal.
+  if(MSVC)
+    target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
+  elseif(APPLE)
+    target_link_options(onnxruntime-genai PRIVATE LINKER:-dead_strip)
+  else()
+    target_link_options(onnxruntime-genai PRIVATE LINKER:--gc-sections)
+  endif()
+endif()
 
 # Group the genai library targets under one Visual Studio solution folder so the object library and
 # the shared library it produces appear together rather than as loose entries at the solution root.

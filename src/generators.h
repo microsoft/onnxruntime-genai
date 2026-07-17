@@ -6,6 +6,7 @@
 #include <array>
 #include <assert.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -102,6 +103,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
@@ -127,9 +129,29 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  // Telemetry tracking
+  uint32_t telemetry_generator_id_{0};
+  int telemetry_prompt_tokens_{0};
+  int telemetry_generated_tokens_{0};
+  std::chrono::steady_clock::time_point telemetry_start_time_;
+  std::chrono::steady_clock::time_point telemetry_first_token_time_;
+  std::chrono::steady_clock::time_point telemetry_last_token_time_;
+  bool telemetry_first_token_logged_{false};
+  bool telemetry_generate_start_logged_{false};
+  std::string telemetry_input_modality_{"text"};
+  bool telemetry_suppress_append_tracking_{false};
+#endif
+
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  bool ShouldTrackTelemetry() const;
+  bool ShouldContinueStartedTelemetry() const;
+  void LogTelemetryGenerateEnd();
+  void ResetTelemetryGeneration();
+#endif
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength

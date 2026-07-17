@@ -4,6 +4,8 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 #include "models/streaming_processor.h"
@@ -17,6 +19,7 @@
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
+#include "telemetry/telemetry.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
@@ -53,6 +56,24 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
 }
 
 namespace Generators {
+
+namespace {
+
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+struct ScopedBoolSetter {
+  ScopedBoolSetter(bool& value, bool temporary_value) : value_{value}, previous_value_{value} {
+    value_ = temporary_value;
+  }
+  ~ScopedBoolSetter() {
+    value_ = previous_value_;
+  }
+
+  bool& value_;
+  bool previous_value_;
+};
+#endif
+
+}  // namespace
 
 static bool _ = (Ort::InitApi(), false);
 
@@ -460,11 +481,21 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  // Initialize telemetry tracking
+  static std::atomic<uint32_t> next_generator_id{1};
+  telemetry_generator_id_ = next_generator_id.fetch_add(1);
+  telemetry_start_time_ = std::chrono::steady_clock::now();
+#endif
+
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+    telemetry_input_modality_ = "audio";  // transducers transcribe audio input
+#endif
     return;
   }
 
@@ -550,6 +581,66 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   }
 }
 
+Generator::~Generator() {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  LogTelemetryGenerateEnd();
+#endif
+}
+
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+bool Generator::ShouldTrackTelemetry() const {
+  return !GenAiTelemetry::IsDestroyed() && GenAiTelemetry::Instance().IsEnabled();
+}
+
+bool Generator::ShouldContinueStartedTelemetry() const {
+  return !GenAiTelemetry::IsDestroyed() && telemetry_generate_start_logged_;
+}
+
+void Generator::LogTelemetryGenerateEnd() {
+  // Emit GenerateEnd telemetry with accumulated stats. Times are generator-
+  // request aggregates measured up to the last generated token (not destruction),
+  // so post-generation idle before the next prompt/generator free is excluded.
+  // Guard against access during static deinitialization
+  if (telemetry_generated_tokens_ > 0 && !GenAiTelemetry::IsDestroyed()) {
+    auto& telemetry = GenAiTelemetry::Instance();
+    // If GenerateStart was already emitted, emit the matching GenerateEnd even if telemetry was disabled
+    // after generation began. This preserves paired lifecycle events for downstream aggregation.
+    if (telemetry.IsEnabled() || ShouldContinueStartedTelemetry()) {
+      auto total_time_ms = std::chrono::duration<double, std::milli>(
+                               telemetry_last_token_time_ - telemetry_start_time_)
+                               .count();
+      double ttft_ms = 0.0;
+      if (telemetry_first_token_logged_) {
+        ttft_ms = std::chrono::duration<double, std::milli>(
+                      telemetry_first_token_time_ - telemetry_start_time_)
+                      .count();
+      }
+      double tps = total_time_ms > 0 ? (telemetry_generated_tokens_ * 1000.0 / total_time_ms) : 0.0;
+
+      telemetry.LogGenerateEnd(
+          model_->telemetry_session_id_,
+          telemetry_generator_id_,
+          telemetry_prompt_tokens_ + telemetry_generated_tokens_,
+          ttft_ms,
+          total_time_ms,
+          tps);
+    }
+  }
+  ResetTelemetryGeneration();
+}
+
+void Generator::ResetTelemetryGeneration() {
+  telemetry_prompt_tokens_ = 0;
+  telemetry_generated_tokens_ = 0;
+  telemetry_first_token_logged_ = false;
+  telemetry_generate_start_logged_ = false;
+  telemetry_start_time_ = std::chrono::steady_clock::now();
+  telemetry_first_token_time_ = {};
+  telemetry_last_token_time_ = {};
+  telemetry_input_modality_ = transducer_state_ ? "audio" : "text";
+}
+#endif
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
@@ -604,6 +695,40 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  const bool track_telemetry =
+      !telemetry_suppress_append_tracking_ && (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry());
+  std::string append_input_modality = transducer_state_ ? "audio" : "text";
+  std::chrono::steady_clock::time_point append_start_time{};
+
+  // If this generator is reused after emitting tokens, first close the previous
+  // GenerateStart/End pair so each request is reported separately. Prompt-token
+  // counters are committed only after AppendTokens succeeds, so failed validation
+  // or prefill work cannot skew the next request.
+  if (track_telemetry) {
+    if (telemetry_generated_tokens_ > 0) {
+      LogTelemetryGenerateEnd();
+    }
+
+    append_start_time = std::chrono::steady_clock::now();
+    bool used_vision = false, used_audio = false;
+    for (const auto& extra : extra_inputs_) {
+      std::string name = extra.name;
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name.find("image") != std::string::npos || name.find("pixel") != std::string::npos ||
+          name.find("vision") != std::string::npos)
+        used_vision = true;
+      else if (name.find("audio") != std::string::npos)
+        used_audio = true;
+    }
+    append_input_modality = (used_vision && used_audio) ? "multimodal"
+                            : used_vision               ? "vision"
+                            : used_audio                ? "audio"
+                                                        : "text";
+  }
+#endif
+
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
@@ -614,6 +739,17 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
+
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  if (track_telemetry) {
+    if (telemetry_prompt_tokens_ == 0 && !telemetry_first_token_logged_) {
+      telemetry_start_time_ = append_start_time;
+    }
+    // Generated-token accounting counts active beam hypotheses; keep prompt/total tokens in the same unit.
+    telemetry_prompt_tokens_ += static_cast<int>(input_ids.size()) * state_->params_->search.num_beams;
+    telemetry_input_modality_ = append_input_modality;
+  }
+#endif
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -756,6 +892,30 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     transducer_state_->StepToken();
+
+    // Telemetry: count transcribed tokens and emit GenerateStart once on the first
+    // token. GenerateEnd is emitted when the generation closes, so usage is
+    // captured with one Generate pair per request.
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+    auto telemetry_now = std::chrono::steady_clock::now();
+    if (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry()) {
+      if (telemetry_prompt_tokens_ == 0 && telemetry_generated_tokens_ == 0) {
+        telemetry_start_time_ = telemetry_now;
+      }
+      telemetry_generated_tokens_ += state_->params_->BatchBeamSize();
+      telemetry_last_token_time_ = telemetry_now;
+      if (!telemetry_first_token_logged_) {
+        telemetry_first_token_time_ = telemetry_now;
+        telemetry_first_token_logged_ = true;
+        if (ShouldTrackTelemetry()) {
+          GenAiTelemetry::Instance().LogGenerateStart(
+              model_->telemetry_session_id_, telemetry_generator_id_, telemetry_prompt_tokens_,
+              telemetry_input_modality_);
+          telemetry_generate_start_logged_ = true;
+        }
+      }
+    }
+#endif
     return;
   }
 
@@ -771,8 +931,16 @@ void Generator::GenerateNextToken() {
   // needs recomputation of Position IDs and KV Cache via rewind + re-append.
   if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+    {
+      ScopedBoolSetter suppress_telemetry_append_tracking{telemetry_suppress_append_tracking_, true};
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
+#else
     RewindToLength(0);
     AppendTokens(current_seq);
+#endif
   }
 
   if (!computed_logits_) {
@@ -801,6 +969,33 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
+
+  // Track token generation for telemetry. On the first generated token, emit
+  // GenerateStart once (the prompt is now complete) so it pairs 1:1 with the
+  // GenerateEnd emitted when generation closes.
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  auto telemetry_now = std::chrono::steady_clock::now();
+  if (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry()) {
+    if (telemetry_prompt_tokens_ == 0 && telemetry_generated_tokens_ == 0) {
+      telemetry_start_time_ = telemetry_now;
+    }
+    telemetry_generated_tokens_ += search_->params_->BatchBeamSize();
+    telemetry_last_token_time_ = telemetry_now;
+    if (!telemetry_first_token_logged_) {
+      telemetry_first_token_time_ = telemetry_now;
+      telemetry_first_token_logged_ = true;
+      if (ShouldTrackTelemetry()) {
+        GenAiTelemetry::Instance().LogGenerateStart(
+            model_->telemetry_session_id_,
+            telemetry_generator_id_,
+            telemetry_prompt_tokens_,
+            telemetry_input_modality_);
+        telemetry_generate_start_logged_ = true;
+      }
+    }
+  }
+#endif
+
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:
       search_->SelectTop();
@@ -829,6 +1024,11 @@ void Generator::RewindToLength(size_t new_length) {
   size_t batch_size = search_->params_->search.batch_size;
   if (batch_size > 1 && new_length != 0)
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  if (!telemetry_suppress_append_tracking_ && telemetry_generated_tokens_ > 0) {
+    LogTelemetryGenerateEnd();
+  }
+#endif
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {

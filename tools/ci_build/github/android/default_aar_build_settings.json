@@ -9,6 +9,7 @@
         "--android",
         "--parallel",
         "--cmake_generator=Ninja",
+        "--use_telemetry",
         "--build_java",
         "--skip_tests",
         "--skip_wheel"

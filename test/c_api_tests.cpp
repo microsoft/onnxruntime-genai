@@ -18,10 +18,28 @@
 #define OGA_USE_SPAN 1
 #include "models/onnxruntime_api.h"
 #include "ort_genai.h"
+#include "telemetry/error_scrubber.h"
 
 #include <gtest/gtest.h>
 
 #include "test_utils.h"
+
+TEST(TelemetryTests, ScrubsErrorMessagePaths) {
+  using Generators::TelemetryInternal::ScrubErrorMessage;
+
+  EXPECT_EQ(ScrubErrorMessage("Load C:\\Users\\First Last\\model.onnx failed"),
+            "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("Load C:/Users/First Last/model.onnx failed"),
+            "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("Load \\\\server\\share\\First Last\\model.onnx failed"),
+            "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("Load Users\\First Last\\model.onnx failed"),
+            "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("Load ~/models/phi failed"), "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("Load /Users/First Last/model.onnx failed"),
+            "Load [path]");
+  EXPECT_EQ(ScrubErrorMessage("n/a read/write domain\\user"), "n/a read/write domain\\user");
+}
 
 TEST(CAPITests, Config) {
 #if TEST_PHI2

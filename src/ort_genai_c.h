@@ -111,6 +111,19 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /**
+ * \brief Enable or disable non-essential telemetry event collection.
+ *
+ * Telemetry can also be disabled at compile time (ENABLE_TELEMETRY=OFF) or via
+ * the environment variable ORT_TELEMETRY_DISABLED=1 (shared with ONNX Runtime) or
+ * ORT_GENAI_TELEMETRY_DISABLED=1. Runtime controls suppress
+ * detailed model, generation, adapter, and error telemetry. To produce a binary that collects no telemetry,
+ * build with ENABLE_TELEMETRY=OFF.
+ *
+ * \param[in] enabled true to enable telemetry, false to disable.
+ */
+OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
+
+/**
  * \param[in] result OgaResult that contains the error message.
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
  *         and can will be freed when the OgaResult is destroyed.
