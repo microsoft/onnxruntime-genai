@@ -57,27 +57,25 @@ from transformers import (
 )
 
 
-# Soft-deprecated extra_options names, kept as aliases for backward compatibility
-# so existing consumers (e.g. Olive recipes) that still pass the old `int4_*`
-# names keep working. Maps old name -> new name. Remove after consumers migrate.
-_DEPRECATED_EXTRA_OPTION_ALIASES = {
-    "int4_accuracy_level": "accuracy_level",
-    "int4_block_size": "block_size",
-    "int4_is_symmetric": "is_symmetric",
-    "int4_op_types_to_quantize": "op_types_to_quantize",
-    "int4_nodes_to_exclude": "nodes_to_exclude",
-    "int4_algo_config": "algo_config",
-}
-
-
 def apply_deprecated_extra_option_aliases(kv_pairs):
     """
     Rename any deprecated extra_options keys to their new names in-place.
 
-    If both the old and new names are provided, the new name wins. Emits a
-    deprecation warning for each old name encountered.
+    Kept for backward compatibility so existing consumers (e.g. Olive recipes) that
+    still pass the old `int4_`-prefixed names keep working. If both the old and new
+    names are provided, the new name wins. Emits a deprecation warning for each old
+    name encountered. Remove this method (and its call sites) once consumers migrate.
     """
-    for old_name, new_name in _DEPRECATED_EXTRA_OPTION_ALIASES.items():
+    # Maps deprecated old name -> new name.
+    deprecated_aliases = {
+        "int4_accuracy_level": "accuracy_level",
+        "int4_block_size": "block_size",
+        "int4_is_symmetric": "is_symmetric",
+        "int4_op_types_to_quantize": "op_types_to_quantize",
+        "int4_nodes_to_exclude": "nodes_to_exclude",
+        "int4_algo_config": "algo_config",
+    }
+    for old_name, new_name in deprecated_aliases.items():
         if old_name not in kv_pairs:
             continue
         print(
