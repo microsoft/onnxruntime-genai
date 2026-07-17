@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <cctype>
+
 #include "session_options.h"
 #include "../models/session_options.h"
 
@@ -40,8 +43,13 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // logits on some D3D12 devices (see IsGraphCaptureEnabled in config.cpp).
   bool graph_capture_opt_out = false;
   for (const auto& [name, value] : provider_options.options) {
-    if (name == "enable_graph_capture" && (value == "0" || value == "false")) {
-      graph_capture_opt_out = true;
+    if (name == "enable_graph_capture") {
+      std::string lower_value = value;
+      std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                     [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+      if (lower_value == "0" || lower_value == "false") {
+        graph_capture_opt_out = true;
+      }
     }
   }
 
