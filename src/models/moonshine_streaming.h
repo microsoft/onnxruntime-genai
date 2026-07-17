@@ -352,10 +352,10 @@ struct MoonshineStreamingState : TransducerState {
   void RefreshCrossKv();
 
   /// Reset self-KV, run the full teacher-forced + AR decode pass over the
-  /// current cross-KV, and queue the newly-committed tokens. `is_final`
+  /// current cross-KV, and queue the newly-committed tokens. `commit_all`
   /// commits the entire pass (vs the longest-common-prefix with the
-  /// previous pass).
-  void DecodeAndQueue(bool is_final);
+  /// previous pass); set on segment close (hard cap / VAD silence / Flush).
+  void DecodeAndQueue(bool commit_all);
 
   /// Clear all accumulated per-segment state (frontend buffers, features,
   /// memory, cross-KV cache) so the next chunk starts a fresh segment.
